@@ -1,4 +1,5 @@
 #include "cpu.hpp"
+#include "jit.hpp"          // CodeCache completo: cacheOp desenlaza las cadenas del dynarec
 #include "../core/memory.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -405,6 +406,12 @@ auto CPU::cacheOp(u32 op, u64 vaddr) -> void {
     u32 idx  = (phys >> 5) & 0x1ff;
     u32 base = phys & ~0x1fu;
     ICacheLine& l = icache[idx];
+    // Block-linking: invalidar la I-cache es la ÚNICA vía por la que el HW puede pasar a
+    // ejecutar código nuevo bajo una dirección ya ejecutada (el RCP/DMA no espía las cachés,
+    // así que el software está obligado a invalidar). Un bloque alcanzado por un salto enlazado
+    // se salta la revalidación del driver, luego aquí hay que romper TODAS las cadenas; cada
+    // bloque se re-enlaza en su próxima entrada validada por el driver.
+    if(jitCache && (fn == 0 || fn == 2 || fn == 4)) jitCache->unlinkAll();
     switch(fn) {
       case 0: /*Index_Invalidate*/ l.valid = false; break;
       case 1: /*Index_Load_Tag*/ {

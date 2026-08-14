@@ -186,6 +186,53 @@ auto CodeCache::clear() -> void {
   blocks.clear();
   std::fill(index.begin(), index.end(), 0xFFFF'FFFFu);
   std::fill(slot.begin(),  slot.end(),  -1);
+  // Todo el código emitido (y con él las guardas/ranuras de enlace) deja de existir: los
+  // punteros de `links` apuntarían a bytes reciclados por el bump-allocator.
+  links.clear();
+  byTarget.clear();
+}
+
+// ---- block-linking: (des)enlace, siempre por escritura de DATOS ---------------
+// Un sitio se activa poniendo el VA de destino en la guarda y el punto de entrada en la
+// ranura; se desactiva devolviendo la guarda a kNoLink (VA imposible). El código emitido
+// nunca se reescribe, así que no hay coherencia de I-cache de host que gestionar.
+auto CodeCache::addLink(const LinkSite& s) -> void {
+  u32 idx = (u32)links.size();
+  links.push_back(s);
+  *s.vaImm = kNoLink;          // nace desenlazado
+  *s.slot  = 0;
+  byTarget[s.targetPhys].push_back(idx);
+  s32 bi = find(s.targetPhys);
+  if(bi >= 0 && !blocks[bi].dead && blocks[bi].linkEntry) {
+    LinkSite& L = links[idx];
+    *L.slot = (u64)(std::uintptr_t)blocks[bi].linkEntry;
+    *L.vaImm = L.targetVA;
+    nLinked++;
+  }
+}
+
+auto CodeCache::linkTo(u32 phys, u8* entry) -> void {
+  auto it = byTarget.find(phys);
+  if(it == byTarget.end() || !entry) return;
+  for(u32 i : it->second) {
+    LinkSite& L = links[i];
+    *L.slot = (u64)(std::uintptr_t)entry;
+    *L.vaImm = L.targetVA;
+    nLinked++;
+  }
+}
+
+auto CodeCache::unlinkTo(u32 phys) -> void {
+  auto it = byTarget.find(phys);
+  if(it == byTarget.end()) return;
+  for(u32 i : it->second) { *links[i].vaImm = kNoLink; nUnlinked++; }
+}
+
+auto CodeCache::unlinkAll() -> void {
+  for(LinkSite& L : links) *L.vaImm = kNoLink;
+  nUnlinked += links.size();
+  linkEpoch++;
+  for(Block& b : blocks) b.linkedEpoch = ~0ull;   // fuerza re-enlace tras revalidar
 }
 
 // ========================= Compilador de bloques ============================
@@ -332,6 +379,10 @@ static const int g_compFailOn = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 // que un futuro bloque enlazado entre aquí sin volver al driver. El prólogo llama a este
 // trampolín (extern "C" → dirección plana, ABI Win64: RCX=cpu, RDX=K).
 static const int g_jitLink = std::getenv("KESTREL_JIT_LINK") ? 1 : 0;
+// Los modos diff ejecutan el bloque como una unidad aislada y lo comparan contra K pasos del
+// intérprete; una cadena enlazada retiraría más ops que K y rompería esa comparación. Son
+// modos de diagnóstico, así que ahí simplemente no se emiten enlaces.
+static const int g_jitDiffAny = (std::getenv("KESTREL_JIT_DIFF") || std::getenv("KESTREL_JIT_BRDIFF")) ? 1 : 0;
 extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K);
 
 static auto compileBlock(CPU& c, u32 phys) -> Block {
@@ -357,6 +408,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // no hay estado guest vivo), RBX/R12 los preserva el trampolín (callee-saved en Win64).
   std::vector<usize> linkBailJmps;   // je (al==0) de cada prólogo → stub de bail
   usize kImmAt = 0;
+  // Punto de entrada ENLAZADO (Step 3): el marco (push rbx/r12 + mov + sub rsp) ya lo montó el
+  // predecesor de la cadena, así que un salto enlazado aterriza AQUÍ, justo en el prólogo
+  // re-validable. El epílogo de este bloque desmonta ese marco y retorna al driver que llamó al
+  // primer bloque de la cadena — la profundidad de pila no crece con la longitud de la cadena.
+  b.linkEntry = c.jitCache->buf.cursor();
   if(g_jitLink) {
     e.mov_r_r(RCX, R12);                                    // arg1 = cpu
     e.mov_r_imm32(RDX, 0);                                  // arg2 = K (placeholder)
@@ -376,8 +432,29 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   const s32 nextOff    = (s32)((char*)&c.nextPc       - (char*)&c);
   const s32 inDelayOff = (s32)((char*)&c.inDelay      - (char*)&c);
   const s32 justBrOff  = (s32)((char*)&c.justBranched - (char*)&c);
+  const s32 pendOff    = (s32)((char*)&c.jitPending   - (char*)&c);
   std::vector<usize> branchExits;  // jmp del terminador de branch → epílogo
   bool endedInBranch = false;
+
+  // Block-linking Step 3: sitios de enlace pendientes de resolver. Se emiten con la guarda
+  // desactivada; al final del bloque se les reserva la ranura de 8 bytes y se parchea el
+  // disp32 rip-relativo. `entryVA` es la VA con la que se compiló: solo se puede predecir el
+  // destino estático de un salto si la entrada está en ckseg0, donde VA→phys es la máscara
+  // arquitectónica (segmento NO mapeado) y por tanto independiente del TLB.
+  struct Pending { usize dispAt; usize immAt; u64 targetVA; u32 targetPhys; };
+  std::vector<Pending> pending;
+  const u64 entryVA = c.pc;
+  const bool ck0Entry = ((entryVA & 0xFFFF'FFFF'E000'0000ull) == 0xFFFF'FFFF'8000'0000ull)
+                        && (((u32)entryVA & 0x1FFF'FFFFu) == phys);
+  // ¿Es `va` un destino enlazable? (ckseg0 ⇒ phys arquitectónica y cacheable, dentro de RDRAM)
+  auto linkable = [&](u64 va, u32& outPhys) -> bool {
+    if(!g_jitLink || g_jitDiffAny || !ck0Entry) return false;
+    if((va & 0xFFFF'FFFF'E000'0000ull) != 0xFFFF'FFFF'8000'0000ull) return false;
+    if(va & 3) return false;
+    u32 p = (u32)va & 0x1FFF'FFFFu;
+    if((usize)p + 4 > c.mem->rdram.size()) return false;
+    outPhys = p; return true;
+  };
 
   // Compila el delay slot (ALU o mem). Si es mem, registra su bail con índice = el del
   // salto (bailIdx=idx): al faultar, el intérprete re-ejecuta desde el salto. Devuelve false
@@ -405,12 +482,34 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   };
   // Cola común de salida de control: target ya en RCX. Escribe pc=target, nextPc=target+4,
   // limpia inDelay/justBranched y sale con el flag de control | ops retiradas (idx+2).
-  auto emitCtrlExit = [&](u32 idx) {
+  // `cands` = destinos ESTÁTICOS posibles de este salto (0 para JR/JALR, 1 para J/JAL, 2 para
+  // los branches condicionales: tomado y caída). Por cada uno se emite una guarda de enlace.
+  auto emitCtrlExit = [&](u32 idx, const u64* cands, int nc) {
     e.mov_m_r(RBX, pcOff, RCX);              // cpu->pc = target
     e.mov_r_r(RDX, RCX); e.add_r_imm8(RDX, 4);
     e.mov_m_r(RBX, nextOff, RDX);            // cpu->nextPc = target+4
     e.mov_m8_imm(RBX, inDelayOff, 0);
     e.mov_m8_imm(RBX, justBrOff, 0);
+    // Guardas de enlace. RCX = target de runtime, ya con pc/nextPc escritos (el sucesor entra
+    // con el estado de control exactamente como si el driver lo hubiera despachado). La guarda
+    // compara contra el VA de compilación: si la VA de entrada del bloque hubiese cambiado
+    // (alias por TLB del mismo phys), no casa y se cae a la salida lenta.
+    usize prevJne = 0; bool havePrev = false;
+    for(int k = 0; k < nc; k++) {
+      u32 tp;
+      if(!linkable(cands[k], tp)) continue;
+      if(havePrev) { e.patchRel32(prevJne); havePrev = false; }
+      e.mov_r_imm64(RDX, kNoLink);                        // guarda (desactivada al nacer)
+      usize immAt = c.jitCache->buf.used - 8;
+      e.cmp_r_r(RCX, RDX);
+      prevJne = e.jne_rel32_placeholder(); havePrev = true;
+      // Enlazado: acumula las ops de ESTE bloque en jitPending (el prólogo del sucesor las
+      // commitea) y salta a su punto de entrada sin pasar por el driver.
+      e.add_m32_imm32(RBX, pendOff, idx + 2);
+      usize dispAt = e.jmp_rip_mem_placeholder();
+      pending.push_back(Pending{ dispAt, immAt, cands[k], tp });
+    }
+    if(havePrev) e.patchRel32(prevJne);
     e.mov_r_imm32(RAX, 0x80000000u | (idx + 2));
     branchExits.push_back(e.jmp_rel32_placeholder());
   };
@@ -493,6 +592,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         // Fase B: delay slot.
         if(compileDelay(dop, idx)) {
           // Fase C: computar target → RCX y salir por la cola de control común.
+          u64 cands[2]; int nc = 0;   // destinos estáticos, para las guardas de block-linking
           if(isBeq || isBcondZ) {
             s32 Ctaken = (s32)(4 * (idx + 1)) + simm * 4;  // VA + 4(idx+1) + SIMM*4
             s32 Cfall  = (s32)(4 * (idx + 2));             // VA + 4(idx+2)
@@ -502,8 +602,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             e.add_r_imm32(RCX, Cfall);      // rcx = fallthrough
             e.ld8_rsp(32); e.test_al_al();
             e.cmovnz(RCX, RDX);             // cond!=0 → rcx = target
+            cands[nc++] = entryVA + (u64)(s64)Ctaken;   // tomado (el caliente: bucles)
+            cands[nc++] = entryVA + (u64)(s64)Cfall;    // caída
           } else if(isJr) {
             e.ld64_rsp(RCX, 32);            // rcx = target de gpr[rs] (pre-delay)
+            // JR/JALR: destino dinámico (gpr[rs]) → sin destino estático que enlazar.
           } else {  // J / JAL: target = (entryVA & 0xFFFFFFFF_F0000000) | (TARGET26<<2)
             u32 tgt = (op & 0x03FF'FFFFu) << 2;
             e.mov_r_m(RCX, RBX, pcOff);                 // rcx = entryVA
@@ -511,8 +614,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             e.and_r_r(RCX, RDX);                        // rcx = entryVA & mask
             e.mov_r_imm32(RDX, tgt);
             e.or_r_r(RCX, RDX);                         // rcx = target
+            cands[nc++] = (entryVA & 0xFFFF'FFFF'F000'0000ull) | (u64)tgt;
           }
-          emitCtrlExit(idx);
+          emitCtrlExit(idx, cands, nc);
           b.src.push_back(op); b.src.push_back(dop);
           b.nOps += 2;
           b.hasBranch = true;
@@ -568,9 +672,24 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   e.pop_reg(R12); e.pop_reg(RBX);
   e.ret();
 
-  if(c.jitCache->buf.overflowed()) { b.nOps = 0; b.src.clear(); return b; }
+  // Ranuras de enlace: 8 bytes por sitio, DESPUÉS del `ret` (son datos, nunca se ejecutan) y
+  // dentro del mismo buffer, así que el disp32 rip-relativo del `jmp qword [rip+...]` siempre
+  // alcanza. Se parchea aquí, cuando ya se conoce el offset de cada ranura.
+  for(const Pending& p : pending) {
+    usize slotOff = e.reserveSlot();
+    e.patchRel32To(p.dispAt, slotOff);
+    LinkSite s;
+    s.vaImm      = (u64*)(c.jitCache->buf.base + p.immAt);
+    s.slot       = (u64*)(c.jitCache->buf.base + slotOff);
+    s.targetVA   = p.targetVA;
+    s.targetPhys = p.targetPhys;
+    b.sites.push_back(s);
+  }
+
+  if(c.jitCache->buf.overflowed()) { b.nOps = 0; b.src.clear(); b.sites.clear(); return b; }
   c.jitCache->buf.finalize(entry);
   b.fn = reinterpret_cast<BlockFn>(entry);
+  b.phys = phys;
   return b;
 }
 
@@ -593,7 +712,43 @@ static u64 g_decl[DR_N] = {0};
 // refresca Cause IP2/IP7 desde interruptPending()/timerIntr, (2) si hay entrega habilitada
 // pendiente → bail, (3) si correr K ops cruzaría Count==Compare → bail. Idempotente (no altera
 // estado de interrupt). Devuelve 1=proceder, 0=bail. Idéntico a jitTryBlock líneas del sample.
+// Presupuesto de cadena (Step 3): tope de bloques enlazados por entrada del driver. Sin él, un
+// bucle auto-enlazado no devolvería el control hasta el borde del timer (miles de millones de
+// ops): el bucle del sistema tiene que poder mirar maxinsn/vídeo/apagado. Las interrupciones NO
+// dependen de esto — se re-muestrean en CADA eslabón, aquí abajo.
+// KESTREL_JIT_CHAIN lo baja para diagnóstico: chain=1 deja toda la maquinaria de enlace en pie
+// (guardas, ranuras, contabilidad diferida) pero sin ningún salto encadenado, así que aísla
+// "el enlace rompe algo" de "la cadena corre demasiado sin volver al driver".
+static const u32 kChainMax = []{
+  if(const char* s = std::getenv("KESTREL_JIT_CHAIN")) { u32 v = (u32)std::strtoul(s, nullptr, 0); if(v) return v; }
+  return 256u;
+}();
+
 auto CPU::jitReenterProceed(u32 K) -> u32 {
+  // (0) Commit diferido de la cadena: las ops de los bloques ya ejecutados y aún sin contabilizar.
+  // Va PRIMERO para que el chequeo de borde de timer de más abajo vea el Count real de ESTE punto.
+  if(u32 p = jitPending) {
+    jitPending = 0;
+    retired += p;
+    cop0[C0_Count] = (u32)((u32)cop0[C0_Count] + p);
+    u32 w = (u32)cop0[C0_Random], wi = (u32)cop0[C0_Wired] & 0x3f;
+    for(u32 i = 0; i < p; i++) { u32 r = w & 0x3f; w = (r == wi) ? 31 : ((r - 1) & 0x3f); }
+    cop0[C0_Random] = w;
+    if(jitCache) jitCache->hits += p;
+    // Estas ops tienen que llegar a quien llamó al driver: el bucle del sistema mide la
+    // ventana de campo en ops retiradas. Si la cadena se las queda, el VI llega tarde.
+    jitChainOps += p;
+    jitOpsBudget = (p >= jitOpsBudget) ? 0 : (jitOpsBudget - p);
+  }
+  if(++jitChain > kChainMax) return 0;          // presupuesto agotado → devuelve el control
+  // El eslabón enlazado sólo arranca si cabe entero en lo que queda de ventana del bucle del
+  // sistema. Así la cadena no desborda el límite de campo más que un bloque suelto (el primer
+  // bloque lo despacha el driver y conserva el comportamiento previo: jitChain==1).
+  if(jitChain > 1 && K > jitOpsBudget) return 0;
+  if(halted) return 0;
+  // Estado que un store del bloque anterior pudo cambiar a mitad de cadena: en LOCKSTEP el hilo
+  // CPU debe interleavear pasos del RSP, así que arrancarlo obliga a salir (espeja el driver).
+  if(mem && mem->rsp.running && mem->rcpMode == Memory::RcpMode::Lockstep) return 0;
   u32 cause = (u32)cop0[C0_Cause];
   if(mem->interruptPending()) cause |= (1u << 10); else cause &= ~(1u << 10);
   if(timerIntr)               cause |= (1u << 15); else cause &= ~(1u << 15);
@@ -708,9 +863,29 @@ auto CPU::jitTryBlock() -> u32 {
     if(b.nOps == 0) { JDECL(DR_COMPILE); return 0; }
     bi = cc->insert(phys, std::move(b));
     if(bi < 0) { cc->clear(); jit::Block b2 = jit::compileBlock(*this, phys); if(b2.nOps==0) return 0; bi = cc->insert(phys, std::move(b2)); if(bi < 0) return 0; }
+    // Block-linking Step 3: registra los sitios de enlace que este bloque emitió (se resuelven
+    // solos si el destino ya está compilado) y publica el bloque como destino, activando los
+    // sitios que ya lo esperaban — incluidos los suyos propios, que es el caso de un bucle
+    // auto-enlazado. Sólo aquí, tras insert(), es encontrable por find().
+    {
+      jit::Block& nb = cc->blocks[bi];
+      for(const jit::LinkSite& s : nb.sites) cc->addLink(s);
+      cc->linkTo(phys, nb.linkEntry);
+      nb.linkedEpoch = cc->linkEpoch;
+    }
   }
   jit::Block& blk = cc->blocks[bi];
   u32 K = blk.nOps;
+
+  // Cap de depuración KESTREL_MAXINSN: el intérprete lo comprueba op a op, así que un bloque
+  // (o una cadena enlazada) que lo cruzase pararía más tarde y en OTRO punto del programa —
+  // el banco de pruebas dejaría de comparar el mismo trabajo entre intérprete y JIT. Recorta
+  // el presupuesto de cadena al resto y cede las últimas ops al intérprete.
+  if(maxInsn) {
+    u64 rem = (retired >= maxInsn) ? 0 : (maxInsn - retired);
+    if(rem < (u64)jitOpsBudget) jitOpsBudget = (u32)rem;
+    if((u64)K > rem) { JDECL(DR_MISC); return 0; }
+  }
 
   // Seguridad de timer: no atravesar una frontera Count==Compare dentro del bloque.
   {
@@ -735,7 +910,17 @@ auto CPU::jitTryBlock() -> u32 {
     if(!l.valid || l.ptag != base) icFill(idx, base);
     u32 off = pa & 0x1c;
     u32 w = ((u32)l.data[off] << 24) | ((u32)l.data[off + 1] << 16) | ((u32)l.data[off + 2] << 8) | l.data[off + 3];
-    if(w != blk.src[i]) { blk.dead = true; JDECL(DR_SMC); return 0; }  // Step2: solo ESTE bloque → recompila in-place (no clear global; imprescindible para block-linking)
+    // Step2: solo ESTE bloque → recompila in-place (no clear global; imprescindible para
+    // block-linking). Step3: además hay que DESENLAZARLO ya — su código va a re-emitirse en
+    // otra dirección y cualquier sitio que apunte al viejo saltaría a bytes reciclados.
+    if(w != blk.src[i]) { blk.dead = true; cc->unlinkTo(phys); JDECL(DR_SMC); return 0; }
+  }
+
+  // Re-enlace tras un desenlace global (invalidación de I-cache): este bloque acaba de pasar la
+  // validación contra la línea de I-cache, así que vuelve a ser un destino legítimo.
+  if(blk.linkedEpoch != cc->linkEpoch) {
+    cc->linkTo(phys, blk.linkEntry);
+    blk.linkedEpoch = cc->linkEpoch;
   }
 
   // Modo diff (solo bloques SIN memoria): ejecuta el bloque sobre una copia y el intérprete
@@ -805,6 +990,8 @@ auto CPU::jitTryBlock() -> u32 {
   // Ejecuta el bloque. Devuelve R = ops REALMENTE retiradas: R==K en éxito total, o el índice
   // de la primera mem-op que faultaría (bail limpio, sin efectos). El intérprete re-ejecuta la
   // op R para vectorizar la excepción exacta, así que aquí solo avanzamos el estado por R.
+  jitChain = 0;                       // presupuesto de cadena fresco por entrada del driver
+  jitChainOps = 0;                    // ops que la cadena commitee por su cuenta (las sumamos al salir)
   u32 Rraw = blk.fn(gpr, this);
   gpr[0] = 0;
   // Bit alto = el bloque terminó en un branch absorbido: ya escribió pc/nextPc/inDelay/
@@ -829,7 +1016,9 @@ auto CPU::jitTryBlock() -> u32 {
     cop0[C0_Random] = w;
   }
   cc->hits += R;
-  return R;
+  // R = ops del ÚLTIMO bloque; jitChainOps = las de los eslabones anteriores, ya contabilizadas
+  // en retired/Count/hits por el prólogo del sucesor. El total es lo que avanzó el guest.
+  return R + jitChainOps;
 }
 
 }  // namespace kestrel

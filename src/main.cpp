@@ -122,6 +122,7 @@ int main(int argc, char** argv) {
   }
 
   system.paused.store(!freeRun);
+  system.exitOnHalt = freeRun;    // lote headless: halt = fin de sesión, no punto de inspección
   system.startTelemetry(port);
   system.startVideo();
   std::printf("[system] running (M1: CPU interpreter, %s). Ctrl-C to quit.\n",

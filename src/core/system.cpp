@@ -51,6 +51,9 @@ auto System::stepCpu(u64 n) -> u64 {
     // de un borde de timer/interrupt, o ante una op no soportada → cae al intérprete.
     // El bloque solo se toma con el RSP parado, así que no altera el interleave 2:3.
     if(jitOn) {
+      // Ventana que le queda a esta llamada: una cadena de bloques enlazados no puede
+      // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
+      cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
       u32 k = cpu.jitTryBlock();
       if(k) { i += k; continue; }
     }
@@ -111,6 +114,7 @@ auto System::run() -> void {
   auto  hbT0 = winT0, hbLast = winT0;   // heartbeat lifetime baseline
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
   while(!shutdown.load()) {
+    if(cpu.halted && exitOnHalt) { shutdown.store(true); break; }
     if(paused.load() || cpu.halted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       winT0 = clock::now(); winInsn = 0; winRsp = rspCycles;  // don't fold idle time into speed

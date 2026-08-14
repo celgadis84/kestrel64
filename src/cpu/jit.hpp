@@ -8,6 +8,7 @@
 #include "../core/types.hpp"
 #include <cstddef>
 #include <vector>
+#include <unordered_map>
 
 namespace kestrel::jit {
 
@@ -193,6 +194,34 @@ public:
   // or  r64, src (reg-reg):  REX.W 09 /r  — para J/JAL: (pc&mask) | (target<<2)
   auto or_r_r(Reg dst, Reg src) -> void { rex(true,src,0,dst); buf.emit(0x09); modrm(3,src,dst); }
 
+  // ---- soporte de block-linking (Etapa 3) ------------------------------------
+  // cmp r64, r64:  REX.W 39 /r  — guarda de enlace (target runtime vs VA de compilación).
+  auto cmp_r_r(Reg a, Reg b) -> void { rex(true,b,0,a); buf.emit(0x39); modrm(3,b,a); }
+  // jne rel32 (ZF=0): placeholder; devuelve el offset del disp32.
+  auto jne_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x85); usize at = buf.used; imm32(0); return at; }
+  // add dword [base+disp], imm32:  81 /0 id  (32-bit, sin REX) — acumula ops en jitPending.
+  auto add_m32_imm32(Reg base, s32 disp, u32 imm) -> void {
+    buf.emit(0x81); memOperand(0, base, disp); imm32(imm);
+  }
+  // jmp qword [rip+disp32]:  FF /4 con mod=00 rm=101 → FF 25 disp32. Salto indirecto a través
+  // de una ranura de datos en el propio buffer: enlazar/desenlazar = un store de 8 bytes, sin
+  // reescribir código (nada de SMC sobre el buffer ejecutable). Devuelve el offset del disp32.
+  auto jmp_rip_mem_placeholder() -> usize {
+    buf.emit(0xFF); buf.emit(0x25); usize at = buf.used; imm32(0); return at;
+  }
+  // Reserva 8 bytes alineados para una ranura de enlace; devuelve su offset en el buffer.
+  auto reserveSlot() -> usize {
+    while(buf.used & 7) buf.emit(0x90);
+    usize at = buf.used; imm64(0); return at;
+  }
+  // Parchea un disp32 rip-relativo para que apunte a un offset ARBITRARIO del buffer (no al
+  // cursor, como patchRel32): el destino puede estar por delante (ranura al final del bloque).
+  auto patchRel32To(usize at, usize targetOff) -> void {
+    if(!buf.base || at + 4 > buf.cap) return;
+    s32 rel = (s32)((s64)targetOff - (s64)(at + 4));
+    for(int i = 0; i < 4; i++) buf.base[at + i] = (u8)((u32)rel >> (8 * i));
+  }
+
   CodeBuffer& buf;
 };
 
@@ -223,6 +252,21 @@ using BlockFn = u32 (*)(u64* gpr, void* cpu);
 // simples (LB/LH/LW/LBU/LHU/LWU/LD/SB/SH/SW/SD) desde una PC física. Termina en la primera
 // op no soportada (branch/cop/HI-LO/unaligned/LL-SC). `src` guarda las palabras originales
 // para revalidar contra SMC/DMA en cada entrada.
+// Un sitio de enlace emitido en la salida de control de un bloque. La guarda compara el target
+// calculado en runtime contra `targetVA`; el enlace se activa/desactiva escribiendo SOLO datos:
+//  - *vaImm  = targetVA  → guarda casa  → se toma el salto indirecto (ENLAZADO)
+//  - *vaImm  = kNoLink   → guarda falla → cae a la salida lenta (DESENLAZADO)
+//  - *slot   = destino del `jmp qword [rip+slot]`
+// Nunca se reescribe código ejecutable, solo estas dos palabras de datos.
+struct LinkSite {
+  u64* vaImm = nullptr;     // imm64 del `mov rdx, targetVA` de la guarda
+  u64* slot = nullptr;      // ranura de 8 bytes del salto indirecto
+  u64  targetVA = 0;        // VA de destino en tiempo de compilación
+  u32  targetPhys = 0;      // phys de destino (clave para (des)enlazar)
+};
+// VA imposible (impar: toda PC de N64 está alineada a 4) → la guarda nunca casa.
+static constexpr u64 kNoLink = 1;
+
 struct Block {
   BlockFn fn = nullptr;
   u32 nOps = 0;
@@ -231,6 +275,15 @@ struct Block {
   bool hasBranch = false; // termina en un branch absorbido (escribe pc/nextPc; salida de control)
   bool dead = false;      // SMC invalidó este bloque: find() lo trata como miss → recompila in-place
   std::vector<u32> src;   // opcodes originales, para validación
+  // --- block-linking (Etapa 3) ---
+  u32 phys = 0;             // PC física de entrada (clave del cache; necesaria para (des)enlazar)
+  std::vector<LinkSite> sites;  // sitios de enlace emitidos en las salidas de este bloque
+  u64 linkedEpoch = ~0ull;  // época de enlace con la que este bloque fue publicado como destino;
+                            // si != cache.linkEpoch hay que re-enlazarlo (tras un desenlace global)
+  u8* linkEntry = nullptr;  // punto de entrada para un salto ENLAZADO: justo tras el prólogo de
+                            // marco (push rbx/r12; mov; sub rsp), donde el predecesor ya dejó
+                            // RBX/R12/RSP válidos → el sucesor reutiliza el marco del predecesor
+                            // y su epílogo retorna al driver que llamó al PRIMER bloque.
 };
 
 // Cache de bloques + buffer ejecutable. Propiedad del CPU (uno por núcleo emulado).
@@ -245,10 +298,27 @@ struct CodeCache {
   bool ready = false;
   u64 hits = 0, misses = 0, compiles = 0;
 
+  // --- block-linking (Etapa 3) ---
+  std::vector<LinkSite> links;                              // todos los sitios emitidos
+  std::unordered_map<u32, std::vector<u32>> byTarget;       // targetPhys → índices en `links`
+  u64 linkEpoch = 0;      // sube en cada desenlace global (invalidación de I-cache)
+  u64 nLinked = 0, nUnlinked = 0;   // estadística
+
   auto init() -> bool;
   auto find(u32 phys) -> s32;               // idx o -1
   auto insert(u32 phys, Block&& b) -> s32;  // devuelve idx
   auto clear() -> void;                      // vacía todo (buffer lleno / invalidación global)
+
+  // Registra un sitio de enlace (desenlazado). Lo resuelve al vuelo si el destino ya existe.
+  auto addLink(const LinkSite& s) -> void;
+  // Activa todos los sitios que apuntan a `phys` para que salten a `entry`.
+  auto linkTo(u32 phys, u8* entry) -> void;
+  // Desactiva todos los sitios que apuntan a `phys` (bloque muerto o recompilado).
+  auto unlinkTo(u32 phys) -> void;
+  // Desactiva TODOS los sitios: lo exige una invalidación de I-cache, que es la única vía por
+  // la que el HW puede pasar a ejecutar código nuevo bajo una dirección ya ejecutada. Sube
+  // linkEpoch para que cada bloque se re-enlace en su próxima entrada VALIDADA por el driver.
+  auto unlinkAll() -> void;
 };
 
 }  // namespace kestrel::jit

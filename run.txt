@@ -1,0 +1,1 @@
+[boot] CIC detected: 6102 (seed 0x3f)

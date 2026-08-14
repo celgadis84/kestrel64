@@ -1725,3 +1725,98 @@ NOTA: baseline CLAUDE.md `2728103c` estaba driftado; nuevo `cbf8aa76` (este buil
   mejor con el usuario presente. Steps 1&2 son el fundamento seguro ya asentado.
 - GOTCHA: modo threaded cuelga al salir (join de workers) tras `[fbdump] wrote` → `taskkill`
   el zombie; el framebuffer ya está escrito, no afecta al md5.
+
+---
+
+## 2026-08-15 — Dynarec Step 3: block-linking real (guarda + ranura indirecta)
+
+**Estado: implementado, gated por `KESTREL_JIT_LINK=1` (default OFF). Lockstep VALIDADO.
+Threaded con cadena larga: NO DETERMINISTA → ver "abierto" abajo.**
+
+### Qué se emite
+
+Salida de control con destino estático predecible (BEQ/BNE/Bcond ambas ramas, J/JAL; JR/JALR no,
+son dinámicos) emite por candidato:
+
+```
+mov rdx, imm64 <VA destino>     ; guarda: kNoLink=1 al nacer (VA imposible, todo PC N64 es 4-align)
+cmp rcx, rdx                    ; rcx = pc que el bloque acaba de escribir
+jne slow                        ; no coincide → salida normal por el epílogo
+add dword [rbx+jitPending], K   ; contabilidad diferida de ESTE bloque
+jmp qword [rip+slot]            ; ranura de 8 bytes, DATOS tras el `ret` (nunca se ejecuta)
+```
+
+Enlazar/desenlazar = **escrituras de datos**, jamás reescritura de código ejecutable (sin
+problemas de coherencia I-cache del host ni de otro hilo ejecutando el bloque).
+
+- **Sólo ckseg0** (`0xFFFFFFFF_8000_0000..9FFF_FFFF`): ahí VA→phys es la máscara arquitectónica
+  de un segmento NO mapeado, así que el enlace no depende del TLB.
+- `linkEntry` = justo detrás de `sub rsp,40` del prólogo → el sucesor reusa el marco del
+  predecesor y su epílogo retorna al driver que llamó al PRIMER bloque (profundidad de pila
+  constante).
+- Contabilidad diferida: `jitPending` lo commitea el prólogo del sucesor (retired/Count/Random/
+  hits) y lo pone a 0 ⇒ en cualquier retorno al driver `pending==0` y el valor devuelto es exacto.
+- Invalidación: la ÚNICA vía por la que el HW puede ejecutar código nuevo en una dirección ya
+  ejecutada es invalidar la I-cache (el RCP/DMA no espían caches) ⇒ `cacheOp` I-side (fn 0/2/4)
+  → `unlinkAll()` + `linkEpoch++`; re-enlace perezoso en la siguiente entrada validada por el
+  driver. SMC (dead-mark) → `unlinkTo(phys)`. `clear()` tira todos los enlaces.
+
+### Tres bugs encontrados al medir (los tres eran del banco, no del enlace)
+
+1. **`jitTryBlock` devolvía sólo las ops del ÚLTIMO bloque de la cadena.** `stepCpu` mide la
+   ventana de campo (750k ops → `viTick`) con ese valor, así que la cadena "escondía" ops: el
+   VI tickeaba tardísimo, el juego se quedaba en el spin de espera de interrupción y el bench
+   marcaba un falso **3.42s**. Fix: `jitChainOps` acumula lo commiteado y el driver devuelve
+   `R + jitChainOps`. **Sin esto, block-linking rompe el pacing del VI de forma silenciosa.**
+2. **La cadena podía pasarse de la ventana de campo.** Fix: `jitOpsBudget` (ops que quedan en
+   la llamada a `stepCpu`); un eslabón enlazado no arranca si no cabe entero. El PRIMER bloque
+   lo sigue despachando el driver sin tocar → comportamiento idéntico al de antes.
+3. **`KESTREL_MAXINSN` sólo se comprobaba en el intérprete** (cpu.cpp, ruta debug op-a-op), así
+   que con JIT el cap saltaba en otro punto del programa y el bench NO comparaba el mismo
+   trabajo. Fix: el driver recorta `jitOpsBudget` al resto y declina el bloque que cruzaría el
+   cap, cediendo las últimas ops al intérprete.
+
+### Dos gotchas del banco de pruebas (documentados aquí porque cuestan horas)
+
+- **SM64 escribe su EEPROM `.eep` junto a la ROM.** Si queda de una corrida previa, el arranque
+  toma otro camino y el md5 cambia sin que el emulador haya cambiado. `scripts/bench.sh` borra
+  el save antes de CADA corrida. Todo md5 comparado sin eso es basura.
+- **`--run` headless no salía tras el cap de maxinsn**: `run()` veía `cpu.halted` y dormía para
+  siempre. Ahora `System::exitOnHalt` (lo pone `--run`) termina el bucle; en modo MCP NO, ahí un
+  halt es punto de inspección y el proceso debe seguir vivo.
+
+### Resultados (SM64 300M ops, save limpio, SoftRDP)
+
+| Config | Wall | md5 |
+|--------|------|-----|
+| lockstep-interp (oráculo) | 22s | `cbf8aa761b92adab89ddde949b6ff24b` |
+| lockstep-JIT | 15s | idéntico |
+| **lockstep-JIT+LINK** | **14s** | **idéntico** |
+| threaded-JIT | 8s | idéntico |
+| threaded-JIT+LINK (chain=1) | 12-17s | idéntico |
+| threaded-JIT+LINK (chain=256) | 5s | **VARÍA entre corridas** |
+
+- systemtest **0/3721 · 0/2 · 0/6** en interp, JIT y JIT+LINK (los tests Timing y Cycle pasan con
+  el enlace activo ⇒ el commit diferido de Count/Random es correcto).
+- Ganancia real del enlace en lockstep: **~7%** (15s→14s). Modesta: SM64 pasa mucho tiempo fuera
+  de bloques enlazables (JR/JALR dinámicos, RSP corriendo en lockstep).
+- A 20M ops interp y JIT paran en el MISMO pc/sp/ra. A 300M el pc del cap difiere (jitter de
+  frontera de campo, ±ops por bloque) pero el framebuffer es idéntico.
+
+### ABIERTO — threaded + cadena larga no es determinista
+
+`KESTREL_THREADS=1 KESTREL_JIT=1 KESTREL_JIT_LINK=1` con `chain=256` dio 2 md5 distintos en 3
+corridas (`3fe185fa` y `21ec9ed5` x2) y baja a 5s. Con `KESTREL_JIT_CHAIN=1` (toda la maquinaria
+de enlace en pie, cero saltos encadenados) vuelve a ser estable e idéntico al oráculo, y
+threaded-JIT sin enlace es estable 3/3. Conclusión: **no lo rompen las guardas ni la contabilidad
+diferida, sino correr mucho rato sin volver al driver mientras los workers RSP/RDP avanzan en
+paralelo** — hay un punto de sincronización que hoy sólo ocurre por vuelta al driver. Siguiente
+paso: encontrarlo (candidato: muestreo de estado del RCP/MI entre bloques) o, si no lo hay,
+limitar la cadena en modo Threaded. Hasta resolverlo, **LINK sólo con lockstep**.
+
+Diagnóstico: `KESTREL_JIT_CHAIN=N` (default 256) acota la cadena; `scripts/bench.sh` corre la
+matriz con save limpio.
+
+### Pendiente
+- Gate 4 (suite krom 47) con LINK: sin correr todavía.
+- RSP HLE / recompilador RSP = la palanca grande medida (mayor que el enlace de bloques).

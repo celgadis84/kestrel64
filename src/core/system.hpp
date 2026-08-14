@@ -31,6 +31,10 @@ struct System {
 
   std::atomic<bool> paused{true};    // start paused so single-stepping is deterministic
   std::atomic<bool> shutdown{false};
+  // Corrida por lotes (--run sin vídeo): un halt de la CPU (cap de maxinsn, fatal) es el fin
+  // de la sesión, así que se sale en vez de quedarse girando. En modo MCP NO: ahí el halt es
+  // un punto de inspección y el proceso tiene que seguir vivo para el cliente.
+  bool exitOnHalt = false;
 
   // Per-domain clock model. Nominal N64 rates; `oc` = overclock multiplier
   // (1.0 = stock console). A future UI can retune these live to model an

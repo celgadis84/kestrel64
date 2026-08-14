@@ -56,6 +56,25 @@ struct CPU {
   bool jitTlbCacheable = false;
   bool jitTlbValid = false;
 
+  // Block-linking Step 3: contabilidad de la CADENA de bloques enlazados. Un bloque enlazado
+  // salta directo al sucesor sin volver al driver, así que la contabilidad que el driver hace
+  // al retornar (retired/Count/Random) la difiere al prólogo del sucesor:
+  //  - jitPending = ops retiradas por los bloques ya ejecutados de la cadena y AÚN sin commitear.
+  //    La salida de control enlazada lo incrementa; el prólogo del sucesor lo commitea y lo pone
+  //    a 0 (así, en cualquier retorno al driver, pending==0 y el valor devuelto es exacto).
+  //  - jitChain = enlaces consumidos desde la última entrada por el driver. Presupuesto duro:
+  //    sin él, un bucle auto-enlazado no devolvería el control hasta el borde del timer.
+  u32  jitPending = 0;
+  u32  jitChain = 0;
+  //  - jitChainOps = ops ya commiteadas por la cadena en ESTA entrada del driver. jitTryBlock
+  //    las suma a las del último bloque: quien llama (stepCpu) tiene que ver el total real, o
+  //    la ventana de 750k ops/campo se estiraría y el VI llegaría tarde.
+  //  - jitOpsBudget = ops que aún caben en la ventana del bucle del sistema. Un eslabón
+  //    enlazado no arranca si no cabe entero, así que la cadena NO desborda el límite de
+  //    campo más de lo que ya lo hace un bloque suelto.
+  u32  jitChainOps = 0;
+  u32  jitOpsBudget = 0;
+
   // --- VR4300 primary caches (direct-mapped, write-back) ---------------------
   // Only RDRAM is cacheable; MMIO/cart accesses (KSEG1 / uncached) bypass. The N64
   // has no hardware cache coherence, so RAM and cache diverge exactly as on silicon:
