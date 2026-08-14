@@ -25,3 +25,7 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
+
+# scratch de depuración en la raíz (volcados de log de sesiones)
+/*.txt
+!requirements*.txt
