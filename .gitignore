@@ -1,0 +1,27 @@
+# Build trees
+build/
+build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+
+# ROMs and dumps (never commit copyrighted images)
+*.z64
+*.n64
+*.v64
+*.N64
+
+# Scratch artifacts from debug/capture sessions
+*.bmp
+*.png
+*.log
+*.out
+*.err
+*.pyc
+__pycache__/
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
