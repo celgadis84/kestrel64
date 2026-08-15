@@ -28,19 +28,19 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   u32 type   = mem->rcp.vi_ctrl & 3;                 // 2=16bpp, 3=32bpp
   u32 srcW = mem->rcp.vi_width ? mem->rcp.vi_width : 320;   // framebuffer line stride (source pixels)
   if(srcW == 0 || srcW > 640) srcW = 320;
-  // VI horizontal presentation. The framebuffer (srcW pixels wide) is scaled to the
-  // display by X_SCALE (2.10 fixed = source-pixel step per 640-domain output pixel).
-  // The visible frame is (H_VIDEO active)/2 output pixels — H_VIDEO counts in the
-  // doubled pixel clock. So for the standard 320-wide fb (xscale $200=0.5, H_VIDEO
-  // $6C02EC → 640 active) the output is 320 with source_x==x (1:1, no resample). A
-  // half-width fb (160, xscale $100=0.25) yields the same 320 output, each source
-  // column duplicated 2× — this is exactly what VI does and matches the reference.
-  u32 hstart = (mem->rcp.vi_hstart >> 16) & 0x3ff;
-  u32 hend   = mem->rcp.vi_hstart & 0x3ff;
-  u32 xscale = mem->rcp.vi_xscale & 0xfff;
-  if(xscale == 0) xscale = 512;                        // default 1:1
-  u32 w = (hend > hstart) ? (hend - hstart) / 2 : srcW;
-  if(w == 0 || w > 640) w = srcW;
+  // This dump is the SOURCE framebuffer exactly as the RDP wrote it: w = VI_WIDTH,
+  // one output pixel per stored pixel, no X_SCALE resample.
+  //
+  // It used to derive the width from the H_VIDEO active window ((hend-hstart)/2),
+  // which is the VI's *display* width, and then resample through X_SCALE. That is
+  // the presenter's job, not the oracle's: it pinned every dump at 320 columns
+  // (standard H_VIDEO $6C02EC = 640 active / 2) regardless of what the ROM
+  // actually rendered, so a 640-wide framebuffer came out half as wide and a
+  // 160-wide one came out doubled. 181 of the 371 PeterLemon references
+  // disagreed on size with the dump for that reason alone, which makes every
+  // accuracy number computed from them meaningless. The references are captures
+  // of the framebuffer, so the dump has to be the framebuffer.
+  u32 w = srcW;
   // Framebuffer height is NOT fixed at 240 — the VI Y_SCALE register (2.10 fixed,
   // source lines per display line) sets it. Krom's low-res demos use YSCALE 0x200
   // (half → 120 source lines) etc. The native source height the RDP renders into is
@@ -57,8 +57,7 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   std::vector<u8> rgb((usize)w * h * 3, 0);
   for(u32 y = 0; y < h; y++) for(u32 x = 0; x < w; x++) {
     u32 R=0,G=0,B=0;
-    u32 sx = (x * xscale) >> 9;                         // 640-domain step = 2×xscale/1024 → >>9
-    if(sx >= srcW) sx = srcW - 1;
+    u32 sx = x;
     if(type == 2) { u32 p = origin + (y*srcW+sx)*2; if(p+1 < ram.size()) { u32 px=((u32)ram[p]<<8)|ram[p+1]; R=exp5((px>>11)&0x1f); G=exp5((px>>6)&0x1f); B=exp5((px>>1)&0x1f); } }
     else if(type == 3) { u32 p = origin + (y*srcW+sx)*4; if(p+3 < ram.size()) { R=ram[p]; G=ram[p+1]; B=ram[p+2]; } }
     usize o = ((usize)(h-1-y)*w + x)*3;             // BMP is bottom-up; store BGR

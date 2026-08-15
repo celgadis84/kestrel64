@@ -1820,3 +1820,76 @@ matriz con save limpio.
 ### Pendiente
 - Gate 4 (suite krom 47) con LINK: sin correr todavía.
 - RSP HLE / recompilador RSP = la palanca grande medida (mayor que el enlace de bloques).
+
+## 2026-08-15 — Batería de validación automatizada + bug del volcado de framebuffer
+
+### `scripts/validate.py` (wrapper `scripts/validate.sh`)
+
+Un solo punto de entrada para las tres puertas obligatorias. Sustituye a los batch ad-hoc
+(`batch2.sh` + `cmpg.py` en scratchpad, que se perdían con la sesión):
+
+```bash
+bash scripts/validate.sh systemtest --mode interp
+bash scripts/validate.sh krom       --mode link --vs interp      # 371 ROMs, ~100-140s
+bash scripts/validate.sh sm64       --mode threaded-jit
+bash scripts/validate.sh all        --mode jit                    # las tres, para en la 1a que falla
+```
+
+- **Salida mínima por diseño**: cada puerta imprime 2-4 líneas. El detalle por ROM va a
+  `out/krom-<modo>.tsv`; la corrida se diffea contra `docs/baselines/krom-<modo>.tsv`, así que
+  una corrida limpia dice `regress=0 improve=0` en vez de escupir 371 filas.
+- `--mode` mapea los toggles del emulador: `interp` (oráculo) · `jit` · `link` · `threaded` ·
+  `threaded-jit` · `threaded-link`. `--vs interp` compara un modo contra la baseline del
+  intérprete: **la salida del RDP no puede depender de cómo se ejecutó la CPU**.
+- Corre en paralelo (`--jobs`, default = núcleos/2). Ya no hace falta el baile de `taskkill`
+  del batch viejo: con `System::exitOnHalt` el proceso termina solo al llegar al cap.
+- `--filter RDP/16BPP` para barridos rápidos; la batería completa NO hace falta en cada cambio.
+- El `.eep` de SM64 se borra antes de cada corrida (gotcha ya documentado arriba).
+
+Dos arreglos del comparador que cambiaban la nota sin que cambiara el emulador:
+- Pillow rechaza los PNG de referencia que llevan el `.asm` entero en un chunk `zTXt`
+  (límite 1 MB) → `MAX_TEXT_CHUNK` subido; si no, esos ROMs desaparecían del barrido.
+- Cuando volcado y referencia no miden lo mismo se reescala con **NEAREST**, nunca con filtro
+  (un filtro inventa colores que el RDP nunca escribió), y se anota `SIZE WxH vs ref WxH`.
+
+### BUG ENCONTRADO — el volcado de framebuffer sacaba el ancho equivocado
+
+`dumpFramebufferBmp` derivaba el ancho de la ventana activa de H_VIDEO (`(hend-hstart)/2`) y
+luego remuestreaba por X_SCALE. Eso es el trabajo del *presentador*, no del oráculo: clavaba
+**todo volcado a 320 columnas** (H_VIDEO estándar $6C02EC = 640 activos / 2) daba igual lo que
+el ROM hubiera renderizado. Un framebuffer de 640 salía a la mitad; uno de 160, al doble.
+
+**181 de 371 referencias discrepaban en tamaño sólo por esto**, así que toda nota calculada
+sobre ellas era ruido. Ahora el volcado es el framebuffer fuente tal cual: `w = VI_WIDTH`, un
+píxel de salida por píxel almacenado, sin remuestreo.
+
+| | antes | después |
+|---|---|---|
+| mean exact (371 ROMs) | 82.91 | **86.51** |
+| ROMs perfectos (>=99.99%) | 19 | **144** |
+| discrepancia de tamaño | 181 | 31 |
+
+De las 31 que quedan, 22 son `640x240 vs ref 640x480` con **exact 100.00%**: el ROM renderiza
+240 líneas fuente y la captura de referencia es la salida entrelazada de 480; decimando da
+identidad exacta ⇒ no son bugs. Reales pendientes: `RDP/8BPP InternalPalette` (160x240, 0%,
+ya diferido), `EMU/SNES PPU*` (272 vs 320) y `N64NICCC` (256x199 vs 320x240).
+
+### Gate 4 (suite krom) CERRADO — block-linking validado
+
+| Puerta | interp | jit | link |
+|---|---|---|---|
+| systemtest | 0/3721 · 0/2 · 0/6 (16s) | idem (25s) | idem (38s) |
+| krom 371 | mean 86.51, 144 perfectos (141s) | — | **idéntico, regress=0** (98s) |
+| SM64 300M md5 | `cbf8aa761b92adab89ddde949b6ff24b` | MATCH | MATCH |
+
+SM64 también MATCH en `threaded` y `threaded-jit`. `threaded-link` sigue fuera (no
+determinista, ver sección anterior).
+
+### Bugs que destapó el primer barrido completo (pendientes)
+
+- **Vídeo decodificado en negro**: `Video/GRB12Decode`, `GRB15Decode`, `GRB12/GRB15/YUV8/YUV16
+  LZDIFFRLEVideo` dan framebuffer 100% negro (exact 0.00). No es falta de instrucciones: a 20M
+  y a 200M ops el resultado es el mismo, y el ROM termina en su bucle final normal.
+- `RDP/RDPModeInput` 6.49 · `HelloWorld/32BPP RDP` 4.22 · `RDP/32BPP SetPrimColor` 0.08.
+- `Compress/DCT` y `RSP/DCT` (quantization multi-block) 5-11%.
+- Animados con desfase de frame (NO bugs, ya sabido): `Rotate*`, `CP1/Fractal`, `VIScrollingBG`.
