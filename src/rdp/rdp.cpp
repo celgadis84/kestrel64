@@ -37,6 +37,13 @@ inline auto sx(u32 v, int bits) -> s32 {
 // N64 hardware expansion (angrylion replicated_rgba[i]=(i<<3)|(i>>2), tmem.c),
 // NOT a linear *255/31 scale — the two differ by 1 in the mid-range (v=16: 132 vs
 // 131). Used for framebuffer readback (blender IMAGE_READ) and RGBA16 texels/palette.
+// TMEM texels and TLUT entries use the same expansion (parallel-rdp convert_rgba16).
+// Truncation (v<<3) was tried and is wrong: krom's RDP/TextureCoordinates is built to
+// expose exactly this, and it settles it without any combiner/blender in the way. At
+// (164,69) the sample sits between texel $0000 (R=0) and $F800 (R=31) with tfrac=4/32
+// and the combiner is a bare TEXEL0 pass-through, so the written 5-bit level is
+// ((R01-R00)*4 + 0x10) >> 5. Truncation gives (248*4+16)>>5 = 31 -> level 3; replication
+// gives (255*4+16)>>5 = 32 -> level 4, and level 4 is what the hardware capture holds.
 inline auto exp5(u32 v) -> u32 { return (v << 3) | (v >> 2); }
 // R8G8B8A8 -> RGBA5551 (N64 16bpp)
 inline auto to5551(u32 c) -> u16 {
@@ -75,7 +82,7 @@ auto SoftRdp::readFb(Memory& mem, int x, int y) -> u32 {
   return (r << 24) | (g << 16) | (b << 8) | al;
 }
 
-auto SoftRdp::blendColor(u32 src, u32 memc) -> u32 {
+auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
   // Blend mux from the render-mode word (other_lo). 1-cycle mode evaluates the FIRST
   // blender cycle's config (GBL_c1: m1a<<30, m1b<<26, m2a<<22, m2b<<18); 2-cycle mode's
   // final write uses the SECOND cycle (GBL_c2: <<28/24/20/16). P/M pick a colour
@@ -87,23 +94,44 @@ auto SoftRdp::blendColor(u32 src, u32 memc) -> u32 {
     switch(sel) { case 0: return src; case 1: return memc; case 2: return blend_color; default: return fog_color; }
   };
   u32 P = pick(Psel), M = pick(Msel);
-  int a;                              // A mux: IN alpha / FOG alpha / SHADE alpha / 0
-  switch(Asel) { case 0: a = src & 0xff; break; case 1: a = fog_color & 0xff; break;
-                 case 2: a = src & 0xff; break; default: a = 0; }
-  int b;                              // B mux: 1-A / MEM alpha / 1.0 / 0
-  switch(Bsel) { case 0: b = 255 - a; break; case 1: b = memc & 0xff; break;
-                 case 2: b = 255; break; default: b = 0; }
+  int a0;                             // A mux: IN alpha / FOG alpha / SHADE alpha / 0
+  switch(Asel) { case 0: a0 = src & 0xff; break; case 1: a0 = fog_color & 0xff; break;
+                 case 2: a0 = src & 0xff; break; default: a0 = 0; }
+  // Two hardware shortcuts that write the P colour untouched. Without them a "solid"
+  // primitive picks up a 1/32 smear of M, because the coefficient path below is NOT an
+  // exact lerp (see the 5-bit truncation).
+  //  - blender disabled (no FORCE_BLEND and the pixel is not an AA edge): the blender is
+  //    bypassed entirely, whatever the mux says;
+  //  - the classic opaque case A=IN alpha, B=1-A, alpha==0xff.
+  if(!blendEn || (Asel == 0 && Bsel == 0 && (src & 0xff) == 0xff)) return (P & ~0xffu) | (src & 0xff);
+  int a1;                             // B mux: 1-A / MEM alpha / 1.0 / 0
+  switch(Bsel) { case 0: a1 = (~a0) & 0xff; break; case 1: a1 = memc & 0xff; break;
+                 case 2: a1 = 0xff; break; default: a1 = 0; }
+  // The blender's coefficients are 5-bit, not 8: the RDP drops the low 3 bits of each
+  // alpha and computes P*a0 + M*(a1+1) in that space. That truncation is visible — an
+  // alpha of 0xf8..0xff all weigh the same — so scaling by /255 instead is wrong.
+  // a0 takes the expanded alpha first (0xff → 0x100 → 32), which is what makes an
+  // additive pass (B = ONE) sum exactly instead of losing 1/32 of the source. krom's
+  // RDPGRB15Decode is the witness: it adds three opaque FORCE_BLEND passes into a 32bpp
+  // buffer and the hardware capture holds exact palette values, not value*31/32.
+  a0 += (a0 + 1) >> 8;
+  a0 >>= 3; a1 >>= 3;
+  bool force = (other_lo >> 14) & 1;
+  // FORCE_BLEND takes the plain >>5; otherwise the RDP runs the sum through its divider,
+  // normalising by the actual coefficient weight (a0 + a1 + 1) rather than by a fixed 32.
+  int sum = (a0 >> 2) + (a1 >> 2) + 1;
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   u32 out = 0;
-  for(int i = 0; i < 3; i++) {        // out = (P*a + M*b)/255, clamped (lerp when b=1-a)
-    int v = (ch(P, i) * a + ch(M, i) * b + 127) / 255;
+  for(int i = 0; i < 3; i++) {
+    int blended = ch(P, i) * a0 + ch(M, i) * (a1 + 1);
+    int v = force ? (blended >> 5) : (((blended >> 2) & 0x7ff) / sum);
     v = v < 0 ? 0 : v > 255 ? 255 : v;
     out |= (u32)v << (24 - i * 8);
   }
   return out | (src & 0xff);         // carry pipeline alpha (coverage) into the stored pixel
 }
 
-auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src) -> void {
+auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
   static const bool noBlend = std::getenv("KESTREL_NOBLEND") != nullptr;
   // The blender runs in every 1-/2-cycle primitive — it is not gated on IM_RD. IM_RD
@@ -116,8 +144,12 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src) -> void {
   int Msel = (other_lo >> (20 + sh)) & 3, Bsel = (other_lo >> (16 + sh)) & 3;
   bool usesMem = (Msel == 1) || (Bsel == 1);
   if(usesMem && !(other_lo & 0x40)) { putPixel(mem, x, y, src); return; }
+  // blend_en = FORCE_BLEND || (ANTIALIAS_EN && the pixel is not fully covered). That is
+  // the hardware rule verbatim ("if not force blend, allow blend enable - use CVG bits"):
+  // with neither bit set the blender is bypassed and the P colour is written as-is.
+  bool blendEn = ((other_lo >> 14) & 1) || (aaEdge && (other_lo & 0x08));
   u32 memc = usesMem ? readFb(mem, x, y) : 0;
-  putPixel(mem, x, y, blendColor(src, memc));
+  putPixel(mem, x, y, blendColor(src, memc, blendEn));
 }
 
 // Edge anti-aliasing. When AA_EN (other_lo bit 0x08) is set and a pixel is only
@@ -132,8 +164,9 @@ auto SoftRdp::coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void
   if(cvg < 0.0) cvg = 0.0;
   u32 fb = readFb(mem, x, y);
   // Pipeline colour first through the blender (if IM_RD), then coverage-fold vs the
-  // original framebuffer. On an edge the two references coincide closely enough.
-  u32 base = (other_lo & 0x40) ? blendColor(src, fb) : src;
+  // original framebuffer. On an edge the two references coincide closely enough. A
+  // partially covered pixel is exactly the case ANTIALIAS_EN enables the blender for.
+  u32 base = (other_lo & 0x40) ? blendColor(src, fb, true) : src;
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   u32 out = 0;
   for(int i = 0; i < 3; i++) {
@@ -422,6 +455,11 @@ auto SoftRdp::sampleTexel(u32 tileIdx, int s, int t) -> u32 {
     u16 e = tlut[idx & 0xff];
     if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
                           return (i << 24) | (i << 16) | (i << 8) | a; }
+    // TLUT entries expand exactly like texels. krom's EMU/SNES and EMU/GameBoy PPU
+    // references settle it: every channel value in them is exactly repl(v>>3), 230k
+    // samples, no exception. (RDPGRB15Decode looks like it argues for truncation, but its
+    // channels carry finer steps than 5 bits — that test reconstructs colour over several
+    // passes and is failing for an unrelated reason.)
     u32 r = exp5((e >> 11) & 0x1f), g = exp5((e >> 6) & 0x1f);
     u32 b = exp5((e >> 1) & 0x1f),  a = (e & 1) ? 255 : 0;   // RGBA5551 palette
     return (r << 24) | (g << 16) | (b << 8) | a;
@@ -519,24 +557,38 @@ auto SoftRdp::sampleTexFiltered(u32 tile, double s, double t) -> u32 {
   static const bool noFilt = std::getenv("KESTREL_NOFILTER") != nullptr;
   if(noFilt || !((other_hi >> 13) & 1))
     return sampleTexel(tile, (int)std::floor(s), (int)std::floor(t));
-  int s0 = (int)std::floor(s), t0 = (int)std::floor(t);
-  double sf = s - s0, tf = t - t0;
-  u32 c00 = sampleTexel(tile, s0, t0);
-  auto ch = [](u32 c, int i) -> double { return (double)((c >> (24 - i * 8)) & 0xff); };
-  double o[4];
-  if(sf + tf <= 1.0) {
-    u32 c10 = sampleTexel(tile, s0 + 1, t0), c01 = sampleTexel(tile, s0, t0 + 1);
+  // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double
+  // lerp rounded at the end lands on a different level whenever the exact result sits on
+  // a .5 boundary, and the 5-bit framebuffer then quantizes that difference into a
+  // visible band. Weights are the 5-bit S/T fractions, the rounding is +0x10 before an
+  // arithmetic >>5 (so a negative slope truncates toward -inf, as on HW).
+  int si = (int)std::lround(s * 32.0), ti = (int)std::lround(t * 32.0);
+  int fx = si & 31, fy = ti & 31;
+  int s0 = si >> 5, t0 = ti >> 5;
+  auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
+  u32 c10 = sampleTexel(tile, s0 + 1, t0), c01 = sampleTexel(tile, s0, t0 + 1);
+  int o[4];
+  if(((other_hi >> 12) & 1) && fx == 16 && fy == 16) {
+    // MID_TEXEL: at the exact centre of the quad the filter degenerates to the average
+    // of all four texels (MPEG half-pel motion compensation).
+    u32 c00 = sampleTexel(tile, s0, t0), c11 = sampleTexel(tile, s0 + 1, t0 + 1);
     for(int i = 0; i < 4; i++)
-      o[i] = ch(c00, i) + sf * (ch(c10, i) - ch(c00, i)) + tf * (ch(c01, i) - ch(c00, i));
+      o[i] = (ch(c00, i) + ch(c10, i) + ch(c01, i) + ch(c11, i) + 2) >> 2;
   } else {
-    u32 c11 = sampleTexel(tile, s0 + 1, t0 + 1);
-    u32 c10 = sampleTexel(tile, s0 + 1, t0), c01 = sampleTexel(tile, s0, t0 + 1);
-    for(int i = 0; i < 4; i++)
-      o[i] = ch(c11, i) + (1 - sf) * (ch(c01, i) - ch(c11, i)) + (1 - tf) * (ch(c10, i) - ch(c11, i));
+    // The RDP is a 3-tap filter, not a 4-tap bilinear: it takes the triangle half the
+    // sample falls in. Past the diagonal the base flips to the opposite corner and the
+    // weights flip with it (and swap axes).
+    bool upper = fx + fy >= 32;
+    u32 base = upper ? sampleTexel(tile, s0 + 1, t0 + 1) : sampleTexel(tile, s0, t0);
+    int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
+    for(int i = 0; i < 4; i++) {
+      int b = ch(base, i);
+      o[i] = (((ch(c10, i) - b) * wx + (ch(c01, i) - b) * wy + 0x10) >> 5) + b;
+    }
   }
   u32 r = 0;
   for(int i = 0; i < 4; i++) {
-    int v = (int)(o[i] + 0.5); v = v < 0 ? 0 : v > 255 ? 255 : v;
+    int v = o[i] < 0 ? 0 : o[i] > 255 ? 255 : o[i];
     r |= (u32)v << (24 - i * 8);
   }
   return r;
@@ -556,8 +608,11 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };  // i: 0=R 1=G 2=B 3=A
   // special_expand: (v-0x80) kept as signed 9-bit, then +0x80. Identity on 0..255.
   auto sexp = [](int v) -> int { int x = (v - 0x80) & 0x1ff; if(x & 0x100) x |= ~0x1ff; return x + 0x80; };
-  // sign-extend a raw 9-bit value (used for the multiplier C).
-  auto sex9 = [](int v) -> int { int x = v & 0x1ff; if(x & 0x100) x |= ~0x1ff; return x; };
+  // The multiplier port is 9 bits wide and its sources are already in that domain:
+  // 0..0xff colours, 0x100 for the "one" sources (LOD_FRAC with no mipmap, an expanded
+  // 0xff alpha), and the raw signed result of cycle 0. Sign-extending the field would
+  // read 0x100 as -256 and negate every product that a "one" multiplies — the reference
+  // images say x*ONE == x, so the port is not re-interpreted here.
   // clamp_9bit_notrunc: fold a 9-bit-wrapped value into [0,255].
   auto clampN = [&](int v) -> int { int x = sexp(v); return x < 0 ? 0 : x > 255 ? 255 : x; };
   // RGB source resolvers. `cin` is the previous cycle's raw RGBA (all 0 on the first cycle).
@@ -576,7 +631,8 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
       case 3: return ch(prim_color, i); case 4: return ch(shade, i); case 5: return ch(env_color, i);
       case 7: return cin[3]; case 8: return ch(tex0, 3); case 9: return ch(tex1, 3);
       case 10: return ch(prim_color, 3); case 11: return ch(shade, 3); case 12: return ch(env_color, 3);
-      default: return 0; }   // 6 key-scale, 13 LOD, 14 prim-LOD, 15 K5 → 0
+      case 13: return lodFrac(); case 14: return (int)prim_lod_frac;
+      default: return 0; }   // 6 key-scale, 15 K5 → 0
   };
   auto srcD = [&](int idx, int i, const int* cin) -> int {   // add (0..7); 6=ONE(0x100)
     switch(idx) { case 0: return cin[i]; case 1: return ch(tex0, i); case 2: return ch(tex1, i);
@@ -590,13 +646,13 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
       case 6: return 0x100; default: return 0; }
   };
   auto aC = [&](int idx, const int* cin) -> int {            // alpha mul (0..7)
-    switch(idx) { case 0: return 0x100;   // LOD_FRACTION: 1.0 in 1-cycle / no-mipmap (HW default)
+    switch(idx) { case 0: return lodFrac();
       case 1: return ch(tex0, 3); case 2: return ch(tex1, 3); case 3: return ch(prim_color, 3);
       case 4: return ch(shade, 3); case 5: return ch(env_color, 3);
-      case 6: return 0x100; default: return 0; }   // 6=PRIM_LOD_FRAC → 1.0 here; 7=0
+      case 6: return (int)prim_lod_frac; default: return 0; }   // 7=0
   };
   auto eq = [&](int a, int b, int c, int d) -> int {        // 9-bit combiner equation (raw, unclamped)
-    a = sexp(a); b = sexp(b); c = sex9(c); d = sexp(d);
+    a = sexp(a); b = sexp(b); d = sexp(d);
     return (((a - b) * c + 0x80) >> 8) + d;
   };
   // Run one combiner cycle, producing a RAW (unclamped) RGBA in `out`.
@@ -606,15 +662,25 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
     out[2] = eq(srcA(cs.aR, 2, cin), srcB(cs.bR, 2, cin), srcC(cs.cR, 2, cin), srcD(cs.dR, 2, cin));
     out[3] = eq(aABD(cs.aA, cin), aABD(cs.bA, cin), aC(cs.cA, cin), aABD(cs.dA, cin));
   };
-  int zero[4] = {0, 0, 0, 0}, mid[4], fin[4];
+  // COMBINED is a pipeline register, not a per-pixel zero: on the first cycle it still
+  // holds the previous pixel's result. That is not a corner case, it is how a 1-cycle
+  // combiner reads COMBINED_ALPHA at all (krom's video decoders multiply TEXEL0 by it,
+  // which is 1.0 in steady state and would be black if COMBINED were forced to zero).
+  int mid[4], fin[4];
   if(cycleType() == 1) {                 // 2-cycle: cycle0 (raw) → COMBINED → cycle1
-    oneCycle(comb[0], zero, mid);
+    oneCycle(comb[0], combined, mid);
     oneCycle(comb[1], mid, fin);
   } else {                               // 1-cycle uses the second-cycle equation
-    oneCycle(comb[1], zero, fin);
+    oneCycle(comb[1], combined, fin);
   }
-  return ((u32)clampN(fin[0]) << 24) | ((u32)clampN(fin[1]) << 16)
-       | ((u32)clampN(fin[2]) << 8)  |  (u32)clampN(fin[3]);
+  for(int i = 0; i < 4; i++) combined[i] = clampN(fin[i]);
+  u32 rgba = ((u32)combined[0] << 24) | ((u32)combined[1] << 16)
+           | ((u32)combined[2] << 8)  |  (u32)combined[3];
+  // The latched alpha is the EXPANDED one: 0xff becomes 0x100 so that a downstream
+  // multiply by it is an exact identity instead of x*255/256, which would shave a level
+  // off every pass. Same expansion the blender applies to its coefficient.
+  combined[3] += (combined[3] + 1) >> 8;
+  return rgba;
 }
 
 auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
@@ -841,7 +907,12 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     case 0x37: fill_color  = (u32)cmd; break;           // SET_FILL_COLOR
     case 0x38: fog_color   = (u32)cmd; break;           // SET_FOG_COLOR
     case 0x39: blend_color = (u32)cmd; break;           // SET_BLEND_COLOR
-    case 0x3a: prim_color  = (u32)cmd; break;           // SET_PRIM_COLOR
+    case 0x3a:                                          // SET_PRIM_COLOR
+      // Bits 44:40 = min_level (LOD clamp, unused while we do not mipmap), 39:32 =
+      // prim_lod_frac (a real combiner input), 31:0 = the RGBA colour.
+      prim_color    = (u32)cmd;
+      prim_lod_frac = (u8)(cmd >> 32);
+      break;
     case 0x3b: env_color   = (u32)cmd; break;           // SET_ENV_COLOR
     case 0x3c: {                                        // SET_COMBINE
       combine_hi = (u32)(cmd >> 32) & 0x00ff'ffff; combine_lo = (u32)cmd;
@@ -868,8 +939,13 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     cur += 8; executed++;
   }
   if(ops) {
+    // KESTREL_RDPOPS is the print interval in DP runs (default 512). Demos that
+    // submit a single command buffer and then spin need =1, or the histogram
+    // never prints and the trace looks like "the RDP did nothing".
+    static const u32 every = []{ const char* s = std::getenv("KESTREL_RDPOPS");
+                                 u32 v = s ? (u32)std::strtoul(s, nullptr, 0) : 0; return v ? v : 512u; }();
     static u32 calls = 0;
-    if(++calls % 512 == 0) {
+    if(++calls % every == 0) {
       std::fprintf(stderr, "[rdpops] ci=%06x sz=%u w=%u | ", ci_addr, ci_size, ci_width);
       for(int i = 0; i < 64; i++) if(hist[i]) std::fprintf(stderr, "%02x:%u ", i, hist[i]);
       std::fprintf(stderr, "\n"); std::fflush(stderr);

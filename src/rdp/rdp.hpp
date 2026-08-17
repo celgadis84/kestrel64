@@ -50,6 +50,15 @@ private:
 
   u32 fill_color = 0;  // SET_FILL_COLOR (raw 32-bit; two 16bpp pixels or one 32bpp)
   u32 blend_color = 0, fog_color = 0, prim_color = 0, env_color = 0;
+  u8  prim_lod_frac = 0;            // SET_PRIM_COLOR bits 39:32 — combiner mul input
+  // LOD fraction feeding the combiner's LOD_FRAC mux. We do not mipmap: every tile is
+  // its own level, so max_level is 0, which pins the LOD unit at full fraction. That is
+  // 0x100 — the same "one" the muladd/add muxes use — NOT 0xff: as a 9-bit mul input it
+  // sign-extends to -256, so x*LOD_FRAC lands at -x, and the combiner's 9-bit clamp maps
+  // [-129,-256] back to 0xff. Net effect for an opaque texel: alpha 0xff exactly, which
+  // is what krom's hardware references show (0xff would give 0xfe and leak a 1/32 smear
+  // of the framebuffer through the blender's opaque shortcut).
+  static constexpr auto lodFrac() -> int { return 0x100; }
   u32 prim_z = 0;      // SET_PRIM_DEPTH primitive Z (used when Z_SOURCE_SEL is set)
 
   int k0 = 0, k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;  // SET_CONVERT (YUV→RGB coeffs, 9-bit signed)
@@ -61,6 +70,14 @@ private:
   // alpha carry independent A/B/C/D source selectors (the SET_COMBINE mux indices).
   struct CombSet { int aR = 0, bR = 0, cR = 0, dR = 0, aA = 0, bA = 0, cA = 0, dA = 0; };
   CombSet comb[2];
+  // COMBINED feedback register. This is real pipeline state, not a per-pixel temporary:
+  // the mux index for COMBINED/COMBINED_ALPHA reads whatever the combiner last wrote, so
+  // in 1-cycle mode (and in cycle 0 of 2-cycle mode) it holds the PREVIOUS pixel's result.
+  // Held CLAMPED (the 8-bit value that left the pipeline), unlike the cycle0→cycle1 path
+  // inside one pixel, which forwards the raw 9-bit result. Storing the raw value here
+  // would feed a negative COMBINED_ALPHA into the next pixel and turn every
+  // TEXEL0*COMBINED_ALPHA decoder into saturated garbage.
+  int combined[4] = {0, 0, 0, 0};
 
   int sx0 = 0, sy0 = 0, sx1 = 320, sy1 = 240;   // scissor box (pixels)
 
@@ -104,8 +121,10 @@ private:
   // is set; opaque modes with no framebuffer read write straight through. out = P*a + M*b
   // with P/M/a/b picked by the blend mux (m1a,m1b,m2a,m2b) of the final blender cycle.
   auto readFb(Memory& mem, int x, int y) -> u32;             // framebuffer colour → RGBA32
-  auto blendColor(u32 src, u32 memc) -> u32;                 // pure blend-mux math
-  auto blendPixel(Memory& mem, int x, int y, u32 src) -> void;
+  auto blendColor(u32 src, u32 memc, bool blendEn) -> u32;   // pure blend-mux math
+  // aaEdge = this pixel is only partially covered, which is what ANTIALIAS_EN turns the
+  // blender on for. Fully covered pixels (the default) blend only under FORCE_BLEND.
+  auto blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge = false) -> void;
   // Coverage-based edge AA: cvg<1 folds `src` (after blend) against the framebuffer.
   auto coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void;
   auto fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void;

@@ -1893,3 +1893,84 @@ determinista, ver sección anterior).
 - `RDP/RDPModeInput` 6.49 · `HelloWorld/32BPP RDP` 4.22 · `RDP/32BPP SetPrimColor` 0.08.
 - `Compress/DCT` y `RSP/DCT` (quantization multi-block) 5-11%.
 - Animados con desfase de frame (NO bugs, ya sabido): `Rotate*`, `CP1/Fractal`, `VIScrollingBG`.
+
+## 2026-08-17 — RDP: filtro 3-point en enteros, expansión 5→8 fijada, y dos PNG de referencia falsos en krom
+
+Segunda pasada sobre los fallos que destapó el barrido completo. Tres cosas, todas
+semántica de HW genuina (ninguna tocada para pasar un test).
+
+### 1. El filtro de textura ahora es entero, como el HW
+
+`sampleTexFiltered` interpolaba en `double` y redondeaba al final. El RDP trabaja en
+10.5 fijo y hace la mezcla en enteros:
+
+```
+frac = st & 31;  st >>= 5
+si frac.x+frac.y >= 32:  base = texel(s0+1,t0+1),  wx = 32-frac.y, wy = 32-frac.x
+si no:                   base = texel(s0,t0),      wx = frac.x,    wy = frac.y
+out = (((t10-base)*wx + (t01-base)*wy + 0x10) >> 5) + base
+```
+
+(oráculo: parallel-rdp `texture.h`, bloque `bilerp && (sample_quad || tlut)`). El `>>5`
+es aritmético, así que una pendiente negativa trunca hacia -inf — con `double` +
+redondeo-al-más-cercano el resultado caía un nivel arriba justo en los bordes .5, y en
+un framebuffer de 16bpp eso se convierte en una banda visible.
+
+Añadido también **MID_TEXEL** (Set_Other_Modes bit 44): con `frac == (16,16)` el filtro
+degenera a la media de los 4 texels `(a+b+c+d+2)>>2` (compensación de medio píxel MPEG).
+Antes se ignoraba el bit.
+
+### 2. Expansión 5→8 bits: replicación en TODAS las rutas
+
+Se probó truncar (`v<<3`) en TMEM/TLUT. Es **incorrecto**. Dos oráculos independientes:
+
+- `RDP/TextureCoordinates` está construido justo para esto (textura 16x8 RGBA16 ampliada
+  8x con y sin SAMPLE_TYPE). En (164,69) el combinador es un paso directo de TEXEL0, la
+  muestra cae entre el texel `$0000` (R=0) y `$F800` (R=31) con `tfrac=4/32`, así que el
+  nivel escrito es `((R01-R00)*4 + 0x10) >> 5`. Truncando: `(248*4+16)>>5 = 31` → nivel 3.
+  Replicando: `(255*4+16)>>5 = 32` → nivel 4, que es lo que tiene la captura de HW.
+- Para la TLUT, las referencias de `EMU/SNES/PPU/*Tile8x8` y `EMU/GameBoy/PPU/2BPPTile8x8`
+  cumplen `v == ((v>>3)<<3)|((v>>3)>>2)` en el **100%** de 230400 muestras. Truncación
+  sólo acierta 22-49%. No hay dos decodificadores: texel y paleta expanden igual.
+
+`RDPGRB15Decode` parecía decir lo contrario (sus valores son casi todos múltiplos de 8).
+No sirve como oráculo: sus canales tienen pasos de 4 (R) y de 1 (B), o sea reconstruye
+color en varias pasadas — está roto por otra razón (sigue en 0.00).
+
+### 3. El blender NO reexpande el alfa... salvo que sí
+
+Se quitó `a0 += (a0+1)>>8` siguiendo a parallel-rdp (que expande dentro del combinador y
+vuelve a clampar a 0xff, así que el blender vería 31 como máximo). Con eso `GRB15Decode`
+pasó a dar exactamente ref-1 en TODO el frame: el HW no pierde ese 1/32. La línea vuelve
+a estar, ahora con el testigo apuntado en el comentario.
+
+### PNG de referencia duplicados en krom (¡no usarlos como oráculo!)
+
+Dos capturas están copiadas de otro test — mismo md5, mismo contenido:
+
+| test | png | md5 | de quién es en realidad |
+|---|---|---|---|
+| `HelloWorld/32BPP/HelloWorldRDP320x240` | `HelloWorldRDP32BPP320X240.png` | `d8b8ef4c…` | de la versión **16BPP** (su fondo es (255,231,0) = `Set_Fill_Color $FF01FF01` del test 16bpp, no el `$FFFF00FF` del 32bpp) |
+| `Video/GRB24Decode/RDP` | `RDPGRB24Decode.png` | `6a701a0f…` | de **GRB15** |
+
+Por eso `HelloWorldRDP32BPP` marca 1.00-4.22 pase lo que pase: es incomparable.
+
+### Herramientas nuevas (baratas en tokens)
+
+- `scripts/probe.py <trozo-de-ruta>` — corre un ROM krom headless y saca los N pares
+  (nuestro, referencia) más frecuentes con conteo/%/delta. Un delta constante señala
+  redondeo del combinador; un tinte, decodificación de textura. Ojo: lanzarlo **sin**
+  `clang64/bin` en el PATH (ese python no tiene numpy).
+- `scripts/imgstat.py` — tamaño/media/colores distintos + la terna de precisión.
+
+### Verificación
+
+| Puerta | resultado |
+|---|---|
+| systemtest interp | 0/3721 · 0/2 · 0/6 |
+| systemtest JIT | 0/3721 · 0/2 · 0/6 |
+| SM64 300M lockstep vs threaded | `cbf8aa761b92adab89ddde949b6ff24b` == `cbf8aa76…` |
+| krom 371 | mean_exact **86.51**, 144 perfectos, regress=0 |
+
+Mejoras contra la baseline anterior: `RDP/AlphaCoverage` 41.31 → **44.72**,
+`RDP/CombinerLongTailConstants` 67.77 → **71.05**. Baseline congelada.
