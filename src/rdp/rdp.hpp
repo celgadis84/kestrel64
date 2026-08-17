@@ -36,6 +36,14 @@ struct SoftRdp {
   auto colorImage() const -> u32 { return ci_addr; }
   auto colorImageSize() const -> u32 { return ci_size; }
 
+  // --- DPC performance counters (accounting only, never gates execution) -------
+  // The RDP owns four 24-bit counters the CPU reads at DPC_CLOCK/BUFBUSY/PIPEBUSY/
+  // TMEM. Games (and Thar0's RDP-Timing-Tests) use them to time rasterization, so
+  // they must advance with a cost model, not stay pinned at zero. See rdp.cpp for
+  // the model and scripts/rdptiming.py for its calibration against hardware.
+  auto accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void;
+  auto accountTmem(Memory& mem, u64 bytes) -> void;
+
 private:
   // --- pipeline state (persists across command lists, like the real RDP) ------
   u32 ci_addr = 0;     // color image base (physical)
@@ -81,6 +89,11 @@ private:
 
   int sx0 = 0, sy0 = 0, sx1 = 320, sy1 = 240;   // scissor box (pixels)
 
+  // Pixels that actually reached the color / z images since boot. Only feeds the
+  // DPC counters: a pixel killed by alpha or depth compare performs its reads but
+  // neither write, and that difference is worth ~1 cycle/pixel on hardware.
+  u64 pxWrites = 0, pxZWrites = 0;
+
   // --- tiles / TMEM -----------------------------------------------------------
   struct Tile {
     u32 fmt = 0, size = 0, line = 0, tmem = 0, palette = 0;
@@ -115,6 +128,7 @@ private:
     return ((com & 0x7ff) << zShift[e]) + zBase[e];
   }
 
+  auto depthTest(Memory& mem, int x, int y, s32 d) -> bool;   // Z_CMP / Z_UPD on one pixel
   auto putPixel(Memory& mem, int x, int y, u32 rgba32) -> void;
   // Blender: fold `src` (pipeline RGBA, alpha = combined alpha) against the framebuffer
   // per SET_OTHER_MODES render-mode word. Only engages when IM_RD (read-enable, bit 0x40)

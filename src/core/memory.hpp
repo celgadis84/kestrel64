@@ -40,13 +40,22 @@ struct Rcp {
   u32  mi_repeat_len = 0;   // repeat span in bytes (init_length + 1)
   // SP
   u32 sp_mem_addr = 0, sp_dram_addr = 0, sp_rd_len = 0, sp_wr_len = 0;
-  u32 sp_status = 1;      // start halted (bit0 = HALT)
+  // SP_STATUS is one register on one RCP, but in threaded mode two threads update it:
+  // the CPU (halt/break/signal control writes) and the RSP worker (HALT|BROKE at BREAK).
+  // As a plain u32 those read-modify-writes lose each other's updates — a lost BREAK
+  // leaves the CPU polling forever, a lost clear relaunches nothing. Atomic RMW is the
+  // only faithful model of a single register seen by both sides.
+  std::atomic<u32> sp_status{1};   // start halted (bit0 = HALT)
   u32 sp_semaphore = 0, sp_pc = 0;
   bool sp_intr_on_break = false;  // SP_STATUS interrupt-on-break latch
   // DPC (RDP command buffer). dpc_status is read by the CPU while the RDP worker
   // thread clears GCLK/PIPE_BUSY on SYNC_FULL → atomic.
-  u32 dpc_start = 0, dpc_end = 0, dpc_current = 0, dpc_clock = 0;
+  u32 dpc_start = 0, dpc_end = 0, dpc_current = 0;
   std::atomic<u32> dpc_status{0};
+  // DPC performance counters (24-bit, free-running). The RDP worker accumulates
+  // them while rasterizing and the CPU reads/clears them, so they are atomic.
+  // DPC_STATUS write bits 6..9 clear TMEM/PIPE/BUF/CLOCK respectively.
+  std::atomic<u32> dpc_clock{0}, dpc_bufbusy{0}, dpc_pipebusy{0}, dpc_tmem{0};
   // VI
   u32 vi_ctrl = 0, vi_origin = 0, vi_width = 0, vi_intr = 256, vi_current = 0;
   u32 vi_burst = 0, vi_vsync = 0, vi_hsync = 0, vi_leap = 0, vi_hstart = 0;
@@ -174,6 +183,7 @@ struct Memory {
   auto rdpSubmit(u32 current, u32 end, bool xbus) -> void;  // enqueue (threaded)
   auto rdpDrain() -> void;          // block until the RDP queue is fully consumed
   auto rdpRunJob(u32 current, u32 end, bool xbus) -> void;  // rasterize + DP bookkeeping
+  auto rspAwaitIdle() -> void;      // block until the RSP worker has published its task result
   auto rspSubmitKick() -> void;     // wake the RSP worker to run the armed task (threaded)
 private:
   auto rdpWorkerLoop() -> void;

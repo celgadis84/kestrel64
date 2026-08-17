@@ -1974,3 +1974,82 @@ Por eso `HelloWorldRDP32BPP` marca 1.00-4.22 pase lo que pase: es incomparable.
 
 Mejoras contra la baseline anterior: `RDP/AlphaCoverage` 41.31 → **44.72**,
 `RDP/CombinerLongTailConstants` 67.77 → **71.05**. Baseline congelada.
+
+---
+
+## 2026-08-18 — Contadores DPC + modelo de coste RDP + 2 bugs RSP threaded
+
+### Contadores de rendimiento DPC (antes eran ceros fijos)
+`DPC_CLOCK/BUFBUSY/PIPEBUSY/TMEM` (0x10/0x14/0x18/0x1C) implementados de verdad:
+`std::atomic<u32>` en `Rcp`, lectura enmascarada a 24 bits, y los bits 6..9 de
+escritura a `DPC_STATUS` limpian TMEM/PIPE/BUF/CLOCK. Expuestos por telemetría
+(`dp.clock/bufbusy/pipebusy/tmem`). El RDP los acumula desde su worker mientras
+rasteriza, la CPU los lee y limpia → atómicos obligatorio.
+
+### Modelo de coste del RDP (calibrado contra HW real)
+Derivado de las 100 configuraciones medidas en hardware de
+[Thar0/RDP-Timing-Tests](https://github.com/Thar0/RDP-Timing-Tests) (`sample_results.txt`).
+
+El RDP procesa el span en trozos de ~8 píxeles RGBA16 y ejecuta las transacciones de
+ese trozo en orden **color read, depth read, color write, depth write**.
+`coste_trozo = max(pipeline, memoria)`:
+
+- `pipeline` = 1 GCLK/px (1-cycle) o 2 (2-cycle); FILL/COPY = 0.25 (64 bit/ciclo), más
+  un overhead fijo por trozo.
+- `memoria` = `XFER` por transacción + un `LAT` si el trozo lee algo (las escrituras
+  son *posted*: una escritura de color sola se esconde bajo el pipeline) + `ROW` por
+  cada alternancia FB↔ZB cuando comparten banco de 1 MB (la fila abierta del trozo
+  anterior cuenta) + escalado del VI `×(1+VI)` y `VIROW` por transacción de FB cuando
+  el VI comparte banco con el framebuffer.
+
+Constantes ajustadas: `LAT=3.583 XFER=6.677 ROW=1.905 VI=0.088 VIROW=0.595
+CHUNKOVH=1.606`. Error vs HW: **rmse 0.133, mae 0.114, peor 0.30 ciclos/px** sobre un
+rango medido de 1.01–4.69 ciclos/px. El modelo aditivo plano anterior daba mae 0.167 /
+peor 0.49. Script reutilizable: `scripts/rdptiming.py` (`table` / `fit` / `check` /
+`compare <results.txt>`), así que revalidar no cuesta tokens de análisis.
+
+Enganchado en `fillRect`, `drawTriangle` y `texRect` (`accountPixels`, que distingue
+píxeles escritos de píxeles matados por alpha/z: en HW eso vale ~1 ciclo/px) y en
+`loadTile` (`accountTmem`). **Sólo contabilidad — nunca condiciona la ejecución.**
+
+### fillRect 1-/2-cycle: alpha-compare y prim-depth
+Leyendo la display list de la ROM de timing apareció un hueco real: `fillRect` en
+1-/2-cycle ignoraba el alpha-compare y el z. Ahora aplica alpha-compare (alfa
+COMBINED contra el umbral de `blend_color`) y test/update de z **sólo bajo
+`Z_SOURCE_SEL`** — un fill rect no lleva pendiente de z, así que su única fuente de
+profundidad definida es `SET_PRIM_DEPTH`; sin ese bit el z se deja intacto. El test de
+profundidad se extrajo del triángulo a `SoftRdp::depthTest` (compartido, misma
+semántica). krom: `Cycle1FillZBufferRectangle` 16/32BPP y `RSPXBUSRDP` **96.15 → 98.60**,
+regress 0.
+
+### DOS bugs de concurrencia RSP (threaded), preexistentes
+`validate.sh --mode threaded` se colgaba en *"RSP VRSQ (all 16 bit values)"*. Bisecado
+con stash: **preexistente**, no de este trabajo. Dos violaciones de semántica RCP:
+
+1. **Arranque de RSP descartado.** Un CLEAR_HALT solitario se condicionaba a la
+   bandera de emulador `rspBusy`; si llegaba mientras el worker aún cerraba la tarea
+   anterior, el arranque se tiraba en silencio → tarea nunca ejecutada → la CPU espera
+   un BREAK eterno. Ahora la condición es el bit HALT real del RSP (lo que ve la CPU) y
+   el lanzamiento se ordena tras el wind-down (`Memory::rspAwaitIdle`). Un poke a
+   SP_STATUS a mitad de tarea (abort, signal) NO espera — sólo los lanzamientos.
+2. **Writeback del PC publicado después de HALT.** `Rsp::step()` ponía `HALT|BROKE` en
+   el BREAK y *después* escribía `sp_pc`. La CPU toma HALT como "tarea terminada" y
+   escribe inmediatamente el SP_PC de la siguiente; ese writeback tardío lo pisaba y la
+   tarea nueva arrancaba en el BREAK viejo → no escribía nada → `a=0x0` en
+   `RSP VRCP (all 16 bit values)`, ~1 fallo por cada 65536 iteraciones, no determinista.
+   Ahora BREAK sólo engancha `broke` y la publicación del estado va tras el writeback
+   del PC. En HW, cuando la CPU observa HALT el PC ya es definitivo.
+
+Además `Rcp::sp_status` pasa a `std::atomic<u32>`: un único registro que actualizan la
+CPU (escrituras de control) y el worker RSP (BREAK) no puede ser `u32` plano sin perder
+updates (RMW entrelazados).
+
+### Invariantes (los tres modos)
+| Modo | systemtest | krom 371 | SM64 300M md5 |
+|------|-----------|----------|----------------|
+| interp | 0/3721 · 0/2 · 0/6 | mean **86.53**, regress 0 | `cbf8aa76…b6ff24b` |
+| JIT | 0/3721 · 0/2 · 0/6 | mean **86.53** | idéntico |
+| threaded | 0/3721 · 0/2 · 0/6 (4/4 corridas limpias) | mean 86.50 | idéntico |
+
+Tiempos de referencia de cada gate documentados en `docs/baselines/timings.md` —
+sirven para distinguir *lento* de *colgado* sin volver a bisecar a ciegas.

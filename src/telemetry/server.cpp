@@ -328,7 +328,7 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   sp.set("dram_addr", (u64)r.sp_dram_addr);
   sp.set("rd_len", (u64)r.sp_rd_len);
   sp.set("wr_len", (u64)r.sp_wr_len);
-  sp.set("status", (u64)r.sp_status);
+  sp.set("status", (u64)r.sp_status.load());
   sp.set("semaphore", (u64)r.sp_semaphore);
   sp.set("pc", (u64)r.sp_pc);
   data.set("sp", sp);
@@ -336,7 +336,10 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   dp.set("start", (u64)r.dpc_start);
   dp.set("end", (u64)r.dpc_end);
   dp.set("current", (u64)r.dpc_current);
-  dp.set("clock", (u64)r.dpc_clock);
+  dp.set("clock", (u64)r.dpc_clock.load());
+  dp.set("bufbusy", (u64)r.dpc_bufbusy.load());
+  dp.set("pipebusy", (u64)r.dpc_pipebusy.load());
+  dp.set("tmem", (u64)r.dpc_tmem.load());
   dp.set("status", (u64)r.dpc_status.load());
   data.set("dp", dp);
   json::Value vi = json::Value::object();
@@ -428,7 +431,7 @@ auto Server::cmdRspRegs(const json::Value& args, json::Value& data) -> void {
   Rsp& s = system.memory.rsp;
   data.set("pc", (u64)s.pc);
   data.set("running", s.running);
-  data.set("sp_status", (u64)system.memory.rcp.sp_status);
+  data.set("sp_status", (u64)system.memory.rcp.sp_status.load());
   data.set("sp_pc", (u64)system.memory.rcp.sp_pc);
   json::Value g = json::Value::array();
   for(int i = 0; i < 32; i++) g.push(json::Value((u64)s.r[i]));

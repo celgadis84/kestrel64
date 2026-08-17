@@ -105,6 +105,7 @@ private:
   u32  curpc = 0;
   bool branch = false; u32 branchTarget = 0; int branchState = 0;
   bool halt = false;
+  bool broke = false;   // BREAK reached; HALT|BROKE published once the PC writeback is done
   bool inDelay = false; u32 pendingTarget = 0;   // persistent branch-delay latch
   u64  budget = 0;                                // remaining safety budget for this task
 

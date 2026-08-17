@@ -543,9 +543,10 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     case 0x04: return rcp.sp_dram_addr;
     case 0x08: return rcp.sp_rd_len;
     case 0x0c: return rcp.sp_wr_len;
-    case 0x10: return rcp.sp_status | (rcp.sp_intr_on_break ? 0x40u : 0u);  // bit6 = INTR_ON_BREAK
-    case 0x14: return (rcp.sp_status >> 2) & 1;   // SP_DMA_FULL
-    case 0x18: return (rcp.sp_status >> 2) & 1;   // SP_DMA_BUSY
+    case 0x10: return rcp.sp_status.load(std::memory_order_acquire)
+                    | (rcp.sp_intr_on_break ? 0x40u : 0u);  // bit6 = INTR_ON_BREAK
+    case 0x14: return (rcp.sp_status.load(std::memory_order_relaxed) >> 2) & 1;   // SP_DMA_FULL
+    case 0x18: return (rcp.sp_status.load(std::memory_order_relaxed) >> 2) & 1;   // SP_DMA_BUSY
     case 0x1c: { u32 s = rcp.sp_semaphore; rcp.sp_semaphore = 1; return s; }  // read sets
     }
     return 0;
@@ -556,7 +557,12 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     case 0x08: return rcp.dpc_current;
     case 0x0c: return rcp.dpc_status | 0x80u;   // COMMAND_BUFFER_READY: the soft RDP is
                                                  // always ready to accept a new command list
-    case 0x10: return rcp.dpc_clock;
+    // Performance counters, 24-bit each. The RDP accumulates them per rasterized
+    // span (see SoftRdp::accountPixels); games time the RDP with these.
+    case 0x10: return rcp.dpc_clock.load(std::memory_order_relaxed)    & 0xff'ffff;
+    case 0x14: return rcp.dpc_bufbusy.load(std::memory_order_relaxed)  & 0xff'ffff;
+    case 0x18: return rcp.dpc_pipebusy.load(std::memory_order_relaxed) & 0xff'ffff;
+    case 0x1c: return rcp.dpc_tmem.load(std::memory_order_relaxed)     & 0xff'ffff;
     }
     return 0;
   case BASE_VI & 0x1ff0'0000:
@@ -659,27 +665,41 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x08: rcp.sp_rd_len = v; spDma(/*toRam=*/false); break;   // RDRAM -> SP mem
     case 0x0c: rcp.sp_wr_len = v; spDma(/*toRam=*/true);  break;   // SP mem -> RDRAM
     case 0x10: {  // SP_STATUS write: paired clear/set control bits.
+      // Threaded: a launch write (lone CLEAR_HALT) must land *after* the previous task
+      // published its own status. The worker sets HALT|BROKE from inside rsp.run(); if
+      // the CPU cleared HALT first and that late store landed afterwards, the CPU would
+      // read a spurious "task finished" and pull the output DMEM before the new task
+      // ever wrote it. The single real RSP orders these implicitly. Only launches wait —
+      // a mid-task SP_STATUS poke (abort, signal bits) must never block on the worker.
+      if(rcpMode == RcpMode::Threaded && (v & (1u << 0)) && !(v & (1u << 1))) rspAwaitIdle();
+      // HALT as the CPU sees it *before* this write. A CLEAR_HALT only launches the
+      // core when it was actually halted; arriving mid-task it is a no-op, because
+      // the bit it clears is already clear. This is the launch condition — not any
+      // emulator-side "is the worker thread busy" bookkeeping.
+      bool wasHalted = (rcp.sp_status.load(std::memory_order_acquire) & 1u) != 0;
       // Each field has a (clear,set) bit pair. Writing BOTH bits of a pair at once is
       // a no-op for that field (hardware quirk); only a lone clear or lone set acts.
       auto pair = [&](u32 clrBit, u32 setBit, auto onClr, auto onSet){
         bool c = v & (1u << clrBit), s = v & (1u << setBit);
         if(c && !s) onClr(); else if(s && !c) onSet();
       };
-      pair(0, 1, [&]{ rcp.sp_status &= ~1u; }, [&]{ rcp.sp_status |= 1u; });   // HALT
-      if(v & (1 << 2)) rcp.sp_status &= ~2u;         // clear BROKE (no paired set bit)
+      auto clr = [&](u32 m){ rcp.sp_status.fetch_and(~m, std::memory_order_acq_rel); };
+      auto set = [&](u32 m){ rcp.sp_status.fetch_or(m, std::memory_order_acq_rel); };
+      pair(0, 1, [&]{ clr(1u); }, [&]{ set(1u); });   // HALT
+      if(v & (1 << 2)) clr(2u);                      // clear BROKE (no paired set bit)
       pair(3, 4, [&]{ clearIntr(MI_SP); }, [&]{ raiseIntr(MI_SP); });         // SP interrupt
       pair(7, 8, [&]{ rcp.sp_intr_on_break = false; }, [&]{ rcp.sp_intr_on_break = true; }); // intr-on-break
       // SIGNAL bits: pairs at bits 9..24 map to SP_STATUS read bits 7..14 (SIG0..SIG7).
       // Microcode sets these at task end (SIG2 = task done) so the OS routes the SP
       // interrupt to OS_EVENT_SP (scheduler) rather than OS_EVENT_SP_BREAK.
       for(u32 i = 0; i < 8; i++)
-        pair(9 + 2*i, 10 + 2*i, [&,i]{ rcp.sp_status &= ~(1u << (7+i)); }, [&,i]{ rcp.sp_status |= (1u << (7+i)); });
+        pair(9 + 2*i, 10 + 2*i, [&,i]{ clr(1u << (7+i)); }, [&,i]{ set(1u << (7+i)); });
       // CPU releasing the RSP (clear HALT, not re-halting): run the microcode LLE.
       // The core executes to its BREAK, updating sp_status/sp_pc and raising the SP
       // interrupt itself. Guarded against reentrancy (microcode can poke SP_STATUS
       // via COP0). If already running, just clear the halt bit.
       if((v & (1 << 0)) && !(v & (1 << 1))) {
-        rcp.sp_status &= ~1u;                        // clear HALT
+        clr(1u);                                     // clear HALT
         if(std::getenv("KESTREL_RSPTRACE")) {
           static u32 kicks = 0;
           kicks++;
@@ -705,7 +725,13 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         }
         if(rcpMode == RcpMode::Threaded) {
           // Threaded: hand the task to the RSP worker (runs to BREAK, raises MI_SP).
-          if(!rspBusy.load(std::memory_order_acquire)) { rsp.mem = this; rspSubmitKick(); }
+          // The launch must never be dropped. The worker raises MI_SP from inside
+          // rsp.run(), so the CPU can service that interrupt and write the next
+          // CLEAR_HALT while the worker is still winding down from the previous task
+          // (rspBusy still set). Gating the kick on rspBusy loses that whole task and
+          // the game then waits forever on a BREAK that never comes — hardware has no
+          // such window. rspSubmitKick() waits the wind-down out instead.
+          if(wasHalted) { rsp.mem = this; rspSubmitKick(); }
         } else {
           if(!rsp.running) { rsp.mem = this; rsp.start(); }   // arm; System::run steps it interleaved
         }
@@ -758,7 +784,11 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       if(v & (1 << 3)) rcp.dpc_status |=  (1u << 1);
       if(v & (1 << 4)) rcp.dpc_status &= ~(1u << 2);  // clear flush
       if(v & (1 << 5)) rcp.dpc_status |=  (1u << 2);
-      if(v & (1 << 9)) rcp.dpc_clock = 0;
+      // counter clears (bit 6 TMEM, 7 PIPE_BUSY, 8 CMD/BUF_BUSY, 9 CLOCK)
+      if(v & (1 << 6)) rcp.dpc_tmem.store(0, std::memory_order_relaxed);
+      if(v & (1 << 7)) rcp.dpc_pipebusy.store(0, std::memory_order_relaxed);
+      if(v & (1 << 8)) rcp.dpc_bufbusy.store(0, std::memory_order_relaxed);
+      if(v & (1 << 9)) rcp.dpc_clock.store(0, std::memory_order_relaxed);
       break;
     }
     }
@@ -1167,9 +1197,21 @@ auto Memory::rdpDrain() -> void {
   rdpCv.wait(lk, [&]{ return rdpQueue.empty() && !rdpBusy.load(std::memory_order_relaxed); });
 }
 
+auto Memory::rspAwaitIdle() -> void {
+  if(rcpMode != RcpMode::Threaded) return;
+  std::unique_lock<std::mutex> lk(rspMx);
+  rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); });
+}
+
 auto Memory::rspSubmitKick() -> void {
   {
-    std::lock_guard<std::mutex> lk(rspMx);
+    std::unique_lock<std::mutex> lk(rspMx);
+    // Serialize against a worker that has finished its microcode (BREAK reached,
+    // MI_SP already raised) but not yet cleared rspBusy. The caller has decided a
+    // launch is due, so we hold the CPU for that short wind-down rather than drop
+    // the task. This never blocks on a genuinely running RSP: mid-task HALT is
+    // clear, so the write is a no-op and we are not called at all.
+    rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); });
     rspBusy.store(true, std::memory_order_release);
     rspKick = true;
   }

@@ -52,9 +52,113 @@ inline auto to5551(u32 c) -> u16 {
 }
 }  // namespace
 
+// --- DPC performance counters ------------------------------------------------
+// The RDP rasterizes into a span buffer that holds ~8 RGBA16 pixels and then runs
+// that chunk's RDRAM transactions in bulk, in the order color read, depth read,
+// color write, depth write. A chunk costs max(pipeline, memory) GCLK:
+//
+//  * pipeline = 1 GCLK/pixel in 1-cycle mode, 2 in 2-cycle mode (FILL/COPY blast
+//    64 bits per cycle = 4 RGBA16 pixels), plus a fixed per-chunk overhead.
+//  * memory = one bus occupancy (XFER) per transaction, plus one RDRAM latency
+//    stall (LAT) per chunk if the chunk reads at all — writes are posted, so a
+//    lone color write disappears under the pipeline, which is why enabling the
+//    framebuffer write costs almost nothing but enabling IM_RD nearly doubles the
+//    fill time on hardware.
+//  * RDRAM keeps ONE open row (0x800 bytes) per 1 MB bank. With the framebuffer
+//    and the z-buffer in the same bank, every alternation between them (including
+//    the wrap from the previous chunk) closes and reopens a row: ROW each.
+//  * The VI reads the framebuffer continuously and outranks the RDP on the bus,
+//    scaling every RDP transaction; sharing its bank also costs the open row.
+//
+// Constants are in GCLK and were calibrated by scripts/rdptiming.py against the
+// 100 hardware configurations of Thar0's RDP-Timing-Tests (rmse 0.133, worst
+// 0.30 cycles/pixel over fills spanning 1.01 .. 4.69 cycles/pixel).
+namespace {
+constexpr double T_XFER = 6.677, T_LAT = 3.583, T_ROW = 1.905;
+constexpr double T_VI = 0.088, T_VIROW = 0.595, T_CHUNKOVH = 1.606;
+constexpr int    T_CHUNK = 8;   // pixels buffered per span-buffer flush
+
+// Cost in GCLK of one span chunk, given which buffers it touches. `seq` lists the
+// transactions in hardware order as buffer ids (0 = color image, 1 = z image).
+auto chunkCost(double pipeline, const int* seq, int n, bool reads, bool fbzbSame,
+               bool viOn, bool fbviSame) -> double {
+  if(n == 0) return pipeline;
+  double mem = T_XFER * n + (reads ? T_LAT : 0.0);
+  if(fbzbSame) {
+    int changes = 0;
+    for(int i = 0; i < n; i++) changes += seq[i] != seq[(i + n - 1) % n];
+    mem += T_ROW * changes;
+  }
+  if(viOn) {
+    mem *= 1.0 + T_VI;
+    if(fbviSame) {
+      int fb = 0;
+      for(int i = 0; i < n; i++) fb += seq[i] == 0;
+      mem += T_VIROW * fb;
+    }
+  }
+  return mem > pipeline ? mem : pipeline;
+}
+}  // namespace
+
+// Charge `npx` rasterized pixels to the DPC counters. `nWrite` of them wrote the
+// color image and `nZWrite` wrote the z image (the rest were killed by alpha or
+// depth compare, which on hardware suppresses both writes).
+auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void {
+  if(!npx) return;
+  bool fbRead = (other_lo & 0x40) != 0;                  // IM_RD
+  bool zRead  = (other_lo & 0x10) != 0 && zi_addr != 0;  // Z_CMP
+  bool zWrite = nZWrite != 0;
+  bool fbzbSame = zi_addr != 0 && (ci_addr >> 20) == (zi_addr >> 20);
+  bool viOn = (mem.rcp.vi_ctrl & 3) != 0 && mem.rcp.vi_origin != 0;
+  bool fbviSame = viOn && (ci_addr >> 20) == ((mem.rcp.vi_origin & 0x00ff'ffff) >> 20);
+
+  double pipeline = (cycleType() < 2 ? double(cycleType() + 1) : 0.25) * T_CHUNK + T_CHUNKOVH;
+  int seq[4], n = 0;
+  if(fbRead) seq[n++] = 0;
+  if(zRead)  seq[n++] = 1;
+  int nRead = n;
+  // A killed pixel performs the reads but neither write, so the two outcomes have
+  // different chunk costs; blend them by how many pixels actually wrote.
+  double killed = chunkCost(pipeline, seq, n, nRead > 0, fbzbSame, viOn, fbviSame);
+  seq[n++] = 0;
+  if(zWrite) seq[n++] = 1;
+  double wrote = chunkCost(pipeline, seq, n, nRead > 0, fbzbSame, viOn, fbviSame);
+
+  double frac = double(nWrite) / double(npx);
+  double cycles = (frac * wrote + (1.0 - frac) * killed) * double(npx) / T_CHUNK;
+  u32 c = (u32)(u64)cycles;
+  mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
+  mem.rcp.dpc_pipebusy.fetch_add(c, std::memory_order_relaxed);
+  mem.rcp.dpc_bufbusy.fetch_add(c, std::memory_order_relaxed);
+}
+
+// TMEM loads run on the RDP's 64-bit texture port: one GCLK per 8 bytes.
+auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
+  u32 c = (u32)((bytes + 7) / 8);
+  mem.rcp.dpc_tmem.fetch_add(c, std::memory_order_relaxed);
+  mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
+  mem.rcp.dpc_bufbusy.fetch_add(c, std::memory_order_relaxed);
+}
+
+// Per-pixel depth test against the 16-bit z image. Opaque z-mode: the pixel wins
+// when its depth is nearer (strictly less) than the stored depth. On a pass with
+// Z_UPDATE the new depth is written back. Returns whether the colour is drawn.
+auto SoftRdp::depthTest(Memory& mem, int x, int y, s32 d) -> bool {
+  auto& m = mem.rdram;
+  if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
+  u32 zoff = zi_addr + (u32(y) * ci_width + u32(x)) * 2;
+  if(zoff + 1 >= m.size()) return false;
+  u32 old = zDecode(((u16)m[zoff] << 8) | m[zoff + 1]);
+  if((other_lo & 0x10) && (u32)d >= old) return false;            // Z_CMP
+  if(other_lo & 0x20) { wr16(m, zoff, zEncode((u32)d)); pxZWrites++; }  // Z_UPD
+  return true;
+}
+
 auto SoftRdp::putPixel(Memory& mem, int x, int y, u32 rgba32) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1) return;
   if(x < 0 || y < 0) return;
+  pxWrites++;         // DPC counters: this pixel reaches the color image
   auto& m = mem.rdram;
   if(ci_size == 3) {  // 32bpp RGBA8888
     wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, rgba32);
@@ -186,6 +290,8 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   // primitive — each pixel runs the colour combiner (no texel/shade; constants like PRIM/
   // ENV/BLEND come through the mux) and then the blender against the framebuffer.
   bool pipeMode = cycleType() < 2;
+  u64 npx = u64(std::max(0, x1 - x0)) * u64(std::max(0, y1 - y0));
+  u64 w0 = pxWrites, z0 = pxZWrites;
   for(int y = y0; y < y1; y++) {
     for(int x = x0; x < x1; x++) {
       if(pipeMode) {
@@ -195,27 +301,40 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
         bool combProg = (combine_hi | combine_lo) != 0;
         u32 flatTexel = combProg ? 0xffffffff : 0;
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : blend_color;
+        // Alpha compare (1-/2-cycle form): COMBINED alpha against the blend_color
+        // threshold. A fill rect is a primitive like any other here.
+        if((other_lo & 1) && (c & 0xff) < (blend_color & 0xff)) continue;
+        // Depth: a fill rect carries no z slope, so its only defined depth source is
+        // SET_PRIM_DEPTH (Z_SOURCE_SEL, other_lo bit 2). Without that bit the span z
+        // the rect never programs is undefined, so leave the z image alone.
+        if((other_lo & 4) && zi_addr && (other_lo & 0x30) && !depthTest(mem, x, y, (s32)prim_z))
+          continue;
         blendPixel(mem, x, y, c);
       } else if(ci_size == 3) {
         wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, fill_color);
+        pxWrites++;
       } else if(ci_size == 1) {
         // FILL cycle, 8bpp CI: the 32-bit fill color packs four 8bpp bytes; pick by x&3
         // (MSB-first byte order, matching the packed 16bpp pair layout above).
         u8 px = (u8)(fill_color >> (24 - (x & 3) * 8));
         wr8(m, ci_addr + (u32(y) * ci_width + u32(x)), px);
+        pxWrites++;
       } else {
         // FILL cycle: the 32-bit fill color packs two 16bpp pixels; pick by x parity.
         u16 px = (x & 1) ? u16(fill_color & 0xffff) : u16(fill_color >> 16);
         wr16(m, ci_addr + (u32(y) * ci_width + u32(x)) * 2, px);
+        pxWrites++;
       }
     }
   }
+  accountPixels(mem, npx, pxWrites - w0, pxZWrites - z0);
 }
 
 // Flat/Gouraud triangle from RDP edge coefficients. First light: correct geometry,
 // solid shade-base color (Gouraud/texture refined later).
 auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void {
   bool hasShade = op & 4, hasTex = op & 2, hasZ = op & 1;
+  u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
   u64 w0 = w[0];
   bool leftMajor = (w0 >> 55) & 1;
   double yl = sx((w0 >> 32) & 0x3fff, 14) / 4.0;   // bottom
@@ -335,14 +454,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     // back. Returns whether the colour should be drawn.
     auto zPass = [&](int x, double dx) -> bool {
       if(!zActive) return true;
-      s32 d = zSrc ? (s32)prim_z : (s32)std::lround(eZ + dZdx * dx);
-      if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
-      u32 zoff = zi_addr + (u32(y) * ci_width + u32(x)) * 2;
-      if(zoff + 1 >= m.size()) return false;
-      u32 old = zDecode(((u16)m[zoff] << 8) | m[zoff + 1]);
-      if(zCmp && (u32)d >= old) return false;
-      if(zUpd) wr16(m, zoff, zEncode((u32)d));
-      return true;
+      return depthTest(mem, x, y, zSrc ? (s32)prim_z : (s32)std::lround(eZ + dZdx * dx));
     };
     // Sub-pixel coverage the way the RDP raster does it: instead of a single horizontal
     // box fraction, the primitive edges are evaluated at several sub-scanlines and
@@ -359,6 +471,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     static const double subX[2] = {0.25, 0.75};
     for(int x = xs; x < xe; x++) {
       if(x < 0) continue;
+      rasterPx++;      // DPC counters: pixel entered the pipeline (may still be killed)
       int hits = 0;
       for(int sy = 0; sy < 4; sy++) {
         double L, R; edgesAt((double)y + subY[sy], L, R);
@@ -372,6 +485,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         if(ci_size == 3) wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, fill_color);
         else { u16 px = (x & 1) ? u16(fill_color & 0xffff) : u16(fill_color >> 16);
                wr16(m, ci_addr + (u32(y) * ci_width + u32(x)) * 2, px); }
+        pxWrites++;
       } else if(textured) {
         double dx = x - xA;
         double su = (eS + dSdx * dx) / 32.0, tu = (eT + dTdx * dx) / 32.0;  // 1/32 → texel
@@ -404,6 +518,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         if(zPass(x, dx)) coverPixel(mem, x, y, c, cvg); }
     }
   }
+  accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
 auto SoftRdp::sampleTexel(u32 tileIdx, int s, int t) -> u32 {
@@ -703,10 +818,12 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   if(cycleType() == 2) dsdx /= 4.0;
   int X0 = std::max((int)std::ceil(xh), sx0), X1 = std::min((int)std::ceil(xl), sx1);
   int Y0 = std::max((int)std::ceil(yh), sy0), Y1 = std::min((int)std::ceil(yl), sy1);
+  u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
   for(int y = Y0; y < Y1; y++) {
     if(y < 0) continue;
     for(int x = X0; x < X1; x++) {
       if(x < 0) continue;
+      rasterPx++;
       double fx = x - xh, fy = y - yh;
       double s = flip ? s0 + dsdx * fy : s0 + dsdx * fx;
       double t = flip ? t0 + dtdy * fx : t0 + dtdy * fy;
@@ -746,6 +863,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       else putPixel(mem, x, y, c);                        // opaque write
     }
   }
+  accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
 auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
@@ -766,8 +884,10 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
       u32 count = (sh >= sl) ? (sh - sl + 1) : 1, nb = (count + 1) / 2;
       u32 dst = tl.tmem * 8, src = ti_addr + (sl >> 1);
       for(u32 i = 0; i < nb && dst + i < 0x1000 && src + i < m.size(); i++) tmem[dst + i] = m[src + i];
+      accountTmem(mem, nb);
     } else {
       u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2, rowBytes = tl.line * 8;
+      accountTmem(mem, u64(t1 - t0 + 1) * (s1 - s0 + 1) / 2);
       for(u32 ty = t0; ty <= t1; ty++)
         for(u32 tx = s0; tx <= s1; tx++) {         // nibble-granular copy
           u32 src = ti_addr + (ty * ti_width + tx) / 2;   // ti_width in texels
@@ -789,10 +909,12 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     u32 count = (sh >= sl) ? (sh - sl + 1) : 1;        // linear texel count
     u32 dst = tl.tmem * 8, src = ti_addr + sl * bpt, nb = count * bpt;
     for(u32 i = 0; i < nb && dst + i < 0x1000 && src + i < m.size(); i++) tmem[dst + i] = m[src + i];
+    accountTmem(mem, nb);
     return;
   }
   u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2;
   u32 rowBytes = tl.line * 8;
+  accountTmem(mem, u64(t1 - t0 + 1) * (s1 - s0 + 1) * bpt);
   for(u32 ty = t0; ty <= t1; ty++)
     for(u32 tx = s0; tx <= s1; tx++) {
       u32 src = ti_addr + (ty * ti_width + tx) * bpt;

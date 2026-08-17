@@ -136,7 +136,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   mem->write32(PHYS_SP + ((rd & 7) << 2), v);
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
   // without a BREAK — so Status.broke is NOT set (unlike the BREAK instruction).
-  if((rd & 7) == 4 && (mem->rcp.sp_status & 1u)) halt = true;
+  if((rd & 7) == 4 && (mem->rcp.sp_status.load(std::memory_order_acquire) & 1u)) halt = true;
 }
 
 // --- scalar dispatch --------------------------------------------------------
@@ -156,9 +156,11 @@ auto Rsp::exec(u32 op) -> void {
     case 0x08: take(r[rs]); break;                                 // JR
     case 0x09: { u32 tgt = r[rs]; setR(rd, (curpc + 8) & 0xfff); take(tgt); } break;  // JALR (read rs before linking rd)
     case 0x0d:                                                     // BREAK
-      halt = true;
-      mem->rcp.sp_status |= 1u | 2u;   // HALT | BROKE
-      if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
+      // Halt now, but publish HALT|BROKE only once step() has written the final PC
+      // back (see below) — the CPU treats HALT as "task over" and immediately writes
+      // the next task's SP_PC, so a status that lands first lets our own stale PC
+      // writeback clobber it and the next task starts on this very BREAK.
+      halt = true; broke = true;
       break;
     case 0x20: case 0x21: setR(rd, r[rs] + r[rt]); break;          // ADD/ADDU
     case 0x22: case 0x23: setR(rd, r[rs] - r[rt]); break;          // SUB/SUBU
@@ -900,7 +902,7 @@ auto Rsp::start() -> void {
   running = true;
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;
-  halt = false;
+  halt = false; broke = false;
   inDelay = false; pendingTarget = 0;
   budget = 40'000'000;
 }
@@ -921,10 +923,19 @@ auto Rsp::step(u64 maxInsns) -> void {
     else             { pc = nextpc; }
   }
   mem->rcp.sp_pc = pc & 0xffc;
-  if(halt) { running = false; return; }
+  if(halt) {
+    // PC is final; now let the CPU see the task end. The release in the fetch_or
+    // publishes everything the microcode wrote (DMEM output, PC) to the poller.
+    if(broke) {
+      broke = false;
+      mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
+      if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
+    }
+    running = false; return;
+  }
   if(budget == 0) {                            // microcode hang: force a break
     std::fprintf(stderr, "[rsp] WARNING: budget exhausted at pc=0x%03x (microcode hang?)\n", curpc);
-    mem->rcp.sp_status |= 1u | 2u;
+    mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);
     if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
     running = false;
   }
