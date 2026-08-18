@@ -59,14 +59,16 @@ private:
   u32 fill_color = 0;  // SET_FILL_COLOR (raw 32-bit; two 16bpp pixels or one 32bpp)
   u32 blend_color = 0, fog_color = 0, prim_color = 0, env_color = 0;
   u8  prim_lod_frac = 0;            // SET_PRIM_COLOR bits 39:32 — combiner mul input
-  // LOD fraction feeding the combiner's LOD_FRAC mux. We do not mipmap: every tile is
-  // its own level, so max_level is 0, which pins the LOD unit at full fraction. That is
-  // 0x100 — the same "one" the muladd/add muxes use — NOT 0xff: as a 9-bit mul input it
-  // sign-extends to -256, so x*LOD_FRAC lands at -x, and the combiner's 9-bit clamp maps
-  // [-129,-256] back to 0xff. Net effect for an opaque texel: alpha 0xff exactly, which
-  // is what krom's hardware references show (0xff would give 0xfe and leak a 1/32 smear
-  // of the framebuffer through the blender's opaque shortcut).
-  static constexpr auto lodFrac() -> int { return 0x100; }
+  // LOD fraction feeding the combiner's LOD_FRAC mux. We do not mipmap: max_level is 0,
+  // so the LOD unit always reports "distant" (parallel-rdp compute_lod_2cycle: the
+  // magnify branch takes `distant = max_level == 0` and the mip branch takes
+  // `distant = mip_base >= max_level`; both then pin lod_frac to 0xff when neither
+  // SHARPEN nor DETAIL is on). It is 0xff, NOT 0x100: the mul port is 9 bits and 0xff is
+  // an ordinary positive value there, so x*LOD_FRAC == (x*0xff + 0x80) >> 8 == x - 1 for
+  // x = 0xff. krom's GRB decoders are the witness — they route TEXEL0_ALPHA through
+  // LOD_FRAC into COMBINED_ALPHA and their hardware captures pin the resulting scale at
+  // 254/256, which only 0xff produces (0x100 would pass the texel through untouched).
+  static constexpr auto lodFrac() -> int { return 0xff; }
   u32 prim_z = 0;      // SET_PRIM_DEPTH primitive Z (used when Z_SOURCE_SEL is set)
 
   int k0 = 0, k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;  // SET_CONVERT (YUV→RGB coeffs, 9-bit signed)

@@ -2258,3 +2258,111 @@ nota `SIZE` en `scripts/validate.py`):
 | interp | 0/3721 · 0/2 · 0/6 (20 s) | mean **87.54**, regress 0 | `cbf8aa76…b6ff24b` |
 | JIT | 0/3721 · 0/2 · 0/6 (28 s) | — | — |
 | threaded | — | — | idéntico a interp |
+
+## 2026-08-18 (quater) — Los decoders GRB, resueltos a bit exacto: LOD_FRAC=0xff, TLUT replicada, blender sin fudge
+
+Frente heredado: `Video/GRB12Decode` 19.11, `GRB15Decode` 11.08, `GRB24Decode` 11.07, y la
+teoría apuntada arriba ("residual = filtrado bilineal/3-point sobre texrects magnificados").
+**Esa teoría era falsa** y el .asm lo desmiente: en `RDPGRB12Decode.asm` el plano verde se
+dibuja con `DSDX = DTDY = 1<<10` (1:1, sin magnificar), el rojo a 2× (`$200`) y el azul a 4×
+(`$100`); un filtro no puede explicar un error que aparece también en el plano 1:1.
+
+El error real era un **escalón constante por nivel**. Los tres decoders montan la misma
+tubería: cargan cada plano de color como CI4 con paleta propia y lo mezclan sobre el
+framebuffer con el blender en modo aditivo. Con 16 niveles de paleta observados en la
+captura de HW, el sistema queda sobredeterminado, así que se resolvió por búsqueda
+exhaustiva sobre las tres incógnitas — (expansión de la entrada de paleta) × (multiplicador
+y redondeo del combinador) × (coeficiente y redondeo del blender) — contra los 16 niveles.
+**Solución única: `('rep', 254, 128, 31, 0)`.** Cada componente tiene además su oráculo
+independiente en parallel-rdp:
+
+### 1. `LOD_FRACTION` sin mipmap vale `0xff`, no `0x100`
+
+Los GRB enrutan `TEXEL0_ALPHA` por `LOD_FRAC` hacia `COMBINED_ALPHA` y luego escalan el
+texel por él. Devolvíamos `0x100` (= paso directo). En HW, con `max_level == 0`, la unidad de
+LOD siempre reporta "distant": en `compute_lod_2cycle` (parallel-rdp `shaders/texture.h`) la
+rama de magnificación toma `distant = max_level == 0` y la de mipmap `distant = mip_base >=
+max_level`, y ambas fijan `lod_frac = 0xff` cuando no hay SHARPEN ni DETAIL. El puerto del
+multiplicador es de 9 bits, así que `0xff` es un valor positivo normal ahí: `x*LOD_FRAC =
+(x*0xff + 0x80) >> 8`, que para `x = 0xff` da **254**, no 255. Ese es el 254/256 que se ve en
+la captura.
+
+### 2. La entrada de TLUT SÍ se replica (revierte el punto 2 de la sección anterior)
+
+La expansión con relleno de ceros que se dedujo ayer de los GRB era una **compensación** del
+escalón que en realidad metía el `0x100`: al pasar el texel entero, la única forma de bajar
+el nivel era truncar la paleta. Con `LOD_FRAC = 0xff` en su sitio, el ajuste exhaustivo
+descarta el relleno de ceros para *cualquier* par de escalas y deja sólo la replicación
+(`v<<3 | v>>2`), que es lo que ya decían los otros dos oráculos (`EMU/*/PPU/*Tile8x8`,
+100% de 230400 muestras) y lo que hace parallel-rdp en las dos rutas de lectura.
+
+**Ojo, son rutas distintas**: el *color de memoria* del blender (punto 4 de ayer) sigue
+rellenando con ceros — `decode_memory_color` hace `rgb & 0xf8` — y no se ha tocado.
+
+### 3. El blender no redondea hacia arriba su coeficiente P (revierte el punto 3 anterior)
+
+`a0 += (a0+1)>>8` desaparece. El blender trabaja en 5 bits: `a0 >>= 3; a1 >>= 3; blended =
+rgb0*a0 + rgb1*(a1+1); rgb0 = blended >> 5` (parallel-rdp `shaders/blender.h`). El `+1` es
+**sólo** del término de memoria, y es justo lo que permite que un pase aditivo con `B = ONE`
+arrastre el framebuffer intacto mientras el color entrante pierde su 1/32. Un alfa de `0xff`
+pesa 31/32, no 32/32.
+
+### Resultado
+
+Los tres decoders GRB pasan a **100.00 % exacto** (todos los canales, todos los píxeles).
+
+### El otro hallazgo: 35 PNG de referencia de krom están estirados verticalmente
+
+Con las tres correcciones puestas, `GRB12Decode` daba 18.16 — pero el diff era un patrón de
+franjas periódico, no ruido. La referencia tiene **líneas de barrido duplicadas byte a byte**
+en las filas 20/100/180: es una captura de **237 líneas activas** reescalada a 240 con vecino
+más próximo. Afecta a toda una familia de assets: los decoders GRB12/15/24, I4 e I8, el par
+de Mandelbrot, `RDPModeInput`, las traducciones de Kira, el par DCT multi-bloque y
+`Devo-TimeOutForFun` — 35 PNG, con tres pitches distintos (`20/100/180`, `40/120/200`,
+`1/101/141`, este último de capturas de 238 líneas).
+
+`compare()` lo deshace: quita de la **referencia** las filas duplicadas y recorta el mismo
+número de filas por abajo de nuestro volcado. Sólo mira el asset — las posiciones salen del
+PNG, nunca de nuestra salida — así que no puede maquillar un render incorrecto. Guardas: como
+mucho 4 filas duplicadas (una imagen realmente plana tiene cientos y se deja en paz) y paso
+constante entre ellas (un artefacto de reescalado es periódico; el contenido repetido de
+verdad, no). Se anota `REF-DEDUP n` en el TSV.
+
+### Impacto en el barrido (371 ROMs, interp)
+
+mean_exact **87.54 → 88.87**, perfectos 143 → **148**, broken(<50%) 37 → **32**.
+
+| test | antes | ahora |
+|---|---|---|
+| `Video/GRB12Decode` | 19.11 | **100.00** |
+| `Video/GRB15Decode` | 11.08 | **100.00** |
+| `Video/GRB24Decode` CPU y RDP | 11.07 | **100.00** |
+| `CP1/Fractal/Mandelbrot 320x240` Double / Single | 84.26 / 84.25 | **100.00 / 99.72** |
+| `Compress/DCT/QuantizationMultiBlockGFX8BIT` | 32.17 | **88.02** |
+| `RDP/16BPP/SetPrimColor` | 98.03 | **100.00** |
+| `RDP/32BPP/.../Texture{Rectangle,Triangle}*` (×18) | 89.1-93.5 | **89.8-96.2** |
+| `EMU/GameBoy/PPU/2BPPTile8x8` | 63.51 | **66.93** (vuelve al valor previo a ayer) |
+
+### Las 6 "regresiones" son en realidad una convergencia
+
+Los seis tests que bajan son los de textura de 4 bits en 16BPP (`I4`, `IA4`, `TLUT RGBA4`,
+rect y triángulo). Bajan al **mismo número exacto** al que suben sus gemelos de 32BPP:
+
+| par | 16BPP | 32BPP |
+|---|---|---|
+| `I4` | 94.91 → **93.96** | 89.11 → **93.96** |
+| `IA4` | 94.97 → **94.21** | 89.15 → **94.25** |
+| `TLUT RGBA4` | 92.52 → **89.73** | 89.15 → **89.77** |
+
+Antes el resultado dependía de la profundidad del color-image, que para el camino de textura
+es irrelevante; ahora no. Lo que queda es **un solo residual compartido** en el manejo de
+texturas de 4 bits (~6 % de píxeles), que es el siguiente frente concreto en vez de dos
+síntomas distintos.
+
+### Invariantes tras el cambio
+| Puerta | resultado |
+|---|---|
+| systemtest interp | 0/3721 · 0/2 · 0/6 (16 s) |
+| systemtest JIT | 0/3721 · 0/2 · 0/6 (25 s) |
+| SM64 300M lockstep vs threaded | `cbf8aa761b92adab89ddde949b6ff24b` MATCH |
+| krom 371 (interp) | mean_exact **88.87**, mean_close 92.18, 148 perfectos |

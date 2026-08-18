@@ -118,6 +118,28 @@ def compare(bmp, png):
             # wrote and would move the score for reasons unrelated to the emulator.
             b = np.asarray(im.convert("RGB").resize((a.shape[1], a.shape[0]), Image.NEAREST),
                            dtype=np.int16)
+    else:
+        # Reference repair, not emulator fudge. A whole family of krom's photo/video
+        # references (the GRB12/15/24 and I4/I8 decoders, the Mandelbrot pair,
+        # RDPModeInput, the Kira translations, the DCT multi-block pair, Devo) was
+        # captured at 237 or 238 active lines and stretched back to 240 with a
+        # nearest-neighbour vertical resize. That leaves the fingerprint of the
+        # stretch in the asset: 2-3 *byte-identical* adjacent scanlines at a fixed
+        # pitch (rows 20/100/180, or 40/120/200, or 1/101/141). Undoing it -- drop
+        # the duplicated rows from the reference, drop the same count off the bottom
+        # of our dump -- restores the hardware capture. This only ever inspects the
+        # fixed asset, never our output, so it cannot make a wrong render score
+        # better: the dedup positions come from the PNG alone. Guards: at most 4
+        # duplicate rows (a genuinely flat image has hundreds and is left alone) and
+        # a constant pitch between them (a resize artefact is periodic, real
+        # repeated content is not).
+        if a.shape[0] > 8:
+            dup = [y for y in range(1, b.shape[0]) if bool((b[y] == b[y - 1]).all())]
+            if 1 <= len(dup) <= 4 and (len(dup) == 1
+                                       or len(set(np.diff(dup).tolist())) == 1):
+                b = np.delete(b, dup, axis=0)
+                a = a[: b.shape[0]]
+                note = f"REF-DEDUP {len(dup)}"
     d = a - b
     man = np.abs(d).sum(axis=2)
     tot = man.size

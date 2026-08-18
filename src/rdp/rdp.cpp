@@ -221,12 +221,11 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
                  case 2: a1 = 0xff; break; default: a1 = 0; }
   // The blender's coefficients are 5-bit, not 8: the RDP drops the low 3 bits of each
   // alpha and computes P*a0 + M*(a1+1) in that space. That truncation is visible — an
-  // alpha of 0xf8..0xff all weigh the same — so scaling by /255 instead is wrong.
-  // a0 takes the expanded alpha first (0xff → 0x100 → 32), which is what makes an
-  // additive pass (B = ONE) sum exactly instead of losing 1/32 of the source. krom's
-  // RDPGRB15Decode is the witness: it adds three opaque FORCE_BLEND passes into a 32bpp
-  // buffer and the hardware capture holds exact palette values, not value*31/32.
-  a0 += (a0 + 1) >> 8;
+  // alpha of 0xf8..0xff all weigh the same — so scaling by /255 instead is wrong, and
+  // there is no rounding-up of a0 either: 0xff weighs 31/32, not 32/32. Only the M term
+  // gets the +1 (parallel-rdp blender(): `rgb0*a0 + rgb1*(a1+1)`), which is what makes
+  // an additive pass with B = ONE carry the framebuffer through untouched while the
+  // incoming colour still loses its 1/32.
   a0 >>= 3; a1 >>= 3;
   bool force = (other_lo >> 14) & 1;
   // FORCE_BLEND takes the plain >>5; otherwise the RDP runs the sum through its divider,
@@ -618,15 +617,14 @@ auto SoftRdp::sampleTexel(u32 tileIdx, int s, int t) -> u32 {
     u16 e = tlut[idx & 0xff];
     if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
                           return (i << 24) | (i << 16) | (i << 8) | a; }
-    // A palette entry does NOT expand like a texel: the TLUT read path zero-fills the
-    // low 3 bits (v<<3) where the TMEM read path replicates them (v<<3|v>>2). angrylion
-    // keeps two separate macros for exactly this (GET_HI_RGBA16_TLUT = (x>>8)&0xf8 vs
-    // GET_HI_RGBA16_TMEM = replicated_rgba[...]); parallel-rdp replicates in both, which
-    // is a known small divergence on its side. krom's GRB decoders are the visible
-    // witness: every channel of their references is exactly v<<3 (palette values are the
-    // odd 5-bit numbers 1,3,..,31, so replicate vs zero-fill differ by v>>2 = 0..7).
-    u32 r = ((e >> 11) & 0x1f) << 3, g = ((e >> 6) & 0x1f) << 3;
-    u32 b = ((e >> 1)  & 0x1f) << 3, a = (e & 1) ? 255 : 0;   // RGBA5551 palette
+    // A palette entry expands exactly like a texel: 5 bits replicated into 8
+    // (v<<3 | v>>2), as parallel-rdp does on both read paths. krom's GRB decoders pin
+    // this down: their palettes hold the odd 5-bit values 1,3,..,31 and the hardware
+    // captures only reproduce once the entry is replicated and then scaled by the
+    // LOD_FRAC(0xff)→COMBINED_ALPHA and 31/32 blender paths — zero-filling the entry
+    // cannot reach those levels for any choice of the two scales.
+    u32 r = exp5((e >> 11) & 0x1f), g = exp5((e >> 6) & 0x1f);
+    u32 b = exp5((e >> 1)  & 0x1f), a = (e & 1) ? 255 : 0;   // RGBA5551 palette
     return (r << 24) | (g << 16) | (b << 8) | a;
   };
   if(tl.size == 0) {                                   // 4-bit texels (CI4 / IA4 / I4)
