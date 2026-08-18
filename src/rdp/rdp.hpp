@@ -139,6 +139,7 @@ private:
   // aaEdge = this pixel is only partially covered, which is what ANTIALIAS_EN turns the
   // blender on for. Fully covered pixels (the default) blend only under FORCE_BLEND.
   auto blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge = false) -> void;
+  auto ditherRgb(int x, int y, u32 c) const -> u32;   // RGB_DITHER_SEL, framebuffer write path
   // Coverage-based edge AA: cvg<1 folds `src` (after blend) against the framebuffer.
   auto coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void;
   auto fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void;

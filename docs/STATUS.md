@@ -2157,3 +2157,104 @@ solo ya son 99M instrucciones). Sigue siendo un gate de 4 min.
 `RDPModeInput` pasa de negro a pintar las dos columnas de texto, pero le falta la imagen
 central: el decode GRB por RDP sigue roto (mismo grupo que `Video/GRB12Decode` 0%). Ese sí
 es bug de emulación y queda apuntado como siguiente frente.
+
+## 2026-08-18 (ter) — TLUT: destino real del LOAD_TLUT, expansión sin replicar, y dither RGB
+
+Frente abierto: `Video/GRB12Decode` **0.00** (pantalla negra) y `RDP/RDPModeInput` sin la
+imagen central. Mismo grupo: decoders que meten los planos de color en TMEM y los releen
+como CI4 con paleta. Cuatro hallazgos, todos de semántica HW y ninguno atado a un test.
+
+### 1. `LOAD_TLUT` escribe en la dirección TMEM del **tile de destino**, no en el índice SL
+
+En HW la paleta vive en los 2 KB altos de TMEM (palabras de 64 bits `0x100..0x1ff`, una
+entrada por palabra con el valor de 16 bits replicado 4×), y `LOAD_TLUT` empieza a escribir
+en `tiles[t].tmem`. Nuestro `tlut[]` modela esa región plana, así que la entrada *n* de la
+carga cae en `(tile.tmem & 0xff) + n` — exactamente la sub-paleta que luego selecciona el
+campo `PALETTE` del dibujo CI4 (paleta *p* = entradas planas `p*16 .. p*16+15`).
+
+Antes ignorábamos el tile y escribíamos en `SL`. Los decoders GRB cargan sus tres planos en
+`PALETTE_3/4/5` (tile TMEM `$130/$140/$150` → índices planos 48/64/80): las tres paletas se
+apilaban en el banco 0 y **cada lookup leía ceros** → negro.
+
+### 2. Una entrada de TLUT NO se expande como un texel: rellena con ceros (`v<<3`)
+
+La ruta de lectura de paleta rellena los 3 bits bajos con **cero**; la de texel de TMEM los
+**replica** (`v<<3 | v>>2`). angrylion mantiene dos macros distintas justo por esto
+(`GET_HI_RGBA16_TLUT = (x>>8)&0xf8` vs `GET_HI_RGBA16_TMEM = replicated_rgba[...]`);
+parallel-rdp replica en ambas, que es una divergencia conocida de su lado.
+
+Los decoders GRB son el testigo: escriben a un color-image de **32bpp**, así que el valor de
+8 bits se ve entero sin que la cuantización a 5 bits lo tape, y sus referencias de HW dan
+exactamente `v<<3` en todos los canales (los valores de paleta son los impares 1,3,…,31, así
+que replicar y rellenar con cero difieren en `v>>2` = 0..7). Ninguna etapa posterior puede
+bajar un valor: el dither sólo redondea hacia arriba.
+
+### 3. Dither RGB (`RGB_DITHER_SEL`) — feature que faltaba entera
+
+`SET_OTHER_MODES` bits 39:38: 0 = magic square, 1 = Bayer estándar, 2 = ruido, 3 = off. No es
+un offset con signo: sube el canal al **siguiente múltiplo de 8** cuando sus 3 bits bajos
+superan el umbral de la matriz, y satura a 255 desde ≥248. Se aplica a la salida del blender
+justo antes del writeback (parallel-rdp `memory_interfacing.h`, tras `blender()` y antes de
+`write_color`), es independiente de la profundidad del color-image, y FILL/COPY lo saltan
+porque no pasan por el blender. El modo ruido usa un hash determinista de (x,y,canal) para
+que el invariante lockstep==threaded siga siendo comprobable.
+
+### 4. El color de memoria del blender también rellena con ceros
+
+`decode_memory_color` de parallel-rdp: `FB_FMT_RGBA5551 -> rgb & 0xf8`. El readback de 16bpp
+entra al camino de 8 bits con los 3 bits bajos a **cero**, no replicados. Sin dither la
+diferencia es invisible (el writeback vuelve a truncar a 5 bits), pero con dither un readback
+replicado (bits bajos `111`) sube un nivel **cada píxel que el blender deja pasar tal cual**.
+Se vio al instante: las 15 ROMs de `RDP/16BPP/.../TextureRectangle` cayeron ~3.5 puntos, con
+2732 píxeles de fondo exactamente +1 nivel de verde — los texels transparentes mezclan el
+fondo a través y la captura de HW conserva el nivel exacto.
+
+### Resultado (barrido 371 ROMs, interp)
+
+mean_exact **87.36 → 87.54**, broken(<50%) 38 → 37, 13 mejoras y 0 regresiones válidas:
+
+| test | antes | ahora |
+|---|---|---|
+| `Video/GRB12Decode` | 0.00 | **19.11** |
+| `Video/GRB15Decode` / `GRB24Decode` | 0.45 / 0.43 | **11.08 / 11.07** |
+| `RDP/AlphaCoverage` | 44.72 | **72.28** |
+| `RDP/16BPP/Triangle/ShadeTriangle` | 90.54 | **96.08** |
+| `Cycle1Texture{Rectangle,Triangle}YUV16B` (16/32bpp, ×4) | 93.97-94.82 | **97.11-98.45** |
+| `RDP/Triangle/Cube/FillTriangle` (×2) | 56.72 | 59.54 |
+| `RDP/RDPTex0And1` | 91.93 | 92.68 |
+| `RDP/CombinerOverflow` | 42.18 | 42.71 |
+
+### Dos referencias de krom que no pueden calificar nada
+
+El gate las puntúa y las lista, pero ya no cuenta como regresión (`BAD_ORACLE` y filas con
+nota `SIZE` en `scripts/validate.py`):
+
+- `HelloWorld/32BPP/HelloWorldRDP320x240`: su PNG es **byte a byte el mismo** que el de la ROM
+  de 16BPP (mismo md5). El fondo de la referencia es el fill de 16bpp `$FF01FF01` (niveles
+  31,28,0 → 255,231,0) mientras esta ROM llena 32bpp `$FFFF00FF` (255,255,0), y todos sus
+  colores son niveles de 5 bits replicados. `mean_close` da 100.00: sólo difiere en la
+  cuantización. No es un bug nuestro.
+- Las 31 filas `SIZE`: dump y referencia no coinciden en resolución, así que la nota puntúa un
+  `NEAREST` reescalado y se mueve por cualquier desplazamiento de píxel. El bug de modo VI que
+  señalan es el hallazgo; el número no sirve de oráculo (las 3 `EMU/SNES/PPU/*` que "caían"
+  eran esto: 272×240 vs referencia 320×240).
+
+### Lo que queda de este frente
+
+- `EMU/GameBoy/PPU/2BPPTile8x8` **66.93 → 63.51**, única regresión real y aceptada. Su combiner
+  es `(TEXEL0 - COMBINED) * TEXEL0`, o sea depende del **latch COMBINED del modo 1-cycle**, la
+  misma familia que `RDP/CombinerOverflow` (parada porque los oráculos discrepan). Medido: el
+  verde pre-dither del HW es ~158 (mezcla de niveles 19/20 en proporción 6/16), y ni rellenar
+  con ceros ni replicar la paleta lo produce con `COMBINED = 0`; el valor de COMBINED es la
+  incógnita, no la expansión. Con paleta replicada el test vuelve a 66.93 pero los GRB caen de
+  9.14 a 2.70 de media, así que la expansión se queda como la deja el oráculo de 32bpp.
+- Los GRB siguen en 11-19%: la estructura ya es correcta, el residual es filtrado bilineal/
+  3-point sobre texrects magnificados (con 4× de magnificación las filas que casan caen cada 4
+  líneas) más el redondeo del blender.
+
+### Invariantes tras el cambio
+| Modo | systemtest | krom 371 | SM64 300M md5 |
+|------|-----------|----------|----------------|
+| interp | 0/3721 · 0/2 · 0/6 (20 s) | mean **87.54**, regress 0 | `cbf8aa76…b6ff24b` |
+| JIT | 0/3721 · 0/2 · 0/6 (28 s) | — | — |
+| threaded | — | — | idéntico a interp |

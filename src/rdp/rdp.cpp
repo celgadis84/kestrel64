@@ -181,8 +181,16 @@ auto SoftRdp::readFb(Memory& mem, int x, int y) -> u32 {
   u32 a = ci_addr + (u32(y) * ci_width + u32(x)) * 2;
   if(a + 1 >= m.size()) return 0;
   u16 px = ((u16)m[a] << 8) | m[a + 1];
-  u32 r = exp5((px >> 11) & 0x1f), g = exp5((px >> 6) & 0x1f);
-  u32 b = exp5((px >> 1) & 0x1f),  al = (px & 1) ? 255 : 0;
+  // The blender's memory colour is NOT expanded the way a texel is: the RDP feeds the
+  // stored 5-bit channel into the 8-bit blend path with the low 3 bits ZERO, it does not
+  // replicate (parallel-rdp decode_memory_color: FB_FMT_RGBA5551 -> `rgb & 0xf8`).
+  // The difference is invisible without dither -- the writeback truncates back to 5 bits --
+  // but dither rounds a channel UP whenever its low 3 bits beat the matrix threshold, so a
+  // replicated readback (low bits 111) would bump every blended-through pixel one level.
+  // krom's texture-rectangle suites are the witness: their transparent texels blend the
+  // background straight through, and the hardware capture keeps the background level exactly.
+  u32 r = ((px >> 11) & 0x1f) << 3, g = ((px >> 6) & 0x1f) << 3;
+  u32 b = ((px >> 1) & 0x1f) << 3,  al = (px & 1) ? 255 : 0;
   return (r << 24) | (g << 16) | (b << 8) | al;
 }
 
@@ -235,6 +243,42 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
   return out | (src & 0xff);         // carry pipeline alpha (coverage) into the stored pixel
 }
 
+// RGB dither, applied to the blender output on its way to the colour image
+// (SET_OTHER_MODES RGB_DITHER_SEL, bits 39:38 -> other_hi bits 7:6):
+//   0 = magic square, 1 = standard Bayer, 2 = noise, 3 = off.
+// The RDP does not add a signed offset: it rounds the channel UP to the next multiple
+// of 8 when its low 3 bits exceed the matrix threshold, and leaves it alone otherwise
+// (247 and above saturate to 255). That is why a dithered flat colour shows up in a
+// hardware capture as two adjacent 5-bit levels in a 4x4 pattern rather than as noise.
+// It runs regardless of the colour image's depth — on a 32bpp image the +8 survives
+// verbatim, on a 16bpp one it decides which way the >>3 truncation goes.
+auto SoftRdp::ditherRgb(int x, int y, u32 c) const -> u32 {
+  static const u8 kMatrix[2][16] = {
+    { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 },   // magic square
+    { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 },   // standard Bayer
+  };
+  u32 mode = (other_hi >> 6) & 3;
+  if(mode == 3) return c;
+  u32 out = c & 0xff;                      // alpha/coverage untouched by RGB dither
+  for(int i = 0; i < 3; i++) {
+    int v = (int)((c >> (24 - i * 8)) & 0xff);
+    int d;
+    if(mode < 2) d = kMatrix[mode][(y & 3) * 4 + (x & 3)];
+    else {
+      // Noise dither. Hardware clocks an LFSR that no capture can be aligned to, so the
+      // only reproducible choice is a per-pixel hash: same pixel, same value in every
+      // run and in every thread configuration (the lockstep==threaded md5 gate depends
+      // on the RDP being a pure function of the command stream).
+      u32 h = (u32)x * 0x9e3779b1u ^ (u32)y * 0x85ebca6bu ^ (u32)i * 0xc2b2ae35u;
+      h ^= h >> 15; h *= 0x2545f491u; h ^= h >> 13;
+      d = (int)(h & 7);
+    }
+    if((v & 7) > d) v = v > 247 ? 255 : (v & 0xf8) + 8;
+    out |= (u32)v << (24 - i * 8);
+  }
+  return out;
+}
+
 auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
   static const bool noBlend = std::getenv("KESTREL_NOBLEND") != nullptr;
@@ -243,17 +287,17 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> voi
   // selects CLR_MEM (M) or MEM_alpha (B). When the blender references memory but reads are
   // disabled, hardware writes the pipeline colour straight through; otherwise the blender
   // evaluates with memc=0 (its memory inputs are never consulted). COPY/FILL bypass it.
-  if(noBlend || cycleType() >= 2) { putPixel(mem, x, y, src); return; }
+  if(noBlend || cycleType() >= 2) { putPixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
   int sh = (cycleType() == 1) ? 0 : 2;
   int Msel = (other_lo >> (20 + sh)) & 3, Bsel = (other_lo >> (16 + sh)) & 3;
   bool usesMem = (Msel == 1) || (Bsel == 1);
-  if(usesMem && !(other_lo & 0x40)) { putPixel(mem, x, y, src); return; }
+  if(usesMem && !(other_lo & 0x40)) { putPixel(mem, x, y, ditherRgb(x, y, src)); return; }
   // blend_en = FORCE_BLEND || (ANTIALIAS_EN && the pixel is not fully covered). That is
   // the hardware rule verbatim ("if not force blend, allow blend enable - use CVG bits"):
   // with neither bit set the blender is bypassed and the P colour is written as-is.
   bool blendEn = ((other_lo >> 14) & 1) || (aaEdge && (other_lo & 0x08));
   u32 memc = usesMem ? readFb(mem, x, y) : 0;
-  putPixel(mem, x, y, blendColor(src, memc, blendEn));
+  putPixel(mem, x, y, ditherRgb(x, y, blendColor(src, memc, blendEn)));
 }
 
 // Edge anti-aliasing. When AA_EN (other_lo bit 0x08) is set and a pixel is only
@@ -574,13 +618,15 @@ auto SoftRdp::sampleTexel(u32 tileIdx, int s, int t) -> u32 {
     u16 e = tlut[idx & 0xff];
     if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
                           return (i << 24) | (i << 16) | (i << 8) | a; }
-    // TLUT entries expand exactly like texels. krom's EMU/SNES and EMU/GameBoy PPU
-    // references settle it: every channel value in them is exactly repl(v>>3), 230k
-    // samples, no exception. (RDPGRB15Decode looks like it argues for truncation, but its
-    // channels carry finer steps than 5 bits — that test reconstructs colour over several
-    // passes and is failing for an unrelated reason.)
-    u32 r = exp5((e >> 11) & 0x1f), g = exp5((e >> 6) & 0x1f);
-    u32 b = exp5((e >> 1) & 0x1f),  a = (e & 1) ? 255 : 0;   // RGBA5551 palette
+    // A palette entry does NOT expand like a texel: the TLUT read path zero-fills the
+    // low 3 bits (v<<3) where the TMEM read path replicates them (v<<3|v>>2). angrylion
+    // keeps two separate macros for exactly this (GET_HI_RGBA16_TLUT = (x>>8)&0xf8 vs
+    // GET_HI_RGBA16_TMEM = replicated_rgba[...]); parallel-rdp replicates in both, which
+    // is a known small divergence on its side. krom's GRB decoders are the visible
+    // witness: every channel of their references is exactly v<<3 (palette values are the
+    // odd 5-bit numbers 1,3,..,31, so replicate vs zero-fill differ by v>>2 = 0..7).
+    u32 r = ((e >> 11) & 0x1f) << 3, g = ((e >> 6) & 0x1f) << 3;
+    u32 b = ((e >> 1)  & 0x1f) << 3, a = (e & 1) ? 255 : 0;   // RGBA5551 palette
     return (r << 24) | (g << 16) | (b << 8) | a;
   };
   if(tl.size == 0) {                                   // 4-bit texels (CI4 / IA4 / I4)
@@ -1022,11 +1068,20 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     }
     case 0x30: {                                        // LOAD_TLUT (palette load)
       // Copy 16-bit palette entries from the texture image (ti_addr) into `tlut`.
-      // SL/SH (10.2) give the first/last palette index; each entry is 2 bytes in RDRAM.
+      // SL/SH (10.2) give the first/last source index; each entry is 2 bytes in RDRAM.
+      //
+      // The destination is NOT index SL: on HW the palette lives in the high 2 KB of TMEM
+      // (64-bit words 0x100..0x1ff, one word per entry, the 16-bit value replicated 4x), and
+      // LOAD_TLUT writes starting at the *destination tile's* TMEM address. `tlut[]` models
+      // that region flat, so entry n of the load lands at (tile.tmem & 0xff) + n -- which is
+      // exactly the sub-palette a CI4 draw then selects with its PALETTE field
+      // (palette p covers flat entries p*16 .. p*16+15).
+      u32 t  = (cmd >> 24) & 7;
+      u32 dst = tiles[t].tmem & 0xff;
       u32 sl = ((u32)(cmd >> 44) & 0xfff) >> 2, sh = ((u32)(cmd >> 12) & 0xfff) >> 2;
-      for(u32 i = sl; i <= sh && i < 256; i++) {
-        u32 src = ti_addr + (i - sl) * 2;
-        if(src + 1 < m.size()) tlut[i] = ((u16)m[src] << 8) | m[src + 1];
+      for(u32 i = sl; i <= sh; i++) {
+        u32 src = ti_addr + i * 2;
+        if(src + 1 < m.size()) tlut[(dst + (i - sl)) & 0xff] = ((u16)m[src] << 8) | m[src + 1];
       }
       break;
     }

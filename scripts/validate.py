@@ -248,6 +248,19 @@ def read_baseline(path):
     return base
 
 
+# Reference PNGs that are provably not a capture of the ROM next to them. These
+# cannot grade anything, so they are scored and reported but never counted as a
+# regression -- otherwise a correct change looks like a break.
+BAD_ORACLE = {
+    # byte-identical to HelloWorld/16BPP/.../HelloWorldRDP16BPP320X240.png (same md5),
+    # i.e. a 16bpp capture filed under the 32bpp ROM: its background is the 16bpp fill
+    # colour $FF01FF01 (levels 31,28,0 -> 255,231,0) while this ROM fills 32bpp
+    # $FFFF00FF (255,255,0), and every other colour is a 5-bit level replicated to 8.
+    "HelloWorld/32BPP/HelloWorldRDP320x240/HelloWorldRDP32BPP320X240":
+        "ref PNG duplicated from the 16BPP ROM",
+}
+
+
 def gate_krom(mode, args):
     cases = krom_cases(args.filter)
     if not cases:
@@ -276,6 +289,8 @@ def gate_krom(mode, args):
     with report.open("w", encoding="utf-8") as fh:
         fh.write("# name\texact%\tclose%\trmse\tnote\n")
         for n, ex, cl, rm, note in rows:
+            if n in BAD_ORACLE:
+                note = (note + " " if note else "") + "BAD-ORACLE: " + BAD_ORACLE[n]
             if ex is None:
                 fh.write(f"{n}\t\t\t\t{note}\n")
             else:
@@ -301,6 +316,13 @@ def gate_krom(mode, args):
     base = read_baseline(BASELINES / f"krom-{ref_mode}.tsv")
     regress, improve, new = [], [], []
     for n, ex, cl, rm, note in rows:
+        # A reference that cannot grade anything is scored and reported, never gated on.
+        #  * BAD_ORACLE: the PNG is not a capture of this ROM at all.
+        #  * SIZE: dump and reference disagree on resolution, so the score comes from a
+        #    NEAREST resize -- it moves whenever any pixel shifts, for reasons unrelated
+        #    to the change under test. The VI-mode bug it points at is the real finding.
+        if n in BAD_ORACLE or note.startswith("SIZE"):
+            continue
         if n not in base:
             new.append(n)
             continue

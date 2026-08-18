@@ -13,9 +13,14 @@ Measured 2026-08-18, commit = DPC counters + RSP threaded launch/PC-publication 
 | Gate | interp | JIT | threaded |
 |------|--------|-----|----------|
 | systemtest (`n64-systemtest.z64 --run`) | 16-17 s | 25 s | 17 s |
-| krom 371-ROM suite (4 jobs) | 139-143 s | 91-92 s | 140 s |
+| krom 371-ROM suite (4 jobs) | 238-250 s | 91-92 s | 140 s |
 | SM64 300M ops (framebuffer md5) | 20 s | 15 s | 16 s |
-| **`validate.sh all` total** | **~180 s** | **~132 s** | **~175 s** |
+| **`validate.sh all` total** | **~285 s** | **~132 s** | **~175 s** |
+
+krom interp went 139 s -> ~240 s on 2026-08-18 when the gate stopped capping ROMs at a
+fixed instruction count and started running them until the picture is finished
+(`--stable/--maxflips/--maxsyncs`); the CPU decoders now run to completion. That is the
+expected cost, not a regression. JIT/threaded rows are still the pre-change measurement.
 
 Not part of `validate.sh` (run it by hand when the RDP cost model or the depth path
 changes — see `docs/RDP-TIMING.md`):

@@ -48,7 +48,7 @@ Change is only done when all pass:
 4. **krom 47-suite** RDP accuracy (SoftRDP path).
 
 Baselines (may drift; the invariant is equality, not the literal hash): SM64 300M md5
-`2728103c3f0f7dcf6e38141fafa853f6` (SoftRDP). Read dump text with `tr -d '\0'` (NUL-padded).
+`cbf8aa761b92adab89ddde949b6ff24b` (SoftRDP). Read dump text with `tr -d '\0'` (NUL-padded).
 
 ## MCP
 
