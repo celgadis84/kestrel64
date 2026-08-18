@@ -1,16 +1,16 @@
 # name	exact%	close%	rmse	note
-CP1/Fractal/32BPP/320X240/Julia/Double/Julia32BPP320X240	72.50	72.50	48.17	
-CP1/Fractal/32BPP/320X240/Julia/Single/Julia32BPP320X240	72.50	72.50	48.17	
+CP1/Fractal/32BPP/320X240/Julia/Double/Julia32BPP320X240	72.60	72.60	48.85	
+CP1/Fractal/32BPP/320X240/Julia/Single/Julia32BPP320X240	72.60	72.60	48.85	
 CP1/Fractal/32BPP/320X240/JuliaInput/Double/JuliaInput32BPP320X240	0.45	0.45	135.43	
 CP1/Fractal/32BPP/320X240/JuliaInput/Single/JuliaInput32BPP320X240	0.45	0.45	135.43	
-CP1/Fractal/32BPP/320X240/Mandelbrot/Double/Mandelbrot32BPP320X240	30.65	30.65	136.83	
-CP1/Fractal/32BPP/320X240/Mandelbrot/Single/Mandelbrot32BPP320X240	30.64	30.64	136.82	
+CP1/Fractal/32BPP/320X240/Mandelbrot/Double/Mandelbrot32BPP320X240	84.26	84.26	39.63	
+CP1/Fractal/32BPP/320X240/Mandelbrot/Single/Mandelbrot32BPP320X240	84.25	84.25	39.59	
 CP1/Fractal/32BPP/320X240/MandelbrotInput/Double/MandelbrotInput32BPP320X240	5.55	5.55	90.74	
 CP1/Fractal/32BPP/320X240/MandelbrotInput/Single/MandelbrotInput32BPP320X240	5.55	5.55	90.74	
-CP1/Fractal/32BPP/640X480/Julia/Double/Julia32BPP640X480	72.38	72.38	48.15	
-CP1/Fractal/32BPP/640X480/Julia/Single/Julia32BPP640X480	72.38	72.38	48.15	
-CP1/Fractal/32BPP/640X480/Mandelbrot/Double/Mandelbrot32BPP640X480	17.47	17.47	152.54	
-CP1/Fractal/32BPP/640X480/Mandelbrot/Single/Mandelbrot32BPP640X480	17.47	17.47	152.54	
+CP1/Fractal/32BPP/640X480/Julia/Double/Julia32BPP640X480	72.40	72.40	48.30	
+CP1/Fractal/32BPP/640X480/Julia/Single/Julia32BPP640X480	72.40	72.40	48.30	
+CP1/Fractal/32BPP/640X480/Mandelbrot/Double/Mandelbrot32BPP640X480	41.61	41.61	121.59	
+CP1/Fractal/32BPP/640X480/Mandelbrot/Single/Mandelbrot32BPP640X480	41.61	41.61	121.59	
 CPUTest/CP0/COP0Cause/COP0Cause	98.40	98.40	25.11	
 CPUTest/CP1/ABS/CP1ABS	100.00	100.00	0.00	
 CPUTest/CP1/ADD/CP1ADD	100.00	100.00	0.00	
@@ -105,7 +105,7 @@ CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM	98.61	98.61	24.84	SIZE 640
 CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM_large_2	100.00	100.00	0.00	SIZE 640x240 vs ref 640x480
 CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM_large_4	100.00	100.00	0.00	SIZE 640x240 vs ref 640x480
 CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM_large_6	100.00	100.00	0.00	SIZE 640x240 vs ref 640x480
-CPUTest/Exceptions/Compare/ExceptionCompareDisabled	97.03	97.03	39.14	
+CPUTest/Exceptions/Compare/ExceptionCompareDisabled	99.87	99.87	9.13	
 CPUTest/Exceptions/Compare/ExceptionCompareRegisters	99.98	99.98	3.29	
 CPUTest/Exceptions/Syscall/ExceptionSyscall	99.31	99.31	21.19	
 CPUTest/Exceptions/Syscall/ExceptionSyscallDelay	99.31	99.31	21.19	
@@ -121,24 +121,24 @@ CPUTest/Exceptions/Trap/ExceptionTEQ	98.92	98.92	23.91
 CPUTest/Exceptions/Trap/ExceptionTEQDelay	98.92	98.92	23.91	
 CPUTest/Exceptions/Unaligned/ExceptionUnaligned	99.73	99.73	13.17	
 CPUTest/Exceptions/Unaligned/ExceptionUnalignedDelay	99.33	99.33	17.36	
-CPUTest/Exceptions/VIIntr/ExceptionVIIntrDisabled	97.88	97.88	31.82	
+CPUTest/Exceptions/VIIntr/ExceptionVIIntrDisabled	99.36	99.36	14.74	
 Compress/DCT/DCTBlockGFX/DCTBlockGFX	100.00	100.00	0.00	
 Compress/DCT/FastDCTBlockGFX/FastDCTBlockGFX	100.00	100.00	0.00	
 Compress/DCT/FastQuantizationBlockGFX/FastQuantizationBlockGFX	100.00	100.00	0.00	
 Compress/DCT/FastQuantizationMultiBlockGFX16BIT/FastQuantizationMultiBlockGFX16BIT	11.00	91.53	5.04	
 Compress/DCT/FastQuantizationMultiBlockGFX8BIT/FastQuantizationMultiBlockGFX8BIT	100.00	100.00	0.00	
 Compress/DCT/QuantizationBlockGFX/QuantizationBlockGFX	100.00	100.00	0.00	
-Compress/DCT/QuantizationMultiBlockGFX16BIT/QuantizationMultiBlockGFX16BIT	6.51	31.03	60.41	
-Compress/DCT/QuantizationMultiBlockGFX8BIT/QuantizationMultiBlockGFX8BIT	14.49	28.88	66.61	
-Compress/HUFFMAN/HUFFMANGFX/HUFFMANGFX	39.63	39.65	133.60	
-Compress/HUFFMAN/HUFFMANROMGFX/HUFFMANROMGFX	29.47	29.50	144.68	
+Compress/DCT/QuantizationMultiBlockGFX16BIT/QuantizationMultiBlockGFX16BIT	10.45	55.33	30.89	
+Compress/DCT/QuantizationMultiBlockGFX8BIT/QuantizationMultiBlockGFX8BIT	32.17	59.67	30.29	
+Compress/HUFFMAN/HUFFMANGFX/HUFFMANGFX	99.41	99.41	11.76	
+Compress/HUFFMAN/HUFFMANROMGFX/HUFFMANROMGFX	99.33	99.33	12.49	
 Compress/LZ77/LZ77GFX/LZ77GFX	99.40	99.40	11.84	
 Compress/LZ77/LZ77ROMGFX/LZ77ROMGFX	99.33	99.33	12.49	
 EMU/GameBoy/PPU/2BPPTile8x8/PPU2BPPTile8x8	66.93	82.59	27.00	
 EMU/SNES/PPU/2BPPTile8x8/PPU2BPPTile8x8	43.27	61.46	60.73	SIZE 272x240 vs ref 320x240
 EMU/SNES/PPU/4BPPTile8x8/PPU4BPPTile8x8	29.16	61.29	37.29	SIZE 272x240 vs ref 320x240
 EMU/SNES/PPU/8BPPTile8x8/PPU8BPPTile8x8	29.76	65.06	25.53	SIZE 272x240 vs ref 320x240
-EMU/SNES/SPC/SPCEMU	99.09	99.09	21.41	
+EMU/SNES/SPC/SPCEMU	99.22	99.22	19.35	
 FrameBuffer/16BPP/FrameBufferCPU320x240/FrameBufferCPU16BPP320X240	98.64	100.00	0.28	
 FrameBuffer/16BPP/FrameBufferDMA320x240/FrameBufferDMA16BPP320X240	98.64	100.00	0.28	
 FrameBuffer/32BPP/FrameBufferCPU640x480/FrameBufferCPU32BPP640X480	100.00	100.00	0.00	
@@ -153,13 +153,13 @@ Input/RDP/InputRDP	100.00	100.00	0.00
 Interrupt/VI/InterruptVI	99.98	99.98	2.98	
 Interrupt/VIScrollingBGDMA16BPP320X240/VIScrollingBGDMA16BPP320X240	0.01	88.59	7.40	
 Interrupt/VIScrollingBGDMA32BPP320X240/VIScrollingBGDMA32BPP320X240	100.00	100.00	0.00	
-N64NICCC/N64NICCC	80.83	80.83	63.65	SIZE 256x199 vs ref 320x240
+N64NICCC/N64NICCC	97.97	97.97	17.42	SIZE 256x199 vs ref 320x240
 RCP/VI/CoverageTest/CoverageTest	91.76	93.45	29.69	SIZE 320x240 vs ref 320x237
 RCP/Version/RCPVersion	98.50	98.50	24.99	SIZE 320x240 vs ref 640x480
 RDP/16BPP/Line/FillLine/Cycle1FillLine320x240/Cycle1FillLine16BPP320X240	99.21	99.21	14.61	
 RDP/16BPP/Line/FillLine/FillLine320x240/FillLine16BPP320X240	99.26	99.26	14.42	
 RDP/16BPP/Line/Plot/FillLine/PlotFillLine16BPP320X240	99.87	99.87	4.81	
-RDP/16BPP/Line/Rotate/FillLine/RotateFillLine16BPP320X240	0.00	99.33	18.04	
+RDP/16BPP/Line/Rotate/FillLine/RotateFillLine16BPP320X240	0.00	99.41	17.57	
 RDP/16BPP/Rectangle/FillRectangle/Cycle1FillRectangle320x240/Cycle1FillRectangle16BPP320X240	98.74	98.74	23.34	
 RDP/16BPP/Rectangle/FillRectangle/FillRectangle320x240/FillRectangle16BPP320X240	98.64	98.64	23.61	
 RDP/16BPP/Rectangle/FillZBufferRectangle320x240/Cycle1FillZBufferRectangle16BPP320X240	98.60	98.60	22.08	
@@ -179,14 +179,14 @@ RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA8B320x240/
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA4B320x240/Cycle1TextureRectangle16BPPTLUTRGBA4B320X240	92.53	96.87	28.46	
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA8B320x240/Cycle1TextureRectangle16BPPTLUTRGBA8B320X240	96.34	97.90	27.95	
 RDP/16BPP/SetPrimColor/SetPrimColor16BPP	98.03	100.00	0.79	
-RDP/16BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle16BPP320X240	77.58	94.11	36.96	
+RDP/16BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle16BPP320X240	56.72	60.67	93.57	
 RDP/16BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle16BPP320X240	98.97	98.97	17.80	
 RDP/16BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle16BPP320X240	98.89	98.89	17.73	
 RDP/16BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle16BPP320X240	98.15	98.15	21.27	
 RDP/16BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle16BPP320X240	99.75	99.75	6.70	
 RDP/16BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle16BPP320X240	99.75	99.75	6.70	
-RDP/16BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle16BPP320X240	64.82	64.82	79.10	
-RDP/16BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle16BPP320X240	66.39	66.39	77.31	
+RDP/16BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle16BPP320X240	70.04	70.04	73.00	
+RDP/16BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle16BPP320X240	71.65	71.65	71.01	
 RDP/16BPP/Triangle/ShadeTriangle320x240/Cycle1ShadeTriangle16BPP320X240	90.54	98.45	2.11	
 RDP/16BPP/Triangle/TextureTriangle/CopyTextureTriangleRGBA16B320x240/CopyTextureTriangle16BPPRGBA16B320X240	99.06	99.06	17.54	
 RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI4B320x240/Cycle1TextureTriangle16BPPI4B320X240	94.91	97.11	12.49	
@@ -206,7 +206,7 @@ RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/C
 RDP/32BPP/Line/FillLine/Cycle1FillLine320x240/Cycle1FillLine32BPP320X240	99.21	99.21	15.10	
 RDP/32BPP/Line/FillLine/FillLine320x240/FillLine32BPP320X240	99.26	99.26	15.31	
 RDP/32BPP/Line/Plot/FillLine/PlotFillLine32BPP320X240	99.87	99.87	5.31	
-RDP/32BPP/Line/Rotate/FillLine/RotateFillLine32BPP320X240	99.33	99.33	12.07	
+RDP/32BPP/Line/Rotate/FillLine/RotateFillLine32BPP320X240	99.41	99.41	11.34	
 RDP/32BPP/Rectangle/FillRectangle/Cycle1FillRectangle320x240/Cycle1FillRectangle32BPP320X240	98.74	98.74	23.34	
 RDP/32BPP/Rectangle/FillRectangle/FillRectangle320x240/FillRectangle32BPP320X240	98.64	98.64	24.24	
 RDP/32BPP/Rectangle/FillZBufferRectangle320x240/Cycle1FillZBufferRectangle32BPP320X240	98.60	98.60	22.08	
@@ -223,14 +223,14 @@ RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA8B320x240/
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA4B320x240/Cycle1TextureRectangle32BPPTLUTRGBA4B320X240	89.11	94.81	29.08	
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA8B320x240/Cycle1TextureRectangle32BPPTLUTRGBA8B320X240	93.49	98.07	27.67	
 RDP/32BPP/SetPrimColor/SetPrimColor32BPP	0.08	98.41	26.44	
-RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240	77.58	94.11	37.69	
+RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240	56.72	60.67	95.40	
 RDP/32BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle32BPP320X240	98.97	98.97	18.33	
 RDP/32BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle32BPP320X240	98.89	98.89	18.78	
 RDP/32BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle32BPP320X240	98.15	98.15	21.62	
 RDP/32BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle32BPP320X240	99.75	99.75	7.40	
 RDP/32BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle32BPP320X240	99.75	99.75	7.40	
-RDP/32BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle32BPP320X240	64.82	64.82	87.32	
-RDP/32BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle32BPP320X240	64.40	64.40	87.84	
+RDP/32BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle32BPP320X240	70.04	70.04	80.59	
+RDP/32BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle32BPP320X240	69.60	69.60	81.17	
 RDP/32BPP/Triangle/ShadeTriangle320x240/Cycle1ShadeTriangle32BPP320X240	0.03	99.95	13.05	
 RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI4B320x240/Cycle1TextureTriangle32BPPI4B320X240	89.11	96.81	12.45	
 RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI8B320x240/Cycle1TextureTriangle32BPPI8B320X240	93.49	97.44	12.31	
@@ -285,7 +285,7 @@ RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_3	67.95	67.95	112.54
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_4	73.75	73.75	101.73	
 RDPTest/CPU/RDPTestCPU	99.65	99.65	13.02	
 RDPTest/RSP/RDPTestRSP	99.65	99.65	13.02	
-RDRAMTest/RDRAMTest	78.77	78.77	87.30	
+RDRAMTest/RDRAMTest	78.76	78.76	87.32	
 RSP/DCT/FastDCTBlockDecode/RSPFastDCTBlockDecode	100.00	100.00	0.00	
 RSP/DCT/FastQuantizationBlockDecode/RSPFastQuantizationBlockDecode	100.00	100.00	0.00	
 RSP/DCT/FastQuantizationMultiBlock16BIT/RSPFastQuantizationMultiBlock16BIT	5.21	64.18	23.90	
@@ -355,11 +355,11 @@ RSPTest/DMAAlignment-SP/DMAAlignment-SP-FROM	98.41	98.41	27.14	SIZE 640x240 vs r
 RSPTest/DMAAlignment-SP/DMAAlignment-SP-TO	97.83	97.83	31.84	SIZE 640x240 vs ref 640x480
 RSPTest/MEM/IMEM/RSPIMEM	100.00	100.00	0.00	
 RSPTest/XBUS/RSPXBUSRDP	98.60	98.60	22.08	
-Video/Devo-TimeOutForFun/Devo-TimeOutForFun	19.71	25.45	109.47	
+Video/Devo-TimeOutForFun/Devo-TimeOutForFun	18.80	23.87	112.44	
 Video/GRB12Decode/RDP/RDPGRB12Decode	0.00	0.06	144.68	
-Video/GRB12LZDIFFRLEVideo/GRB12LZDIFFRLEVideo	0.00	0.06	144.68	
+Video/GRB12LZDIFFRLEVideo/GRB12LZDIFFRLEVideo	0.00	0.06	144.85	
 Video/GRB15Decode/RDP/RDPGRB15Decode	0.45	69.68	18.03	
-Video/GRB15LZDIFFRLEVideo/GRB15LZDIFFRLEVideo	0.01	0.67	53.68	
+Video/GRB15LZDIFFRLEVideo/GRB15LZDIFFRLEVideo	0.01	0.71	53.58	
 Video/GRB24Decode/CPU/CPUGRB24Decode	13.54	77.89	17.60	
 Video/GRB24Decode/RDP/RDPGRB24Decode	0.43	69.68	17.72	
 Video/I4Decode/CPU/CPUI4Decode	32.79	32.90	23.41	
@@ -368,5 +368,5 @@ Video/I4LZRLEVideo/I4LZRLEVideo	33.23	33.23	206.75
 Video/I8Decode/CPU/CPUI8Decode	32.55	96.15	35.71	
 Video/I8Decode/RDP/RDPI8Decode	78.73	97.20	25.92	
 Video/I8LZRLEVideo/I8LZRLEVideo	32.78	33.09	204.10	
-Video/YUV16LZDIFFRLEVideo/YUV16LZDIFFRLEVideo	0.00	0.00	128.39	
-Video/YUV8LZDIFFRLEVideo/YUV8LZDIFFRLEVideo	0.00	0.00	128.39	
+Video/YUV16LZDIFFRLEVideo/YUV16LZDIFFRLEVideo	0.00	0.23	141.04	
+Video/YUV8LZDIFFRLEVideo/YUV8LZDIFFRLEVideo	0.00	0.23	141.05	

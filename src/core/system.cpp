@@ -104,6 +104,27 @@ auto System::runLoop() -> void {
   presenter.close();
 }
 
+// Hash of the VI framebuffer exactly as the headless dump reads it (origin, VI_WIDTH
+// stride, bpp from VI_CTRL). Region size only — the point is "did the picture move",
+// not what it looks like, so a cheap FNV-1a over the bytes is enough.
+static auto framebufferHash(Memory& mem) -> u64 {
+  u32 origin = mem.rcp.vi_origin & 0x00ff'ffff;
+  u32 type   = mem.rcp.vi_ctrl & 3;                        // 2=16bpp, 3=32bpp
+  if(type != 2 && type != 3) return 0;
+  u32 w = mem.rcp.vi_width ? mem.rcp.vi_width : 320;
+  if(w == 0 || w > 640) w = 320;
+  u32 ysc = mem.rcp.vi_yscale & 0xfff;
+  u32 baseH = ((mem.rcp.vi_vsync & 0x3ff) >= 550) ? 288 : 240;
+  u32 h = ysc ? ((baseH * ysc) >> 10) : baseH;
+  if(h == 0 || h > 576) h = baseH;
+  usize bytes = (usize)w * h * (type == 2 ? 2 : 4);
+  const auto& ram = mem.rdram;
+  if((usize)origin + bytes > ram.size()) return 0;
+  u64 hsh = 1469598103934665603ull ^ origin ^ ((u64)w << 32) ^ ((u64)type << 48);
+  for(usize i = 0; i < bytes; i++) { hsh ^= ram[origin + i]; hsh *= 1099511628211ull; }
+  return hsh;
+}
+
 auto System::run() -> void {
   // M1: run the CPU in short batches when not paused, yielding coreMutex between
   // batches so telemetry can inspect/step. Paused → idle; the telemetry thread
@@ -113,6 +134,40 @@ auto System::run() -> void {
   u64   winInsn = 0, winRsp = rspCycles;
   auto  hbT0 = winT0, hbLast = winT0;   // heartbeat lifetime baseline
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
+
+  // KESTREL_STABLE=<insns per check>[,<checks>] — stop once the picture stops moving.
+  //
+  // A fixed instruction cap is the wrong yardstick for a screenshot oracle: ROMs that
+  // decode an image on the CPU (DCT, Huffman, I4/I8, GRB, Mandelbrot) are still halfway
+  // down the frame when the cap fires, and the reference compare then scores a partially
+  // drawn picture — 33% for a third of the image, which reads like an emulation bug and
+  // is not one. Raising the cap for everyone costs the whole suite. So: run with a high
+  // cap and stop when the VI framebuffer has been byte-identical for N consecutive
+  // checks, having changed at least once (otherwise a ROM that has not drawn yet counts
+  // as "stable" while still black).
+  //
+  // KESTREL_MAXFLIPS=<n> is the companion bound for ROMs that never settle at all —
+  // video playback, the rotating-primitive demos. Those animate, so "stable" never
+  // arrives and only the instruction cap stops them, on whatever frame it happens to
+  // land. Counting displayed-buffer swaps instead pins them to an early, reproducible
+  // frame, and it does not touch the CPU decoders: those render one picture into one
+  // buffer and never flip.
+  // KESTREL_MAXSYNCS=<n> is the same idea for animation that never flips a buffer (the
+  // rotating-primitive demos redraw one framebuffer in place): an RDP SYNC_FULL is the
+  // end of a display list, so N syncs is N completed frames. CPU-side decoders never
+  // touch the RDP, so it does not bound them either.
+  u64  stableEvery = 0, stableNeed = 3, stableNext = 0, stableHash = 0;
+  u32  stableRun = 0, maxFlips = 0, maxSyncs = 0;
+  bool stableSawChange = false;
+  if(const char* f = std::getenv("KESTREL_MAXFLIPS")) maxFlips = (u32)std::strtoul(f, nullptr, 0);
+  if(const char* f = std::getenv("KESTREL_MAXSYNCS")) maxSyncs = (u32)std::strtoul(f, nullptr, 0);
+  if(const char* s = std::getenv("KESTREL_STABLE")) {
+    char* end = nullptr;
+    stableEvery = std::strtoull(s, &end, 0);
+    if(end && *end == ',') stableNeed = std::strtoull(end + 1, nullptr, 0);
+    if(stableNeed == 0) stableNeed = 1;
+    stableNext = stableEvery;
+  }
   while(!shutdown.load()) {
     if(cpu.halted && exitOnHalt) { shutdown.store(true); break; }
     if(paused.load() || cpu.halted) {
@@ -130,6 +185,30 @@ auto System::run() -> void {
     }
     retiredInsns.fetch_add(did, std::memory_order_relaxed);
     winInsn += did;
+
+    if((maxFlips && memory.rcp.viFlips >= maxFlips) ||
+       (maxSyncs && memory.rcp.dpSyncs >= maxSyncs)) {
+      std::fprintf(stderr, "[frames] %u buffer swaps, %u RDP syncs after %lluM insns, stopping\n",
+                   memory.rcp.viFlips, memory.rcp.dpSyncs,
+                   (unsigned long long)(cpu.retired / 1'000'000));
+      std::lock_guard<std::mutex> lk(coreMutex);
+      cpu.maxInsn = cpu.retired + 1;
+    }
+
+    if(stableEvery && cpu.retired >= stableNext) {
+      stableNext = cpu.retired + stableEvery;
+      u64 h;
+      { std::lock_guard<std::mutex> lk(coreMutex); h = framebufferHash(memory); }
+      if(h != stableHash) { stableHash = h; stableRun = 0; stableSawChange = true; }
+      else if(stableSawChange && ++stableRun >= stableNeed) {
+        std::fprintf(stderr, "[stable] framebuffer unchanged for %llu insns after %lluM, stopping\n",
+                     (unsigned long long)(stableEvery * stableNeed),
+                     (unsigned long long)(cpu.retired / 1'000'000));
+        // Reuse the cap path so the dump/report side stays in exactly one place.
+        std::lock_guard<std::mutex> lk(coreMutex);
+        cpu.maxInsn = cpu.retired + 1;
+      }
+    }
 
     // Recompute the realtime-% meter over a short window. Emulated cycles/sec vs
     // each domain's (overclock-scaled) target clock. 100% == real N64 speed.

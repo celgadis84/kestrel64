@@ -2112,3 +2112,48 @@ Thar0 nunca entra en FILL.
 | interp | 0/3721 · 0/2 · 0/6 | mean **86.53**, regress 0 | `cbf8aa76…b6ff24b` |
 | JIT | 0/3721 · 0/2 · 0/6 | — | — |
 | threaded | — | — | idéntico a interp |
+
+## 2026-08-18 (bis) — El gate krom paraba las ROMs a medio dibujar: 86.53 → 87.36
+
+Investigando `RDP/RDPModeInput` (6.49%, negro en pantalla) salió un fallo del **harness**,
+no del emulador: el gate krom corría cada ROM con un cap fijo de **20M instrucciones**.
+Las ROMs que decodifican una imagen en CPU (DCT, Huffman, I4/I8, GRB, Mandelbrot) todavía
+iban por el primer tercio del cuadro cuando el cap disparaba, así que el compare puntuaba
+una imagen a medio pintar — y ~33% *parece* un bug de emulación sin serlo.
+
+Regla nueva, tres cotas en el emulador, todas semánticas y ninguna por-ROM:
+
+- **`KESTREL_STABLE=<insns>,<checks>`** — hash del framebuffer VI cada N instrucciones;
+  para cuando lleva `checks` comprobaciones idéntico *habiendo cambiado alguna vez* (si no,
+  una ROM que aún no ha dibujado contaría como "estable" en negro). Es el criterio normal.
+- **`KESTREL_MAXFLIPS=<n>`** — para tras N *swaps* de buffer mostrado (VI_ORIGIN cambia a
+  otra dirección). Cota para lo que nunca se estabiliza: vídeo, demos. No afecta a los
+  decoders, que pintan un cuadro en un solo buffer y no hacen flip nunca.
+- **`KESTREL_MAXSYNCS=<n>`** — para tras N SYNC_FULL del RDP (= display lists completadas).
+  Misma idea para animación que redibuja el mismo buffer en sitio.
+
+El cap de instrucciones queda de red de seguridad (150M) y es lo único que acota a las
+ROMs que animan sin flip y sin SYNC_FULL (el demo del cubo genera su lista cada cuadro y
+no emite ninguno).
+
+Con `--stable 8000000,3 --maxflips 1 --maxsyncs 1`: los PNG de referencia de krom son
+capturas del **primer cuadro**, así que las cotas de cuadro además aciertan mejor que el
+cap viejo. Mean 86.53 → **87.36**, broken(<50%) 42 → **38**, cero regresiones estáticas:
+
+| test | antes | ahora |
+|---|---|---|
+| `Compress/HUFFMAN/HUFFMANGFX` | 39.63 | **99.41** |
+| `Compress/HUFFMAN/HUFFMANROMGFX` | 29.47 | **99.33** |
+| `N64NICCC` | 80.83 | **97.97** |
+| `CP1/Fractal/Mandelbrot 320x240` (×2) | 30.6 | **84.3** |
+| `CP1/Fractal/Mandelbrot 640x480` (×2) | 17.47 | **41.61** |
+| `Compress/DCT/QuantizationMultiBlockGFX8BIT` | 14.49 | 32.17 |
+| `RDP/Triangle/Rotate/*` (×4) | 64-66 | 69-72 |
+| `RDP/Triangle/Cube/*` (×2) | 77.58 | 56.72 ← lotería de frame, sin cota |
+
+Coste: barrido krom 137 s → ~235 s (los decoders ahora corren hasta terminar; Mandelbrot
+solo ya son 99M instrucciones). Sigue siendo un gate de 4 min.
+
+`RDPModeInput` pasa de negro a pintar las dos columnas de texto, pero le falta la imagen
+central: el decode GRB por RDP sigue roto (mismo grupo que `Video/GRB12Decode` 0%). Ese sí
+es bug de emulación y queda apuntado como siguiente frente.

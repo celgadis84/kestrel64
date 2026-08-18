@@ -830,7 +830,12 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     if(((off & 0xff) >> 2) < 14) vrdp::viWrite((off & 0xff) >> 2, v);
     switch(off & 0xff) {
     case 0x00: rcp.vi_ctrl = v; break;
-    case 0x04: rcp.vi_origin = v & 0xffffff; break;
+    // Count buffer flips, not writes: a single-buffered ROM rewrites VI_ORIGIN with the
+    // same address every field. The count is what tells an animating ROM (flips) apart
+    // from one still drawing a single picture (never flips) — see KESTREL_MAXFLIPS.
+    case 0x04: { u32 nv = v & 0xffffff;
+                 if(rcp.vi_origin && nv != rcp.vi_origin) rcp.viFlips++;
+                 rcp.vi_origin = nv; } break;
     case 0x08: rcp.vi_width = v & 0xfff; break;
     case 0x0c: rcp.vi_intr = v & 0x3ff; break;
     case 0x10: {
@@ -1191,6 +1196,7 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   } else { (void)nc; }
   if(softRdp.sawSyncFull) {
     rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
+    rcp.dpSyncs++;                       // "a frame finished rendering" — see KESTREL_MAXSYNCS
     raiseIntr(MI_DP);
   }
 }

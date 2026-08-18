@@ -58,6 +58,8 @@ struct Rcp {
   std::atomic<u32> dpc_clock{0}, dpc_bufbusy{0}, dpc_pipebusy{0}, dpc_tmem{0};
   // VI
   u32 vi_ctrl = 0, vi_origin = 0, vi_width = 0, vi_intr = 256, vi_current = 0;
+  u32 viFlips = 0;    // VI_ORIGIN changed to a different address = displayed buffer swapped
+  u32 dpSyncs = 0;    // RDP SYNC_FULL count = display lists completed
   u32 vi_burst = 0, vi_vsync = 0, vi_hsync = 0, vi_leap = 0, vi_hstart = 0;
   u32 vi_vstart = 0, vi_vburst = 0, vi_xscale = 0, vi_yscale = 0;
   // AI — models a 2-deep DMA buffer FIFO so the audio driver blocks (STATUS

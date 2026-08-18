@@ -129,14 +129,24 @@ def compare(bmp, png):
 
 # ------------------------------------------------------------------- run a ROM
 
-def run_rom(rom, dump, mode, insn, timeout, extra_env=None):
+def run_rom(rom, dump, mode, insn, timeout, extra_env=None, stable=None, frames=None):
     """Run one ROM headless to the instruction cap, dumping the VI framebuffer.
 
     Relies on System::exitOnHalt: with --run, hitting KESTREL_MAXINSN halts the
     CPU and ends the process. No taskkill dance, so ROMs can run in parallel.
+
+    `stable` (KESTREL_STABLE) is the real stop condition for the krom gate: run
+    with a high cap and stop when the framebuffer stops changing. A fixed cap
+    scores ROMs that decode an image on the CPU while they are still drawing it.
     """
     env = env_for(mode, extra_env)
     env["KESTREL_MAXINSN"] = str(insn)
+    if stable:
+        env["KESTREL_STABLE"] = stable
+    if frames:
+        flips, syncs = frames
+        if flips: env["KESTREL_MAXFLIPS"] = str(flips)
+        if syncs: env["KESTREL_MAXSYNCS"] = str(syncs)
     env["KESTREL_FBDUMP"] = str(dump)
     if dump.exists():
         dump.unlink()
@@ -209,9 +219,9 @@ def krom_cases(filt=None):
 
 
 def krom_one(job):
-    name, rom, png, mode, insn, timeout, outdir = job
+    name, rom, png, mode, insn, timeout, outdir, stable, frames = job
     dump = outdir / (re.sub(r"[^A-Za-z0-9]+", "_", name) + ".bmp")
-    rc, log = run_rom(rom, dump, mode, insn, timeout)
+    rc, log = run_rom(rom, dump, mode, insn, timeout, stable=stable, frames=frames)
     if not dump.exists():
         return name, None, None, None, f"NODUMP rc={rc}"
     try:
@@ -245,7 +255,9 @@ def gate_krom(mode, args):
         return True
     outdir = OUT / f"krom-{mode}"
     outdir.mkdir(parents=True, exist_ok=True)
-    jobs = [(n, r, p, mode, args.insn, args.timeout, outdir) for n, r, p in cases]
+    frames = (args.maxflips, args.maxsyncs)
+    jobs = [(n, r, p, mode, args.insn, args.timeout, outdir, args.stable, frames)
+            for n, r, p in cases]
 
     t0 = time.time()
     rows = []
@@ -360,7 +372,21 @@ def main():
                     help="emulator configuration under test (default: interp = oracle)")
     ap.add_argument("--filter", help="krom: substring of the ROM path, e.g. RDP/ or Triangle")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) // 2))
-    ap.add_argument("--insn", type=int, default=20_000_000, help="krom: instruction cap per ROM")
+    ap.add_argument("--insn", type=int, default=150_000_000,
+                    help="krom: instruction cap per ROM. Backstop only — --stable is the normal "
+                         "stop. It still has to fire for ROMs that never settle (video playback, "
+                         "the rotating-primitive demos), and it is what pins the frame those are "
+                         "scored on, so changing it moves their baselines.")
+    ap.add_argument("--maxflips", type=int, default=1,
+                    help="krom: stop after N displayed-buffer swaps (0 = never). Pins animated "
+                         "double-buffered ROMs to an early frame, which is what the reference "
+                         "captures show.")
+    ap.add_argument("--maxsyncs", type=int, default=1,
+                    help="krom: stop after N RDP SYNC_FULLs (0 = never). Same idea for animation "
+                         "that redraws one buffer in place.")
+    ap.add_argument("--stable", default="8000000,3",
+                    help="krom: KESTREL_STABLE=<insns per check>,<checks> — stop when the "
+                         "framebuffer stops changing. Empty string disables it.")
     ap.add_argument("--timeout", type=int, default=90, help="krom: seconds per ROM")
     ap.add_argument("--sm64-insn", type=int, default=300_000_000)
     ap.add_argument("--sm64-timeout", type=int, default=600)
