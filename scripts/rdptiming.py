@@ -58,6 +58,61 @@ def parse(path):
     return rows
 
 
+# The ROM itself prints one flat description line per configuration followed by the
+# raw BUFBUSY/PIPEBUSY arrays; sample_results.txt is that output already grouped and
+# averaged by the repo's analyze.py. Reading the raw form lets an emulator run be
+# scored without going through numpy/matplotlib, and keeps the two paths comparable:
+# both end up as the same feature dict plus a cycles-per-pixel number.
+def parse_raw(path):
+    with open(path) as f:
+        body = f.read()
+    body = body.split("!!BEGIN!!", 1)[1].split("!!DONE!!", 1)[0]
+    rows, desc, vals = [], None, None
+    for line in body.split("\n"):
+        t = line.strip()
+        if not t:
+            continue
+        if t in ("]",):
+            continue
+        if t.startswith(("BUF = [", "PIPE = [")):
+            vals = "buf" if t.startswith("BUF") else "pipe"
+            continue
+        if vals and t[0].isdigit():
+            nums = [int(v) for v in t.rstrip(", ").split(", ")]
+            nums.sort()
+            med = nums[len(nums) // 2]
+            if vals == "buf":
+                rows.append(dict(desc=desc, buf=med))
+            else:
+                rows[-1]["pipe"] = med
+            vals = None
+            continue
+        desc = t
+    for r in rows:
+        r.update(split_desc(r["desc"]))
+        r.update(features(r))
+        r["cpp"] = r["buf"] / PIXELS       # counter already counts GCLK ticks
+    return rows
+
+
+def split_desc(desc):
+    """Flat ROM description → the section / bank-layout / render-mode split that
+    features() expects. e.g. "ZB Read/Write, VI, Z Pass, FB + ZB same, VI separate,
+    image_read on,  2-cycle"."""
+    parts = [p.strip() for p in desc.split(",")]
+    sect, sub, mode, cyc = [], [], [], 1
+    for p in parts:
+        if p.endswith("-cycle"):
+            cyc = int(p[0])
+        elif p.startswith(("image_read", "z_compare")):
+            mode.append(p)
+        elif p.startswith(("FB ", "ZB +", "VI ")) or p in ("separate", "same"):
+            sub.append(p)
+        else:
+            sect.append(p)
+    return dict(sect=", ".join(sect), sub=", ".join(sub), mode=" ".join(mode), cyc=cyc)
+
+
 def features(r):
     """Decode a row's section/subsection text into the render-mode flags."""
     s, sub, mode = r["sect"], r["sub"], r["mode"]
@@ -193,6 +248,25 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     default = os.path.join(here, "..", "..", "rdp-timing-tests", "sample_results.txt")
     cmd = sys.argv[1] if len(sys.argv) > 1 else "check"
+    if cmd == "compare":
+        # Score a kestrel run (raw ROM output) against the hardware reference. Rows
+        # are matched on the render-mode features, not on text, so the two file
+        # formats line up even though their descriptions are worded differently.
+        FEAT = ("cyc", "fbread", "zread", "zwrite", "zpass", "alphafail", "vi",
+                "fbzb_same", "fbvi_same")
+        key = lambda r: tuple(r[k] for k in FEAT)
+        hw = {key(r): r for r in parse(default)}
+        ours = parse_raw(sys.argv[2])
+        pairs = [(r, hw[key(r)]) for r in ours if key(r) in hw]
+        errs = [(abs(o["cpp"] - h["cpp"]), o, h) for o, h in pairs]
+        mse = sum(e * e for e, _, _ in errs) / len(errs)
+        print(f"n={len(errs)}/{len(ours)} matched  rmse={mse ** .5:.4f} "
+              f"mae={sum(e for e, _, _ in errs) / len(errs):.4f} "
+              f"max={max(e for e, _, _ in errs):.4f} cyc/px")
+        errs.sort(key=lambda t: -t[0])
+        for e, o, h in errs[:15]:
+            print(f"  {h['cpp']:6.3f} hw  {o['cpp']:6.3f} kestrel  ({e:+.3f})  {o['desc']}")
+        return
     rows = parse(sys.argv[2] if len(sys.argv) > 2 else default)
     if cmd == "table":
         cols = ["cyc", "fbread", "zread", "zwrite", "zpass", "alphafail", "vi",

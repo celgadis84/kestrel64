@@ -2053,3 +2053,62 @@ updates (RMW entrelazados).
 
 Tiempos de referencia de cada gate documentados en `docs/baselines/timings.md` —
 sirven para distinguir *lento* de *colgado* sin volver a bisecar a ciegas.
+
+## 2026-08-18 — RDP-Timing-Tests (Thar0) corriendo: rmse 0.948 → 0.133 cyc/px
+
+Tercera batería de validación, la única que mira **tiempo** en vez de píxeles:
+[Thar0/RDP-Timing-Tests](https://github.com/Thar0/RDP-Timing-Tests) barre 100
+configuraciones de fill y publica contadores DPC medidos en N64 real. Detalle completo
+(build, harness, modelo, huecos) en **`docs/RDP-TIMING.md`**.
+
+### Camino para poder correrla
+- **ISViewer lectura** (`Memory::isvRead`, gancho al principio de `cartRead`): libdragon
+  sondea el magic en `0x13FF0000` antes de usar el canal; sin respuesta decide que no
+  hay debug channel y la ROM no imprime nada. Ahora responde header + buffer.
+- ROM local parcheada: `debug_init_isviewer()` y `TOTAL_RUNS` overridable
+  (`make EXTRA_CFLAGS=-DTOTAL_RUNS=8`). Los 1000 repeats de upstream promedian jitter de
+  refresh RDRAM/VI en HW; nuestro modelo es determinista y da el mismo número siempre.
+- `scripts/rdptiming.py compare` parsea la salida cruda y casa cada config con la
+  referencia HW **por tupla de features**, no por orden de línea. Barrido = 97 s.
+
+### El bug que encontró: el dominio de profundidad es 18-bit, no 15
+Todo el error estaba en las configs "ZB Read/Write, **Z Pass**": el test de profundidad
+no pasaba, así que nunca se pagaba la escritura de z. Causa: `SET_PRIM_DEPTH` guardaba
+el campo Z de 15 bits pelado. El HW lo mete en el mismo atributo s15.16 que produce el
+interpolador de z del triángulo, y la unidad de profundidad consume **bits 31:13** — 18
+bits, 3 de ellos fraccionarios (oráculo parallel-rdp: `rdp_renderer.cpp:3510` y
+`shaders/interpolation.h`, neto `>> 13`).
+
+Esos 3 bits no son adorno: el formato almacenado (exp 3 bits + mantisa 11) cerca de
+`z = 0x7FFF` avanza de 1 en 1 en el dominio de 18 bits pero de **64 en 64** en el de 15.
+Un test que camina prim depth de 1 en 1 cuantizaba todos los pasos al mismo valor y
+fallaba cada compare menos el primero. Fix: `prim_z = ((cmd >> 16) & 0x7fff) << 3` y
+coeficientes Z del triángulo `/ 8192.0` en vez de `/ 65536.0`. Semántica RDP genuina, no
+parche a medida del test — sube además 5 tests de z de krom (96.15 → 98.60 ×3,
+98.10 → 98.15 ×2).
+
+`n=100/100 matched  rmse=0.1332  mae=0.1137  max=0.2992 cyc/px` — mismo residuo que
+tiene el propio modelo contra HW; lo que queda es modelo, no implementación.
+
+### Hueco aceptado: `RDPTest/CPU` y `RDPTest/RSP` 100.00 → 99.65
+Esas ROMs de krom imprimen los registros DPC como texto y comparan pantalla contra PNG.
+Su trabajo RDP es un fill rect FILL-cycle a pantalla completa — **sin z ni prim depth**,
+así que el fix de profundidad no puede ser la causa; lo que movió el score es que el
+modelo de coste ya produce contadores no-cero donde antes había ceros. Nosotros pintamos
+`CLOCK = BUFBUSY = PIPEBUSY = $000144E9`; la referencia pinta `$00000000` en los cuatro.
+
+No se toca, y no se hardcodea: (1) en HW los contadores no son cero — el dataset de Thar0
+mide miles de ticks GCLK y el profiler de libultra lee `DPC_CLOCK` sin escribir nunca
+`DPC_STATUS`; una referencia de cero exacto tras un fill de pantalla completa huele a
+captura de emulador que los deja stub. (2) Nuestros tres contadores salen idénticos y el
+coste de FILL-cycle está sin calibrar (el modelo se ajustó sólo con fills de 1/2-cycle
+RGBA16; FILL escribe 64 bits por reloj). Ambas cosas son huecos de modelado reales,
+apuntados en `docs/RDP-TIMING.md`, y necesitan su propio oráculo HW porque el barrido de
+Thar0 nunca entra en FILL.
+
+### Invariantes tras el cambio
+| Modo | systemtest | krom 371 | SM64 300M md5 |
+|------|-----------|----------|----------------|
+| interp | 0/3721 · 0/2 · 0/6 | mean **86.53**, regress 0 | `cbf8aa76…b6ff24b` |
+| JIT | 0/3721 · 0/2 · 0/6 | — | — |
+| threaded | — | — | idéntico a interp |

@@ -213,7 +213,9 @@ public:
   // physical 0x13FF0000. Chars are staged at 0x13FF0020; a length write to
   // 0x13FF0014 flushes them to stdout. Returns true if the address was handled.
   std::vector<u8> isv;                  // staging buffer (lazily sized on first use)
+  u8  isvHdr[0x20] = {};                // the window's header registers (magic, pointers)
   auto isvWrite(u32 phys, u32 value, u32 nbytes) -> bool;
+  auto isvRead(u32 phys, u32 nbytes, u32& out) -> bool;   // header/buffer readback
 
   // PI/cartridge write-latch. Writing to cart space does not reach ROM; it latches
   // the value onto the PI bus, and the very next cart read returns it before the

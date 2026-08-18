@@ -162,7 +162,7 @@ RDP/16BPP/Line/Plot/FillLine/PlotFillLine16BPP320X240	99.87	99.87	4.81
 RDP/16BPP/Line/Rotate/FillLine/RotateFillLine16BPP320X240	0.00	99.33	18.04	
 RDP/16BPP/Rectangle/FillRectangle/Cycle1FillRectangle320x240/Cycle1FillRectangle16BPP320X240	98.74	98.74	23.34	
 RDP/16BPP/Rectangle/FillRectangle/FillRectangle320x240/FillRectangle16BPP320X240	98.64	98.64	23.61	
-RDP/16BPP/Rectangle/FillZBufferRectangle320x240/Cycle1FillZBufferRectangle16BPP320X240	96.15	96.15	39.42	
+RDP/16BPP/Rectangle/FillZBufferRectangle320x240/Cycle1FillZBufferRectangle16BPP320X240	98.60	98.60	22.08	
 RDP/16BPP/Rectangle/TextureRectangle/CopyTextureRectangleRGBA16B320x240/CopyTextureRectangle16BPPRGBA16B320X240	99.53	99.53	13.53	
 RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleI4B320x240/Cycle1TextureRectangle16BPPI4B320X240	94.91	97.10	15.66	
 RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleI8B320x240/Cycle1TextureRectangle16BPPI8B320X240	96.30	97.30	15.59	
@@ -182,7 +182,7 @@ RDP/16BPP/SetPrimColor/SetPrimColor16BPP	98.03	100.00	0.79
 RDP/16BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle16BPP320X240	77.58	94.11	36.96	
 RDP/16BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle16BPP320X240	98.97	98.97	17.80	
 RDP/16BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle16BPP320X240	98.89	98.89	17.73	
-RDP/16BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle16BPP320X240	98.10	98.10	21.73	
+RDP/16BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle16BPP320X240	98.15	98.15	21.27	
 RDP/16BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle16BPP320X240	99.75	99.75	6.70	
 RDP/16BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle16BPP320X240	99.75	99.75	6.70	
 RDP/16BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle16BPP320X240	64.82	64.82	79.10	
@@ -209,7 +209,7 @@ RDP/32BPP/Line/Plot/FillLine/PlotFillLine32BPP320X240	99.87	99.87	5.31
 RDP/32BPP/Line/Rotate/FillLine/RotateFillLine32BPP320X240	99.33	99.33	12.07	
 RDP/32BPP/Rectangle/FillRectangle/Cycle1FillRectangle320x240/Cycle1FillRectangle32BPP320X240	98.74	98.74	23.34	
 RDP/32BPP/Rectangle/FillRectangle/FillRectangle320x240/FillRectangle32BPP320X240	98.64	98.64	24.24	
-RDP/32BPP/Rectangle/FillZBufferRectangle320x240/Cycle1FillZBufferRectangle32BPP320X240	96.15	96.15	39.42	
+RDP/32BPP/Rectangle/FillZBufferRectangle320x240/Cycle1FillZBufferRectangle32BPP320X240	98.60	98.60	22.08	
 RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleI4B320x240/Cycle1TextureRectangle32BPPI4B320X240	89.11	96.81	15.55	
 RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleI8B320x240/Cycle1TextureRectangle32BPPI8B320X240	93.49	97.44	14.53	
 RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleIA16B320x240/Cycle1TextureRectangle32BPPIA16B320X240	93.49	97.75	27.83	
@@ -226,7 +226,7 @@ RDP/32BPP/SetPrimColor/SetPrimColor32BPP	0.08	98.41	26.44
 RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240	77.58	94.11	37.69	
 RDP/32BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle32BPP320X240	98.97	98.97	18.33	
 RDP/32BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle32BPP320X240	98.89	98.89	18.78	
-RDP/32BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle32BPP320X240	98.10	98.10	22.07	
+RDP/32BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle32BPP320X240	98.15	98.15	21.62	
 RDP/32BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle32BPP320X240	99.75	99.75	7.40	
 RDP/32BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle32BPP320X240	99.75	99.75	7.40	
 RDP/32BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle32BPP320X240	64.82	64.82	87.32	
@@ -283,8 +283,8 @@ RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_1	80.48	80.48	83.89
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_2	75.93	75.93	99.75	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_3	67.95	67.95	112.54	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_4	73.75	73.75	101.73	
-RDPTest/CPU/RDPTestCPU	100.00	100.00	0.00	
-RDPTest/RSP/RDPTestRSP	100.00	100.00	0.00	
+RDPTest/CPU/RDPTestCPU	99.65	99.65	13.02	
+RDPTest/RSP/RDPTestRSP	99.65	99.65	13.02	
 RDRAMTest/RDRAMTest	78.77	78.77	87.30	
 RSP/DCT/FastDCTBlockDecode/RSPFastDCTBlockDecode	100.00	100.00	0.00	
 RSP/DCT/FastQuantizationBlockDecode/RSPFastQuantizationBlockDecode	100.00	100.00	0.00	
@@ -354,7 +354,7 @@ RSPTest/CPU/XOR/RSPCPUXOR	96.44	96.44	46.59
 RSPTest/DMAAlignment-SP/DMAAlignment-SP-FROM	98.41	98.41	27.14	SIZE 640x240 vs ref 640x480
 RSPTest/DMAAlignment-SP/DMAAlignment-SP-TO	97.83	97.83	31.84	SIZE 640x240 vs ref 640x480
 RSPTest/MEM/IMEM/RSPIMEM	100.00	100.00	0.00	
-RSPTest/XBUS/RSPXBUSRDP	96.15	96.15	39.42	
+RSPTest/XBUS/RSPXBUSRDP	98.60	98.60	22.08	
 Video/Devo-TimeOutForFun/Devo-TimeOutForFun	19.71	25.45	109.47	
 Video/GRB12Decode/RDP/RDPGRB12Decode	0.00	0.06	144.68	
 Video/GRB12LZDIFFRLEVideo/GRB12LZDIFFRLEVideo	0.00	0.06	144.68	

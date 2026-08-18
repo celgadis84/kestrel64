@@ -368,9 +368,13 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   if(hasZ && !zSrc) {
     int zb = 4 + (hasShade ? 8 : 0) + (hasTex ? 8 : 0);
     if(zb + 1 < words) {
-      Zs   = (double)(s32)(u32)(w[zb] >> 32)   / 65536.0;
-      dZdx = (double)(s32)(u32) w[zb]          / 65536.0;
-      dZde = (double)(s32)(u32)(w[zb + 1] >> 32) / 65536.0;
+      // >>13, not >>16: the depth unit consumes bits 31:13 of the s15.16 attribute,
+      // so the value it compares and stores is 18-bit with 3 fractional bits. Dropping
+      // to whole units would throw away precision the z-buffer's float format keeps
+      // (its far segments step by 1 in this domain) — see SET_PRIM_DEPTH below.
+      Zs   = (double)(s32)(u32)(w[zb] >> 32)     / 8192.0;
+      dZdx = (double)(s32)(u32) w[zb]            / 8192.0;
+      dZde = (double)(s32)(u32)(w[zb + 1] >> 32) / 8192.0;
     }
   }
 
@@ -989,7 +993,14 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       k3 = s9((u32)(cmd >> 18)); k4 = s9((u32)(cmd >> 9));  k5 = s9((u32)cmd);
       break;
     }
-    case 0x2e: prim_z = (u32)(cmd >> 16) & 0xffff; break;  // SET_PRIM_DEPTH (Z<<16 | dZ)
+    // SET_PRIM_DEPTH (Z<<16 | dZ). The Z field is a 15-bit integer depth that the RDP
+    // loads into the same s15.16 attribute the triangle z interpolator produces, and the
+    // depth unit then takes bits 31:13 of that — an 18-bit value, 3 bits of it fractional.
+    // Storing the bare 15-bit number instead costs those 3 bits, and they matter: near
+    // z=0x7FFF the z-buffer's floating format has 1-unit steps in the 18-bit domain but
+    // 64-unit steps in the 15-bit one, so successive prim depths 1 apart all quantize to
+    // the same stored value and every depth compare after the first fails.
+    case 0x2e: prim_z = ((u32)(cmd >> 16) & 0x7fff) << 3; break;
     case 0x2f:                                          // SET_OTHER_MODES
       other_hi = (u32)(cmd >> 32) & 0x00ff'ffff;
       other_lo = (u32)cmd;

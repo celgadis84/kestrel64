@@ -364,7 +364,36 @@ auto Memory::isvWrite(u32 phys, u32 value, u32 nbytes) -> bool {
       isv[off + i] = (u8)(value >> (8 * (nbytes - 1 - i)));
     return true;
   }
-  return true;  // swallow other control words in the window (e.g. 0x13FF0000 magic)
+  // Header registers below the buffer. The real IS-Viewer is a devkit cartridge with
+  // RAM in this window, and probes rely on that: libdragon's isviewer_init() writes a
+  // magic word to 0x13FF0000 and reads it back to decide the device is present. Backing
+  // the header with actual storage is what the hardware does; leaving the readback to
+  // the PI bus latch only happens to work.
+  u32 off = phys - 0x13ff'0000;
+  for(u32 i = 0; i < nbytes && off + i < sizeof(isvHdr); i++)
+    isvHdr[off + i] = (u8)(value >> (8 * (nbytes - 1 - i)));
+  return true;
+}
+
+// Readback of the IS-Viewer window. Mirrors isvWrite: header registers below 0x20,
+// text staging buffer above it. Returns false when the window is untouched, so an
+// unprobed cartridge keeps its normal ROM/open-bus behaviour.
+auto Memory::isvRead(u32 phys, u32 nbytes, u32& out) -> bool {
+  if(phys < 0x13ff'0000 || phys >= 0x1400'0000 || isv.empty()) return false;
+  auto gather = [&](const u8* p, u32 avail) {   // big-endian, zero past the region
+    u32 v = 0;
+    for(u32 i = 0; i < nbytes; i++) v = (v << 8) | (i < avail ? p[i] : 0u);
+    return v;
+  };
+  if(phys >= 0x13ff'0020) {
+    u32 off = phys - 0x13ff'0020;
+    if(off >= isv.size()) return false;
+    out = gather(isv.data() + off, (u32)isv.size() - off);
+    return true;
+  }
+  u32 off = phys - 0x13ff'0000;
+  out = gather(isvHdr + off, (u32)sizeof(isvHdr) - off);
+  return true;
 }
 
 // --- cartridge / PI bus ------------------------------------------------------
@@ -384,6 +413,8 @@ auto Memory::cartRom32(u32 phys) -> u32 {
 // ROM read, mangled by the 16-bit-wide PI bus: sub-word reads only reach the UPPER
 // halfword of each 32-bit word (a LB/LH of the lower half aliases to the upper).
 auto Memory::cartRead(u32 phys, u32 nbytes) -> u32 {
+  u32 isvVal = 0;
+  if(isvRead(phys, nbytes, isvVal)) return isvVal;
   u64 now = cartClock ? *cartClock : 0;
   if(cartLatchValid && now < cartLatchExpiry) {
     u32 v = cartLatch;

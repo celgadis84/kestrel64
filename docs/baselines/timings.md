@@ -17,6 +17,13 @@ Measured 2026-08-18, commit = DPC counters + RSP threaded launch/PC-publication 
 | SM64 300M ops (framebuffer md5) | 20 s | 15 s | 16 s |
 | **`validate.sh all` total** | **~180 s** | **~132 s** | **~175 s** |
 
+Not part of `validate.sh` (run it by hand when the RDP cost model or the depth path
+changes — see `docs/RDP-TIMING.md`):
+
+| Battery | interp |
+|---------|--------|
+| RDP-Timing-Tests sweep (`rdp_fill_timing.z64`, `TOTAL_RUNS=8`, 100 configs) | 97 s |
+
 systemtest's own internal report ("Finished in N s") is ~7 s in every mode; the rest
 of the wall time is ROM load plus boot. The historical 6.86 s quoted throughout
 STATUS.md is that internal figure, not wall clock — do not compare the two.
