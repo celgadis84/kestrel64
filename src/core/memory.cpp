@@ -587,7 +587,7 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     switch(off & 0xff) {
     case 0x00: return rcp.dpc_start;
     case 0x04: return rcp.dpc_end;
-    case 0x08: return rcp.dpc_current;
+    case 0x08: return rcp.dpc_current.load(std::memory_order_acquire);
     case 0x0c: return rcp.dpc_status | 0x80u;   // COMMAND_BUFFER_READY: the soft RDP is
                                                  // always ready to accept a new command list
     // Performance counters, 24-bit each. The RDP accumulates them per rasterized
@@ -771,7 +771,10 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
           // start() leia sp_pc cuando al planificador le venia bien — con la CPU rapida
           // (JIT) la escritura siguiente ganaba la carrera y el microcodigo arrancaba en
           // otra direccion: nunca llegaba al BREAK y el test giraba para siempre.
-          if(wasHalted) { rsp.mem = this; rsp.start(); rspSubmitKick(); }
+          static const int rspInline = std::getenv("KESTREL_RSPINLINE") ? 1 : 0;
+          if(wasHalted) { rsp.mem = this; rsp.start();
+            if(rspInline) rsp.step(~0ull);   // diagnostico: RSP sincrono dentro del hilo CPU
+            else          rspSubmitKick(); }
         } else {
           if(!rsp.running) { rsp.mem = this; rsp.start(); }   // arm; System::run steps it interleaved
         }
@@ -796,19 +799,26 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // CURRENT reloads from START only when a fresh START is pending (START_VALID).
       // Otherwise the RDP continues from where CURRENT sits — the streaming case,
       // where many END bumps follow a single START.
-      if(rcp.dpc_status & 0x400u) { rcp.dpc_current = rcp.dpc_start; rcp.dpc_status &= ~0x400u; }
+      if(rcp.dpc_status & 0x400u) { rcp.dpc_current.store(rcp.dpc_start, std::memory_order_release);
+                                    rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u; }
       if(!(rcp.dpc_status & (1u << 1))) { // not frozen
         bool xbus = rcp.dpc_status & 0x1u;   // DP_STATUS_XBUS: fetch commands from DMEM
         // Kicking the FIFO starts the graphics clock and marks the pipe busy; both
         // stay set until a SYNC_FULL drains the pipe (DP_STATUS "flags during a run").
         rcp.dpc_status |= 0x8u | 0x20u;      // START_GCLK | PIPE_BUSY
-        u32 cur = rcp.dpc_current;
-        rcp.dpc_current = rcp.dpc_end;       // CURRENT tracks END immediately (CPU view)
+        // Se encola desde donde quedo el ULTIMO encolado, no desde CURRENT: CURRENT es
+        // ahora el avance real del rasterizador y puede ir por detras si el RDP sigue
+        // ocupado con el trabajo anterior.
+        u32 cur = rcp.dpc_submitted;
+        rcp.dpc_submitted = rcp.dpc_end;
         // Lockstep: rasterize synchronously (deterministic, systemtest path).
         // Threaded: enqueue; the RDP worker rasterizes async and raises MI_DP itself.
         // Both routes funnel through rdpRunJob, so results are identical — only the
         // DP-interrupt/pixel-visibility *timing* differs, exactly as on hardware.
-        if(rcpMode == RcpMode::Threaded) rdpSubmit(cur, rcp.dpc_end, xbus);
+        // Diagnostico: KESTREL_RDPINLINE corre el RDP en el hilo CPU aun en modo threaded.
+        // Sirve para bisecar que worker introduce una carrera, no para uso normal.
+        static const int rdpInline = std::getenv("KESTREL_RDPINLINE") ? 1 : 0;
+        if(rcpMode == RcpMode::Threaded && !rdpInline) rdpSubmit(cur, rcp.dpc_end, xbus);
         else                             rdpRunJob(cur, rcp.dpc_end, xbus);
       }
       // (frozen: no run, CURRENT stays where the START reload left it)
@@ -973,6 +983,8 @@ auto Memory::piDma(bool toCart) -> void {
   bool firstBlock = true;
   u32 cart = rcp.pi_cart_addr & 0x1fff'fffe;
   u32 dram = rcp.pi_dram_addr & 0x00ff'ffff;
+  if(dram < 0x400u)
+    std::fprintf(stderr, "[dma!] PI->RDRAM sobre vectores: dram=0x%06x len=%d\n", dram, (int)length);
   while(length > 0) {
     s32 misalign = (s32)(dram & 7);
     s32 distEndOfRow = 0x800 - (s32)(dram & 0x7ff);
@@ -1024,6 +1036,12 @@ auto Memory::spDma(bool toRam) -> void {
   bool imem    = (memAddr & 0x1000) != 0;
   u32 memOff   = memAddr & 0xff8;
   u32 dramAddr = rcp.sp_dram_addr & 0xfffff8;
+  // Invariante: los vectores de excepcion (0x0-0x400) no son destino legitimo de
+  // ningun DMA. Si alguno apunta ahi, el kernel del juego queda sin manejador y la
+  // siguiente interrupcion se va a la nada: avisar en el acto.
+  if(toRam && dramAddr < 0x400u)
+    std::fprintf(stderr, "[dma!] SP->RDRAM sobre vectores: dram=0x%06x len=%u\n", dramAddr, length);
+
   std::vector<u8>& sp = imem ? this->imem : this->dmem;
   if(watchAddr && toRam)
     std::fprintf(stderr, "[spDma] %s->RDRAM dram=0x%06x memOff=0x%03x len=%u count=%u skip=%u by pc=0x%08x\n",
@@ -1190,13 +1208,18 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   }
   if(vrdp::active()) {
     bool sync = vrdp::runFifo(rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus);
+    rcp.dpc_current.store(end, std::memory_order_release);
     if(sync) {
       rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
       raiseIntr(MI_DP);
     }
     return;
   }
+  // El rasterizador publica su puntero de lectura en DPC_CURRENT mientras consume el
+  // FIFO: es lo que el microcodigo mira para saber cuanto buffer puede reutilizar.
+  softRdp.curOut = &rcp.dpc_current;
   u32 nc = softRdp.run(*this, current, end, xbus);
+  rcp.dpc_current.store(end, std::memory_order_release);
   if(std::getenv("KESTREL_RDPTRACE")) {
     static u32 dpCalls = 0;
     if(dpCalls++ < 40)
@@ -1210,9 +1233,25 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   }
 }
 
+auto Memory::evDump(u32 n) -> void {
+  if(!evOn) { std::fprintf(stderr, "[ev] apagado (KESTREL_EVLOG=1 para grabar)\n"); return; }
+  u32 end = evIdx.load(std::memory_order_relaxed);
+  if(n > kEvN) n = kEvN;
+  u32 first = end > n ? end - n : 0;
+  std::fprintf(stderr, "[ev] ultimos %u eventos (clk = instrucciones retiradas)\n", end - first);
+  for(u32 i = first; i < end; i++) {
+    const Ev& e = evRing[i & (kEvN - 1)];
+    if(!e.tag) continue;
+    std::fprintf(stderr, "[ev] %12llu %-8s %08x %08x\n",
+                 (unsigned long long)e.clk, e.tag, e.a, e.b);
+  }
+  std::fflush(stderr);
+}
+
 auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   {
     std::lock_guard<std::mutex> lk(rdpMx);
+    ev("dp.sub", current, end);
     rdpQueue.push_back({current, end, xbus});
     rdpBusy.store(true, std::memory_order_relaxed);
   }
@@ -1238,6 +1277,7 @@ auto Memory::rdpWorkerLoop() -> void {
     rdpBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
     rdpJobsRun.fetch_add(1, std::memory_order_relaxed);
+    ev("dp.done", job.end, (u32)rdpQueue.size());
     {
       std::lock_guard<std::mutex> lk(rdpMx);
       if(rdpQueue.empty()) rdpBusy.store(false, std::memory_order_relaxed);
@@ -1275,6 +1315,7 @@ auto Memory::rspSubmitKick() -> void {
     rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); });
     rspBusy.store(true, std::memory_order_release);
     rspKick = true;
+    ev("sp.kick", rcp.sp_pc, rcp.sp_status.load());
   }
   rspCv.notify_all();   // ver nota en rdpSubmit: worker y drenador comparten condvar
 }
@@ -1296,6 +1337,7 @@ auto Memory::rspWorkerLoop() -> void {
     rspBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
     rspJobsRun.fetch_add(1, std::memory_order_relaxed);
+    ev("sp.done", rcp.sp_pc, rcp.sp_status.load());
     // El flag SE BAJA CON EL MUTEX COGIDO. Sin el, la tienda+notify puede caer entre el
     // chequeo del predicado del esperador (que vio rspBusy=true, bajo el mutex) y el
     // registro de su espera: la notificacion se pierde y la CPU duerme para siempre
@@ -1307,6 +1349,7 @@ auto Memory::rspWorkerLoop() -> void {
 }
 
 auto Memory::startRcpThreads() -> void {
+  if(const char* e = std::getenv("KESTREL_EVLOG")) { evOn = true; evLvl = std::atoi(e); }
   if(rcpMode != RcpMode::Threaded) return;
   if(!rdpWorker.joinable()) { rdpStop = false; rdpWorker = std::thread([this]{ rdpWorkerLoop(); }); }
   if(!rspWorker.joinable()) { rspStop = false; rspWorker = std::thread([this]{ rspWorkerLoop(); }); }

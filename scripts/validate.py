@@ -441,19 +441,10 @@ def gate_sm64(mode, args):
     return want is None or want == md5
 
 
-def gate_bench(mode, args):
-    """Velocidad honesta: tiempo de pared para una cantidad FIJA de trabajo guest.
-
-    Mips no vale como metrica en modo threaded — una CPU mas rapida solo gasta mas
-    instrucciones girando en el spin-wait, asi que "mejorar" el numero puede ser una
-    regresion real. Aqui el trabajo es fijo (N campos VI de un juego real) y lo que
-    se mide es cuanto tarda el reloj de pared. Se repite y se queda el MINIMO, que es
-    la muestra menos contaminada por el resto del sistema.
-    """
+def _bench_once(mode, args, flips):
+    """Una medida: N campos VI, se repite --bench-runs veces y se queda el MINIMO
+    (la muestra menos contaminada por el resto del sistema). Devuelve (mejor, hb)."""
     rom = Path(args.bench_rom) if args.bench_rom else ROMS / "Super Mario 64 (USA).z64"
-    if not rom.exists():
-        print(f"bench: SKIP (missing {rom})")
-        return True
     save = rom.with_suffix(".eep")
     dump = OUT / f"bench-{mode}.bmp"
     times, lines = [], []
@@ -467,29 +458,61 @@ def gate_bench(mode, args):
         # spin-wait, asi que ese tope convierte una mejora en un tiempo menor sin que el
         # guest haya avanzado igual. Se verifica ademas con la linea [frames] del emulador.
         rc, log = run_rom(rom, dump, mode, args.bench_insn, args.sm64_timeout,
-                          frames=(args.bench_flips, 0),
-                          extra_env={"KESTREL_HEARTBEAT": "1"})
+                          frames=(flips, 0), extra_env={"KESTREL_HEARTBEAT": "1"})
         dt = time.time() - t0
         got = re.search(r"\[frames\] (\d+) buffer swaps", log)
-        if not got or int(got.group(1)) < args.bench_flips:
-            print(f"bench[{mode}]: INVALIDO — la corrida no llego a {args.bench_flips} campos "
+        if not got or int(got.group(1)) < flips:
+            print(f"bench[{mode}]: INVALIDO — la corrida no llego a {flips} campos "
                   f"({'sin [frames]' if not got else got.group(1)+' campos'}); sube --bench-insn")
-            return False
-        if rc != 0 and rc != -9:
-            pass
+            return None, ""
         hb = [l for l in log.splitlines() if l.startswith("[hb]")]
         times.append(dt)
         lines.append(hb[-1] if hb else "")
-        print(f"bench[{mode}] run {i+1}/{args.bench_runs}: {dt:.2f}s")
+        print(f"bench[{mode}] {flips} campos, run {i+1}/{args.bench_runs}: {dt:.2f}s")
     if save.exists():
         save.unlink()
     best = min(times)
-    # Un campo VI = 1/60 s de video guest (NTSC ~59.94). Realtime = trabajo/tiempo.
-    guest = args.bench_flips / 60.0
-    print(f"bench[{mode}]: {args.bench_flips} campos VI  min {best:.2f}s  "
-          f"med {sorted(times)[len(times)//2]:.2f}s  ->  {100.0*guest/best:.1f}% realtime")
-    if lines[times.index(best)]:
-        print("   " + lines[times.index(best)])
+    return best, lines[times.index(best)]
+
+
+def gate_bench(mode, args):
+    """Velocidad honesta: tiempo de pared para una cantidad FIJA de trabajo guest.
+
+    Mips no vale como metrica en modo threaded — una CPU mas rapida solo gasta mas
+    instrucciones girando en el spin-wait, asi que "mejorar" el numero puede ser una
+    regresion real. Aqui el trabajo es fijo (N campos VI de un juego real) y lo que
+    se mide es cuanto tarda el reloj de pared.
+
+    Con --bench-flips2 se miden DOS cantidades de campos. El tiempo total lleva un
+    coste fijo que no es emulacion sostenida (arranque del proceso, carga de la ROM
+    y el tramo de arranque del juego hasta el primer intercambio de buffer, donde no
+    hay campos que contar). Restando las dos medidas ese termino se cancela: la
+    pendiente es la velocidad EN REGIMEN y la ordenada el coste de arranque. Un
+    numero de "% tiempo real" sacado de una sola medida corta mezcla las dos cosas.
+    """
+    rom = Path(args.bench_rom) if args.bench_rom else ROMS / "Super Mario 64 (USA).z64"
+    if not rom.exists():
+        print(f"bench: SKIP (missing {rom})")
+        return True
+    n1 = args.bench_flips
+    best1, hb1 = _bench_once(mode, args, n1)
+    if best1 is None:
+        return False
+    guest1 = n1 / 60.0
+    print(f"bench[{mode}]: {n1} campos VI  min {best1:.2f}s  ->  {100.0*guest1/best1:.1f}% realtime (total)")
+    if args.bench_flips2:
+        n0 = args.bench_flips2
+        best0, _ = _bench_once(mode, args, n0)
+        if best0 is None:
+            return False
+        dwall, dguest = best1 - best0, (n1 - n0) / 60.0
+        if dwall <= 0:
+            print(f"bench[{mode}]: dos puntos INVALIDO (mas campos tardaron menos: {best0:.2f}s -> {best1:.2f}s)")
+        else:
+            print(f"bench[{mode}]: en regimen {100.0*dguest/dwall:.1f}% realtime "
+                  f"({dguest:.2f}s de video en {dwall:.2f}s)  |  arranque fijo {best0 - n0/60.0*dwall/dguest:.2f}s")
+    if hb1:
+        print("   " + hb1)
     return True
 
 
@@ -525,6 +548,8 @@ def main():
     ap.add_argument("--st-timeout", type=int, default=300)
     ap.add_argument("--bench-runs", type=int, default=3, help="bench: repeticiones (se queda el minimo)")
     ap.add_argument("--bench-flips", type=int, default=200, help="bench: campos VI de trabajo fijo")
+    ap.add_argument("--bench-flips2", type=int, default=0,
+                    help="bench: segundo punto de medida; la resta cancela el coste de arranque")
     ap.add_argument("--bench-rom", help="bench: ROM alternativa (por defecto SM64)")
     ap.add_argument("--bench-insn", type=int, default=20_000_000_000,
                     help="bench: red de seguridad de instrucciones; el corte real son los campos VI")

@@ -51,8 +51,47 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
 // inicialización en CADA vuelta del bucle, o sea por instrucción emulada.
 static const bool g_jitOn = envFlag("KESTREL_JIT", true);
 
+// Diagnostico opt-in: vigilante de las listas de hilos de libultra. KESTREL_QCHK=<addr>
+// apunta a la variable de cabecera de la cola (p.ej. __osRunQueue) y cada KESTREL_QCHKN
+// instrucciones se recorre la cadena exigiendo el invariante del kernel: todo hilo
+// encolado esta RUNNABLE(2) y la cadena termina en el centinela de prioridad -1. La
+// primera violacion vuelca el anillo de PCs y el de eventos, que es justo la ventana
+// donde se rompio la seccion critica del guest.
+static auto guestQueueBroken(CPU& cpu, u32 qaddr, char* why, size_t whyN) -> bool {
+  // Lectura COHERENTE: las estructuras del kernel viven en KSEG0, asi que una linea
+  // sucia de la D-cache tapa lo que hay en RDRAM. Mirar la RAM cruda daria falsos
+  // positivos (se ve el valor viejo de una cabeza de cola ya reescrita en cache).
+  auto rd32 = [&](u32 a) -> u32 {
+    u32 p = a & 0x1fff'ffffu;
+    return ((u32)cpu.peekPhysCoherent(p) << 24) | ((u32)cpu.peekPhysCoherent(p + 1) << 16)
+         | ((u32)cpu.peekPhysCoherent(p + 2) << 8) | (u32)cpu.peekPhysCoherent(p + 3);
+  };
+  u32 h = rd32(qaddr);
+  for(int n = 0; n < 64; n++) {
+    if(h < 0x8000'0000u || h >= 0x8080'0000u) {
+      std::snprintf(why, whyN, "puntero %08x invalido en el nodo %d", h, n); return true; }
+    if(rd32(h + 0x04) == 0xffff'ffffu) return false;   // centinela __osThreadTail: sana
+    // __osEnqueueThread deja thread->queue apuntando a la cabecera donde lo mete, asi
+    // que un hilo enlazado aqui cuyo campo queue diga otra cosa esta en dos listas.
+    u32 q = rd32(h + 0x08);
+    if(q != qaddr) {
+      std::snprintf(why, whyN, "hilo %08x enlazado en la cola pero su campo queue dice %08x (state=%u)",
+                    h, q, rd32(h + 0x10) >> 16); return true; }
+    h = rd32(h + 0x00);
+  }
+  std::snprintf(why, whyN, "cadena sin centinela tras 64 nodos");
+  return true;
+}
+
 auto System::stepCpu(u64 n) -> u64 {
   const bool jitOn = g_jitOn;
+  static const u32 qchkAddr  = std::getenv("KESTREL_QCHK")
+                             ? (u32)std::strtoul(std::getenv("KESTREL_QCHK"), nullptr, 0) : 0u;
+  static const u32 qchkEvery = !qchkAddr ? 0u : std::getenv("KESTREL_QCHKN")
+                             ? (u32)std::strtoul(std::getenv("KESTREL_QCHKN"), nullptr, 0) : 1024u;
+  static const u32 qchkAfter = std::getenv("KESTREL_QCHKAFTER")
+                             ? (u32)std::strtoul(std::getenv("KESTREL_QCHKAFTER"), nullptr, 0) : 30u;
+  static u32 qchkTick = 0;
   u64 i = 0;
   while(i < n && !cpu.halted) {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
@@ -67,6 +106,25 @@ auto System::stepCpu(u64 n) -> u64 {
     }
     cpu.step();
     i++;
+    // Solo se mira con interrupciones habilitadas y fuera de excepcion: dentro de
+    // __osDisableInt el kernel esta a medio enlazar y el invariante no aplica.
+    // El arranque no cuenta: bzero de las estructuras del kernel viola el invariante
+    // legitimamente, asi que la vigilancia empieza pasados unos campos de video.
+    if(qchkEvery && ++qchkTick >= qchkEvery && memory.rcp.viFlips >= qchkAfter
+       && ((u32)cpu.cop0[12] & 0x7) == 0x1) {
+      qchkTick = 0;
+      char why[160];
+      if(guestQueueBroken(cpu, qchkAddr, why, sizeof why)) {
+        std::fprintf(stderr, "[qchk] cola %08x ROTA: %s  retired=%llu pc=%08x\n",
+                     qchkAddr, why, (unsigned long long)cpu.retired, (u32)cpu.pc);
+        cpu.wDump(48);
+        cpu.pcRingDump(400);
+        memory.evDump(60);
+        std::fflush(stderr);
+        cpu.halted = true;
+        return i;
+      }
+    }
     // Debug breakpoints: fire when the *next* PC to execute matches (standard
     // "stop before executing addr" semantics). Only scanned while armed → the
     // common no-breakpoint case pays a single empty()-check per instruction.
@@ -137,6 +195,30 @@ auto System::run() -> void {
   // Ciclos de RSP: los publica el propio core en cada step(), asi que el contador vale igual
   // en Lockstep (interleave del bucle) que en Threaded (tarea entera en el worker).
   auto rspNow = [this]{ return memory.rsp.cyclesRun.load(std::memory_order_relaxed); };
+  // Muestreador de SOLAPE (KESTREL_OCC=<microsegundos>, opt-in). La ocupacion suelta de
+  // cada worker no distingue "RSP y RDP corren a la vez y el techo es la suma de trabajo"
+  // de "se serializan y el techo es la suma de TIEMPOS". Esto lee las dos banderas de golpe
+  // y cuenta los cuatro estados: si el estado 'ambos' es despreciable, se serializan.
+  std::thread occTh;
+  std::atomic<u64> occ[4] = {};
+  if(const char* o = std::getenv("KESTREL_OCC")) {
+    unsigned us = (unsigned)std::strtoul(o, nullptr, 0); if(!us) us = 200;
+    occTh = std::thread([this, us, &occ]{
+      while(!shutdown.load()) {
+        unsigned st = (memory.rspBusy.load(std::memory_order_relaxed) ? 1u : 0u)
+                    | (memory.rdpBusy.load(std::memory_order_relaxed) ? 2u : 0u);
+        occ[st].fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::microseconds(us));
+      }
+      u64 t = 0; for(int i = 0; i < 4; i++) t += occ[i].load();
+      if(!t) t = 1;
+      std::fprintf(stderr, "[occ] muestras=%llu  ninguno=%.1f%%  soloRSP=%.1f%%  soloRDP=%.1f%%  ambos=%.1f%%\n",
+                   (unsigned long long)t, 100.0*occ[0].load()/t, 100.0*occ[1].load()/t,
+                   100.0*occ[2].load()/t, 100.0*occ[3].load()/t);
+      std::fflush(stderr);
+    });
+  }
+
   // Watchdog opt-in (KESTREL_WATCHDOG=<segundos>): un livelock del guest y un hilo CPU
   // bloqueado en un handshake del RCP se ven IGUAL desde fuera. Esto los separa: si
   // retired avanza, gira el guest; si no avanza, la CPU esta parada esperando al RCP.
@@ -165,6 +247,68 @@ auto System::run() -> void {
                      (unsigned)memory.rspBusy.load(), (unsigned)memory.rspKick,
                      (unsigned)memory.rdpBusy.load(), (unsigned)memory.rdpQueue.size(),
                      memory.rcp.mi_intr.load(), memory.rcp.mi_mask);
+        // Un guest que gira con retired subiendo puede estar (a) en un bucle de espera con
+        // las interrupciones abiertas — entonces falta que alguien las levante — o (b) con
+        // IE=0 / EXL=1, esperando algo que nunca llega DENTRO de un handler. Status/Cause/EPC
+        // separan los dos casos, y las cuatro palabras alrededor de la PC dicen qué bucle es.
+        std::fprintf(stderr, "[wdog] status=%08x cause=%08x epc=%016llx count=%08x compare=%08x\n",
+                     (u32)cpu.cop0[12], (u32)cpu.cop0[13], (unsigned long long)cpu.cop0[14],
+                     (u32)cpu.cop0[9], (u32)cpu.cop0[11]);
+        memory.miDump();
+        {
+          u32 ph = (u32)cpu.pc & 0x1fff'ffff;
+          std::fprintf(stderr, "[wdog] code @%08x:", (u32)cpu.pc - 8);
+          for(int k = -2; k <= 2; k++) {
+            u32 a = ph + 4 * k;
+            u32 w = 0;
+            if(a + 4 <= memory.rdram.size()) std::memcpy(&w, memory.rdram.data() + a, 4);
+            std::fprintf(stderr, " %08x", __builtin_bswap32(w));
+          }
+          std::fprintf(stderr, "\n");
+        }
+        // Volcado de hilos del guest (libultra). Un cuelgue "todo el RCP parado y la CPU
+        // girando en el hilo idle" solo se explica desde dentro del SO invitado: que hilos
+        // hay, en que estado, y en que PC quedo congelado cada uno. OSThread se reconoce por
+        // su forma: prioridad razonable, state en {1,2,4,8}, id pequeno y context.pc (+0x11c)
+        // apuntando a codigo de RDRAM. No hay simbolos ni direcciones cableadas de ningun juego.
+        if(std::getenv("KESTREL_GUESTTHREADS")) {
+          // Coherente: una linea sucia de la D-cache tapa la RDRAM (ver guestQueueBroken).
+          auto rd32 = [&](u32 a) -> u32 {
+            u32 p = a & 0x1fff'ffffu;
+            return ((u32)cpu.peekPhysCoherent(p) << 24) | ((u32)cpu.peekPhysCoherent(p + 1) << 16)
+                 | ((u32)cpu.peekPhysCoherent(p + 2) << 8) | (u32)cpu.peekPhysCoherent(p + 3); };
+          std::fprintf(stderr, "[wdog] hilos del guest:\n");
+          int found = 0; u32 qs[8] = {}; int qn = 0;
+          for(u32 a = 0; a + 0x140 <= (u32)memory.rdram.size() && found < 24; a += 4) {
+            u32 pri = rd32(a + 0x04), idst = rd32(a + 0x10), id = rd32(a + 0x14);
+            u32 state = idst >> 16, pc = rd32(a + 0x11c);
+            if(state != 1 && state != 2 && state != 4 && state != 8) continue;
+            if(pri > 255 || id > 64) continue;
+            if((pc & 3) || pc < 0x8000'0000u || pc >= 0x8080'0000u) continue;
+            u32 q = rd32(a + 0x08), sr = rd32(a + 0x118), ra = rd32(a + 0x110);
+            std::fprintf(stderr, "[wdog]   thread@%08x id=%u pri=%u state=%u queue=%08x pc=%08x ra=%08x sr=%08x\n",
+                         0x8000'0000u + a, id, pri, state, q, pc, ra, sr);
+            if(qn < 8) { bool dup = false;
+              for(int k = 0; k < qn; k++) if(qs[k] == q) dup = true;
+              if(!dup && q >= 0x8000'0000u && q < 0x8080'0000u) qs[qn++] = q; }
+            found++;
+          }
+          // Las colas del SO (run queue y colas de mensajes) encadenan OSThread por su
+          // campo next. Si el guest se queda en el hilo idle con hilos de mas prioridad
+          // encolados, la cola es lo unico que lo explica: se vuelca tal cual.
+          for(int k = 0; k < qn; k++) {
+            u32 h = rd32(qs[k] - 0x8000'0000u);
+            std::fprintf(stderr, "[wdog]   cola@%08x -> ", qs[k]);
+            for(int n = 0; n < 8 && h >= 0x8000'0000u && h < 0x8080'0000u; n++) {
+              u32 b = h - 0x8000'0000u;
+              std::fprintf(stderr, "%08x(id=%u pri=%u st=%u) ", h, rd32(b + 0x14), rd32(b + 0x04), rd32(b + 0x10) >> 16);
+              h = rd32(b + 0x00);
+            }
+            std::fprintf(stderr, "fin=%08x\n", h);
+          }
+        }
+        if(std::getenv("KESTREL_PCRING")) cpu.pcRingDump(150);
+        memory.evDump(80);
         std::fflush(stderr);
 #ifdef _WIN32
         if(now == last && cpuTh) {
@@ -189,6 +333,7 @@ auto System::run() -> void {
   using clock = std::chrono::steady_clock;
   auto  winT0 = clock::now();       // sliding speed window (recomputed ~4x/sec)
   u64   winInsn = 0, winRsp = rspNow();
+  u64   winRdpNs = 0, winRspNs = 0, winWaitNs = 0, winFlips = 0;   // bases de la ventana
   auto  hbT0 = winT0, hbLast = winT0;   // heartbeat lifetime baseline
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
 
@@ -230,6 +375,10 @@ auto System::run() -> void {
     if(paused.load() || cpu.halted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       winT0 = clock::now(); winInsn = 0; winRsp = rspNow();  // don't fold idle time into speed
+      winRdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
+      winRspNs = memory.rspBusyNs.load(std::memory_order_relaxed);
+      winWaitNs = memory.cpuWaitNs.load(std::memory_order_relaxed);
+      winFlips = memory.rcp.viFlips;
       continue;
     }
     u64 did;
@@ -312,6 +461,17 @@ auto System::run() -> void {
       n64SpeedPct.store(cpuCps / clocks.cpuTarget() * 100.0, std::memory_order_relaxed);
       rspSpeedPct.store(rspCps / clocks.rspTarget() * 100.0, std::memory_order_relaxed);
       // RDRAM has no per-transaction cycle model yet → leave at 0 (unmodeled).
+      // Ocupacion en la misma ventana: nanosegundos de pared que cada worker paso DENTRO
+      // de un trabajo, y cuantos intercambios de buffer hubo (= fps de verdad del juego).
+      u64 rdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
+      u64 rspNs = memory.rspBusyNs.load(std::memory_order_relaxed);
+      u64 witNs = memory.cpuWaitNs.load(std::memory_order_relaxed);
+      u64 flips = memory.rcp.viFlips;
+      rdpBusyPct.store((rdpNs - winRdpNs) / 1e9 / ws * 100.0, std::memory_order_relaxed);
+      rspBusyPct.store((rspNs - winRspNs) / 1e9 / ws * 100.0, std::memory_order_relaxed);
+      cpuWaitPct.store((witNs - winWaitNs) / 1e9 / ws * 100.0, std::memory_order_relaxed);
+      fieldsPerSec.store((flips - winFlips) / ws, std::memory_order_relaxed);
+      winRdpNs = rdpNs; winRspNs = rspNs; winWaitNs = witNs; winFlips = flips;
       winT0 = now; winInsn = 0; winRsp = rspNow();
     }
 
@@ -340,7 +500,9 @@ auto System::run() -> void {
     }
   }
   hostprof::stop();
+  shutdown.store(true);
   if(wdog.joinable()) { shutdown.store(true); wdog.join(); }
+  if(occTh.joinable()) occTh.join();
 }
 
 }  // namespace kestrel

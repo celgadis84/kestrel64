@@ -997,9 +997,14 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   u64 words[24];
   int guard = 0;
   sawSyncFull = false;
+  static bool lowCi = false; static u64 lowMark = 0;
+  static const bool citrace = std::getenv("KESTREL_CITRACE") != nullptr;
   static bool ops = std::getenv("KESTREL_RDPOPS") != nullptr;
   static u32 hist[64] = {};
   while(cur < end && guard++ < 200000) {
+    // Publicar el puntero de lectura ANTES de consumir el comando: el productor debe
+    // ver como ocupado todo lo que aun no se ha leido.
+    if(curOut) curOut->store(cur, std::memory_order_release);
     u64 cmd = fetch(cur);
     u32 op = (cmd >> 56) & 0x3f;
     if(ops) {
@@ -1126,6 +1131,19 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       ci_size = (cmd >> 51) & 3;
       ci_width = ((cmd >> 32) & 0x3ff) + 1;
       ci_addr = (u32)cmd & 0x00ff'ffff;
+      // Diagnostico: ningun juego pone su framebuffer encima de los vectores de
+      // excepcion de libultra (0x0-0x400) ni del area del OS. Si aparece aqui es que
+      // el FIFO se ha desincronizado o el puntero llego corrupto: avisar con el
+      // comando crudo y la posicion del FIFO para poder rastrear el origen.
+      if(ci_addr < 0x400u || citrace) {
+        lowCi = true; lowMark = pxWrites;
+        std::fprintf(stderr, "[rdp!] SET_COLOR_IMAGE bajo: addr=%06x cmd=%016llx fifo=%08x\n",
+                     ci_addr, (unsigned long long)cmd, cur);
+      } else if(lowCi) {
+        lowCi = false;
+        std::fprintf(stderr, "[rdp!]   ...se escribieron %llu pixeles con el CI bajo\n",
+                     (unsigned long long)(pxWrites - lowMark));
+      }
       break;
     default: break;                                     // sync/tlut/other → no-op for now
     }

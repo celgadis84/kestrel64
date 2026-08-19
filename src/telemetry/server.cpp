@@ -122,6 +122,15 @@ auto Server::cmdStatus(const json::Value&, json::Value& data) -> void {
     oc.set("rsp",   system.clocks.rspOc);
     oc.set("rdram", system.clocks.rdramOc);
     sp.set("overclock", oc);
+    // Ocupacion de los workers: en modo threaded el % de CPU sube cuando la CPU gira
+    // esperando al RCP, asi que sin esto el estado enganaria. cpuWait alto = el palo
+    // largo es un worker; rdp/rsp altos dicen cual.
+    json::Value oc2 = json::Value::object();
+    oc2.set("rdpBusyPct", system.rdpBusyPct.load(std::memory_order_relaxed));
+    oc2.set("rspBusyPct", system.rspBusyPct.load(std::memory_order_relaxed));
+    oc2.set("cpuWaitPct", system.cpuWaitPct.load(std::memory_order_relaxed));
+    oc2.set("fps", system.fieldsPerSec.load(std::memory_order_relaxed));
+    sp.set("occupancy", oc2);
     data.set("speed", sp);
   }
   if(system.rom.valid()) {
@@ -335,7 +344,7 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   json::Value dp = json::Value::object();
   dp.set("start", (u64)r.dpc_start);
   dp.set("end", (u64)r.dpc_end);
-  dp.set("current", (u64)r.dpc_current);
+  dp.set("current", (u64)r.dpc_current.load());
   dp.set("clock", (u64)r.dpc_clock.load());
   dp.set("bufbusy", (u64)r.dpc_bufbusy.load());
   dp.set("pipebusy", (u64)r.dpc_pipebusy.load());

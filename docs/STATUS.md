@@ -2390,6 +2390,12 @@ sh scripts/gate_all.sh     # las cinco modalidades + krom en un solo log
 | threaded (CPU interp) | 44.7 s | 22.4 % |
 | **threaded-jit** | **10.1 s** | **99.1 %** |
 
+> **ESTA TABLA ES FALSA — no se reproduce.** Se midio antes de que `bench` exigiera la
+> linea `[frames] N buffer swaps`: las corridas cortaban por el tope de instrucciones sin
+> haber pintado los 600 campos, asi que lo cronometrado no era el mismo trabajo guest en
+> todos los modos. Numeros honestos (mismo host, 600 campos verificados) en la entrada
+> **2026-08-19 — DPC_CURRENT** de mas abajo.
+
 O sea: el binario ya corria SM64 a tiempo real, pero `KESTREL_THREADS` y `KESTREL_JIT`
 estaban en OFF por defecto. Quien lanzaba `kestrel64.exe rom.z64` a secas se llevaba el
 12.8 % — 7.7x mas lento que el MISMO binario bien configurado. Esa era la comparacion
@@ -2442,3 +2448,104 @@ ambito de fichero (inicializacion antes de `main`, sin guarda).
 
 Validado: systemtest 0/3721·0/2·0/6 y sm64 md5 en las cinco modalidades, krom 371/371 sin
 regresion (mean_exact 88.87 / mean_close 92.18).
+
+## 2026-08-19 — DPC_CURRENT era mentira: el cuelgue de modo threaded, resuelto
+
+### Sintoma
+
+Modo `threaded` (RCP en hilos, CPU interprete) se colgaba en SM64 pasados unos cientos de
+campos. Bajo el MCP el estado del cuelgue era inconfundible:
+
+- `emu_status`: fps 0, `rdpBusyPct` 0, `rspBusyPct` 0, `cpuWaitPct` 0, insns subiendo.
+- `cpu_registers`: `Status=0xFF03` (IE=1 **y EXL=1** → interrupciones bloqueadas),
+  `Cause=0x80008414` (BD=1, IP2+IP7 pendientes, **ExcCode=5 = AdES**), `pc=0x80246dbc`.
+- `profile_cpu`: 66 % en el fisico `0x360`, 33 % en `0x45a0` — o sea, la CPU giraba
+  DENTRO del area de vectores de excepcion.
+- `read_memory rdram 0x180` (crudo **y** `coherent=1`): todo ceros. El manejador general
+  de libultra no estaba. Cualquier excepcion caia por `nop`s hasta basura, tomaba AdES,
+  re-vectorizaba y volvia a empezar: bucle infinito con EXL=1.
+
+En una corrida sana `0x180` contiene `3c1a8032 275a7650 03400008 00000000`
+(`lui k0,0x8032; addiu k0,k0,0x7650; jr k0`). Alguien lo borraba en marcha.
+
+### Quien lo borraba
+
+Sonda nueva en `SoftRdp` (se queda): si un `SET_COLOR_IMAGE` apunta por debajo de `0x400`
+se avisa con el comando crudo y la posicion del FIFO, y al cambiar de imagen se dice
+cuantos pixeles se llegaron a escribir ahi. Ningun juego pinta encima de los vectores.
+(Ojo con el umbral: SM64 SI pone su **z-buffer en 0x80000400**, por eso el limite es
+`0x400` y no "el primer mega": el borrado de z con `ci=0x400` es legitimo y son 320x224
+pixeles por campo.)
+
+En la corrida colgada aparecian comandos IMPOSIBLES en el FIFO:
+
+```
+[rdp!] SET_COLOR_IMAGE bajo: addr=000000 cmd=ffff03e000000000 fifo=0022bd00
+[rdp!] SET_COLOR_IMAGE bajo: addr=0003c0 cmd=ffff1c20000003c0 fifo=0022cc20
+[rdp!]   ...se escribieron 84 pixeles con el CI bajo
+```
+
+`fmt/size/width` basura y direccion 0 / 0x3c0 → 84 pixeles escritos justo encima de
+`0x180`. El RDP estaba rasterizando **basura**, y esa basura mataba el kernel del juego.
+
+Biseccion con los conmutadores de diagnostico: `KESTREL_RSPINLINE=1` (RSP en el hilo CPU)
+o `KESTREL_RDPINLINE=1` (RDP en el hilo CPU) → cero comandos basura, 300 campos limpios.
+Hacia falta que los DOS trabajadores corrieran a la vez.
+
+### Raiz: CURRENT es el puntero del que LEE, no del que ESCRIBE
+
+En `mmioWrite` de `DPC_END` estaba esto:
+
+```cpp
+u32 cur = rcp.dpc_current;
+rcp.dpc_current = rcp.dpc_end;   // "CURRENT tracks END immediately (CPU view)"
+```
+
+Es decir: al dar la patada, CURRENT saltaba a END **antes de que el RDP hubiera leido
+nada**. En lockstep da igual (el trabajo se ejecuta entero dentro de esa misma llamada),
+pero con el RDP en su hilo es una mentira con consecuencias: en hardware **DPC_CURRENT es
+el puntero de lectura del rasterizador**, y el microcodigo grafico (F3DEX2) lo consulta
+—via `mfc0` del COP0 del RSP, que enruta a los registros DPC— justamente para saber que
+parte del buffer de salida puede reutilizar sin pisar comandos no leidos. Con CURRENT ==
+END el microcodigo creia SIEMPRE que el RDP habia drenado todo, daba la vuelta al buffer
+y reescribia comandos que el hilo del RDP todavia estaba leyendo → el RDP decodificaba
+mitad de un comando viejo y mitad de uno nuevo → `SET_COLOR_IMAGE` basura → pintaba sobre
+los vectores. No era una carrera de memoria del emulador: era el **control de flujo
+productor/consumidor del hardware** roto por un registro falseado.
+
+### Arreglo (semantica de hardware, no parche)
+
+- `rcp.dpc_current` pasa a `std::atomic<u32>` y lo publica **el rasterizador**: `SoftRdp`
+  guarda su puntero de lectura al principio de cada comando (`curOut`), y al terminar el
+  trabajo se fija en `end`. El camino paraLLEl-RDP (GPU) lo fija al terminar el FIFO.
+- Nuevo `rcp.dpc_submitted` = vista del PRODUCTOR (hasta donde se ha encolado ya). La
+  patada de `DPC_END` encola `[dpc_submitted, end)` en vez de `[dpc_current, end)`, que
+  ahora puede ir por detras.
+- `START_VALID` recarga los dos punteros desde START, como antes.
+
+Efecto: cuando el microcodigo se acerca a la cola del FIFO, ve CURRENT real, espera, y el
+RDP no vuelve a leer basura nunca. Es exactamente la contrapresion del hardware.
+
+### Guardas que se quedan (invariantes, coste cero en camino normal)
+
+- `[rdp!] SET_COLOR_IMAGE bajo` — imagen de color por debajo de `0x400` (+ contador de
+  pixeles escritos ahi). `KESTREL_CITRACE=1` lista todos los cambios de imagen de color.
+- `[dma!] SP->RDRAM / PI->RDRAM sobre vectores` — cualquier DMA con destino < `0x400`.
+
+### Velocidad honesta despues del arreglo (600 campos VI de SM64 = 10 s de video)
+
+Host i7-870, `build/` con SoftRDP, `[frames] 600 buffer swaps` verificado en todas:
+
+| Modo | 600 campos | % tiempo real |
+|---|---|---|
+| interp (lockstep) | 126.0 s | 7.9 % |
+| jit (lockstep) | 126.9 s | 7.9 % |
+| threaded (CPU interp) | 58 s | 17.2 % |
+| **threaded-jit** | **26.7 s** | **37.5 %** |
+
+ares en este mismo host va al 50-65 % de tiempo real: **kestrel64 sigue por detras**. El
+palo largo esta medido y no es el interprete — con la telemetria de ocupacion nueva
+(`emu_status.occupancy`, tambien en la linea `[hb]`): **RDP 87 % ocupado**, RSP 67 %,
+`cpuWait` ~0. Es decir, el hilo CPU casi nunca espera: manda SoftRDP en el host, y
+despues el RSP LLE. Orden de ataque que sale de ahi: (1) backend paraLLEl-RDP en GPU,
+(2) vectorizar el COP2 del RSP, (3) intereses menores del JIT.

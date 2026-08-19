@@ -55,7 +55,13 @@ struct Rcp {
   bool sp_intr_on_break = false;  // SP_STATUS interrupt-on-break latch
   // DPC (RDP command buffer). dpc_status is read by the CPU while the RDP worker
   // thread clears GCLK/PIPE_BUSY on SYNC_FULL → atomic.
-  u32 dpc_start = 0, dpc_end = 0, dpc_current = 0;
+  u32 dpc_start = 0, dpc_end = 0;
+  // CURRENT es el puntero de LECTURA del rasterizador, no el de escritura del que
+  // encola: el microcodigo grafico lo consulta para no pisar comandos que el RDP
+  // todavia no ha leido. Con el RDP en su propio hilo tiene que reflejar el avance
+  // real, asi que lo publica el rasterizador (de ahi el atomico).
+  std::atomic<u32> dpc_current{0};
+  u32 dpc_submitted = 0;   // hasta donde se ha encolado ya (vista del productor)
   std::atomic<u32> dpc_status{0};
   // DPC performance counters (24-bit, free-running). The RDP worker accumulates
   // them while rasterizing and the CPU reads/clears them, so they are atomic.
@@ -293,20 +299,68 @@ public:
   // 8-byte unit for SD). Consumed by the store; caller then skips the normal write.
   auto miRepeatStore(u32 phys, u64 value, u32 sz) -> void;
 
+  // --- anillo de eventos del RCP (KESTREL_EVLOG=1) ---------------------------
+  // Un cuelgue del guest en modo threaded se ve desde fuera como "la CPU gira y nadie le
+  // levanta nada". Lo que falta saber es la SECUENCIA: quien encolo, quien termino, quien
+  // levanto o bajo que bit de MI, y en que punto del reloj de instrucciones. Esto lo graba
+  // sin bloquear (indice atomico, escritura de una entrada) y el watchdog lo vuelca.
+  struct Ev { const char* tag; u32 a, b; u64 clk; };
+  static constexpr u32 kEvN = 16384;                 // potencia de 2: la mascara es el modulo
+  Ev               evRing[kEvN] = {};
+  std::atomic<u32> evIdx{0};
+  bool             evOn = false;
+  int              evLvl = 0;   // 2 = sin eventos de RDP (ahogan el anillo)
+  // El VI se levanta y se baja cada campo: en el anillo ahoga todo lo demas. Se cuenta.
+  u64              evVi = 0, evViClr = 0;
+  auto ev(const char* tag, u32 a = 0, u32 b = 0) -> void {
+    if(!evOn) return;
+    if(evLvl >= 2 && tag[0] == 0x64) return;   // 'd' = dp.sub / dp.done
+    u32 i = evIdx.fetch_add(1, std::memory_order_relaxed) & (kEvN - 1);
+    evRing[i] = Ev{ tag, a, b, cartClock ? *cartClock : 0 };
+  }
+  auto evDump(u32 n = 80) -> void;
+
+  // Contabilidad de interrupciones MI. En HW cada fuente tiene un latch de un bit: si el
+  // RCP vuelve a levantar una linea que aun no ha sido reconocida, el segundo aviso se
+  // funde con el primero. Aqui se cuenta ese colapso por fuente para poder demostrar si
+  // un despertar se pierde (worker adelantado al ack del huesped) en modo threaded.
+  std::atomic<u32> miRaise[6]{}, miMerge[6]{}, miClear[6]{}, miClearIdle[6]{};
+  static auto miIdx(u32 bit) -> int {
+    return bit==MI_SP?0:bit==MI_SI?1:bit==MI_AI?2:bit==MI_VI?3:bit==MI_PI?4:5; }
+  auto miDump() -> void {
+    static const char* nm[6] = { "SP","SI","AI","VI","PI","DP" };
+    std::fprintf(stderr, "[mi] fuente  raise  fundidas  clear  clear-en-vacio\n");
+    for(int k = 0; k < 6; k++)
+      std::fprintf(stderr, "[mi]   %-4s %7u %9u %6u %10u\n", nm[k], miRaise[k].load(),
+                   miMerge[k].load(), miClear[k].load(), miClearIdle[k].load());
+  }
+
   // --- interrupt aggregation (MI) --------------------------------------------
   auto raiseIntr(u32 bit) -> void {
     static int irqt = std::getenv("KESTREL_IRQTRACE") ? 1 : 0;
     if(irqt) { const char* nm = bit==MI_SP?"SP":bit==MI_SI?"SI":bit==MI_AI?"AI":bit==MI_VI?"VI":bit==MI_PI?"PI":bit==MI_DP?"DP":"?";
       static u32 cnt[6]={}; int idx = bit==MI_SP?0:bit==MI_SI?1:bit==MI_AI?2:bit==MI_VI?3:bit==MI_PI?4:5;
       if(cnt[idx]++ < 12) std::fprintf(stderr,"[irq] %s #%u mask=%02x intr=%02x\n",nm,cnt[idx],rcp.mi_mask,rcp.mi_intr|bit); }
-    rcp.mi_intr |= bit;
+    if(bit == MI_VI) { evVi++; if(evLvl >= 2) ev("mi+", bit, rcp.mi_mask); } else ev("mi+", bit, rcp.mi_mask);
+    {  // fetch_or: el valor previo dice si el latch ya estaba puesto (aviso fundido).
+      u32 prev = rcp.mi_intr.fetch_or(bit, std::memory_order_release);
+      int k = miIdx(bit);
+      miRaise[k].fetch_add(1, std::memory_order_relaxed);
+      if(prev & bit) miMerge[k].fetch_add(1, std::memory_order_relaxed);
+    }
     if((bit & MI_SP) && spTrace()) { static u32 n=0; if(n++<40) std::fprintf(stderr,"[mi] raise SP #%u mask=%02x intr=%02x\n",n,rcp.mi_mask,rcp.mi_intr.load()); }
     if((bit & MI_DP) && spTrace()) { static u32 n=0; if(n++<40) std::fprintf(stderr,"[mi] raise DP #%u mask=%02x intr=%02x\n",n,rcp.mi_mask,rcp.mi_intr.load()); }
   }
   auto clearIntr(u32 bit) -> void {
     if((bit & MI_SP) && spTrace()) { static u32 n=0; if(n++<40) std::fprintf(stderr,"[mi] clear SP #%u\n",n); }
     if((bit & MI_DP) && spTrace()) { static u32 n=0; if(n++<40) std::fprintf(stderr,"[mi] clear DP #%u\n",n); }
-    rcp.mi_intr &= ~bit;
+    if(bit == MI_VI) { evViClr++; if(evLvl >= 2) ev("mi-", bit, rcp.mi_mask); } else ev("mi-", bit, rcp.mi_mask);
+    {  // fetch_and: reconocer una linea que ya estaba baja indica un ack sin evento.
+      u32 prev = rcp.mi_intr.fetch_and(~bit, std::memory_order_acq_rel);
+      int k = miIdx(bit);
+      miClear[k].fetch_add(1, std::memory_order_relaxed);
+      if(!(prev & bit)) miClearIdle[k].fetch_add(1, std::memory_order_relaxed);
+    }
   }
   static auto spTrace() -> bool { static int t = std::getenv("KESTREL_RSPTRACE")?1:0; return t; }
   auto interruptPending() const -> bool { return (rcp.mi_intr & rcp.mi_mask) != 0; }

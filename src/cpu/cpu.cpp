@@ -282,6 +282,7 @@ envflags:
   if(std::getenv("KESTREL_FPDBG")) fpDbg = true;
   if(std::getenv("KESTREL_FPTRACE")) fpTrace = true;
   if(std::getenv("KESTREL_PCRING")) pcRingOn = true;
+  if(const char* w = std::getenv("KESTREL_WATCHP")) wPhys = (u32)std::strtoul(w, nullptr, 0) & 0x1fff'ffffu;
   if(std::getenv("KESTREL_HALT_UNIMPL")) haltUnimpl = true;
   refreshDebugArmed();
 }
@@ -397,6 +398,8 @@ auto CPU::dcWrite(u32 phys, u64 val, u32 size) -> void {
     default: for(u32 i = 0; i < size; i++) l.data[off + i] = (u8)(val >> (8 * (size - 1 - i))); break;
   }
   l.dirty = true;
+  if(__builtin_expect(wPhys != 0, 0) && (phys & ~0xfu) == (wPhys & ~0xfu))
+    wNote((u32)val);
   if(g_dcWriteThrough) for(u32 i = 0; i < size; i++) if(phys+i < mem->rdram.size()) mem->rdram[phys+i] = l.data[off+i];
 }
 
@@ -1215,9 +1218,36 @@ auto CPU::tlbProbe() -> void {
   cop0[C0_Index] = 0x8000'0000u;   // probe failure
 }
 
+auto CPU::wDump(u32 n) -> void {
+  if(!wPhys) { std::fprintf(stderr, "[watch] apagado (KESTREL_WATCHP=<fis>)\n"); return; }
+  u32 have = wIdx < 128u ? wIdx : 128u;
+  if(n > have) n = have;
+  std::fprintf(stderr, "[watch] ultimas %u escrituras CPU a la linea de %08x\n", n, wPhys);
+  for(u32 k = 0; k < n; k++) {
+    u32 i = (wIdx - n + k) % 128u;
+    std::fprintf(stderr, "  ret=%llu pc=%08x val=%08x\n", (unsigned long long)wRing[i].ret, wRing[i].pc, wRing[i].val);
+  }
+  std::fflush(stderr);
+}
+
+auto CPU::pcRingDump(u32 n) -> void {
+  if(!pcRingOn) { std::fprintf(stderr, "[pcring] apagado (KESTREL_PCRING=1)\n"); return; }
+  u32 have = pcRingIdx < (u32)kPcRing ? pcRingIdx : (u32)kPcRing;
+  if(n > have) n = have;
+  std::fprintf(stderr, "[pcring] ultimas %u PCs distintas (antigua->reciente)\n", n);
+  for(u32 k = 0; k < n; k++) {
+    u32 i = (pcRingIdx - n + k) % kPcRing;
+    std::fprintf(stderr, "  %08x: %08x  %s\n", (u32)pcRing[i], opRing[i], disasm(opRing[i], pcRing[i]).c_str());
+  }
+  std::fflush(stderr);
+}
+
 auto CPU::execute(u32 op) -> void {
   if(__builtin_expect(pcRingOn, 0)) {
-   pcRing[pcRingIdx % kPcRing] = curPc; opRing[pcRingIdx % kPcRing] = op; pcRingIdx++;
+   // Un bucle de espera (b .) llenaria el anillo entero y borraria justo lo que interesa:
+   // las instrucciones que llevaron hasta el. Se colapsa el giro sobre la misma PC.
+   if(pcRingIdx == 0 || pcRing[(pcRingIdx - 1) % kPcRing] != curPc) {
+     pcRing[pcRingIdx % kPcRing] = curPc; opRing[pcRingIdx % kPcRing] = op; pcRingIdx++; }
   if(retired>=8195000 && retired<=8225000){
     if((u32)curPc==0x8001aa64){ u32 v0=(u32)gpr[2]; memAbort=false;
       u32 c=mem?mem->read32((v0+12)&0x1fffffff):0,d=mem?mem->read32((v0+16)&0x1fffffff):0; memAbort=false;

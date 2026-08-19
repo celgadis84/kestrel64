@@ -173,11 +173,20 @@ struct CPU {
   u64 bpHits = 0;
   bool trapWild = false;
   // Debug (KESTREL_PCRING): ring of last executed (pc,op) dumped on the line-666 leak fire.
-  static constexpr int kPcRing = 80;
+  static constexpr int kPcRing = 4096;
   u64 pcRing[kPcRing] = {};
   u32 opRing[kPcRing] = {};
   u32 pcRingIdx = 0;
   bool pcRingOn = false;
+  auto pcRingDump(u32 n) -> void;
+  // Vigilancia de una palabra fisica concreta (KESTREL_WATCHP): apunta quien la escribe
+  // desde la CPU. Si la palabra cambia sin aparecer aqui, el escritor fue un DMA/RDP.
+  u32 wPhys = 0;
+  struct WEnt { u64 ret; u32 pc; u32 val; };
+  WEnt wRing[128] = {};
+  u32  wIdx = 0;
+  auto wNote(u32 val) -> void { wRing[wIdx % 128] = WEnt{ retired, (u32)curPc, val }; wIdx++; }
+  auto wDump(u32 n) -> void;
   bool excTrace = false;
   bool fpDbg = false;
   bool fpTrace = false;

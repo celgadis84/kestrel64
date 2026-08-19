@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // kestrel64 — software RDP (M3.2). Consumes the RDP command FIFO
 // (DPC_START..DPC_END, 64-bit commands living in RDRAM) and rasterizes into the
 // RDRAM color/z images the game set up. This is the "first light" renderer: no
@@ -33,6 +34,9 @@ struct SoftRdp {
   bool sawSyncFull = false;
 
   // read-only introspection for telemetry / tracing
+  // Donde publicar el puntero de lectura del FIFO (DPC_CURRENT). Opcional: en las
+  // pruebas unitarias del RDP no hay registros que actualizar.
+  std::atomic<u32>* curOut = nullptr;
   auto colorImage() const -> u32 { return ci_addr; }
   auto colorImageSize() const -> u32 { return ci_size; }
 

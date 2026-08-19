@@ -58,6 +58,14 @@ struct System {
   std::atomic<double> n64SpeedPct{0.0};   // overall (CPU domain) % of realtime
   std::atomic<double> rspSpeedPct{0.0};   // RSP domain % (0 while RSP idle)
   std::atomic<double> rdramSpeedPct{0.0}; // RDRAM domain % (0 until modeled)
+  // Ocupacion de los workers y ritmo de imagen, sobre la MISMA ventana deslizante que el
+  // medidor de velocidad. Sin esto el unico numero visible es el de la CPU, y en modo
+  // threaded ese numero sube cuando la CPU gira en el spin-wait: parece mejor y es peor.
+  // Con la ocupacion al lado se ve quien es el palo largo (RDP, RSP o espera de la CPU).
+  std::atomic<double> rdpBusyPct{0.0};    // % de tiempo de pared con el RDP rasterizando
+  std::atomic<double> rspBusyPct{0.0};    // % de tiempo de pared con el RSP ejecutando
+  std::atomic<double> cpuWaitPct{0.0};    // % del tiempo con el hilo CPU bloqueado en un worker
+  std::atomic<double> fieldsPerSec{0.0};  // intercambios de buffer por segundo = fps reales
   std::atomic<u64>    retiredInsns{0};    // lifetime CPU instructions (=cycles)
   u64                 rspCycles = 0;      // lifetime RSP steps (=cycles), run-thread only
 
