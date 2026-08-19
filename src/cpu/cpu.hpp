@@ -74,6 +74,14 @@ struct CPU {
   //    campo más de lo que ya lo hace un bloque suelto.
   u32  jitChainOps = 0;
   u32  jitOpsBudget = 0;
+  //  - jitGuard = ops que la cadena puede encadenar SIN volver a llamar al trampolin de
+  //    re-validacion. Lo fija el trampolin: es el minimo entre las ops que faltan para el
+  //    borde Count==Compare, lo que queda de ventana del bucle del sistema y un tope duro.
+  //    Solo dos cosas pueden invalidar el permiso sin pasar por el trampolin — ese borde de
+  //    timer (determinista, contado en ops) y una interrupcion asincrona del RCP (que el
+  //    prologo mira en linea) — asi que el resto de eslabones se saltan la llamada entera.
+  //    El driver lo pone a 0 en cada entrada: un permiso nunca cruza dos entradas.
+  u32  jitGuard = 0;
 
   // --- VR4300 primary caches (direct-mapped, write-back) ---------------------
   // Only RDRAM is cacheable; MMIO/cart accesses (KSEG1 / uncached) bypass. The N64

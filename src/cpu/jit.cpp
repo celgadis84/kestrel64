@@ -437,6 +437,9 @@ static const int g_compFailOn = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 // el coste dominante, así que saltar directo al sucesor es la palanca principal.
 // KESTREL_JIT_NOLINK lo apaga para bisecar.
 static const int g_jitLink = std::getenv("KESTREL_JIT_NOLINK") ? 0 : 1;
+// Camino rápido en línea del prólogo re-validable (ver más abajo). KESTREL_JIT_NOFAST=1 lo
+// apaga y deja la llamada al trampolín en cada entrada de bloque (bisección).
+static const int g_jitFast = std::getenv("KESTREL_JIT_NOFAST") ? 0 : 1;
 // Los modos diff ejecutan el bloque como una unidad aislada y lo comparan contra K pasos del
 // intérprete; una cadena enlazada retiraría más ops que K y rompería esa comparación. Son
 // modos de diagnóstico, así que ahí simplemente no se emiten enlaces.
@@ -473,19 +476,57 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   e.mov_r_r(R12, RDX);
   e.sub_rsp_imm8(40);
 
+  const s32 guardOff   = (s32)((char*)&c.jitGuard     - (char*)&c);
+  const s32 timerOff   = (s32)((char*)&c.timerIntr    - (char*)&c);
+  // MI: el prólogo lee (mi_intr & mi_mask) directamente. Las dos viven en la misma línea de
+  // caché de Rcp, así que el segundo acceso es gratis; el desplazamiento es constante.
+  const s32 miMaskDelta = (s32)((char*)&c.mem->rcp.mi_mask - (char*)&c.mem->rcp.mi_intr);
   // Block-linking Step 1: prólogo re-validable. call kestrel_jitProceedTramp(cpu, K); si
   // devuelve 0 (bail: interrupt pendiente o borde de timer) → eax=0, cae al epílogo con pc
   // intacto y el driver re-despacha por la ruta lenta. K aún no se conoce (depende del cuerpo)
   // → placeholder imm32 parcheado con pokeU32 tras compilar. RAX/RCX/RDX son scratch aquí (aún
   // no hay estado guest vivo), RBX/R12 los preserva el trampolín (callee-saved en Win64).
   std::vector<usize> linkBailJmps;   // je (al==0) de cada prólogo → stub de bail
-  usize kImmAt = 0;
+  usize kImmAt = 0, kSubAt = 0;      // imm32 de K: uno en el arg del trampolín, otro en el `sub`
   // Punto de entrada ENLAZADO (Step 3): el marco (push rbx/r12 + mov + sub rsp) ya lo montó el
   // predecesor de la cadena, así que un salto enlazado aterriza AQUÍ, justo en el prólogo
   // re-validable. El epílogo de este bloque desmonta ese marco y retorna al driver que llamó al
   // primer bloque de la cadena — la profundidad de pila no crece con la longitud de la cadena.
   b.linkEntry = c.jitCache->buf.cursor();
   if(g_jitLink) {
+    // Camino rápido EN LÍNEA. El trampolín cuesta una llamada Win64 + una veintena de accesos a
+    // campos repartidos por el struct, y se pagaba en CADA entrada de bloque — o sea cada ~3
+    // instrucciones guest, el 34% del hilo de CPU medido con el perfilador de host. Pero lo que
+    // comprueba solo puede cambiar por dos vías mientras la cadena corre: el borde
+    // Count==Compare (determinista, y el trampolín ya nos dijo cuántas ops faltan → `jitGuard`)
+    // y una interrupción asíncrona del RCP (una lectura de MI, más barata en línea que la
+    // llamada). Todo lo demás — Status/Cause, EPC, halted, el modo del RCP — solo cambia en ops
+    // interpretadas, y esas terminan el bloque y devuelven el control al driver. Así que si hay
+    // permiso y no hay interrupción, se entra al cuerpo sin llamar a nadie.
+    const bool fastOk = g_jitFast;
+    usize fastToSlow[4] = {0,0,0,0}; usize fastToBody = 0; int nSlow = 0;
+    if(fastOk) {
+      e.mov_r32_m(RAX, RBX, guardOff);            // eax = ops permitidas
+      e.alu32_imm(5, RAX, 0);                     // sub eax, K (placeholder)
+      kSubAt = c.jitCache->buf.used - 4;
+      fastToSlow[nSlow++] = e.jb_rel32_placeholder();   // sin margen → trampolín
+      e.mov_r_imm64(RDX, (u64)&c.mem->rcp.mi_intr);
+      e.mov_r32_m(RCX, RDX, 0);                   // ecx = MI_INTR
+      e.and_r32_m(RCX, RDX, miMaskDelta);         // ecx &= MI_MASK
+      fastToSlow[nSlow++] = e.jne_rel32_placeholder();  // interrupción del RCP pendiente
+      e.cmp_m8_imm(RBX, timerOff, 0);             // latch Count==Compare ya disparado
+      fastToSlow[nSlow++] = e.jne_rel32_placeholder();
+      // En LOCKSTEP el hilo CPU interleavea pasos del RSP en cuanto un store lo arranca, así
+      // que un bloque de la cadena que lo arranque tiene que devolver el control. Es un byte
+      // en una línea de caché propia (rsp.running); comprobarlo aquí cuesta lo mismo que en
+      // el trampolín y deja el camino rápido válido en los dos modos del RCP.
+      e.mov_r_imm64(RDX, (u64)&c.mem->rsp.running);
+      e.cmp_m8_imm(RDX, 0, 0);
+      fastToSlow[nSlow++] = e.jne_rel32_placeholder();
+      e.mov_m_r32(RBX, guardOff, RAX);            // consume el permiso
+      fastToBody = e.jmp_rel32_placeholder();
+    }
+    for(int k = 0; k < nSlow; k++) e.patchRel32(fastToSlow[k]);
     e.mov_r_r(RCX, R12);                                    // arg1 = cpu
     e.mov_r_imm32(RDX, 0);                                  // arg2 = K (placeholder)
     kImmAt = c.jitCache->buf.used - 4;                      // offset del imm32 de K
@@ -493,6 +534,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     e.call_reg(RAX);
     e.test_al_al();                                         // al==0 → bail
     linkBailJmps.push_back(e.je_rel32_placeholder());
+    if(fastOk) e.patchRel32(fastToBody);
   }
 
   std::vector<usize> bailSites;   // offset del disp32 del je de cada mem-op
@@ -781,6 +823,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     for(usize k = 0; k < linkBailJmps.size(); k++) e.patchRel32(linkBailJmps[k]);
     e.mov_r_imm32(RAX, 0);
     e.pokeU32(kImmAt, b.nOps);
+    if(kSubAt) e.pokeU32(kSubAt, b.nOps);
   }
   // Epílogo (done): restaura RSP + callee-saved y retorna eax.
   if(haveMain) e.patchRel32(toDoneMain);
@@ -858,6 +901,12 @@ static inline auto randomAdvance(u32 rnd, u32 wired, u32 p) -> u32 {
   return (wi + (n - ((p - d) % n)) % n) & 0x3f;
 }
 
+// Tope del permiso del camino rápido. No es una condición de corrección (el borde de timer y
+// la ventana del sistema ya acotan), sino una correa: garantiza que el trampolín — y con él el
+// commit de jitPending y el presupuesto de cadena — se ejecute con regularidad aunque el guest
+// esté en un bucle enlazado con Compare muy lejos.
+static constexpr u32 kGuardMaxOps = 4096;
+
 auto CPU::jitReenterProceed(u32 K) -> u32 {
   // (0) Commit diferido de la cadena: las ops de los bloques ya ejecutados y aún sin contabilizar.
   // Va PRIMERO para que el chequeo de borde de timer de más abajo vea el Count real de ESTE punto.
@@ -891,6 +940,18 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   if((status & 0x7) == 0x1 && (cause & status & 0xff00)) return 0;   // interrupt pendiente
   u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
   if((u32)(cmp - cnt) <= K) return 0;                                // cruzaría borde de timer
+  // Permiso para el camino rápido del prólogo: cuántas ops MÁS puede encadenar la cadena sin
+  // volver a preguntar. Lo acota lo mismo que acaba de comprobarse aquí — el borde de timer
+  // (determinista: Count avanza 1 por op) y lo que queda de ventana del bucle del sistema —
+  // menos las K de ESTE bloque, que aún no están commiteadas. Lo demás que mira el trampolín o
+  // no puede cambiar dentro de una cadena (Status/Cause por mtc0, halted: terminan bloque) o lo
+  // re-comprueba el propio prólogo en línea (MI, latch de timer).
+  {
+    u32 slack = (u32)(cmp - cnt) - K - 1;                 // > 0 garantizado por la línea de arriba
+    u32 budg  = (K >= jitOpsBudget) ? 0 : (jitOpsBudget - K);
+    u32 g     = slack < budg ? slack : budg;
+    jitGuard  = g < kGuardMaxOps ? g : kGuardMaxOps;
+  }
   return 1;
 }
 // Trampolín extern "C" (dirección plana, ABI Win64 RCX/RDX) que llama el prólogo emitido.
@@ -1150,6 +1211,7 @@ auto CPU::jitTryBlock() -> u32 {
   // op R para vectorizar la excepción exacta, así que aquí solo avanzamos el estado por R.
   jitChain = 0;                       // presupuesto de cadena fresco por entrada del driver
   jitChainOps = 0;                    // ops que la cadena commitee por su cuenta (las sumamos al salir)
+  jitGuard = 0;                       // el primer bloque siempre pasa por el trampolín (chequeo completo)
   u32 Rraw = blk.fn(gpr, this);
   gpr[0] = 0;
   // Bit alto = el bloque terminó en un branch absorbido: ya escribió pc/nextPc/inDelay/
@@ -1172,6 +1234,17 @@ auto CPU::jitTryBlock() -> u32 {
     cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], R);
   }
   cc->hits += R;
+  // Eslabones que entraron por el camino rápido: sus ops quedaron en jitPending porque ningún
+  // trampolín llegó a commitearlas. Se commitean aquí, al salir de la cadena, exactamente como
+  // haría el trampolín (el borde de timer estaba cubierto por el permiso, ver kGuardMaxOps).
+  if(u32 p = jitPending) {
+    jitPending = 0;
+    retired += p;
+    cop0[C0_Count]  = (u32)((u32)cop0[C0_Count] + p);
+    cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], p);
+    cc->hits += p;
+    jitChainOps += p;
+  }
   // R = ops del ÚLTIMO bloque; jitChainOps = las de los eslabones anteriores, ya contabilizadas
   // en retired/Count/hits por el prólogo del sucesor. El total es lo que avanzó el guest.
   return R + jitChainOps;

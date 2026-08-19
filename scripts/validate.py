@@ -461,10 +461,20 @@ def gate_bench(mode, args):
         if save.exists():
             save.unlink()
         t0 = time.time()
-        rc, log = run_rom(rom, dump, mode, args.sm64_insn, args.sm64_timeout,
+        # El tope de instrucciones tiene que quedar MUY por encima: si salta antes que los
+        # campos, lo que se mide es "tiempo hasta N instrucciones", no trabajo guest fijo —
+        # y en modo threaded una CPU mas rapida gasta MAS instrucciones girando en el
+        # spin-wait, asi que ese tope convierte una mejora en un tiempo menor sin que el
+        # guest haya avanzado igual. Se verifica ademas con la linea [frames] del emulador.
+        rc, log = run_rom(rom, dump, mode, args.bench_insn, args.sm64_timeout,
                           frames=(args.bench_flips, 0),
                           extra_env={"KESTREL_HEARTBEAT": "1"})
         dt = time.time() - t0
+        got = re.search(r"\[frames\] (\d+) buffer swaps", log)
+        if not got or int(got.group(1)) < args.bench_flips:
+            print(f"bench[{mode}]: INVALIDO — la corrida no llego a {args.bench_flips} campos "
+                  f"({'sin [frames]' if not got else got.group(1)+' campos'}); sube --bench-insn")
+            return False
         if rc != 0 and rc != -9:
             pass
         hb = [l for l in log.splitlines() if l.startswith("[hb]")]
@@ -514,8 +524,10 @@ def main():
     ap.add_argument("--sm64-timeout", type=int, default=600)
     ap.add_argument("--st-timeout", type=int, default=300)
     ap.add_argument("--bench-runs", type=int, default=3, help="bench: repeticiones (se queda el minimo)")
-    ap.add_argument("--bench-flips", type=int, default=600, help="bench: campos VI de trabajo fijo")
+    ap.add_argument("--bench-flips", type=int, default=200, help="bench: campos VI de trabajo fijo")
     ap.add_argument("--bench-rom", help="bench: ROM alternativa (por defecto SM64)")
+    ap.add_argument("--bench-insn", type=int, default=20_000_000_000,
+                    help="bench: red de seguridad de instrucciones; el corte real son los campos VI")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--vs", choices=sorted(MODES),
                     help="diff against another mode's baseline (default: the same mode)")

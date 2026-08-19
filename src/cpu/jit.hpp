@@ -213,6 +213,29 @@ public:
   auto jmp_rip_mem_placeholder() -> usize {
     buf.emit(0xFF); buf.emit(0x25); usize at = buf.used; imm32(0); return at;
   }
+  // ---- camino rapido del prologo re-validable (Etapa 3b) ---------------------
+  // mov r32, [base+disp]  (8B /r sin REX.W)
+  auto mov_r32_m(Reg dst, Reg base, s32 disp) -> void {
+    if((dst & 8) || (base & 8)) rex(false, dst, 0, base);
+    buf.emit(0x8B); memOperand(dst, base, disp);
+  }
+  // mov [base+disp], r32  (89 /r sin REX.W)
+  auto mov_m_r32(Reg base, s32 disp, Reg src) -> void {
+    if((src & 8) || (base & 8)) rex(false, src, 0, base);
+    buf.emit(0x89); memOperand(src, base, disp);
+  }
+  // and r32, [base+disp]  (23 /r sin REX.W)
+  auto and_r32_m(Reg dst, Reg base, s32 disp) -> void {
+    if((dst & 8) || (base & 8)) rex(false, dst, 0, base);
+    buf.emit(0x23); memOperand(dst, base, disp);
+  }
+  // cmp byte [base+disp], imm8  (80 /7 ib)
+  auto cmp_m8_imm(Reg base, s32 disp, u8 imm) -> void {
+    if(base & 8) rex(false, 0, 0, base);
+    buf.emit(0x80); memOperand(7, base, disp); buf.emit(imm);
+  }
+  // jb rel32 (CF=1, sin prestamo → resta sin margen): placeholder; devuelve offset del disp32.
+  auto jb_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x82); usize at = buf.used; imm32(0); return at; }
   // Reserva 8 bytes alineados para una ranura de enlace; devuelve su offset en el buffer.
   auto reserveSlot() -> usize {
     while(buf.used & 7) buf.emit(0x90);

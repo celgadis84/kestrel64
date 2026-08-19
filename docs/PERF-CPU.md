@@ -320,3 +320,45 @@ Y en el rasterizador, lo mismo: `KESTREL_NOBLEND` / `KESTREL_NOAA` / `KESTREL_NO
 eran `static` locales dentro de funciones **por pixel**. Subidos a ambito de fichero.
 
 Resultado: `rsp 33.6 → 36.5 Mips` emulados (+9 %) sin tocar una sola semantica.
+
+## 12. El `bench` medía mal (y el 99% de tiempo real era falso)
+
+`bench` fija el trabajo guest en N campos VI y cronometra. Pasaba además
+`KESTREL_MAXINSN=900M` como red de seguridad — y ese tope saltaba ANTES que los campos.
+Lo que se estaba midiendo era "tiempo hasta 900M instrucciones", que en modo threaded es
+justo la métrica envenenada que `bench` existe para evitar: el hilo de CPU gasta
+instrucciones girando en el spin-wait del guest, así que una CPU más rápida llega al tope
+antes y "mejora" el cronómetro sin que el guest haya avanzado un solo campo de más.
+
+Corregido: `--bench-insn` (20e9 por defecto, red de seguridad de verdad) y verificación de
+la línea `[frames] N buffer swaps` del emulador — si la corrida no llegó a los N campos, el
+gate falla en vez de dar un número. `--bench-flips` baja a 200: SM64 se atasca entre 200 y
+300 campos (no progresa ni en 19.000M instrucciones, con y sin JIT — defecto aparte, ver
+STATUS), así que 600 campos nunca se alcanzaban.
+
+**Números honestos, SM64, 200 campos VI (i7-870):**
+
+| modo | tiempo | % tiempo real |
+|------|--------|---------------|
+| threaded-jit | 9.84 s | 33.9 % |
+| jit (lockstep) | 30.4 s | 11.0 % |
+
+## 13. El camino rápido del prólogo JIT: correcto, y casi irrelevante
+
+El perfilador de host decía `kestrel_jitProceedTramp` = 34% del HILO de CPU (se llamaba en
+cada entrada de bloque, ~cada 3 instrucciones guest). El prólogo emitido ahora comprueba en
+línea lo único que puede cambiar dentro de una cadena — permiso en ops (`jitGuard`, fijado
+por el trampolín a partir del borde Count==Compare y de la ventana del bucle del sistema),
+`MI_INTR & MI_MASK`, el latch de timer y `rsp.running` — y solo llama al trampolín cuando
+alguno falla. Todo lo demás que el trampolín mira (Status/Cause vía mtc0, `halted`) solo
+cambia en ops que terminan el bloque.
+
+Rinde lo prometido en throughput del hilo de CPU: 456M → 991M instrucciones ejecutadas en
+el mismo intervalo de pared. Y **no mueve la aguja**: −5% en threaded-jit (9.37 → 9.84 s),
++3% en lockstep (31.4 → 30.4 s). Porque el hilo de CPU **no es el camino crítico**: esas
+instrucciones de más son spin-wait del guest esperando al RCP. Ocupación medida en la
+corrida de 200 campos: **RDP 49%, RSP 40%, y suman ≈ el 100% del tiempo de pared** — es
+decir, RSP y RDP se serializan. Ahí está el techo, no en la CPU.
+
+Se queda encendido (`KESTREL_JIT_NOFAST=1` lo apaga): es una mejora real y generalizable del
+dynarec, y el −5% es el síntoma de otro defecto (amplificación del spin-wait), no suyo.
