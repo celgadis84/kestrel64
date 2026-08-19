@@ -843,6 +843,21 @@ static const u32 kChainMax = []{
   return 256u;
 }();
 
+// Avanza Random `p` pasos en O(1). El HW lo decrementa por ciclo y recarga 31 solo cuando
+// coincide EXACTAMENTE con Wired, asi que la secuencia es un ciclo: bajando desde r hasta
+// tocar wired (d = (r-wired) mod 64 pasos) y de ahi un ciclo de n = ((31-wired) mod 64)+1
+// valores. Con Wired<=31 eso es el rango [wired..31] de siempre; con Wired>31 es el barrido
+// completo que ya modelaba el bucle. Se hacia iterando p veces en CADA enlace de bloque —
+// con avgK~3 eran ~30 instrucciones de host por bloque para un registro que el juego casi
+// nunca lee. Misma funcion, sin bucle.
+static inline auto randomAdvance(u32 rnd, u32 wired, u32 p) -> u32 {
+  u32 wi = wired & 0x3f, r = rnd & 0x3f;
+  u32 d  = (r - wi) & 0x3f;                       // pasos hasta tocar Wired
+  if(p <= d) return (r - p) & 0x3f;               // aun no ha recargado
+  u32 n  = ((31u - wi) & 0x3f) + 1;               // longitud del ciclo tras la recarga
+  return (wi + (n - ((p - d) % n)) % n) & 0x3f;
+}
+
 auto CPU::jitReenterProceed(u32 K) -> u32 {
   // (0) Commit diferido de la cadena: las ops de los bloques ya ejecutados y aún sin contabilizar.
   // Va PRIMERO para que el chequeo de borde de timer de más abajo vea el Count real de ESTE punto.
@@ -850,9 +865,7 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
     jitPending = 0;
     retired += p;
     cop0[C0_Count] = (u32)((u32)cop0[C0_Count] + p);
-    u32 w = (u32)cop0[C0_Random], wi = (u32)cop0[C0_Wired] & 0x3f;
-    for(u32 i = 0; i < p; i++) { u32 r = w & 0x3f; w = (r == wi) ? 31 : ((r - 1) & 0x3f); }
-    cop0[C0_Random] = w;
+    cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], p);
     if(jitCache) jitCache->hits += p;
     // Estas ops tienen que llegar a quien llamó al driver: el bucle del sistema mide la
     // ventana de campo en ops retiradas. Si la cadena se las queda, el VI llega tarde.
@@ -867,7 +880,9 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   if(halted) return 0;
   // Estado que un store del bloque anterior pudo cambiar a mitad de cadena: en LOCKSTEP el hilo
   // CPU debe interleavear pasos del RSP, así que arrancarlo obliga a salir (espeja el driver).
-  if(mem && mem->rsp.running && mem->rcpMode == Memory::RcpMode::Lockstep) return 0;
+  // rcpMode PRIMERO: en modo Threaded corta aqui y no llega a leer rsp.running, que vive en
+  // memoria que el hilo RSP escribe. El orden inverso pagaba esa lectura en cada bloque.
+  if(mem && mem->rcpMode == Memory::RcpMode::Lockstep && mem->rsp.running) return 0;
   u32 cause = (u32)cop0[C0_Cause];
   if(mem->interruptPending()) cause |= (1u << 10); else cause &= ~(1u << 10);
   if(timerIntr)               cause |= (1u << 15); else cause &= ~(1u << 15);
@@ -921,7 +936,7 @@ auto CPU::jitTryBlock() -> u32 {
   // JIT de K ops los saltaría → divergencia. En THREADED el RSP va en su propio worker y el hilo
   // CPU NO lo pisa, así que JIT es tan válido como el intérprete (mismo thunk de memoria, misma
   // concurrencia ya existente). Solo declinamos en LOCKSTEP.
-  if(mem->rsp.running && mem->rcpMode == Memory::RcpMode::Lockstep) { JDECL(DR_RSP); return 0; }
+  if(mem->rcpMode == Memory::RcpMode::Lockstep && mem->rsp.running) { JDECL(DR_RSP); return 0; }
   if(randomReload) { JDECL(DR_MISC); return 0; }        // hazard COP0 Wired (raro)
   if((u32)cop0[C0_Status] & (1u << 25)) { JDECL(DR_MISC); return 0; } // RE → no JIT
   if(pc & 3) { JDECL(DR_MISC); return 0; }              // fetch address error → intérprete
@@ -1154,9 +1169,7 @@ auto CPU::jitTryBlock() -> u32 {
 
   // Random cuenta atrás R pasos (randomReload==0 garantizado arriba).
   {
-    u32 w = (u32)cop0[C0_Random], wi = (u32)cop0[C0_Wired] & 0x3f;
-    for(u32 i = 0; i < R; i++) { u32 r = w & 0x3f; w = (r == wi) ? 31 : ((r - 1) & 0x3f); }
-    cop0[C0_Random] = w;
+    cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], R);
   }
   cc->hits += R;
   // R = ops del ÚLTIMO bloque; jitChainOps = las de los eslabones anteriores, ya contabilizadas

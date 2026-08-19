@@ -31,13 +31,18 @@ struct Rcp {
   // MI — mi_intr is RMW'd by the RDP/RSP worker threads (raise) and the CPU thread
   // (read/clear), so it is atomic. The raise doubles as the release barrier that
   // publishes the producer's RDRAM writes before the CPU sees the interrupt.
-  u32 mi_mode = 0, mi_mask = 0;
+  // Linea de cache propia: el hilo CPU consulta (mi_intr & mi_mask) en cada entrada de bloque
+  // JIT, mientras que los workers escriben aqui solo al levantar una IRQ (unas cientos por
+  // segundo). Sin el aislamiento comparten linea con dpc_clock/bufbusy/pipebusy, que el worker
+  // RDP incrementa por cada span rasterizado, y la consulta barata se vuelve un fallo coherente.
+  alignas(64) u32 mi_mode = 0, mi_mask = 0;
   std::atomic<u32> mi_intr{0};
   // RDRAM "init/repeat" mode (MI_MODE bit8 arms it, bit7 clears). While armed, the
   // next CPU store to RDRAM is broadcast/repeated across a byte span. Used by the
   // boot code to blank RDRAM; exposed as an observable quirk by n64-systemtest.
   bool mi_repeat_on = false;
   u32  mi_repeat_len = 0;   // repeat span in bytes (init_length + 1)
+  char miPad_[44] = {};     // cierra la linea de MI
   // SP
   u32 sp_mem_addr = 0, sp_dram_addr = 0, sp_rd_len = 0, sp_wr_len = 0;
   // SP_STATUS is one register on one RCP, but in threaded mode two threads update it:
@@ -55,7 +60,8 @@ struct Rcp {
   // DPC performance counters (24-bit, free-running). The RDP worker accumulates
   // them while rasterizing and the CPU reads/clears them, so they are atomic.
   // DPC_STATUS write bits 6..9 clear TMEM/PIPE/BUF/CLOCK respectively.
-  std::atomic<u32> dpc_clock{0}, dpc_bufbusy{0}, dpc_pipebusy{0}, dpc_tmem{0};
+  alignas(64) std::atomic<u32> dpc_clock{0}, dpc_bufbusy{0}, dpc_pipebusy{0}, dpc_tmem{0};
+  char dpcPad_[48] = {};
   // VI
   u32 vi_ctrl = 0, vi_origin = 0, vi_width = 0, vi_intr = 256, vi_current = 0;
   u32 viFlips = 0;    // VI_ORIGIN changed to a different address = displayed buffer swapped
@@ -158,7 +164,12 @@ struct Memory {
   // rasterizes async and raises MI_DP on SYNC_FULL, matching real hardware where
   // the RDP chews the FIFO while the CPU keeps running. Same *results*, async timing.
   enum class RcpMode { Lockstep, Threaded };
-  RcpMode rcpMode = RcpMode::Lockstep;
+  // Se fija una vez al arrancar y luego solo se LEE — pero el hilo CPU la lee en cada entrada
+  // de bloque JIT, y sin aislar cae en la misma linea de cache que rdpQueue/rdpMx/rdpBusy, que
+  // el worker RDP escribe en cada job. Esa lectura constante-pero-invalidada costaba 12.7% del
+  // tiempo total del emulador (hostprof, SM64 threaded+JIT). Linea propia = hit L1 siempre.
+  alignas(64) RcpMode rcpMode = RcpMode::Lockstep;
+  char rcpModePad_[60] = {};
 
   struct RdpJob { u32 current, end; bool xbus; };
   std::deque<RdpJob>      rdpQueue;

@@ -113,6 +113,86 @@ depending on the mode. The interpreter never overshoots; the JIT could. Blocks
 whose `K` exceeds the remaining budget are now declined — bit-exact field
 boundaries across interp/JIT.
 
+### 7. Host FP environment via MXCSR, not `<cfenv>` (`cpu.cpp`)
+
+Every computational COP1 op sets the host rounding mode and clears the IEEE status
+before computing, then harvests the sticky flags. Through `<cfenv>` that is
+`fesetround` + `feclearexcept` + `fetestexcept`, and under mingw each one goes into
+`__mingw_setfp`, which synchronises the **x87 control word as well as MXCSR**. The
+host profiler put ~32 % of the emulator's total time there:
+
+```
+51.28%  kestrel_jitProceedTramp
+28.68%  __mingw_setfp
+ 2.07%  fenv_decode
+ 1.70%  __mingw_setfp_sse
+```
+
+On x86-64 every float/double operation is SSE, so MXCSR alone governs rounding and
+the sticky flags, and reading/writing it is two instructions. `namespace mx` in
+`cpu.cpp` does exactly that; `mx::prep()` only writes the register when the value
+actually changes (the guest's rounding mode almost never moves between ops), and
+`cvtInt` saves/restores only the RC field, matching what `fesetround(save)` did.
+
+**33.99 -> 49.35 Mips** (26.0 % -> 50.1 % N64 CPU speed). The krom suite dropped
+from 245 s to 158 s as a side effect.
+
+### 8. False sharing on the fields the CPU thread polls (`memory.hpp`, `rsp.hpp`)
+
+With the FP churn gone the profile collapsed onto two *loads* inside the block
+re-entry check — 18.45 % and 12.70 % of all samples in two `cmp` instructions:
+
+```
+mem->rsp.running                       // 18.45 %
+mem->rcpMode == RcpMode::Lockstep      // 12.70 %
+```
+
+Neither is contended in the logical sense: `running` changes at task start and at
+BREAK, `rcpMode` is fixed at startup. They were slow because of what sat next to
+them in memory. `Rsp::running` was followed by the delay-slot latch and the safety
+budget, which the RSP worker writes on **every microcode instruction**; `rcpMode`
+shared its line with `rdpQueue` / `rdpMx` / `rdpBusy`, which the RDP worker writes
+on every job. The JIT re-entry check reads them roughly every three guest
+instructions, so what should be an L1 hit was a coherence miss with another core
+invalidating the line continuously.
+
+Fix: give them their own cache lines (`alignas(64)` plus explicit padding), same
+for the MI interrupt pair (`mi_mask` / `mi_intr`, read per block, written only when
+an IRQ is raised — they shared a line with the DPC performance counters the RDP
+bumps per span) and for those counters themselves. Also reordered the guard to test
+`rcpMode` before `rsp.running`, so threaded mode never touches the RSP field at all.
+No semantic change whatsoever.
+
+**52.4 -> 70.5 Mips** (53 % -> 75 % N64 CPU speed).
+
+### 9. `Random` advanced in O(1) (`jit.cpp`)
+
+COP0 `Random` decrements once per instruction and snaps back to 31 when it equals
+`Wired`. The chained-block prologue replayed that **as a loop**, one iteration per
+deferred op, on every link. With `avgK ~= 3` that was ~30 host instructions per
+block for a register the game almost never reads.
+
+The sequence is a cycle: `d = (r - wired) mod 64` steps down to `Wired`, then a
+cycle of `n = ((31 - wired) mod 64) + 1` values — which is `[wired..31]` for the
+normal `Wired <= 31`, and the full 64-value sweep the loop already modelled for
+`Wired > 31`. `randomAdvance()` computes the same answer directly; it was checked
+exhaustively against the old loop over all 64x64x139 combinations of
+(Random, Wired, steps) with zero mismatches, and n64-systemtest exercises it.
+
+**70.5 -> 87.5 Mips** (75 % -> 86 % N64 CPU speed).
+
+## Result after the second pass (SM64, threaded RCP + JIT)
+
+| Step | Mips | N64 CPU speed |
+|---|---|---|
+| Before this pass | 33.99 | 26.0 % |
+| + MXCSR instead of `<cfenv>` | 49.35 | 50.1 % |
+| + cache-line isolation | 70.55 | 72-75 % |
+| + `Random` in O(1) | **87.51** | **~86 %** |
+
+For reference, the same host runs the interpreter at 13.55 Mips and lockstep JIT at
+14.41 Mips, so threading and the dynarec are both carrying their weight now.
+
 ## Two bugs found by this work
 
 ### Bug 1 — `unlinkAll()` was quadratic against guest I-cache flushes

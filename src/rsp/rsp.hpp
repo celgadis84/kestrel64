@@ -70,11 +70,20 @@ struct Rsp {
   u16 reciprocals[512];
   u16 invSqrts[512];
 
-  bool running = false;    // reentrancy guard (microcode may poke SP_STATUS)
+  // Estos dos los LEE el hilo CPU (el chequeo de reentrada del JIT mira `running` en cada
+  // entrada de bloque, ~cada 3 instrucciones guest) y los escribe casi nunca: `running` solo
+  // al arrancar la tarea y al BREAK. Todo lo que los rodea en la clase — el estado VU de
+  // arriba, el latch de delay-slot y el presupuesto de abajo — lo escribe el hilo RSP en CADA
+  // instruccion de microcodigo. Compartiendo linea de cache, esa lectura que deberia ser un
+  // hit L1 se convierte en un fallo coherente porque el otro nucleo invalida la linea sin
+  // parar: el perfilador de host medía 18% del tiempo TOTAL del emulador en ese unico `cmpb`.
+  // Aislarlos en su propia linea (y rellenarla) lo elimina; no cambia ninguna semantica.
+  alignas(64) bool running = false;    // reentrancy guard (microcode may poke SP_STATUS)
 
   // Vector unit SSE fast path (8 lanes = 1 XMM). Bit-exact with the scalar reference
   // (proven by the differential fuzz, `--rspfuzz`). Disable with KESTREL_NORSPSSE for A/B.
   bool sse = true;
+  char coldPad_[62] = {};   // resto de la linea: nada mas debe caer aqui
 
   Rsp();
 
