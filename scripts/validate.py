@@ -50,10 +50,13 @@ OUT = ROOT / "out"
 MODES = {
     "interp":        {},
     "jit":           {"KESTREL_JIT": "1"},
-    "link":          {"KESTREL_JIT": "1", "KESTREL_JIT_LINK": "1"},
+    # El enlace de bloques va ACTIVO por defecto dentro del JIT; este modo lo apaga
+    # para poder bisecar "el enlace rompe algo" contra el JIT sin enlazar.
+    "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
     "threaded":      {"KESTREL_THREADS": "1"},
     "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1"},
-    "threaded-link": {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_LINK": "1"},
+    "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1"},
+    "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
 }
 
 # Accuracy below this counts as "broken" rather than "imperfect" — used only to
@@ -63,6 +66,30 @@ BROKEN_BELOW = 50.0
 # covers ROMs that animate: a fixed instruction cap lands on a frame boundary
 # that can shift by one frame between builds.
 REGRESS_EPS = 0.50
+
+
+def preflight():
+    """Fallos de ENTORNO que se disfrazan de fallos de emulacion.
+
+    Dos formas vistas en vivo: (1) el python que ejecuta el script no tiene numpy, y
+    las 371 ROMs salen "CMPERR"; (2) el PATH no lleva /c/msys64/clang64/bin, el exe no
+    encuentra sus DLL y arranca con 0xC0000135, y las 371 salen "NODUMP". Las dos
+    tardan minutos en manifestarse y ninguna de las dos es un bug del emulador, asi que
+    se comprueban aqui, en un segundo, antes de correr nada.
+    """
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        sys.exit(f"validate: falta numpy en {sys.executable}
+"
+                 "         usa el python que lo tenga (p.ej. el de Windows), no el de MSYS")
+    if not EXE.exists():
+        sys.exit(f"validate: no existe {EXE}")
+    p = subprocess.run([str(EXE)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if p.returncode == -1073741515 or (p.returncode & 0xffffffff) == 0xC0000135:
+        sys.exit("validate: el exe no encuentra sus DLL (0xC0000135)
+"
+                 "         export PATH=/c/msys64/clang64/bin:$PATH")
 
 
 def env_for(mode, extra=None):
@@ -386,7 +413,14 @@ def gate_sm64(mode, args):
         save.unlink()          # see module docstring: a stale save changes the md5
     dump = OUT / f"sm64-{mode}.bmp"
     t0 = time.time()
-    rc, log = run_rom(rom, dump, mode, args.sm64_insn, args.sm64_timeout)
+    # Corte por CAMPOS DE VIDEO, no por instrucciones. En modo Threaded el RCP corre en
+    # hilos propios, asi que cuantas instrucciones gasta la CPU girando en un spin-wait
+    # depende del wall-clock del worker: dos ejecuciones del MISMO build paran en fases
+    # distintas de la animacion y el md5 cambia sin que nada este mal. Contando swaps de
+    # buffer VI el punto de parada es un estado del JUEGO, y ahi los cinco modos
+    # (interp / jit / jit-nolink / threaded / threaded-jit) coinciden byte a byte.
+    rc, log = run_rom(rom, dump, mode, args.sm64_insn, args.sm64_timeout,
+                      frames=(args.sm64_flips, 0))
     (OUT / f"sm64-{mode}.log").write_text(log, encoding="utf-8")
     if save.exists():
         save.unlink()
@@ -401,7 +435,7 @@ def gate_sm64(mode, args):
         bl.write_text(md5 + "\n", encoding="utf-8")
         want = md5
     verdict = "MATCH" if want == md5 else ("no-baseline" if want is None else "DIVERGE")
-    print(f"sm64[{mode}]: {verdict} md5={md5} ({time.time()-t0:.0f}s, {args.sm64_insn/1e6:.0f}M ops)")
+    print(f"sm64[{mode}]: {verdict} md5={md5} ({time.time()-t0:.0f}s, {args.sm64_flips} campos VI)")
     if want is not None and want != md5:
         print(f"   baseline {want}")
     return want is None or want == md5
@@ -412,6 +446,8 @@ def gate_sm64(mode, args):
 def main():
     ap = argparse.ArgumentParser(description="kestrel64 validation gates")
     ap.add_argument("gate", choices=["systemtest", "krom", "sm64", "all"])
+    ap.add_argument("--sm64-flips", type=int, default=60,
+                    help="campos VI (buffer swaps) antes de volcar el framebuffer")
     ap.add_argument("--mode", default="interp", choices=sorted(MODES),
                     help="emulator configuration under test (default: interp = oracle)")
     ap.add_argument("--filter", help="krom: substring of the ROM path, e.g. RDP/ or Triangle")
@@ -432,7 +468,7 @@ def main():
                     help="krom: KESTREL_STABLE=<insns per check>,<checks> — stop when the "
                          "framebuffer stops changing. Empty string disables it.")
     ap.add_argument("--timeout", type=int, default=90, help="krom: seconds per ROM")
-    ap.add_argument("--sm64-insn", type=int, default=300_000_000)
+    ap.add_argument("--sm64-insn", type=int, default=900_000_000)   # solo red de seguridad: el corte real son --sm64-flips campos
     ap.add_argument("--sm64-timeout", type=int, default=600)
     ap.add_argument("--st-timeout", type=int, default=300)
     ap.add_argument("--update-baseline", action="store_true")
@@ -441,6 +477,7 @@ def main():
     ap.add_argument("--list-max", type=int, default=25, help="max per-ROM lines printed")
     ap.add_argument("--quiet", action="store_true", help="no progress line on stderr")
     args = ap.parse_args()
+    preflight()
 
     if not EXE.exists():
         print(f"error: emulator not found at {EXE}", file=sys.stderr)

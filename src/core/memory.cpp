@@ -1,4 +1,5 @@
 #include "memory.hpp"
+#include <chrono>
 #include "../audio/audio.hpp"
 #include "../vrdp/vrdp.hpp"
 #include <algorithm>
@@ -762,7 +763,14 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
           // (rspBusy still set). Gating the kick on rspBusy loses that whole task and
           // the game then waits forever on a BREAK that never comes — hardware has no
           // such window. rspSubmitKick() waits the wind-down out instead.
-          if(wasHalted) { rsp.mem = this; rspSubmitKick(); }
+          // El arranque se LATCHEA aqui, en el hilo CPU, no dentro del worker: start()
+          // toma sp_pc, limpia halt/broke y arma el presupuesto. El RSP real arranca en el
+          // instante del CLEAR_HALT, asi que un SP_PC (o un DMA de DMEM) que la CPU escriba
+          // despues NO puede afectar a la tarea ya lanzada. Dejandolo dentro del worker,
+          // start() leia sp_pc cuando al planificador le venia bien — con la CPU rapida
+          // (JIT) la escritura siguiente ganaba la carrera y el microcodigo arrancaba en
+          // otra direccion: nunca llegaba al BREAK y el test giraba para siempre.
+          if(wasHalted) { rsp.mem = this; rsp.start(); rspSubmitKick(); }
         } else {
           if(!rsp.running) { rsp.mem = this; rsp.start(); }   // arm; System::run steps it interleaved
         }
@@ -1207,7 +1215,11 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
     rdpQueue.push_back({current, end, xbus});
     rdpBusy.store(true, std::memory_order_relaxed);
   }
-  rdpCv.notify_one();
+  // notify_ALL, no _one: en este condvar esperan DOS clases de hilo con predicados
+  // distintos (el worker, "hay trabajo"; el drenador de la CPU, "cola vacia"). notify_one
+  // puede despertar al drenador, cuyo predicado sigue falso, y el worker se queda dormido
+  // con trabajo encolado — wakeup perdido: la CPU espera un BREAK que nunca llega.
+  rdpCv.notify_all();
 }
 
 auto Memory::rdpWorkerLoop() -> void {
@@ -1219,7 +1231,11 @@ auto Memory::rdpWorkerLoop() -> void {
       if(rdpStop && rdpQueue.empty()) return;
       job = rdpQueue.front(); rdpQueue.pop_front();
     }
+    auto t0 = std::chrono::steady_clock::now();
     rdpRunJob(job.current, job.end, job.xbus);
+    rdpBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+    rdpJobsRun.fetch_add(1, std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lk(rdpMx);
       if(rdpQueue.empty()) rdpBusy.store(false, std::memory_order_relaxed);
@@ -1230,14 +1246,20 @@ auto Memory::rdpWorkerLoop() -> void {
 
 auto Memory::rdpDrain() -> void {
   if(rcpMode != RcpMode::Threaded) return;
-  std::unique_lock<std::mutex> lk(rdpMx);
-  rdpCv.wait(lk, [&]{ return rdpQueue.empty() && !rdpBusy.load(std::memory_order_relaxed); });
+  auto t0 = std::chrono::steady_clock::now();
+  { std::unique_lock<std::mutex> lk(rdpMx);
+    rdpCv.wait(lk, [&]{ return rdpQueue.empty() && !rdpBusy.load(std::memory_order_relaxed); }); }
+  cpuWaitNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
 }
 
 auto Memory::rspAwaitIdle() -> void {
   if(rcpMode != RcpMode::Threaded) return;
-  std::unique_lock<std::mutex> lk(rspMx);
-  rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); });
+  auto t0 = std::chrono::steady_clock::now();
+  { std::unique_lock<std::mutex> lk(rspMx);
+    rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); }); }
+  cpuWaitNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
 }
 
 auto Memory::rspSubmitKick() -> void {
@@ -1252,7 +1274,7 @@ auto Memory::rspSubmitKick() -> void {
     rspBusy.store(true, std::memory_order_release);
     rspKick = true;
   }
-  rspCv.notify_one();
+  rspCv.notify_all();   // ver nota en rdpSubmit: worker y drenador comparten condvar
 }
 
 auto Memory::rspWorkerLoop() -> void {
@@ -1266,8 +1288,17 @@ auto Memory::rspWorkerLoop() -> void {
     // Run the armed microcode to BREAK. run() = start()+step(budget); it updates
     // sp_status/sp_pc and raises MI_SP itself. Any DPC_END the microcode writes
     // funnels through mmioWrite → rdpSubmit, so the RDP pipelines behind us.
-    rsp.run();
-    rspBusy.store(false, std::memory_order_release);
+    auto t0 = std::chrono::steady_clock::now();
+    rsp.step(~0ull);   // start() ya corrio en el hilo CPU al escribir CLEAR_HALT
+    rspBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+    rspJobsRun.fetch_add(1, std::memory_order_relaxed);
+    // El flag SE BAJA CON EL MUTEX COGIDO. Sin el, la tienda+notify puede caer entre el
+    // chequeo del predicado del esperador (que vio rspBusy=true, bajo el mutex) y el
+    // registro de su espera: la notificacion se pierde y la CPU duerme para siempre
+    // esperando un RSP que ya termino. Es el patron que exige condition_variable —
+    // el worker del RDP ya lo hacia asi.
+    { std::lock_guard<std::mutex> lk(rspMx); rspBusy.store(false, std::memory_order_release); }
     rspCv.notify_all();   // wake a possible drain waiter
   }
 }

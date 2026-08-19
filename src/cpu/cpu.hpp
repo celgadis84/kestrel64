@@ -304,6 +304,11 @@ public:
   // Devuelve 1 = hecho limpio; 0 = faultaría (misalign/TLB/ADE) → el bloque hace bail y
   // el intérprete re-ejecuta la op para vectorizar la excepción. Nunca vectoriza aquí.
   auto jitMem(u32 op) -> u8;
+  // Ejecuta UNA op no compilable con el intérprete desde dentro de un bloque JIT.
+  // `off` = desplazamiento en bytes de la op respecto a la entrada del bloque (pc).
+  // Devuelve 1 si la op terminó normal (el bloque sigue), 0 si hubo excepción/parada:
+  // en ese caso pc/nextPc ya describen el punto de reanudación correcto.
+  auto jitInterpOp(u32 op, u32 off) -> u8;
 private:
   auto takeException(u32 excCode, bool tlbRefill = false, bool xtlb = false) -> void;
   // Coprocessor Unusable (ExcCode 11) with the Cause CE field set to the cop number.

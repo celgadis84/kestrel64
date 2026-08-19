@@ -58,3 +58,15 @@ RCP-semantics violations, not test-specific quirks:
 `Rcp::sp_status` was also made `std::atomic<u32>` — one register updated by both the
 CPU (control writes) and the RSP worker (BREAK) cannot be a plain `u32` without
 losing updates.
+
+## Entorno del gate (dos fallos que parecen bugs y no lo son)
+
+`scripts/validate.py` necesita a la vez:
+
+- el **python de Windows** (`~/AppData/Local/Programs/Python/Python311/python`), que es el
+  que tiene numpy — el de MSYS/CLANG64 no lo tiene, y sin numpy las 371 ROMs salen `CMPERR`;
+- `/c/msys64/clang64/bin` en el **PATH**, porque el exe carga sus DLL de ahi — sin eso
+  arranca con `0xC0000135` y las 371 salen `NODUMP rc=3221225781`.
+
+Es decir: `export PATH=/c/msys64/clang64/bin:$PATH` y llamar al python de Windows por ruta.
+`preflight()` comprueba las dos cosas y aborta en un segundo en vez de a los cuatro minutos.

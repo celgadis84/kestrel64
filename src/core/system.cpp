@@ -1,5 +1,9 @@
 #include "system.hpp"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include "../telemetry/server.hpp"
+#include "../telemetry/hostprof.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -43,8 +47,12 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   return true;
 }
 
+// Leído una vez al arranque: como `static` local se comprobaba la variable-guarda de
+// inicialización en CADA vuelta del bucle, o sea por instrucción emulada.
+static const bool g_jitOn = std::getenv("KESTREL_JIT") != nullptr;
+
 auto System::stepCpu(u64 n) -> u64 {
-  static int jitOn = std::getenv("KESTREL_JIT") ? 1 : 0;
+  const bool jitOn = g_jitOn;
   u64 i = 0;
   while(i < n && !cpu.halted) {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
@@ -126,6 +134,52 @@ static auto framebufferHash(Memory& mem) -> u64 {
 }
 
 auto System::run() -> void {
+  // Watchdog opt-in (KESTREL_WATCHDOG=<segundos>): un livelock del guest y un hilo CPU
+  // bloqueado en un handshake del RCP se ven IGUAL desde fuera. Esto los separa: si
+  // retired avanza, gira el guest; si no avanza, la CPU esta parada esperando al RCP.
+  std::thread wdog;
+  if(const char* w = std::getenv("KESTREL_WATCHDOG")) {
+    unsigned secs = (unsigned)std::strtoul(w, nullptr, 0); if(!secs) secs = 5;
+#ifdef _WIN32
+    // Si retired no avanza, el hilo CPU esta atascado DENTRO del emulador. Suspenderlo y
+    // leer su RIP dice exactamente donde (se simboliza con scripts/hostprof.py).
+    HANDLE cpuTh = nullptr;
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &cpuTh, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    u64 imgBase = (u64)GetModuleHandleW(nullptr);
+#endif
+    wdog = std::thread([this, secs
+#ifdef _WIN32
+                        , cpuTh, imgBase
+#endif
+                       ]{
+      u64 last = 0;
+      while(!shutdown.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(secs));
+        u64 now = cpu.retired;
+        std::fprintf(stderr, "[wdog] retired=%llu (+%llu) pc=%08x sp_status=%08x sp_pc=%03x rspRun=%u rspBusy=%u rspKick=%u rdpBusy=%u rdpQ=%u mi_intr=%02x mi_mask=%02x\n",
+                     (unsigned long long)now, (unsigned long long)(now - last), (u32)cpu.pc,
+                     memory.rcp.sp_status.load(), memory.rcp.sp_pc, (unsigned)memory.rsp.running,
+                     (unsigned)memory.rspBusy.load(), (unsigned)memory.rspKick,
+                     (unsigned)memory.rdpBusy.load(), (unsigned)memory.rdpQueue.size(),
+                     memory.rcp.mi_intr.load(), memory.rcp.mi_mask);
+        std::fflush(stderr);
+#ifdef _WIN32
+        if(now == last && cpuTh) {
+          CONTEXT ctx{}; ctx.ContextFlags = CONTEXT_CONTROL;
+          if(SuspendThread(cpuTh) != (DWORD)-1) {
+            if(GetThreadContext(cpuTh, &ctx))
+              std::fprintf(stderr, "[wdog] CPU thread stuck at rip +0x%llx (rsp=%llx)\n",
+                           (unsigned long long)((u64)ctx.Rip - imgBase), (unsigned long long)ctx.Rsp);
+            ResumeThread(cpuTh);
+          }
+        }
+#endif
+        last = now;
+      }
+    });
+  }
+  hostprof::start();   // opt-in host sampler; samples THIS (CPU) thread
+
   // M1: run the CPU in short batches when not paused, yielding coreMutex between
   // batches so telemetry can inspect/step. Paused → idle; the telemetry thread
   // drives stepCpu() directly under the same lock.
@@ -181,6 +235,32 @@ auto System::run() -> void {
       // ~one video field of CPU work per tick, then a VI field boundary. Keeps
       // main loops that block on the VI interrupt progressing.
       did = stepCpu(750000);
+      // Diagnostico de divergencia entre modos, opt-in. El md5 final solo dice "difieren";
+      // estos dicen DONDE: KESTREL_FIELDHASH=1 imprime un FNV del estado CPU al cierre de
+      // cada campo (primer campo distinto = ventana a bisecar) y KESTREL_FIELDDUMP=<n>
+      // vuelca los registros enteros en ese campo. El getenv se lee una vez.
+      static const u64  fieldDump = std::getenv("KESTREL_FIELDDUMP")
+                                  ? std::strtoull(std::getenv("KESTREL_FIELDDUMP"), nullptr, 0) : 0;
+      static const bool fieldHash = std::getenv("KESTREL_FIELDHASH") != nullptr;
+      if(fieldDump || fieldHash) {
+        static u64 nField = 0; nField++;
+        if(nField == fieldDump) {
+          for(int r = 0; r < 32; r++) std::fprintf(stderr, "[fd] gpr%02d=%016llx\n", r, (unsigned long long)cpu.gpr[r]);
+          for(int r = 0; r < 32; r++) std::fprintf(stderr, "[fd] cop0_%02d=%016llx\n", r, (unsigned long long)cpu.cop0[r]);
+          std::fprintf(stderr, "[fd] pc=%016llx next=%016llx retired=%llu\n", (unsigned long long)cpu.pc,
+                       (unsigned long long)cpu.nextPc, (unsigned long long)cpu.retired);
+        }
+        if(fieldHash) {
+          u64 h = 1469598103934665603ull;
+          auto mix = [&](u64 v){ h ^= v; h *= 1099511628211ull; };
+          for(int r = 0; r < 32; r++) mix((u64)cpu.gpr[r]);
+          mix(cpu.pc); mix(cpu.nextPc);
+          mix((u64)cpu.cop0[9]); mix((u64)cpu.cop0[11]); mix((u64)cpu.cop0[12]); mix((u64)cpu.cop0[13]);
+          mix(cpu.retired);
+          std::fprintf(stderr, "[fh] %llu %016llx\n", (unsigned long long)nField, (unsigned long long)h);
+        }
+        std::fflush(stderr);
+      }
       memory.viTick();
     }
     retiredInsns.fetch_add(did, std::memory_order_relaxed);
@@ -226,13 +306,23 @@ auto System::run() -> void {
     if(hbOn && now - hbLast >= std::chrono::seconds(5)) {
       double s  = std::chrono::duration<double>(now - hbT0).count();
       u64    ri = retiredInsns.load(std::memory_order_relaxed);
-      std::fprintf(stderr, "[hb] %.0fM insns, %.2f Mips avg | N64 speed: CPU %.1f%%  RSP %.1f%%\n",
+      // Worker occupancy as a share of wall time: which domain is the long pole.
+      // >100% per worker is impossible, and cpuWait is how long the CPU thread sat
+      // blocked on one of them — together they localize the bottleneck.
+      double rdpPct  = memory.rdpBusyNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
+      double rspPct  = memory.rspBusyNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
+      double waitPct = memory.cpuWaitNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
+      std::fprintf(stderr, "[hb] %.0fM insns, %.2f Mips avg | N64 speed: CPU %.1f%%  RSP %.1f%%"
+                           " | occupancy: rdp %.0f%% rsp %.0f%% cpuWait %.0f%%\n",
                    ri / 1e6, ri / 1e6 / s,
                    n64SpeedPct.load(std::memory_order_relaxed),
-                   rspSpeedPct.load(std::memory_order_relaxed));
+                   rspSpeedPct.load(std::memory_order_relaxed),
+                   rdpPct, rspPct, waitPct);
       hbLast = now;
     }
   }
+  hostprof::stop();
+  if(wdog.joinable()) { shutdown.store(true); wdog.join(); }
 }
 
 }  // namespace kestrel

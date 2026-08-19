@@ -138,7 +138,11 @@ public:
   // setcc r8:  setl=0x9C setb=0x92 (into AL etc.)
   auto setcc(u8 cc, Reg r8) -> void { buf.emit(0x0F); buf.emit(cc); modrm(3,0,r8); }
   // mov r32, imm32 (zero-extends to 64)
-  auto mov_r_imm32(Reg dst, u32 imm) -> void { buf.emit((u8)(0xB8 + (dst & 7))); imm32(imm); }
+  // mov r32, imm32. Los registros extendidos (R8-R15) necesitan REX.B; sin él el opcode
+  // 0xB8+reg codificaría el registro bajo homónimo (R8D se convertiría en EAX).
+  auto mov_r_imm32(Reg dst, u32 imm) -> void {
+    if(dst & 8) buf.emit(0x41);
+    buf.emit((u8)(0xB8 + (dst & 7))); imm32(imm); }
 
   // ---- soporte de llamada C (Etapa 2b: loads/stores como helper) -------------
   // Win64: args en RCX,RDX,R8,R9; retorno en (E)AX; shadow-space 32B; RSP 16-alineado
@@ -301,8 +305,23 @@ struct CodeCache {
   // --- block-linking (Etapa 3) ---
   std::vector<LinkSite> links;                              // todos los sitios emitidos
   std::unordered_map<u32, std::vector<u32>> byTarget;       // targetPhys → índices en `links`
+  // Cache negativa de compilación. compileBlock() falla siempre que la op LÍDER no es
+  // compilable (COP1, branch-likely...), y en código real eso vuelve a ocurrir millones de
+  // veces en el mismo PC: recompilar para volver a fallar era el mayor coste del driver.
+  // Directa por índice; la validez se comprueba contra la palabra líder leída de la línea
+  // de I-cache, así que SMC/DMA que cambie el código invalida la entrada sola.
+  static constexpr u32 kNoCompSlots = 8192;
+  struct NoComp { u32 phys = ~0u; u32 word = 0; };
+  std::vector<NoComp> noComp;   // dimensionada en init()
+
   u64 linkEpoch = 0;      // sube en cada desenlace global (invalidación de I-cache)
   u64 nLinked = 0, nUnlinked = 0;   // estadística
+  // ¿Hay algún sitio de enlace ARMADO ahora mismo? unlinkAll() recorre todos los sitios y
+  // todos los bloques; el guest invalida la I-cache línea a línea (512 CACHE seguidos por
+  // barrido completo), y sin esta guarda cada uno de esos 512 paga el barrido entero — con
+  // decenas de miles de bloques el emulador se para en seco. Tras el primer desenlace no
+  // queda nada que desenlazar hasta que alguien vuelva a armar un sitio.
+  bool anyLinked = false;
 
   auto init() -> bool;
   auto find(u32 phys) -> s32;               // idx o -1

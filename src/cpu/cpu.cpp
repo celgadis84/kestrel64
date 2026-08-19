@@ -4,12 +4,23 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <bit>
 #include <cmath>
 #include <cfenv>
 #pragma STDC FENV_ACCESS ON
 
 namespace kestrel {
+
+// Interruptores de entorno leídos UNA vez al arranque. Antes vivían como `static` locales
+// dentro de step()/dcWrite(): en C++ eso obliga a comprobar la variable-guarda de
+// inicialización en CADA ejecución de la sentencia, es decir por instrucción emulada.
+// A escala de decenas de millones de instrucciones por segundo eso es coste puro; en
+// ámbito de namespace la inicialización dinámica ocurre una sola vez antes de main().
+static const bool g_fastFetch       = !std::getenv("KESTREL_NOFETCHFAST");
+static const bool g_intLog          = std::getenv("KESTREL_INTLOG")      != nullptr;
+static const bool g_jlogNoSpin      = std::getenv("KESTREL_JLOG_NOSPIN") != nullptr;
+static const bool g_dcWriteThrough  = std::getenv("KESTREL_DCWT")        != nullptr;
 
 // Debug: SEEN_EXCEPTION discriminant (0x801acfa4) transition ring, dumped when a
 // "failed with exception" verdict is xlogged, to isolate the leaking fire.
@@ -313,13 +324,18 @@ auto CPU::cacheable(u64 vaddr) -> bool {
 auto CPU::dcFill(u32 idx, u32 base) -> void {
   DCacheLine& l = dcache[idx];
   l.ptag = base; l.valid = true; l.dirty = false;
-  for(u32 i = 0; i < 16; i++) l.data[i] = (base + i < mem->rdram.size()) ? mem->rdram[base + i] : 0;
+  // Camino normal: la línea entera cae dentro de RDRAM → una copia de 16 B en vez de 16
+  // lecturas con comprobación de rango. El borde (línea a caballo del final) mantiene la
+  // semántica byte a byte con relleno a 0.
+  if(base + 16 <= mem->rdram.size()) std::memcpy(l.data, &mem->rdram[base], 16);
+  else for(u32 i = 0; i < 16; i++) l.data[i] = (base + i < mem->rdram.size()) ? mem->rdram[base + i] : 0;
 }
 
 auto CPU::dcFlush(u32 idx) -> void {
   DCacheLine& l = dcache[idx];
   if(!l.valid || !l.dirty) return;
-  for(u32 i = 0; i < 16; i++) if(l.ptag + i < mem->rdram.size()) mem->rdram[l.ptag + i] = l.data[i];
+  if(l.ptag + 16 <= mem->rdram.size()) std::memcpy(&mem->rdram[l.ptag], l.data, 16);
+  else for(u32 i = 0; i < 16; i++) if(l.ptag + i < mem->rdram.size()) mem->rdram[l.ptag + i] = l.data[i];
   l.dirty = false;
 }
 
@@ -329,6 +345,16 @@ auto CPU::dcRead(u32 phys, u32 size) -> u64 {
   DCacheLine& l = dcache[idx];
   if(!l.valid || l.ptag != base) { dcFlush(idx); dcFill(idx, base); }
   u32 off = phys & 0xf;
+  // El valor guest es big-endian dentro de la línea; el host es little-endian. Un memcpy del
+  // ancho exacto + bswap da el MISMO resultado que el bucle byte a byte, pero en 2 instrucciones
+  // en vez de un bucle de cuenta variable (size no es constante en la llamada indirecta).
+  switch(size) {
+    case 1: return l.data[off];
+    case 2: { u16 v; std::memcpy(&v, &l.data[off], 2); return __builtin_bswap16(v); }
+    case 4: { u32 v; std::memcpy(&v, &l.data[off], 4); return __builtin_bswap32(v); }
+    case 8: { u64 v; std::memcpy(&v, &l.data[off], 8); return __builtin_bswap64(v); }
+    default: break;
+  }
   u64 v = 0;
   for(u32 i = 0; i < size; i++) v = (v << 8) | l.data[off + i];   // big-endian
   return v;
@@ -340,10 +366,15 @@ auto CPU::dcWrite(u32 phys, u64 val, u32 size) -> void {
   DCacheLine& l = dcache[idx];
   if(!l.valid || l.ptag != base) { dcFlush(idx); dcFill(idx, base); }
   u32 off = phys & 0xf;
-  for(u32 i = 0; i < size; i++) l.data[off + i] = (u8)(val >> (8 * (size - 1 - i)));
+  switch(size) {
+    case 1: l.data[off] = (u8)val; break;
+    case 2: { u16 v = __builtin_bswap16((u16)val); std::memcpy(&l.data[off], &v, 2); break; }
+    case 4: { u32 v = __builtin_bswap32((u32)val); std::memcpy(&l.data[off], &v, 4); break; }
+    case 8: { u64 v = __builtin_bswap64(val);      std::memcpy(&l.data[off], &v, 8); break; }
+    default: for(u32 i = 0; i < size; i++) l.data[off + i] = (u8)(val >> (8 * (size - 1 - i))); break;
+  }
   l.dirty = true;
-  static int wt = std::getenv("KESTREL_DCWT") ? 1 : 0;
-  if(wt) for(u32 i = 0; i < size; i++) if(phys+i < mem->rdram.size()) mem->rdram[phys+i] = l.data[off+i];
+  if(g_dcWriteThrough) for(u32 i = 0; i < size; i++) if(phys+i < mem->rdram.size()) mem->rdram[phys+i] = l.data[off+i];
 }
 
 auto CPU::peekPhysCoherent(u32 phys) -> u8 {
@@ -358,7 +389,8 @@ auto CPU::peekPhysCoherent(u32 phys) -> u8 {
 auto CPU::icFill(u32 idx, u32 base) -> void {
   ICacheLine& l = icache[idx];
   l.ptag = base; l.valid = true;
-  for(u32 i = 0; i < 32; i++) l.data[i] = (base + i < mem->rdram.size()) ? mem->rdram[base + i] : 0;
+  if(base + 32 <= mem->rdram.size()) std::memcpy(l.data, &mem->rdram[base], 32);
+  else for(u32 i = 0; i < 32; i++) l.data[i] = (base + i < mem->rdram.size()) ? mem->rdram[base + i] : 0;
 }
 
 auto CPU::icFetch(u32 phys) -> u32 {
@@ -367,7 +399,8 @@ auto CPU::icFetch(u32 phys) -> u32 {
   ICacheLine& l = icache[idx];
   if(!l.valid || l.ptag != base) icFill(idx, base);
   u32 off = phys & 0x1c;
-  return ((u32)l.data[off] << 24) | ((u32)l.data[off + 1] << 16) | ((u32)l.data[off + 2] << 8) | l.data[off + 3];
+  u32 w; std::memcpy(&w, &l.data[off], 4);
+  return __builtin_bswap32(w);   // la línea guarda bytes big-endian; el host es little-endian
 }
 
 // The CACHE instruction. op = the 5-bit rt field: bit0 selects cache (0=I,1=D),
@@ -538,6 +571,18 @@ auto CPU::unimplemented(u32 op) -> void {
       }
       std::fflush(stderr);
     }
+    // Huella del estado arquitectónico al llegar al tope. Comparada entre dos modos
+    // (interp vs JIT, lockstep vs threaded) dice en una línea si ambos llegaron al MISMO
+    // sitio, sin tener que diffear volcados enteros.
+    {
+      u64 h = 1469598103934665603ull;
+      auto mix = [&](u64 v){ h ^= v; h *= 1099511628211ull; };
+      for(int r = 0; r < 32; r++) mix((u64)gpr[r]);
+      for(int r = 0; r < 32; r++) mix((u64)cop0[r]);
+      for(int r = 0; r < 32; r++) mix(fpr[r]);
+      mix(pc); mix(nextPc); mix(hi); mix(lo);
+      std::fprintf(stderr, "[statehash] %016llx\n", (unsigned long long)h);
+    }
     std::fprintf(stderr, "[maxinsn] cap %llu reached, pc=0x%08x sp=0x%08x ra=0x%08x\n",
                  (unsigned long long)maxInsn, (u32)pc, (u32)gpr[29], (u32)gpr[31]);
     { u32 st=(u32)cop0[C0_Status], ca=(u32)cop0[C0_Cause];
@@ -548,6 +593,10 @@ auto CPU::unimplemented(u32 op) -> void {
       std::fprintf(stderr, "[vi] ctrl=%08x origin=%06x width=%u xscale=%08x yscale=%08x intr=%u\n",
                    mem->rcp.vi_ctrl, mem->rcp.vi_origin, mem->rcp.vi_width,
                    mem->rcp.vi_xscale, mem->rcp.vi_yscale, mem->rcp.vi_intr);
+    if(mem)
+      std::fprintf(stderr, "[rcp] mi_intr=%02x mi_mask=%02x sp_status=%08x sp_pc=%03x dpc_status=%08x rspRun=%u\n",
+                   mem->rcp.mi_intr.load(), mem->rcp.mi_mask, mem->rcp.sp_status.load(), mem->rcp.sp_pc,
+                   mem->rcp.dpc_status.load(), (unsigned)mem->rsp.running);
     if(const char* fb = std::getenv("KESTREL_FBDUMP")) dumpFramebufferBmp(mem, fb);
     if(const char* md = std::getenv("KESTREL_MEMDUMP")) {   // dump real guest words direct from RDRAM (KSEG0/1 phys)
       const auto& ram = mem->rdram;
@@ -686,8 +735,7 @@ auto CPU::step() -> void {
     u32 status = (u32)cop0[C0_Status];
     // ie=1, exl=0, erl=0  ⇔  (status & 0b111) == 0b001, plus any unmasked pending IP.
     if((status & 0x7) == 0x1 && (cause & status & 0xff00)) deliverInterrupt();
-    static int intlog = std::getenv("KESTREL_INTLOG") ? 1 : 0;
-    if(intlog) {
+    if(g_intLog) {
       static u64 tick = 0;
       if((++tick & 0x3fffff) == 0) {   // ~every 4M steps
         u32 mi = mem ? (u32)mem->rcp.mi_intr : 0, mk = mem ? mem->rcp.mi_mask : 0;
@@ -705,10 +753,9 @@ auto CPU::step() -> void {
   // adjusted physical fetch address; the bytes still come through icFetch() so the
   // I-cache / SMC snapshot semantics are unchanged — only translate()+cacheable() are
   // memoized while the PC stays in the same 32-byte line and xlatEpoch is unchanged.
-  static bool fastFetch = !std::getenv("KESTREL_NOFETCHFAST");   // bisect gate
   u64 vbase = pc & ~0x1full;   // línea de 32 B, clave 64-bit completa (ver fetchLineVBase)
   u32 fpe; bool fcacheable;
-  if(fastFetch && vbase == fetchLineVBase && fetchLineEpoch == xlatEpoch) {
+  if(g_fastFetch && vbase == fetchLineVBase && fetchLineEpoch == xlatEpoch) {
     fpe        = fetchLinePhys | (((u32)pc & 0x1cu) ^ fetchLineReXor);
     fcacheable = fetchLineCache;
   } else {
@@ -738,9 +785,8 @@ auto CPU::step() -> void {
   // Log taken control transfers (target differs from the sequential fall-through).
   // The jump ring-buffer + wild-jump traps are debug-only, so skip the whole block
   // on normal runs — it otherwise runs on every taken branch (~1 in 6 instructions).
-  static int jlogNoSpin = std::getenv("KESTREL_JLOG_NOSPIN") ? 1 : 0;
   if(debugArmed && justBranched && nextPc != pc + 4 &&
-     !(jlogNoSpin && (u32)nextPc == (u32)curPc)) {  // optionally skip b. self-loops (idle)
+     !(g_jlogNoSpin && (u32)nextPc == (u32)curPc)) {  // optionally skip b. self-loops (idle)
     jlogSrc[jlogIdx] = curPc; jlogDst[jlogIdx] = nextPc; jlogOp[jlogIdx] = op;
     jlogIdx = (jlogIdx + 1) % kJumpLog;
     // Trap wild control transfer into RCP MMIO space (0xA4000000..0xA4900000):
@@ -1267,6 +1313,42 @@ auto CPU::execute(u32 op) -> void {
 // Solo se llama desde bloques JIT (mem!=null garantizado por jitTryBlock). Devuelve 0 si
 // la op faultaría (misalign/TLB/ADE): NO vectoriza (probe sin efectos vía `probing`), el
 // bloque hace bail y el intérprete re-ejecuta esa op para levantar la excepción exacta.
+// Ejecuta con el intérprete una op que el compilador de bloques no sabe emitir (COP1,
+// loads/stores no alineados, LWC1/SWC1...), SIN cerrar el bloque. Es la palanca de longitud
+// de bloque: cortar en cada op de coma flotante dejaba bloques de ~2 instrucciones en juegos
+// con FPU, y el coste de entrada al bloque dominaba sobre el trabajo emulado.
+//
+// Convención de pc del intérprete durante execute(): curPc = dirección de la op, pc = op+4
+// (la ranura de retardo), nextPc = op+8. El bloque mantiene `pc` fijo en su VA de entrada,
+// así que la VA de esta op es pc+off.
+//
+// Postcondición al devolver 0: pc/nextPc describen exactamente por dónde seguir — el vector
+// de excepción si execute() la levantó, o la op siguiente si simplemente hay que parar. El
+// llamador sale del bloque con la bandera de "control ya escrito" contando esta op como
+// retirada, así que nunca se re-ejecuta.
+auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
+  u64 va      = pc + off;
+  u64 savedPc = pc, savedNext = nextPc, savedCur = curPc;
+  // Monta el contexto EXACTO que vería el intérprete en step() para esta VA: curPc = la op,
+  // pc = la ranura de retardo (base de los branches relativos), nextPc = pc+4. Un bloque JIT
+  // nunca entra en ranura de retardo (jitTryBlock declina si inDelay), así que inDelay=false.
+  curPc  = va;
+  pc     = va + 4;
+  nextPc = va + 8;
+  memAbort     = false;
+  justBranched = false;
+  inDelay      = false;
+  execute(op);
+  gpr[0] = 0;                 // r0 cableado: el bloque puede leerlo como fuente después
+  inDelay = justBranched;     // misma actualización que hace step() tras execute()
+  // Cualquier desviación del avance secuencial (excepción vectorizada, halt, salto) significa
+  // que el estado de control YA es el punto de reanudación correcto → el bloque sale con la
+  // bandera de control y el driver no vuelve a tocar pc.
+  if(halted || memAbort || justBranched || pc != va + 4 || nextPc != va + 8) return 0;
+  pc = savedPc; nextPc = savedNext; curPc = savedCur;
+  return 1;
+}
+
 auto CPU::jitMem(u32 op) -> u8 {
   if(!mem) return 0;
   u32 OPc = op >> 26 & 0x3f;

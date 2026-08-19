@@ -37,18 +37,29 @@ cmake --build build -j
 
 ## Verification — run after EVERY change (hard rule)
 
-Change is only done when all pass:
+Everything runs from one script; do not hand-roll the invocations.
 
-1. **systemtest, interpreter**: `kestrel64.exe n64-systemtest.z64 --run`
-   (ROM at `/e/Claude/N64/n64-systemtest.z64`) → expect **Failed 0 of 3721 · 0 of 2 · 0 of 6**.
-2. **systemtest, JIT**: same with `KESTREL_JIT=1` → same **0/3721·0/2·0/6**.
-3. **Lockstep == Threaded framebuffer md5**: run SM64 with
-   `KESTREL_MAXINSN=300000000 KESTREL_FBDUMP=<path>` (dumps RDRAM framebuffer BMP, no HUD),
-   compare default (Lockstep) vs `KESTREL_THREADS=1` (Threaded). md5 must be **identical**.
-4. **krom 47-suite** RDP accuracy (SoftRDP path).
+```bash
+python scripts/validate.py systemtest --mode <mode>   # 0/3721 · 0/2 · 0/6
+python scripts/validate.py sm64       --mode <mode>   # framebuffer md5
+python scripts/validate.py krom                       # 371-ROM RDP accuracy vs baseline
+```
 
-Baselines (may drift; the invariant is equality, not the literal hash): SM64 300M md5
-`cbf8aa761b92adab89ddde949b6ff24b` (SoftRDP). Read dump text with `tr -d '\0'` (NUL-padded).
+Modes: `interp`, `jit`, `jit-nolink`, `threaded`, `threaded-jit` (plus
+`threaded-trace`, `threaded-nolink`). A change is done when systemtest and sm64
+pass in **all five** and krom shows no regression.
+
+**The sm64 gate stops on VI buffer swaps, not on an instruction count**
+(`--sm64-flips`, default 60). A fixed instruction cap is not a deterministic point
+of the game in threaded mode: the RCP runs on its own threads, so the number of
+instructions the CPU burns in a spin-wait depends on the workers' wall-clock, and
+two runs of the same build stop in different animation phases. Counting displayed
+frames is a game state, and there all five modes agree byte for byte. See
+`docs/PERF-CPU.md`.
+
+Baselines live in `docs/baselines/` (may drift; the invariant is equality, not the
+literal hash): SM64 60 fields `466282775dbd0ac084946558a1c30771` (SoftRDP).
+Read dump text with `tr -d '\0'` (NUL-padded).
 
 ## MCP
 
@@ -75,7 +86,12 @@ dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP) · `vrdp/` (parallel-rdp glue
 
 ## Env-var toggles
 
-`KESTREL_THREADS=1` (threaded RCP) · `KESTREL_JIT=1` (dynarec, default OFF, oracle=interp) ·
+`KESTREL_THREADS=1` (threaded RCP) · `KESTREL_JIT=1` (dynarec, default OFF, oracle=interp;
+block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` to bisect,
+`KESTREL_JIT_TRACE=1` superblocks = measured negative) ·
+`KESTREL_HEARTBEAT=1` · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=1` ·
+`KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_FIELDHASH=1` /
+`KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n fields) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
 `KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_SAVETYPE` ·
 `KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST`.

@@ -27,6 +27,7 @@ add_executable(kestrel64
   src/cpu/jit.cpp
   src/net/tcp.cpp
   src/telemetry/server.cpp
+  src/telemetry/hostprof.cpp
   src/video/present.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp

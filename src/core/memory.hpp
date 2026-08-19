@@ -180,6 +180,13 @@ struct Memory {
   bool                    rspKick = false;      // pending run request (guarded by rspMx)
   std::atomic<bool>       rspBusy{false};        // true from kick until the task breaks
 
+  // Worker occupancy telemetry. Wall time actually spent inside a job, so the
+  // heartbeat can say which domain is the long pole instead of guessing from
+  // host-thread CPU time. Relaxed: read-only diagnostics, never a control input.
+  std::atomic<u64>        rdpBusyNs{0}, rspBusyNs{0};
+  std::atomic<u64>        rdpJobsRun{0}, rspJobsRun{0};
+  std::atomic<u64>        cpuWaitNs{0};   // CPU thread blocked on an RCP worker
+
   auto startRcpThreads() -> void;   // spawn workers if rcpMode==Threaded (idempotent)
   auto stopRcpThreads()  -> void;   // join workers on shutdown
   auto rdpSubmit(u32 current, u32 end, bool xbus) -> void;  // enqueue (threaded)
