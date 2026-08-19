@@ -80,15 +80,13 @@ def preflight():
     try:
         import numpy  # noqa: F401
     except ImportError:
-        sys.exit(f"validate: falta numpy en {sys.executable}
-"
+        sys.exit(f"validate: falta numpy en {sys.executable}\n"
                  "         usa el python que lo tenga (p.ej. el de Windows), no el de MSYS")
     if not EXE.exists():
         sys.exit(f"validate: no existe {EXE}")
     p = subprocess.run([str(EXE)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if p.returncode == -1073741515 or (p.returncode & 0xffffffff) == 0xC0000135:
-        sys.exit("validate: el exe no encuentra sus DLL (0xC0000135)
-"
+        sys.exit("validate: el exe no encuentra sus DLL (0xC0000135)\n"
                  "         export PATH=/c/msys64/clang64/bin:$PATH")
 
 

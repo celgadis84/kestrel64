@@ -8,9 +8,32 @@
 #include <bit>
 #include <cmath>
 #include <cfenv>
+#include <xmmintrin.h>
 #pragma STDC FENV_ACCESS ON
 
 namespace kestrel {
+
+// --- Entorno de coma flotante del host, sin <cfenv> --------------------------
+// Cada op COP1 fija el modo de redondeo y limpia el estado IEEE antes de calcular. En
+// mingw eso entra en __mingw_setfp, que sincroniza la palabra de control x87 Y MXCSR:
+// el perfilador de host lo medía en ~32% del tiempo total del emulador con SM64.
+// En x86-64 todo el cálculo de float/double va por SSE, así que el único registro que
+// gobierna redondeo y banderas es MXCSR, y leerlo/escribirlo son dos instrucciones.
+// Los bits son los mismos que expone <cfenv>, sólo que sin la capa de la CRT.
+namespace mx {
+constexpr u32 RC = 0x6000;                                       // bits 13-14: redondeo
+constexpr u32 RN = 0x0000, RM = 0x2000, RP = 0x4000, RZ = 0x6000; // near/-inf/+inf/cero
+constexpr u32 EX = 0x003f;                                       // IE DE ZE OE UE PE
+constexpr u32 INVALID = 0x01, DIVZERO = 0x04, OVERFLOW_ = 0x08,
+              UNDERFLOW_ = 0x10, INEXACT = 0x20;
+// Redondeo pedido + banderas a cero. Escribe sólo si algo cambia: el modo casi nunca
+// cambia entre ops, así que el caso normal es una lectura y una comparación.
+inline auto prep(u32 rc) -> void {
+  u32 v = _mm_getcsr(), w = (v & ~(RC | EX)) | rc;
+  if(w != v) _mm_setcsr(w);
+}
+inline auto flags() -> u32 { return _mm_getcsr() & EX; }
+}  // namespace mx
 
 // Interruptores de entorno leídos UNA vez al arranque. Antes vivían como `static` locales
 // dentro de step()/dcWrite(): en C++ eso obliga a comprobar la variable-guarda de
@@ -1774,30 +1797,30 @@ auto CPU::cop1op(u32 op) -> void {
   // instead traps (FPE, ExcCode 15) and the sticky Flags [6:2] are left untouched;
   // otherwise the raised bits accumulate into Flags. Host <cfenv> supplies the IEEE
   // status for arithmetic; conversions to integer detect inexact/overflow directly.
-  auto rmHost = [&]() -> int {
-    switch(fcr31 & 3) { case 1: return FE_TOWARDZERO; case 2: return FE_UPWARD; case 3: return FE_DOWNWARD; default: return FE_TONEAREST; }
+  auto rmHost = [&]() -> u32 {
+    switch(fcr31 & 3) { case 1: return mx::RZ; case 2: return mx::RP; case 3: return mx::RM; default: return mx::RN; }
   };
   bool flushDenorm = (fcr31 >> 24) & 1;                 // FCSR FS bit: flush denormals to zero
   bool ueEn = (fcr31 >> 8) & 1, ieEn = (fcr31 >> 7) & 1; // underflow / inexact enables
   auto unimpl = [&](){ fcr31 = (fcr31 & ~0x0003'F000u) | (1u << 17); takeException(15); };  // Unimplemented-Operation (E)
   // Fold host IEEE flags into FCSR after an arithmetic op; returns true if it trapped.
   auto harvest = [&]() -> bool {
-    int ex = std::fetestexcept(FE_ALL_EXCEPT);
+    u32 ex = mx::flags();
     // VR4300: Underflow is never a normal trappable cause. A tiny result that rounds
     // all the way to zero still underflows: with FS=0, or with the U/I enable set, the
     // VR4300 raises Unimplemented-Operation; otherwise it silently sets U+I and writes
     // the (signed-zero) result. Subnormal results proper are caught earlier in setS/setD.
-    if(ex & FE_UNDERFLOW) {
+    if(ex & mx::UNDERFLOW_) {
       if(!flushDenorm || ueEn || ieEn) { unimpl(); return true; }
       fcr31 = (fcr31 & ~0x0003'F000u) | (1u << 13) | (1u << 12);  // Cause U+I
       fcr31 |= (1u << 3) | (1u << 2);                             // Flag  U+I
       return false;
     }
     u32 cause = 0;
-    if(ex & FE_INEXACT)   cause |= 1u << 12;
-    if(ex & FE_OVERFLOW)  cause |= 1u << 14;
-    if(ex & FE_DIVBYZERO) cause |= 1u << 15;
-    if(ex & FE_INVALID)   cause |= 1u << 16;
+    if(ex & mx::INEXACT)   cause |= 1u << 12;
+    if(ex & mx::OVERFLOW_)  cause |= 1u << 14;
+    if(ex & mx::DIVZERO)   cause |= 1u << 15;
+    if(ex & mx::INVALID)   cause |= 1u << 16;
     fcr31 = (fcr31 & ~0x0003'F000u) | cause;
     u32 c5 = (cause >> 12) & 0x1f, en = (fcr31 >> 7) & 0x1f;
     if(c5 & en) { takeException(15); return true; }
@@ -1854,13 +1877,14 @@ auto CPU::cop1op(u32 op) -> void {
   // Convert a float source to a W(32)/L(64) integer. NaN, ±inf, subnormal inputs, or
   // an out-of-range result raise the Unimplemented-Operation exception (E) on the
   // VR4300 instead of producing a value; an inexact conversion sets I.
-  auto cvtInt = [&](double src, int hostRnd, bool isL) {
-    int save = std::fegetround();
-    std::fesetround(hostRnd);
-    std::feclearexcept(FE_ALL_EXCEPT);
+  auto cvtInt = [&](double src, u32 hostRnd, bool isL) {
+    u32 save = _mm_getcsr();
+    _mm_setcsr((save & ~(mx::RC | mx::EX)) | hostRnd);
     double r = std::rint(src);
-    int ex = std::fetestexcept(FE_INEXACT);
-    std::fesetround(save);
+    u32 ex = _mm_getcsr() & mx::INEXACT;
+    // Restaura SÓLO el redondeo, igual que hacía fesetround(save): las banderas que
+    // acabe de levantar esta conversión se quedan, y la siguiente op las limpia.
+    _mm_setcsr((_mm_getcsr() & ~mx::RC) | (save & mx::RC));
     double lim = isL ? 9223372036854775808.0 : 2147483648.0;   // 2^63 / 2^31
     // .L conversions only resolve results that fit in 53 significant bits; a magnitude
     // >= 2^53 needs a 54th bit the VR4300 conversion unit lacks, so it raises Unimplemented.
@@ -1876,8 +1900,7 @@ auto CPU::cop1op(u32 op) -> void {
   };
 
   // Prepare host rounding + a clean IEEE status for the arithmetic ops below.
-  std::fesetround(rmHost());
-  std::feclearexcept(FE_ALL_EXCEPT);
+  mx::prep(rmHost());
 
   if(fn >= 0x30) {  // C.cond.fmt — compare, set fcr31 C bit. bit0=less, bit1=equal, bit2 unord.
     bool isD = (fmt == 0x11);
@@ -1981,14 +2004,14 @@ auto CPU::cop1op(u32 op) -> void {
     case 0x05: set32c(fd, (u32)fpr[fs] & 0x7fff'ffffu); return;   // ABS.S (clear sign, no exceptions)
     case 0x06: setL(fd, fpr[fs]); return;                 // MOV.S (copies the full 64 bits, upper included)
     case 0x07: set32c(fd, (u32)fpr[fs] ^ 0x8000'0000u); return;   // NEG.S (flip sign, no exceptions)
-    case 0x08: cvtInt(getS(fs), FE_TONEAREST, true);  return; // ROUND.L.S
-    case 0x09: cvtInt(getS(fs), FE_TOWARDZERO, true); return; // TRUNC.L.S
-    case 0x0a: cvtInt(getS(fs), FE_UPWARD, true);     return; // CEIL.L.S
-    case 0x0b: cvtInt(getS(fs), FE_DOWNWARD, true);   return; // FLOOR.L.S
-    case 0x0c: cvtInt(getS(fs), FE_TONEAREST, false); return; // ROUND.W.S
-    case 0x0d: cvtInt(getS(fs), FE_TOWARDZERO, false);return; // TRUNC.W.S
-    case 0x0e: cvtInt(getS(fs), FE_UPWARD, false);    return; // CEIL.W.S
-    case 0x0f: cvtInt(getS(fs), FE_DOWNWARD, false);  return; // FLOOR.W.S
+    case 0x08: cvtInt(getS(fs), mx::RN, true);  return; // ROUND.L.S
+    case 0x09: cvtInt(getS(fs), mx::RZ, true); return; // TRUNC.L.S
+    case 0x0a: cvtInt(getS(fs), mx::RP, true);     return; // CEIL.L.S
+    case 0x0b: cvtInt(getS(fs), mx::RM, true);   return; // FLOOR.L.S
+    case 0x0c: cvtInt(getS(fs), mx::RN, false); return; // ROUND.W.S
+    case 0x0d: cvtInt(getS(fs), mx::RZ, false);return; // TRUNC.W.S
+    case 0x0e: cvtInt(getS(fs), mx::RP, false);    return; // CEIL.W.S
+    case 0x0f: cvtInt(getS(fs), mx::RM, false);  return; // FLOOR.W.S
     case 0x21: setD(fd, (double)getS(fs)); return;        // CVT.D.S
     case 0x24: cvtInt(getS(fs), rmHost(), false); return;      // CVT.W.S
     case 0x25: cvtInt(getS(fs), rmHost(), true);  return;      // CVT.L.S
@@ -2003,14 +2026,14 @@ auto CPU::cop1op(u32 op) -> void {
     case 0x05: setL(fd, fpr[fs] & 0x7fff'ffff'ffff'ffffull); return;   // ABS.D
     case 0x06: setL(fd, fpr[fs]); return;                 // MOV.D
     case 0x07: setL(fd, fpr[fs] ^ 0x8000'0000'0000'0000ull); return;   // NEG.D
-    case 0x08: cvtInt(getD(fs), FE_TONEAREST, true);  return; // ROUND.L.D
-    case 0x09: cvtInt(getD(fs), FE_TOWARDZERO, true); return; // TRUNC.L.D
-    case 0x0a: cvtInt(getD(fs), FE_UPWARD, true);     return; // CEIL.L.D
-    case 0x0b: cvtInt(getD(fs), FE_DOWNWARD, true);   return; // FLOOR.L.D
-    case 0x0c: cvtInt(getD(fs), FE_TONEAREST, false); return; // ROUND.W.D
-    case 0x0d: cvtInt(getD(fs), FE_TOWARDZERO, false);return; // TRUNC.W.D
-    case 0x0e: cvtInt(getD(fs), FE_UPWARD, false);    return; // CEIL.W.D
-    case 0x0f: cvtInt(getD(fs), FE_DOWNWARD, false);  return; // FLOOR.W.D
+    case 0x08: cvtInt(getD(fs), mx::RN, true);  return; // ROUND.L.D
+    case 0x09: cvtInt(getD(fs), mx::RZ, true); return; // TRUNC.L.D
+    case 0x0a: cvtInt(getD(fs), mx::RP, true);     return; // CEIL.L.D
+    case 0x0b: cvtInt(getD(fs), mx::RM, true);   return; // FLOOR.L.D
+    case 0x0c: cvtInt(getD(fs), mx::RN, false); return; // ROUND.W.D
+    case 0x0d: cvtInt(getD(fs), mx::RZ, false);return; // TRUNC.W.D
+    case 0x0e: cvtInt(getD(fs), mx::RP, false);    return; // CEIL.W.D
+    case 0x0f: cvtInt(getD(fs), mx::RM, false);  return; // FLOOR.W.D
     case 0x20: setS(fd, (float)getD(fs)); return;         // CVT.S.D
     case 0x24: cvtInt(getD(fs), rmHost(), false); return;      // CVT.W.D
     case 0x25: cvtInt(getD(fs), rmHost(), true);  return;      // CVT.L.D
