@@ -70,3 +70,18 @@ losing updates.
 
 Es decir: `export PATH=/c/msys64/clang64/bin:$PATH` y llamar al python de Windows por ruta.
 `preflight()` comprueba las dos cosas y aborta en un segundo en vez de a los cuatro minutos.
+
+## 2026-08-19 — `gate_all.sh` (cinco modalidades + krom) y la puerta `bench`
+
+`sh scripts/gate_all.sh` = systemtest + sm64 en interp / jit / jit-nolink / threaded /
+threaded-jit, luego krom. Total medido: **~7 min**.
+
+| Tramo | interp | jit | jit-nolink | threaded | threaded-jit |
+|---|---|---|---|---|---|
+| systemtest | 15 s | 9 s | 9 s | 16-17 s | 9 s |
+| sm64 (60 campos) | 13-14 s | 8 s | 9-10 s | 11 s | 3-4 s |
+| krom 371 ROMs (4 jobs) | 163-167 s | — | — | — | — |
+
+`validate.py bench --bench-runs 2` (600 campos VI de SM64, dos pasadas) = ~25 s en
+threaded-jit, ~160 s en interp. Si una pasada de threaded-jit pasa de ~15 s con la maquina
+ociosa, hay contencion (otro gate corriendo) o una regresion; no subir el timeout.

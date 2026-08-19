@@ -2366,3 +2366,79 @@ síntomas distintos.
 | systemtest JIT | 0/3721 · 0/2 · 0/6 (25 s) |
 | SM64 300M lockstep vs threaded | `cbf8aa761b92adab89ddde949b6ff24b` MATCH |
 | krom 371 (interp) | mean_exact **88.87**, mean_close 92.18, 148 perfectos |
+
+## 2026-08-19 — Velocidad: el emulador ya iba a tiempo real, pero con los DEFAULTS apagados
+
+Contexto: la orden era "revisar el interprete y luego el dynarec; no puede ir peor que
+ares". Antes de tocar nada hacia falta **medir bien**, y la metrica que se estaba usando
+(Mips) es falsa en modo threaded: si la CPU va mas rapida, gasta mas instrucciones
+girando en el spin-wait del RCP, asi que el numero sube cuando el emulador empeora.
+
+### Puerta nueva: `bench` (trabajo guest FIJO, reloj de pared)
+
+```
+python scripts/validate.py bench --mode <modo> [--bench-flips 600] [--bench-runs 3]
+sh scripts/gate_all.sh     # las cinco modalidades + krom en un solo log
+```
+
+600 campos VI de SM64 = 10 s de video guest. i7-870, `build/` (SoftRDP):
+
+| Modo | 600 campos | % tiempo real |
+|---|---|---|
+| interp (lockstep) | 78.2 s | 12.8 % |
+| jit (lockstep) | 73.7 s | 13.6 % |
+| threaded (CPU interp) | 44.7 s | 22.4 % |
+| **threaded-jit** | **10.1 s** | **99.1 %** |
+
+O sea: el binario ya corria SM64 a tiempo real, pero `KESTREL_THREADS` y `KESTREL_JIT`
+estaban en OFF por defecto. Quien lanzaba `kestrel64.exe rom.z64` a secas se llevaba el
+12.8 % — 7.7x mas lento que el MISMO binario bien configurado. Esa era la comparacion
+perdida contra ares, no el interprete.
+
+**Arreglo**: los dos conmutadores van ON por defecto y pasan a leer VALOR, no presencia
+(`envFlag(name, def)` en `core/types.hpp`): `KESTREL_JIT=0` / `KESTREL_THREADS=0` apagan.
+`scripts/validate.py` pone el valor explicito en `MODES`, asi que el modo `interp` sigue
+siendo el oraculo puro y las cinco modalidades siguen comparandose entre si.
+
+### Coste por instruccion quitado del RSP (el nuevo palo largo)
+
+Con la CPU al ~100 % de velocidad N64, el que manda es el RSP LLE (`occupancy rsp ~62 %`,
+`rsp 33.6 Mips` emulados). Perfilando el HILO DEL RSP (`KESTREL_HOSTPROF_WHO=rsp`, nuevo):
+`Rsp::step` 73.3 %, `Rsp::execCop2` 26.7 %, con los buckets muy repartidos = coste de
+despacho, no una operacion cara concreta. Cuatro costes tontos, cero semantica tocada:
+
+1. `R128::operator()(e)` (modificador de broadcast) construia su tabla de mascaras
+   `pshufb` en un `static` LOCAL con constructor → comprobacion de guarda de
+   inicializacion atomica **en cada op COP2**. Ahora `constexpr` a nivel de fichero.
+2. `imword()` montaba la instruccion con cuatro lecturas de byte. El PC del RSP siempre
+   esta alineado (avanza de 4 en 4, `take()` enmascara con `0xffc`) → carga de 32 bits +
+   `bswap`, dejando el camino byte a byte para lecturas no alineadas (depuracion).
+3. LQV/SQV con `e == 0` y direccion multiplo de 16 — el caso que usan los microcodigos de
+   graficos para traer/soltar un vertice entero — pasan de 16 accesos de byte a una
+   carga/almacen de 128 bits + `pshufb` que intercambia los bytes de cada banda de 16
+   bits (DMEM es big-endian dentro de la banda; `el[]` es un u16 del host). Mismos bytes,
+   mismo orden, bajo el mismo interruptor `KESTREL_NORSPSSE` para poder bisecar.
+4. Los 4 KB de contadores del muestreador (`profPc[1024]`) vivian DENTRO del struct entre
+   los GPR escalares y los registros vectoriales, calientes los dos. Movidos al final.
+
+En el rasterizador, el mismo patron: `KESTREL_NOBLEND` / `KESTREL_NOAA` /
+`KESTREL_NOFILTER` eran `static` locales dentro de funciones **por pixel**. Subidos a
+ambito de fichero (inicializacion antes de `main`, sin guarda).
+
+`rsp 33.6 → 36.5 Mips` emulados (+9 %).
+
+### Ademas
+- **Bug real**: `KESTREL_MAXFLIPS` no paraba nada. `cpu.maxInsn` solo se mira dentro de la
+  guarda de depuracion del interprete, y esa guarda se calcula UNA vez al parsear el
+  entorno; ponerlo tarde dejaba el corte inerte y el aviso `[frames] ... stopping` salia en
+  cada campo para siempre. Se llama a `cpu.refreshDebugArmed()` al armarlo. Quedaba tapado
+  porque el gate pasaba ademas `KESTREL_MAXINSN`.
+- **Contador de ciclos del RSP** (`Rsp::cyclesRun`, publicado una vez por `step()`, no por
+  instruccion): en modo threaded nadie los contaba y el heartbeat decia "RSP 0.0 %" justo
+  cuando el RSP era el cuello de botella. El heartbeat ahora imprime `rsp N Mips busy`.
+- **hostprof por hilo**: `KESTREL_HOSTPROF_WHO=cpu|rsp|rdp` elige a quien muestrear (antes
+  solo la CPU). Aviso: muestrear a 1 ms suspende el hilo y **falsea el tiempo de pared** —
+  medir velocidad con `bench`, nunca con hostprof activo.
+
+Validado: systemtest 0/3721·0/2·0/6 y sm64 md5 en las cinco modalidades, krom 371/371 sin
+regresion (mean_exact 88.87 / mean_close 92.18).

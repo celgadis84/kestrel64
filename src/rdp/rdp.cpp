@@ -7,6 +7,16 @@
 
 namespace kestrel {
 
+// Conmutadores de depuracion del rasterizador. Estaban como `static` LOCALES dentro de
+// blendPixel/aaPixel/el filtrado de textura, o sea funciones por-pixel: cada pixel pagaba
+// la comprobacion de la guarda de inicializacion del static. Al subirlos a ambito de
+// fichero se inicializan una vez al arrancar el proceso y el punto caliente lee una
+// constante ya materializada.
+static const bool g_noBlend  = std::getenv("KESTREL_NOBLEND")  != nullptr;
+static const bool g_noAA     = std::getenv("KESTREL_NOAA")     != nullptr;
+static const bool g_noFilter = std::getenv("KESTREL_NOFILTER") != nullptr;
+
+
 // --- raw big-endian RDRAM access (physical addresses) ------------------------
 namespace {
 inline auto rd32(const std::vector<u8>& m, u32 p) -> u32 {
@@ -280,13 +290,12 @@ auto SoftRdp::ditherRgb(int x, int y, u32 c) const -> u32 {
 
 auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
-  static const bool noBlend = std::getenv("KESTREL_NOBLEND") != nullptr;
   // The blender runs in every 1-/2-cycle primitive — it is not gated on IM_RD. IM_RD
   // (bit 0x40) only enables READS of the framebuffer, i.e. it matters solely when the mux
   // selects CLR_MEM (M) or MEM_alpha (B). When the blender references memory but reads are
   // disabled, hardware writes the pipeline colour straight through; otherwise the blender
   // evaluates with memc=0 (its memory inputs are never consulted). COPY/FILL bypass it.
-  if(noBlend || cycleType() >= 2) { putPixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
+  if(g_noBlend || cycleType() >= 2) { putPixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
   int sh = (cycleType() == 1) ? 0 : 2;
   int Msel = (other_lo >> (20 + sh)) & 3, Bsel = (other_lo >> (16 + sh)) & 3;
   bool usesMem = (Msel == 1) || (Bsel == 1);
@@ -306,8 +315,7 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> voi
 // pixels (cvg>=1) take the normal blend/write path. `src` is the pipeline RGBA.
 auto SoftRdp::coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
-  static const bool noAA = std::getenv("KESTREL_NOAA") != nullptr;
-  if(noAA || !(other_lo & 0x08) || cvg >= 0.999) { blendPixel(mem, x, y, src); return; }
+  if(g_noAA || !(other_lo & 0x08) || cvg >= 0.999) { blendPixel(mem, x, y, src); return; }
   if(cvg < 0.0) cvg = 0.0;
   u32 fb = readFb(mem, x, y);
   // Pipeline colour first through the blender (if IM_RD), then coverage-fold vs the
@@ -717,8 +725,7 @@ auto SoftRdp::sampleTexFiltered(u32 tile, double s, double t) -> u32 {
   // triangle of texels around the sample and lerps by the fractional coords. No -0.5
   // GL-style bias: the RDP addresses texel origins directly, sfrac/tfrac are the low
   // fractional bits of the S/T coordinate.
-  static const bool noFilt = std::getenv("KESTREL_NOFILTER") != nullptr;
-  if(noFilt || !((other_hi >> 13) & 1))
+  if(g_noFilter || !((other_hi >> 13) & 1))
     return sampleTexel(tile, (int)std::floor(s), (int)std::floor(t));
   // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double
   // lerp rounded at the end lands on a different level whenever the exact result sits on

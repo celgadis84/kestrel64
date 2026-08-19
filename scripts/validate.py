@@ -47,13 +47,15 @@ EXE = Path(os.environ.get("KESTREL_EXE", ROOT / "build" / "kestrel64.exe"))
 BASELINES = ROOT / "docs" / "baselines"
 OUT = ROOT / "out"
 
+# Los conmutadores llevan valor explicito ("0" apaga) porque hilos+JIT van ON por
+# defecto en el binario: sin el "0" el modo oraculo `interp` no seria interp.
 MODES = {
-    "interp":        {},
-    "jit":           {"KESTREL_JIT": "1"},
+    "interp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0"},
+    "jit":           {"KESTREL_JIT": "1", "KESTREL_THREADS": "0"},
     # El enlace de bloques va ACTIVO por defecto dentro del JIT; este modo lo apaga
     # para poder bisecar "el enlace rompe algo" contra el JIT sin enlazar.
-    "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
-    "threaded":      {"KESTREL_THREADS": "1"},
+    "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", "KESTREL_JIT_NOLINK": "1"},
+    "threaded":      {"KESTREL_THREADS": "1", "KESTREL_JIT": "0"},
     "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1"},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1"},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
@@ -439,11 +441,53 @@ def gate_sm64(mode, args):
     return want is None or want == md5
 
 
+def gate_bench(mode, args):
+    """Velocidad honesta: tiempo de pared para una cantidad FIJA de trabajo guest.
+
+    Mips no vale como metrica en modo threaded — una CPU mas rapida solo gasta mas
+    instrucciones girando en el spin-wait, asi que "mejorar" el numero puede ser una
+    regresion real. Aqui el trabajo es fijo (N campos VI de un juego real) y lo que
+    se mide es cuanto tarda el reloj de pared. Se repite y se queda el MINIMO, que es
+    la muestra menos contaminada por el resto del sistema.
+    """
+    rom = Path(args.bench_rom) if args.bench_rom else ROMS / "Super Mario 64 (USA).z64"
+    if not rom.exists():
+        print(f"bench: SKIP (missing {rom})")
+        return True
+    save = rom.with_suffix(".eep")
+    dump = OUT / f"bench-{mode}.bmp"
+    times, lines = [], []
+    for i in range(args.bench_runs):
+        if save.exists():
+            save.unlink()
+        t0 = time.time()
+        rc, log = run_rom(rom, dump, mode, args.sm64_insn, args.sm64_timeout,
+                          frames=(args.bench_flips, 0),
+                          extra_env={"KESTREL_HEARTBEAT": "1"})
+        dt = time.time() - t0
+        if rc != 0 and rc != -9:
+            pass
+        hb = [l for l in log.splitlines() if l.startswith("[hb]")]
+        times.append(dt)
+        lines.append(hb[-1] if hb else "")
+        print(f"bench[{mode}] run {i+1}/{args.bench_runs}: {dt:.2f}s")
+    if save.exists():
+        save.unlink()
+    best = min(times)
+    # Un campo VI = 1/60 s de video guest (NTSC ~59.94). Realtime = trabajo/tiempo.
+    guest = args.bench_flips / 60.0
+    print(f"bench[{mode}]: {args.bench_flips} campos VI  min {best:.2f}s  "
+          f"med {sorted(times)[len(times)//2]:.2f}s  ->  {100.0*guest/best:.1f}% realtime")
+    if lines[times.index(best)]:
+        print("   " + lines[times.index(best)])
+    return True
+
+
 # ------------------------------------------------------------------------- main
 
 def main():
     ap = argparse.ArgumentParser(description="kestrel64 validation gates")
-    ap.add_argument("gate", choices=["systemtest", "krom", "sm64", "all"])
+    ap.add_argument("gate", choices=["systemtest", "krom", "sm64", "bench", "all"])
     ap.add_argument("--sm64-flips", type=int, default=60,
                     help="campos VI (buffer swaps) antes de volcar el framebuffer")
     ap.add_argument("--mode", default="interp", choices=sorted(MODES),
@@ -469,6 +513,9 @@ def main():
     ap.add_argument("--sm64-insn", type=int, default=900_000_000)   # solo red de seguridad: el corte real son --sm64-flips campos
     ap.add_argument("--sm64-timeout", type=int, default=600)
     ap.add_argument("--st-timeout", type=int, default=300)
+    ap.add_argument("--bench-runs", type=int, default=3, help="bench: repeticiones (se queda el minimo)")
+    ap.add_argument("--bench-flips", type=int, default=600, help="bench: campos VI de trabajo fijo")
+    ap.add_argument("--bench-rom", help="bench: ROM alternativa (por defecto SM64)")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--vs", choices=sorted(MODES),
                     help="diff against another mode's baseline (default: the same mode)")
@@ -485,7 +532,8 @@ def main():
     gates = ["systemtest", "krom", "sm64"] if args.gate == "all" else [args.gate]
     fail = False
     for g in gates:
-        okg = {"systemtest": gate_systemtest, "krom": gate_krom, "sm64": gate_sm64}[g](args.mode, args)
+        okg = {"systemtest": gate_systemtest, "krom": gate_krom, "sm64": gate_sm64,
+               "bench": gate_bench}[g](args.mode, args)
         if not okg:
             fail = True
             if args.gate == "all":

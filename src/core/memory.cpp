@@ -1,3 +1,4 @@
+#include "../telemetry/hostprof.hpp"
 #include "memory.hpp"
 #include <chrono>
 #include "../audio/audio.hpp"
@@ -1223,6 +1224,7 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
 }
 
 auto Memory::rdpWorkerLoop() -> void {
+  hostprof::start("rdp");   // opt-in: KESTREL_HOSTPROF_WHO=rdp
   for(;;) {
     RdpJob job;
     {
@@ -1278,6 +1280,7 @@ auto Memory::rspSubmitKick() -> void {
 }
 
 auto Memory::rspWorkerLoop() -> void {
+  hostprof::start("rsp");   // opt-in: KESTREL_HOSTPROF_WHO=rsp
   for(;;) {
     {
       std::unique_lock<std::mutex> lk(rspMx);

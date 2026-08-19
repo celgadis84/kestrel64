@@ -2,6 +2,7 @@
 // Loom core — fundamental fixed-width types and small helpers.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstddef>
 
 namespace kestrel {
@@ -27,6 +28,20 @@ inline auto bswap32(u32 v) -> u32 {
 }
 inline auto bswap64(u64 v) -> u64 {
   return  (u64)bswap32((u32)v) << 32 | bswap32((u32)(v >> 32));
+}
+
+
+// Toggle de entorno con VALOR, no por presencia. Los conmutadores caros (hilos RCP,
+// dynarec) van en ON por defecto: medido en SM64, threaded-jit corre al 99% de tiempo
+// real y el modo interp/lockstep al 12.8%, asi que arrancar apagado por defecto era
+// regalar 7x. `KESTREL_X=0|off|false|no` apaga; cualquier otro valor enciende; ausente
+// = `def`. Hace falta el valor explicito para que las puertas de validacion puedan
+// forzar el modo oraculo (interp puro) sin depender del default del build.
+inline auto envFlag(const char* name, bool def) -> bool {
+  const char* v = std::getenv(name);
+  if(!v || !*v) return def;
+  return !(v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F'
+           || ((v[0] == 'o' || v[0] == 'O') && (v[1] == 'f' || v[1] == 'F')));
 }
 
 }  // namespace kestrel

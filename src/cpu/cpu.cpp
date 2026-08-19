@@ -636,7 +636,7 @@ auto CPU::unimplemented(u32 op) -> void {
       }
       std::fflush(stderr);
     }
-    if(mem && std::getenv("KESTREL_THREADS")) {   // walk libultra all-threads list (tlnext)
+    if(mem && envFlag("KESTREL_THREADS", true)) {   // walk libultra all-threads list (tlnext)
       auto rd = [&](u32 va){ memAbort=false; u32 v=read32(va); memAbort=false; return v; };
       const char* sn[]={"?","STOPPED","RUNNABLE","RUNNING","4","WAITING","6","7","8"};
       // .lib globals have KSEG0 VMA 0x8004xxxx but the game runs it TLB-mapped at 0x7000xxxx;
@@ -1072,7 +1072,6 @@ auto CPU::translate(u64 vaddr, Access acc) -> u64 {
     if(mapped) return tlbLookup(vaddr, acc, false);
   } else {
     // --- 64-bit addressing ------------------------------------------------
-    u64 off40 = vaddr & 0x0000'00FF'FFFF'FFFFull;   // in-region offset for 2^40 segments
     bool lo40 = (vaddr >> 40) == 0;                 // vaddr < 2^40 (xkuseg/xsuseg/xuseg)
     if(mode == 2) {                    // user: only xuseg
       if(lo40) return tlbLookup(vaddr, acc, true);

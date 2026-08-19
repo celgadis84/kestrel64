@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 // kestrel64 — Reality Signal Processor, low-level interpreter (M3.3).
 //
 // The RSP is a MIPS-ish scalar core (no mult/div/HI/LO, 32 GPRs, 12-bit PC over
@@ -52,13 +53,11 @@ struct Rsp {
   u32 r[32] = {};          // GPRs; r[0] is hardwired zero (enforced on write)
   u32 pc = 0;              // 12-bit program counter into IMEM
 
-  // Per-IMEM-instruction hotpath sampler (opt-in via MCP prof.*). IMEM is 4 KB, so
-  // one u32 counter per 4-byte slot pins the hot microcode routine exactly. Zero cost
-  // when profOn is false.
+  // Per-IMEM-instruction hotpath sampler (opt-in via MCP prof.*). El interruptor vive
+  // aqui, junto a los registros que se tocan por instruccion; los 4 KB de contadores
+  // viven al final del struct (ver profPc), para no meter una pagina fria entre los
+  // GPR escalares y los registros vectoriales, que si son calientes los dos.
   bool profOn = false;
-  u32  profPc[1024] = {};
-  u64  profTotal = 0;
-  auto profClear() -> void { for(auto& c : profPc) c = 0; profTotal = 0; }
 
   // --- vector unit -----------------------------------------------------------
   R128 vpr[32];
@@ -78,6 +77,10 @@ struct Rsp {
   // hit L1 se convierte en un fallo coherente porque el otro nucleo invalida la linea sin
   // parar: el perfilador de host medía 18% del tiempo TOTAL del emulador en ese unico `cmpb`.
   // Aislarlos en su propia linea (y rellenarla) lo elimina; no cambia ninguna semantica.
+  // Contador de instrucciones de microcodigo ejecutadas (telemetria de velocidad). Lo escribe
+  // el hilo RSP una vez por step(), lo lee el hilo CPU al refrescar el heartbeat.
+  std::atomic<u64> cyclesRun{0};
+
   alignas(64) bool running = false;    // reentrancy guard (microcode may poke SP_STATUS)
 
   // Vector unit SSE fast path (8 lanes = 1 XMM). Bit-exact with the scalar reference
@@ -144,6 +147,13 @@ private:
   auto accGet(int n) const -> u64;
   auto accSet(int n, u64 v) -> void;
   auto accSat(int n, bool slice, u16 neg, u16 pos) const -> u16;
+
+public:
+  // Contadores del muestreador (frios: solo se tocan con profOn). IMEM son 4 KB, o sea
+  // un contador u32 por ranura de 4 bytes, lo que senala la rutina de microcodigo exacta.
+  u32  profPc[1024] = {};
+  u64  profTotal = 0;
+  auto profClear() -> void { for(auto& c : profPc) c = 0; profTotal = 0; }
 };
 
 }  // namespace kestrel

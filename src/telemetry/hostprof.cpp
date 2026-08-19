@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -70,9 +71,13 @@ auto dump() -> void {
 }
 }  // namespace
 
-auto start() -> void {
+auto start(const char* label) -> void {
   const char* e = std::getenv("KESTREL_HOSTPROF");
   if(!e) return;
+  const char* who = std::getenv("KESTREL_HOSTPROF_WHO");
+  if(!who) who = "cpu";
+  if(std::strcmp(who, label) != 0) return;   // este hilo no es el elegido
+  if(g_thread.joinable()) return;            // ya hay un muestreador vivo
   unsigned ms = (unsigned)std::strtoul(e, nullptr, 0);
   if(ms == 0) ms = 1;
   g_base = (u64)GetModuleHandleW(nullptr);
@@ -94,5 +99,5 @@ auto stop() -> void {
 
 }  // namespace kestrel::hostprof
 #else
-namespace kestrel::hostprof { auto start() -> void {} auto stop() -> void {} }
+namespace kestrel::hostprof { auto start(const char*) -> void {} auto stop() -> void {} }
 #endif

@@ -39,7 +39,7 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   cpu.connect(&memory);
   cpu.fastBoot(rom.header.entryPoint);  // HLE IPL3: boot segment in RDRAM, PC at entry
   std::printf("[cpu] HLE boot, pc=0x%08x\n", (u32)cpu.pc);
-  if(std::getenv("KESTREL_THREADS")) {
+  if(envFlag("KESTREL_THREADS", true)) {
     memory.rcpMode = Memory::RcpMode::Threaded;
     memory.startRcpThreads();
     std::printf("[system] RCP threading ON — RDP rasterizes on its own thread\n");
@@ -49,7 +49,7 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
 
 // Leído una vez al arranque: como `static` local se comprobaba la variable-guarda de
 // inicialización en CADA vuelta del bucle, o sea por instrucción emulada.
-static const bool g_jitOn = std::getenv("KESTREL_JIT") != nullptr;
+static const bool g_jitOn = envFlag("KESTREL_JIT", true);
 
 auto System::stepCpu(u64 n) -> u64 {
   const bool jitOn = g_jitOn;
@@ -81,7 +81,7 @@ auto System::stepCpu(u64 n) -> u64 {
     // so the CPU thread must NOT also step it — that would double-execute the core.
     if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running) {
       rspPhase += 2;
-      while(rspPhase >= 3) { rspPhase -= 3; memory.rsp.step(1); rspCycles++; if(!memory.rsp.running) break; }
+      while(rspPhase >= 3) { rspPhase -= 3; memory.rsp.step(1); if(!memory.rsp.running) break; }
     }
   }
   return i;
@@ -134,6 +134,9 @@ static auto framebufferHash(Memory& mem) -> u64 {
 }
 
 auto System::run() -> void {
+  // Ciclos de RSP: los publica el propio core en cada step(), asi que el contador vale igual
+  // en Lockstep (interleave del bucle) que en Threaded (tarea entera en el worker).
+  auto rspNow = [this]{ return memory.rsp.cyclesRun.load(std::memory_order_relaxed); };
   // Watchdog opt-in (KESTREL_WATCHDOG=<segundos>): un livelock del guest y un hilo CPU
   // bloqueado en un handshake del RCP se ven IGUAL desde fuera. Esto los separa: si
   // retired avanza, gira el guest; si no avanza, la CPU esta parada esperando al RCP.
@@ -185,7 +188,7 @@ auto System::run() -> void {
   // drives stepCpu() directly under the same lock.
   using clock = std::chrono::steady_clock;
   auto  winT0 = clock::now();       // sliding speed window (recomputed ~4x/sec)
-  u64   winInsn = 0, winRsp = rspCycles;
+  u64   winInsn = 0, winRsp = rspNow();
   auto  hbT0 = winT0, hbLast = winT0;   // heartbeat lifetime baseline
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
 
@@ -226,7 +229,7 @@ auto System::run() -> void {
     if(cpu.halted && exitOnHalt) { shutdown.store(true); break; }
     if(paused.load() || cpu.halted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      winT0 = clock::now(); winInsn = 0; winRsp = rspCycles;  // don't fold idle time into speed
+      winT0 = clock::now(); winInsn = 0; winRsp = rspNow();  // don't fold idle time into speed
       continue;
     }
     u64 did;
@@ -273,6 +276,13 @@ auto System::run() -> void {
                    (unsigned long long)(cpu.retired / 1'000'000));
       std::lock_guard<std::mutex> lk(coreMutex);
       cpu.maxInsn = cpu.retired + 1;
+      // El tope de instrucciones se comprueba en la guarda de depuracion del interprete, y
+      // esa guarda se calcula UNA vez al parsear el entorno. Ponerlo aqui sin re-armarla
+      // dejaba el corte inerte: el emulador seguia corriendo y reimprimiendo este mensaje
+      // campo tras campo. Solo no se notaba porque el gate pasa ademas KESTREL_MAXINSN,
+      // que ya la arma.
+      cpu.refreshDebugArmed();
+      maxFlips = maxSyncs = 0;    // ya disparado: no repetir el aviso cada campo
     }
 
     if(stableEvery && cpu.retired >= stableNext) {
@@ -287,6 +297,8 @@ auto System::run() -> void {
         // Reuse the cap path so the dump/report side stays in exactly one place.
         std::lock_guard<std::mutex> lk(coreMutex);
         cpu.maxInsn = cpu.retired + 1;
+        cpu.refreshDebugArmed();   // idem: sin re-armar la guarda el tope no lo mira nadie
+        stableEvery = 0;
       }
     }
 
@@ -296,11 +308,11 @@ auto System::run() -> void {
     double ws = std::chrono::duration<double>(now - winT0).count();
     if(ws >= 0.25) {
       double cpuCps = winInsn / ws;                          // CPI≈1 baseline
-      double rspCps = (rspCycles - winRsp) / ws;
+      double rspCps = (rspNow() - winRsp) / ws;
       n64SpeedPct.store(cpuCps / clocks.cpuTarget() * 100.0, std::memory_order_relaxed);
       rspSpeedPct.store(rspCps / clocks.rspTarget() * 100.0, std::memory_order_relaxed);
       // RDRAM has no per-transaction cycle model yet → leave at 0 (unmodeled).
-      winT0 = now; winInsn = 0; winRsp = rspCycles;
+      winT0 = now; winInsn = 0; winRsp = rspNow();
     }
 
     if(hbOn && now - hbLast >= std::chrono::seconds(5)) {
@@ -312,12 +324,18 @@ auto System::run() -> void {
       double rdpPct  = memory.rdpBusyNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
       double rspPct  = memory.rspBusyNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
       double waitPct = memory.cpuWaitNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
+      // Rendimiento del emulador de RSP: instrucciones de microcodigo por segundo DENTRO de
+      // step(), sin contar el tiempo ocioso del worker. Separa "lo emulamos despacio" de
+      // "el juego no le da trabajo al RSP".
+      double rspBusyS = memory.rspBusyNs.load(std::memory_order_relaxed) / 1e9;
+      double rspMips  = rspBusyS > 0.01 ? memory.rsp.cyclesRun.load(std::memory_order_relaxed)
+                                          / 1e6 / rspBusyS : 0.0;
       std::fprintf(stderr, "[hb] %.0fM insns, %.2f Mips avg | N64 speed: CPU %.1f%%  RSP %.1f%%"
-                           " | occupancy: rdp %.0f%% rsp %.0f%% cpuWait %.0f%%\n",
+                           " | occupancy: rdp %.0f%% rsp %.0f%% cpuWait %.0f%% | rsp %.1f Mips busy\n",
                    ri / 1e6, ri / 1e6 / s,
                    n64SpeedPct.load(std::memory_order_relaxed),
                    rspSpeedPct.load(std::memory_order_relaxed),
-                   rdpPct, rspPct, waitPct);
+                   rdpPct, rspPct, waitPct, rspMips);
       hbLast = now;
     }
   }

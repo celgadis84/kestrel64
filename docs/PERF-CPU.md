@@ -264,3 +264,59 @@ modes (interp / jit / jit-nolink), which are the JIT's oracle.
 Note: the host profiler dump is **cumulative over the whole run**, so it cannot
 profile a hang window — that misled one round of diagnosis before the watchdog
 existed.
+
+## 10. Lo que de verdad se estaba midiendo mal: los DEFAULTS
+
+`Mips` no es una metrica valida en modo threaded (una CPU mas rapida solo gasta mas
+instrucciones girando en el spin-wait), asi que se anadio una puerta que mide **tiempo
+de pared para trabajo guest FIJO**: N campos VI de SM64.
+
+```
+python scripts/validate.py bench --mode <modo> [--bench-flips 600] [--bench-runs 3]
+```
+
+600 campos = 10 s de video guest. Medido en el i7-870, `build/` (SoftRDP):
+
+| Modo | 600 campos VI | % tiempo real |
+|---|---|---|
+| interp (lockstep) | 78.2 s | 12.8 % |
+| jit (lockstep) | 73.7 s | 13.6 % |
+| threaded (interp CPU) | 44.7 s | 22.4 % |
+| **threaded-jit** | **10.1 s** | **99.1 %** |
+
+El emulador ya corria **a tiempo real** — pero solo si el usuario sabia exportar dos
+variables de entorno. `KESTREL_THREADS` y `KESTREL_JIT` iban en OFF por defecto, asi que
+`kestrel64.exe rom.z64` daba el 12.8 %: 7.7x mas lento que el mismo binario bien
+configurado. Eso, y no el interprete, era la razon de "va peor que ares".
+
+**Cambio**: los dos van ON por defecto. Los conmutadores pasan a leer VALOR
+(`envFlag(name, def)` en `core/types.hpp`): `KESTREL_JIT=0` apaga el dynarec,
+`KESTREL_THREADS=0` vuelve a lockstep. Las puertas de validacion ponen el valor
+explicito en `MODES`, de modo que `interp` sigue siendo el oraculo puro.
+
+## 11. RSP: quitar coste por instruccion del interprete LLE
+
+Con la CPU al ~100% de la velocidad N64, el palo largo pasa a ser el RSP
+(`occupancy rsp ~62%`, `rsp 33.6 Mips busy`). Cuatro costes tontos, todos de HW
+semanticamente neutro:
+
+1. **Guarda de `static` local en el modificador de broadcast**. `R128::operator()(e)`
+   construia su tabla de mascaras `pshufb` en un `static` local con constructor → una
+   comprobacion de guarda de inicializacion (thread-safe statics, atomica) en **cada
+   operacion COP2**. Ahora es `constexpr` a nivel de fichero.
+2. **`imword()` montaba la instruccion byte a byte**. El PC del RSP siempre esta alineado
+   (avanza de 4 en 4, `take()` enmascara con `0xffc`), asi que el camino normal es una
+   carga de 32 bits + `bswap`; el camino byte a byte se queda para lecturas no alineadas.
+3. **LQV/SQV alineados** (`e == 0`, direccion multiplo de 16 — el caso que usan los
+   microcodigos de graficos para un vertice entero): 16 lecturas/escrituras de byte con
+   enmascarado → una carga/almacen de 128 bits + `pshufb` que intercambia los bytes de
+   cada banda. Mismos bytes, mismo orden. Bajo el mismo interruptor `KESTREL_NORSPSSE`
+   que el resto del camino SIMD, para poder bisecar.
+4. **Los 4 KB de contadores del muestreador** (`profPc[1024]`) estaban DENTRO del struct
+   entre los GPR escalares y los registros vectoriales, que son calientes los dos. Movidos
+   al final.
+
+Y en el rasterizador, lo mismo: `KESTREL_NOBLEND` / `KESTREL_NOAA` / `KESTREL_NOFILTER`
+eran `static` locales dentro de funciones **por pixel**. Subidos a ambito de fichero.
+
+Resultado: `rsp 33.6 → 36.5 Mips` emulados (+9 %) sin tocar una sola semantica.

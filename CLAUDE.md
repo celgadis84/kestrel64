@@ -43,7 +43,13 @@ Everything runs from one script; do not hand-roll the invocations.
 python scripts/validate.py systemtest --mode <mode>   # 0/3721 · 0/2 · 0/6
 python scripts/validate.py sm64       --mode <mode>   # framebuffer md5
 python scripts/validate.py krom                       # 371-ROM RDP accuracy vs baseline
+python scripts/validate.py bench      --mode <mode>   # wall clock for N VI fields (speed)
+sh scripts/gate_all.sh                                # las cinco modalidades + krom, un log
 ```
+
+**Speed is measured with `bench`, never with Mips.** In threaded mode a faster CPU
+thread just burns more spin-wait instructions, so Mips can rise while the emulator
+gets slower. `bench` fixes the guest work (N VI fields) and times the wall clock.
 
 Modes: `interp`, `jit`, `jit-nolink`, `threaded`, `threaded-jit` (plus
 `threaded-trace`, `threaded-nolink`). A change is done when systemtest and sm64
@@ -86,7 +92,8 @@ dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP) · `vrdp/` (parallel-rdp glue
 
 ## Env-var toggles
 
-`KESTREL_THREADS=1` (threaded RCP) · `KESTREL_JIT=1` (dynarec, default OFF, oracle=interp;
+`KESTREL_THREADS` (threaded RCP, **default ON**) · `KESTREL_JIT` (dynarec, **default ON**, oracle=interp;
+los dos leen VALOR: `=0` apaga. Medido en SM64: threaded-jit = 99% tiempo real, interp = 12.8%;
 block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` to bisect,
 `KESTREL_JIT_TRACE=1` superblocks = measured negative) ·
 `KESTREL_HEARTBEAT=1` · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=1` ·

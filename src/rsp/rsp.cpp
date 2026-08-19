@@ -47,31 +47,43 @@ static inline auto sclip48(s64 x) -> s64 {
 static inline auto clz(u32 v) -> u32 { return v ? (u32)__builtin_clz(v) : 32; }
 
 // --- broadcast modifier -----------------------------------------------------
-auto R128::operator()(u32 e) const -> R128 {
-  // per-lane source index for each element specifier (n64brew broadcast table)
-  static const u8 src[16][8] = {
+// Tabla de mascaras pshufb del modificador de elemento, como DATO CONSTANTE. Antes era un
+// `static` local con constructor, o sea una comprobacion de guarda de inicializacion
+// (atomica, thread-safe statics) en CADA operacion de COP2 — y COP2 es la mitad del
+// tiempo del RSP. Se sigue derivando de la misma tabla de broadcast del wiki (n64brew):
+// la salida de la banda n (bytes 2n,2n+1) toma la banda src[e][n] (bytes 2s,2s+1), asi que
+// el resultado es byte a byte el mismo que el `v.el[n] = el[src[e][n]]` escalar.
+namespace {
+struct BcastMasks { u8 b[16][16]; };
+constexpr auto makeBcastMasks() -> BcastMasks {
+  const u8 src[16][8] = {
     {0,1,2,3,4,5,6,7}, {0,1,2,3,4,5,6,7},
     {0,0,2,2,4,4,6,6}, {1,1,3,3,5,5,7,7},
     {0,0,0,0,4,4,4,4}, {1,1,1,1,5,5,5,5}, {2,2,2,2,6,6,6,6}, {3,3,3,3,7,7,7,7},
     {0,0,0,0,0,0,0,0}, {1,1,1,1,1,1,1,1}, {2,2,2,2,2,2,2,2}, {3,3,3,3,3,3,3,3},
     {4,4,4,4,4,4,4,4}, {5,5,5,5,5,5,5,5}, {6,6,6,6,6,6,6,6}, {7,7,7,7,7,7,7,7},
   };
-  // Byte-lane gather → one pshufb (SSSE3). Masks derived from `src` once: output lane n
-  // (bytes 2n,2n+1) takes source lane src[e][n] (bytes 2s,2s+1), preserving el[] layout
-  // exactly, so the result is byte-identical to the scalar `v.el[n] = el[src[e][n]]`.
-  static const struct Masks {
-    __m128i m[16];
-    Masks() {
-      for(int ee = 0; ee < 16; ee++) {
-        alignas(16) u8 b[16];
-        for(int n = 0; n < 8; n++) { u8 s = src[ee][n]; b[2 * n] = (u8)(2 * s); b[2 * n + 1] = (u8)(2 * s + 1); }
-        m[ee] = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b));
-      }
+  BcastMasks m{};
+  for(int e = 0; e < 16; e++)
+    for(int n = 0; n < 8; n++) {
+      u8 s = src[e][n];
+      m.b[e][2 * n] = (u8)(2 * s); m.b[e][2 * n + 1] = (u8)(2 * s + 1);
     }
-  } masks;
+  return m;
+}
+constexpr BcastMasks kBcast = makeBcastMasks();
+
+// Intercambio de los dos bytes de cada banda de 16 bits: DMEM guarda la banda en
+// big-endian y el[] es un u16 del host. Dato constante a nivel de fichero (un `static`
+// local aqui costaria una guarda de inicializacion por cuarteto cargado).
+alignas(16) constexpr u8 kLaneSwap[16] = {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};
+}  // namespace
+
+auto R128::operator()(u32 e) const -> R128 {
   R128 v;
   _mm_storeu_si128(reinterpret_cast<__m128i*>(v.el),
-                   _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(el)), masks.m[e & 15]));
+                   _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(el)),
+                                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(kBcast.b[e & 15]))));
   return v;
 }
 
@@ -104,6 +116,12 @@ auto Rsp::wWord(u32 a, u32 v) -> void { wb(a, v >> 24); wb(a + 1, v >> 16); wb(a
 auto Rsp::imword(u32 a) const -> u32 {
   a &= 0xfff;
   const u8* p = mem->imem.data();
+  // Camino normal: el PC del RSP siempre esta alineado a palabra (pc avanza de 4 en 4 y
+  // take() enmascara el destino con 0xffc), asi que una carga de 32 bits + bswap sustituye
+  // a cuatro cargas de byte con sus desplazamientos. El camino byte a byte se queda para
+  // las lecturas no alineadas (solo llegan de utilidades de depuracion) porque ahi si
+  // puede cruzar el final de IMEM y hay que envolver a 0.
+  if((a & 3) == 0) { u32 w; std::memcpy(&w, p + a, 4); return bswap32(w); }
   return (u32)p[a] << 24 | p[(a + 1) & 0xfff] << 16 | p[(a + 2) & 0xfff] << 8 | p[(a + 3) & 0xfff];
 }
 
@@ -226,7 +244,19 @@ auto Rsp::execLoad(u32 op) -> void {
   case 0x02: { u32 a = rsv + imm * 4; for(u32 o = e; o < e + 4u && o < 16; o++) V.sb(o & 15, rb(a++)); } break;  // LLV
   case 0x03: { u32 a = rsv + imm * 8; for(u32 o = e; o < e + 8u && o < 16; o++) V.sb(o & 15, rb(a++)); } break;  // LDV
   case 0x04: {  // LQV
-    u32 a = rsv + imm * 16; u32 end = (a | 15); u32 lim = end - a; if(lim > 15u - e) lim = 15u - e;
+    u32 a = rsv + imm * 16;
+    // Camino rapido: cuarteto alineado y sin desplazamiento de elemento — el caso que usan
+    // los microcodigos de graficos para traerse un vertice entero. Son los mismos 16 bytes
+    // en el mismo orden, solo que en una carga de 128 bits con un pshufb que intercambia
+    // los bytes de cada banda de 16 bits (DMEM es big-endian dentro de la banda, el[] no),
+    // en vez de dieciseis lecturas de byte con su enmascarado. Alineado a 16 no puede
+    // cruzar el final de DMEM, asi que no hay envoltura que respetar.
+    if(sse && e == 0 && ((a & 0xfff) & 15) == 0) {
+      __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&mem->dmem[a & 0xfff]));
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(V.el), _mm_shuffle_epi8(w, _mm_loadu_si128(reinterpret_cast<const __m128i*>(kLaneSwap))));
+      break;
+    }
+    u32 end = (a | 15); u32 lim = end - a; if(lim > 15u - e) lim = 15u - e;
     for(u32 o = 0; o <= lim; o++) V.sb((e + o) & 15, rb(a + o));
   } break;
   case 0x05: {  // LRV
@@ -278,7 +308,15 @@ auto Rsp::execStore(u32 op) -> void {
   case 0x01: { u32 a = rsv + imm * 2; for(u32 o = e; o < e + 2u; o++) wb(a++, V.gb(o & 15)); } break;   // SSV
   case 0x02: { u32 a = rsv + imm * 4; for(u32 o = e; o < e + 4u; o++) wb(a++, V.gb(o & 15)); } break;   // SLV
   case 0x03: { u32 a = rsv + imm * 8; for(u32 o = e; o < e + 8u; o++) wb(a++, V.gb(o & 15)); } break;   // SDV
-  case 0x04: { u32 a = rsv + imm * 16; u32 end = e + (16 - (a & 15)); for(u32 o = e; o < end; o++) wb(a++, V.gb(o & 15)); } break;  // SQV
+  case 0x04: {  // SQV
+    u32 a = rsv + imm * 16;
+    if(sse && e == 0 && ((a & 0xfff) & 15) == 0) {   // simetrico del camino rapido de LQV
+      __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(V.el));
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(&mem->dmem[a & 0xfff]), _mm_shuffle_epi8(w, _mm_loadu_si128(reinterpret_cast<const __m128i*>(kLaneSwap))));
+      break;
+    }
+    u32 end = e + (16 - (a & 15)); for(u32 o = e; o < end; o++) wb(a++, V.gb(o & 15));
+  } break;
   case 0x05: {  // SRV
     u32 a = rsv + imm * 16; u32 end = e + (a & 15); u32 bse = 16 - (a & 15); a &= ~15u;
     for(u32 o = e; o < end; o++) wb(a++, V.gb((o + bse) & 15));
@@ -909,8 +947,9 @@ auto Rsp::start() -> void {
 
 auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
+  u64 ran = 0;
   while(!halt && maxInsns && budget) {
-    maxInsns--; budget--;
+    maxInsns--; budget--; ran++;
     u32 op = imword(pc);
     curpc = pc;
     if(profOn) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
@@ -922,6 +961,11 @@ auto Rsp::step(u64 maxInsns) -> void {
     else if(branch)  { pendingTarget = branchTarget; inDelay = true; pc = nextpc; }
     else             { pc = nextpc; }
   }
+  // Ciclos de RSP ejecutados. En modo Lockstep los contaba el bucle del sistema, pero en
+  // Threaded el worker llama a step() con la tarea entera y nadie los contaba: el heartbeat
+  // decia "RSP 0.0%" justo cuando el RSP es el palo largo. Se publica una vez por llamada,
+  // no por instruccion, asi que no toca la linea de cache en el bucle caliente.
+  cyclesRun.fetch_add(ran, std::memory_order_relaxed);
   mem->rcp.sp_pc = pc & 0xffc;
   if(halt) {
     // PC is final; now let the CPU see the task end. The release in the fetch_or
