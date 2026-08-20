@@ -93,7 +93,9 @@ dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP) · `vrdp/` (parallel-rdp glue
 ## Env-var toggles
 
 `KESTREL_THREADS` (threaded RCP, **default ON**) · `KESTREL_JIT` (dynarec, **default ON**, oracle=interp;
-los dos leen VALOR: `=0` apaga. Medido en SM64: threaded-jit = 99% tiempo real, interp = 12.8%;
+los dos leen VALOR: `=0` apaga. Medido honesto en SM64, `bench` de 200 campos VI:
+threaded-jit 8.8 s, threaded (CPU interp) 26.3 s, jit lockstep ~30 s. El "99% de tiempo
+real" que se cito aqui era el bench viejo midiendo mal, ver `docs/PERF-CPU.md` §12;
 block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` to bisect,
 `KESTREL_JIT_TRACE=1` superblocks = measured negative) ·
 `KESTREL_HEARTBEAT=1` · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=1` ·
@@ -101,7 +103,10 @@ block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` 
 `KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n fields) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
 `KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_SAVETYPE` ·
-`KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST`.
+`KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST` · `KESTREL_FAULTSTOP=1` (halt on a guest fault with
+the RCP event ring intact) · `KESTREL_WATCHP=<phys>` (store watchpoint hooked in the D-cache;
+bus-level `KESTREL_WATCH` misses cacheable CPU stores) · `KESTREL_EVDUMP=<n>` ·
+`KESTREL_DPSYNCLOG=1` (address of every retired SYNC_FULL).
 
 ## Hard rules (NON-NEGOTIABLE)
 
@@ -118,14 +123,17 @@ block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` 
 
 systemtest 100%, SM64 boots+renders 3D, PD boots+renders+advances, lockstep==threaded.
 Save types complete (EEPROM/SRAM/FlashRAM). Dynarec Stage-2c (block-linking = ceiling).
-parallel-rdp WIRED + first light (SM64 Mario head correct; background rainbow = VI/clear
-accuracy item). Real RDP accuracy frontier = coverage/AA subpixel (biggest, last).
+parallel-rdp VENDORED under `third_party/` and correct on SM64 — the background rainbow was
+RDRAM byte order (kestrel keeps guest big-endian, parallel-rdp assumes ares' word swizzle),
+see `docs/parallel-rdp-integration.md`; shaders patched, SPIR-V bank regenerated with
+`tools/slangmosh_lite.py` (upscaling still unsupported). RDP FIFO back-pressure fixed the
+threaded DP-interrupt surplus, `docs/RDP-FIFO-BACKPRESSURE.md`. Real RDP accuracy frontier =
+coverage/AA subpixel (biggest, last).
 
 ### Queued work (autonomous order)
-1. Fix parallel-RDP SM64 background rainbow (VI dedither/divot/clear path).
-2. RSP VU with **SSE4.2** intrinsics (8×s16 = 1 XMM; user asked for most-advanced host CPU
+1. RSP VU with **SSE4.2** intrinsics (8×s16 = 1 XMM; user asked for most-advanced host CPU
    instr — i7-870 Nehalem, SSE4.2 max, NO AVX). Oracle = current scalar interp, bit-exact.
-3. Savestates. 4. Dynarec block-linking. 5. Controller Pak `.mpk`. 6. PIF/CIC LLE.
+2. Savestates. 3. Dynarec block-linking. 4. Controller Pak `.mpk`. 5. PIF/CIC LLE.
 
 Note: classic Zilmar video/audio plugin architecture = legacy that caused inaccuracy;
 but backend SELECTION (SoftRDP↔parallel-RDP, audio sink) is what we already build = good.

@@ -2663,3 +2663,51 @@ traza `[exl]` de quien puso/quito EXL, `KESTREL_THREADSCAN` (escaneo de OSThread
 juego, no depende de simbolos de PD), aviso `[rdp!]` de SET_COLOR_IMAGE bajo con volcado del
 vecindario del FIFO, contador `dpcCurReads` (lecturas de DPC_CURRENT por el ucode) y
 `KESTREL_RDPINLINE=1` (rasterizar en el hilo CPU aun en modo threaded, para bisecar carreras).
+
+## 2026-08-20 — El cuelgue de SM64 RESUELTO: contrapresion del FIFO del RDP
+
+Cerrado el cuelgue de la seccion anterior. **No era el rasterizador ni la ruta VI: era una
+interrupcion DP de mas.** Detalle completo en `docs/RDP-FIFO-BACKPRESSURE.md`; resumen:
+
+El command processor del HW tiene **un solo puntero de lectura**. Instalar un buffer nuevo
+(`DPC_START` fresco + `DPC_END`) recarga `CURRENT` desde `START`, y lo que quedara sin leer
+del span anterior deja de existir. En HW eso no pierde nada porque el RDP consume el FIFO en
+tiempo real. Con el RDP en su propio hilo deja de ser automatico: el productor se adelanta
+frames enteros (828 trabajos encolados medidos), y tras recargar `START` el worker rasteriza
+DESPUES esos spans viejos y retira sus `SYNC_FULL` -> DP de mas. El kernel del juego la
+atiende sin tarea viva: `handle_dp_complete` de SM64 deref de `sCurrentDisplaySPTask == NULL`
+-> TLBL con `BadVAddr=0x40` -> libultra deja el hilo de interrupciones (pri 100) en
+`OS_STATE_STOPPED` con `OS_FLAG_FAULT` -> todos los demas hilos esperan para siempre en
+`osRecvMesg` y la CPU cae al bucle ocioso `0x80246dd8`.
+
+**Arreglo**: en modo threaded el escritor de `DPC_END` hace `rdpDrain()` antes de instalar un
+START nuevo — el productor no puede instalar buffer nuevo con el anterior en vuelo. Dos
+efectos colaterales buscados: `DPC_CURRENT` queda honesto para el control de flujo del anillo
+de F3DEX2, y la cola de trabajos queda acotada a un frame.
+
+parallel-rdp solo lo **destapo** (espera la timeline de la GPU en cada SYNC_FULL, asi que se
+retrasa lo bastante como para que el productor le saque una vuelta). SoftRDP tiene el mismo
+agujero pero nunca encola tan hondo.
+
+Verificado: `gate_all` verde en los cinco modos (4 min 53 s), 300 flips en interp y 400 en JIT
+bajo `KESTREL_PRDP=1` sin cuelgue, y `bench` threaded-jit 8.80 s / 200 campos frente a 9.84 s
+de antes del cambio (o sea, la contrapresion **no** cuesta velocidad).
+
+Ademas: el camino PRDP de `rdpRunJob` no hacia la contabilidad que si hace el de SoftRDP al
+retirar un SYNC_FULL (limpiar `START_GCLK|PIPE_BUSY`, incrementar `dpSyncs`).
+
+**Herramientas nuevas** (se quedan): `KESTREL_FAULTSTOP=1` (parar en un fallo del guest con el
+anillo de eventos del RCP intacto — la ventana exacta del bug), `KESTREL_WATCHP=<fis>`
+(watchpoint de escritura por linea de 16 B enganchado en la **D-cache**; el `KESTREL_WATCH` de
+bus no ve las escrituras cacheables de la CPU), `KESTREL_EVDUMP=<n>`, `KESTREL_DPSYNCLOG=1`
+(direccion de cada SYNC_FULL retirado, en SoftRDP y en PRDP) y las etiquetas de evento
+`rdpst` / `rdpint`.
+
+**Tambien cerrado**: el fondo arcoiris de SM64 bajo parallel-rdp era **orden de bytes de
+RDRAM**, no la ruta VI. parallel-rdp asume el almacenamiento de ares (palabras nativas, byte
+en `addr^3`) y kestrel guarda big-endian del guest. Convenio y regeneracion del banco SPIR-V
+en `docs/parallel-rdp-integration.md`. Arbol vendorizado en `third_party/parallel-rdp/`.
+
+**Pendiente conocido**: SoftRDP corrompe el titulo de SM64 a los 250 flips (80.0 % de pixeles
+distintos frente a parallel-rdp, delta medio 28.69); la puerta de 60 flips no lo ve.
+parallel-rdp escupe `[WARN]: Exhausted LinkedDeviceHost memory` en corridas largas.
