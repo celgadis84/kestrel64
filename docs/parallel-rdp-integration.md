@@ -8,6 +8,49 @@ prerequisite for audible audio (waveOut underruns below realtime).
 Toggle: `-DKESTREL_PRDP=ON` at configure; runtime `KESTREL_PRDP=1`. Default OFF so the
 deterministic core (systemtest / lockstep md5) never depends on it.
 
+## Status (2026-08-20) — VENDORED, BYTE ORDER FIXED, SM64 CORRECT ✅
+
+Lo que hay hoy, corriendo:
+
+- **Arbol vendorizado** en `third_party/parallel-rdp/` (commit upstream en
+  `third_party/parallel-rdp/COMMIT` = `1cecd042b2619bc505c12bfdc713808386f2b54d`).
+  `cmake/parallel_rdp.cmake` ya no apunta al checkout de ares — ares esta CONGELADO y
+  ademas kestrel tiene que **parchear los shaders**, asi que el arbol vive aqui.
+- **Orden de bytes de RDRAM resuelto** (era el arcoiris del fondo de SM64, no la ruta VI).
+  parallel-rdp asume el almacenamiento de ares: palabras de 32 bits en orden nativo del
+  host, o sea cada byte del guest en el indice `addr^3`. kestrel guarda RDRAM en el orden
+  big-endian propio del N64. Convenio adoptado, en `shaders/small_types.h`:
+  - la vista `vram8` NO lleva swizzle de indice (es la que ya coincide);
+  - las vistas `vram16`/`vram32` caen sobre valores con los bytes al reves, y se pasan por
+    `RDRAM_BSWAP16` / `RDRAM_BSWAP32` al leer y al escribir.
+  Ficheros tocados: `small_types.h`, `memory_interfacing.h`, `extract_vram.comp`,
+  `tmem_update.comp`. Los shaders de VI y el rasterizador no ven RDRAM cruda, no cambian.
+- **Banco SPIR-V regenerado sin Granite.** Upstream hornea los shaders compilados en
+  `shaders/slangmosh.hpp` con el `slangmosh` de Themaister, que no esta vendorizado.
+  `tools/slangmosh_lite.py` lo reconstruye: lee el constructor existente para recuperar el
+  orden exacto de shaders/variantes que emitio slangmosh, recompila cada permutacion con
+  `glslangValidator` y parchea el par (offset, size) de cada `request_program`. El banco de
+  reflexion se reutiliza tal cual porque los parches no tocan ningun binding.
+  `python tools/slangmosh_lite.py --check` compila y dice que cambiaria, sin escribir.
+  **Hay que ejecutarlo tras CUALQUIER edicion de un shader**; si no, el `.hpp` manda.
+- **LIMITACION: upscaling NO soportado.** `update_upscaled_domain_post.comp` y
+  `update_upscaled_domain_resolve.comp` no se convirtieron al convenio de bytes. Con
+  upscale activado esos dos leerian RDRAM con el swizzle de ares y saldria basura. Si
+  alguna vez se quiere 2x/4x, primero pasar esos dos por el mismo tratamiento.
+- **Contrapresion del FIFO del RDP** — ver `docs/RDP-FIFO-BACKPRESSURE.md`. PRDP espera la
+  timeline de la GPU en cada SYNC_FULL, asi que se retrasa lo bastante como para que el
+  productor le saque frames de ventaja; eso destapo que la cola de trabajos del worker no
+  estaba acotada y un `DPC_START` fresco dejaba spans viejos vivos -> interrupcion DP de
+  mas -> el kernel del juego se cuelga. El escritor ahora hace `rdpDrain()` antes de
+  instalar un START nuevo en modo threaded. El agujero existia igual en SoftRDP, solo que
+  nunca se encolaba tan hondo.
+- SM64 arranca y renderiza correcto con `KESTREL_PRDP=1` en interp y en JIT (300 y 400
+  cambios de buffer sin cuelgue).
+
+Pendiente conocido: en corridas largas parallel-rdp escupe
+`[WARN]: Even after garbage collection, we will exceed budget` y
+`[WARN]: Exhausted LinkedDeviceHost memory, falling back to host.` — sin investigar.
+
 ## Status (2026-08-13) — WIRED + FIRST LIGHT ✅
 
 paraLLEl-RDP is now fully wired and renders SM64. See the "Wiring done" section below; the

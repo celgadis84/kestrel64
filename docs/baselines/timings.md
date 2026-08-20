@@ -284,3 +284,19 @@ MiB ya ocupados por el escritorio) para un búfer de pocos cientos de bytes que
 memoria de sistema **cada vez**, sin recordar el fallo. Arreglarlo exige parchear el árbol
 de parallel-rdp, que hoy vive dentro del checkout **congelado** de ares
 (`PRDP_DIR`); el paso limpio sería vendorizar parallel-rdp dentro de kestrel.
+
+## `gate_all.sh` completo (2026-08-18/20)
+
+Medido tras el fix de contrapresion del FIFO del RDP (`docs/RDP-FIFO-BACKPRESSURE.md`),
+mismo host. Dos pasadas consecutivas dieron lo mismo dentro del ruido: **4 min 53 s**
+de reloj de pared en total (15:56:03 -> 16:00:56).
+
+| Tramo | interp | jit | jit-nolink | threaded | threaded-jit |
+|-------|--------|-----|------------|----------|--------------|
+| systemtest | 16-17 s | 9-11 s | 9 s | 17-18 s | 9-10 s |
+| sm64 (60 campos VI) | 14 s | 7 s | 9-10 s | 11-12 s | 2-3 s |
+| krom 371 ROMs (4 jobs, solo interp) | 164-186 s | — | — | — | — |
+
+Los tramos JIT bajaron mucho respecto a la tabla de arriba porque aquella medicion
+era anterior al block linking. Si un tramo pasa de ~3x su fila, es cuelgue: bisecar
+con `git stash`, no subir el timeout.

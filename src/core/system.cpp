@@ -319,7 +319,12 @@ auto System::run() -> void {
           }
         }
         if(std::getenv("KESTREL_PCRING")) cpu.pcRingDump(150);
-        memory.evDump(80);
+        // KESTREL_WATCHP=<fis>: quien escribio ultimo esa linea de 16 bytes (via D-cache).
+        if(cpu.wPhys) cpu.wDump(48);
+        {  // KESTREL_EVDUMP=<n>: cuantos eventos escupe el watchdog (80 por defecto).
+          const char* n = std::getenv("KESTREL_EVDUMP");
+          memory.evDump(n ? (u32)std::strtoul(n, nullptr, 0) : 80);
+        }
         std::fflush(stderr);
 #ifdef _WIN32
         if(now == last && cpuTh) {

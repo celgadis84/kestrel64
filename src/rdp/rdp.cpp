@@ -1052,7 +1052,10 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     switch(op) {
     case 0x00: break;                                   // no-op
     case 0x26: case 0x27: case 0x28: break;             // SYNC_LOAD/PIPE/TILE → no-op here
-    case 0x29: sawSyncFull = true; break;               // SYNC_FULL → raises DP (see caller)
+    case 0x29: {
+      static const bool sfLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
+      if(sfLog) { std::fprintf(stderr, "[dpsync] at=%06x span=%06x..%06x xbus=%u\n", cur, start & 0x00ffffffu, end, (unsigned)xbus); std::fflush(stderr); }
+      sawSyncFull = true; break; }               // SYNC_FULL → raises DP (see caller)
     case 0x24: case 0x25: {                             // TEXTURE_RECTANGLE (+flip)
       words[0] = cmd; words[1] = fetch(cur + 8);        // 2 words
       texRect(mem, words, op == 0x25);

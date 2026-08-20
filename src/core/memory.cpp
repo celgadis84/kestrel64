@@ -807,7 +807,23 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // RDP (F3DEX2 usa el buffer como FIFO circular y hace flow-control leyendo CURRENT).
       // La recarga viaja con el trabajo: rdpRunJob publica CURRENT = inicio del span al empezar.
       if(rcp.dpc_status & 0x400u) {
+        // Contrapresion del FIFO. En HW el command processor tiene UN puntero de lectura:
+        // instalar un buffer nuevo (START fresco + END) recarga CURRENT desde START, y lo
+        // que quedara sin leer del span anterior deja de existir. El RDP consume el FIFO en
+        // tiempo real, asi que cuando el juego instala el buffer del frame siguiente ya no
+        // queda nada del anterior y la recarga no pierde trabajo.
+        // Con el RDP en su propio hilo eso deja de ser automatico: el productor puede
+        // adelantarse frames enteros y dejar cientos de spans encolados. Si entonces se
+        // recarga START, el worker rasterizara DESPUES esos spans viejos y retirara sus
+        // SYNC_FULL -> una interrupcion DP de mas. El kernel del juego la atiende sin tarea
+        // viva (SM64: sCurrentDisplaySPTask == NULL -> deref de 0x40 -> TLBL -> el hilo de
+        // interrupciones queda STOPPED con OS_FLAG_FAULT y el juego se cuelga).
+        // La semantica fiel es esperar al RDP: el productor no puede instalar un buffer
+        // nuevo mientras el anterior sigue en vuelo. Eso ademas mantiene DPC_CURRENT
+        // honesto y acota la cola a un frame.
+        if(rcpMode == RcpMode::Threaded) rdpDrain();
         rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u;
+        ev("rdpst", rcp.dpc_start, rcp.dpc_end);
         // HW recarga CURRENT desde START en el propio kick y la CPU lo ve al momento
         // (systemtest "RDP STATUS: Flags during a run", "RDP START & END REG"), incluso
         // congelado, donde no se rasteriza nada. Publicarlo desde aqui solo es seguro si
@@ -1250,6 +1266,8 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
     rcp.dpc_current.store(end, std::memory_order_release);
     if(sync) {
       rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
+      rcp.dpSyncs++;                       // misma contabilidad que el camino SoftRDP
+      ev("rdpint", current, end);
       raiseIntr(MI_DP);
     }
     return;
@@ -1269,6 +1287,7 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   if(softRdp.sawSyncFull) {
     rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
     rcp.dpSyncs++;                       // "a frame finished rendering" — see KESTREL_MAXSYNCS
+    ev("rdpint", current, end);
     raiseIntr(MI_DP);
   }
 }

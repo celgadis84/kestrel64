@@ -233,6 +233,8 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     if(op >= 8) g->proc->enqueue_command(len * 2, words);
 
     if(::RDP::Op(op) == ::RDP::Op::SyncFull) {
+      static const bool sfLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
+      if(sfLog) { std::fprintf(stderr, "[dpsync] at=%06x span=%06x..%06x xbus=%u\n", cur, start, end, (unsigned)xbus); std::fflush(stderr); }
       u64 tw = g->stats ? nowNs() : 0;
       g->proc->wait_for_timeline(g->proc->signal_timeline());
       if(g->stats) { g->nsWait += nowNs() - tw; g->nSync++; }

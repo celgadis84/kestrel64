@@ -989,6 +989,14 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
         ec<16?nm[ec]:"?", ec, (u32)epc, (u32)cop0[C0_BadVAddr], (u32)cop0[C0_Cause], (u32)gpr[31],
         (unsigned long long)retired);
       std::fflush(stderr);
+      // KESTREL_FAULTSTOP=1: un fallo del guest (deref nulo, direccion mala) es la ventana
+      // exacta del bug; parar AQUI conserva el anillo de eventos del RCP intacto.
+      if(std::getenv("KESTREL_FAULTSTOP")) {
+        if(mem) mem->evDump(std::getenv("KESTREL_EVDUMP")
+                            ? (u32)std::strtoul(std::getenv("KESTREL_EVDUMP"), nullptr, 0) : 120);
+        pcRingDump(120);
+        halted = true;
+      }
     } }
   if(fpTrace && excCode==15 && fpDbgN==0 && std::getenv("KESTREL_HDUMP")) {
     memAbort=false;
