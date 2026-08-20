@@ -122,3 +122,79 @@ misma prueba se iba a los 300 s y moria por timeout, con ~53 anomalias `[rdp!]`.
 - Barrido `KESTREL_PACESLACK` {64,256,1024,8192,32768,131072}: el default 8192 es el mejor.
 - `--vubench`: 21.28 → 18.27 ns/op tras quitar la division entera del propio banco de pruebas
   y alinear `R128` a 16 (RSP: 34.9 → 36.1 Mips).
+
+## 2026-08-20 — interprete del RSP: donde se va el tiempo (banco `--rspbench`)
+
+`--vubench` solo medía la ALU vectorial, que resultó ser ~52% del tiempo del RSP. Para ver el
+resto se añadió **`--rspbench`**: llena la IMEM entera (1024 ranuras, el PC envuelve solo) con
+la mezcla de opcodes medida sobre el arranque de SM64 — 386 COP2, 123 SPECIAL, 103 LWC2, 83
+SWC2, 213 ADDI, 38 LH, 37 ANDI, 24 LW, 17 SW de cada 1000 — y con las subfamilias pesadas
+igual (VMADN 17%, VMADH 13%, ... / LDV 9 de cada 25 LWC2). `KESTREL_RSPMIX=<familia>` aísla
+una: `cop2`, `vecld`, `alu` (ADDI rotando destino), `alu1` (ADDI encadenado sobre el mismo
+registro), `scald` (LW/SW), `nop` (SLL r0,r0,0 = coste del bucle desnudo).
+
+Anfitrión i7-870, 2.93 GHz **medidos** (`Win32_Processor`), 1 ciclo = 0.341 ns.
+**El N64 pide 62.5 Mips.**
+
+| mezcla | antes | después |
+|--------|-------|---------|
+| real   | 18.8 ns / 53.2 Mips | **15.45 ns / 64.7 Mips** |
+| nop    | 8.35 ns | 7.16 ns |
+| alu    | 8.10 ns | 6.04 ns |
+| scald  | 10.1 ns | 6.89 ns |
+| cop2   | 25.9 ns | 23.6 ns |
+| vecld  | 25.1 ns | 22.5 ns |
+
+### Lo que lo explica: este anfitrión despacha UNA carga por ciclo
+
+Nehalem tiene un solo puerto de carga. En un intérprete eso convierte cada campo del objeto
+leído dentro del cuerpo del bucle en un ciclo entero, y el bucle leía doce: `budget`, `halt`,
+`imp`, `pc`, la palabra de IMEM, `profOn`, la tabla de saltos, `r[rt]`, `inDelay`, `branch`,
+`pendingTarget`... El suelo medido con `nop` era 8.35 ns = **24 ciclos para no hacer nada**.
+
+Dos cambios (commit `fa308ef`), ambos de semántica idéntica:
+
+1. **`dmp`/`imp` como punteros del propio `Rsp`** (`bindMem()`) en vez de `mem->dmem.data()`
+   en cada acceso: `std::vector::data()` se recargaba en cada uso porque cualquier llamada
+   interna podía aliasar el vector. **53.2 → 56.9 Mips (+7%)**.
+2. **Bucle por tandas de 8K instrucciones**: fuera del cuerpo el puntero a IMEM, el
+   interruptor del muestreador y los tres contadores (`maxInsns`, `budget`, `ran`) reducidos
+   a uno solo. **56.9 → 64.7 Mips (+13%)**. La tanda es la misma que ya usaba la publicación
+   al regulador, así que el hilo CPU no ve el avance más tarde que antes.
+
+### Lo que se probó y NO valió (medido, revertido)
+
+- `execVuSse(u32 fn, __m128i t, ...)` pasando el vector por valor: **peor** (17.3 → 20.0 ns).
+  Win64 pasa `__m128i` por valor **en memoria**, así que la tienda que se quería quitar vuelve.
+- La misma función tomando `(vt, e)` y haciendo el broadcast dentro: peor (18.6-18.8 ns).
+  Dentro del callee `vpr[vt]` puede aliasar la salida `R128& D` y la carga deja de poder
+  adelantarse; el temporal del llamante demostrablemente no aliasaba.
+- Reescribir `vadd48` con cadena de acarreo (`vcarry16` vía xor 0x8000 + cmpgt): correcto
+  (`--rspfuzz` 0 fallos) pero ~2% más lento: cambia rendimiento por latencia en serie.
+- `flatten` en `Rsp::exec` además de en `step`: 44.8 vs 48.2 Mips, **peor**. En `step` solo: +3.2%.
+- Mantener `pc`/`budget`/el latch de retardo en locales: **peor** (real 17.8 → 18.3 ns). El
+  registro extra hace derramar otras cosas dentro del switch gigante.
+- Leer la instrucción siguiente por adelantado (con un contador de generación de IMEM para el
+  microcódigo que se reescribe): neutral en la mezcla real. No compensa ni la carga extra ni
+  el riesgo.
+
+### Y sin embargo, en SM64 no se nota — y eso es el dato importante
+
+`KFLIPS=250 sh scripts/perf.sh`, media de 5 pasadas: **24.78 → 24.79 swaps/s**, y el latido
+sigue diciendo **`rsp 35.3 Mips busy`** igual que antes del +21% aislado. O sea: el tiempo
+del worker del RSP **no** es ejecutar instrucciones. Lo que hay dentro de `step()` y no
+ejecuta instrucciones es el DMA del SP (una instrucción `MTC0` que mueve kilobytes).
+
+Barrido de elasticidad sobre SM64 (250 swaps, attract intercambia a 30/s = tiempo real):
+
+| variante | swaps/s | % de tiempo real |
+|----------|---------|------------------|
+| base                        | 25.20 | 84% |
+| `KESTREL_NORASTER=1`        | 28.95 | **96%** |
+| `KESTREL_PACESLACK=1000000` | 23.82 | 79% |
+| `KESTREL_JIT=0`             | 10.42 | 35% |
+| `KESTREL_THREADS=0`         |  6.65 | 22% |
+
+**Conclusión: SM64 corre al 84% de tiempo real y casi todo el hueco que queda es el
+rasterizador por software.** El siguiente palo largo no es el intérprete ni el JIT: es
+parallel-RDP.

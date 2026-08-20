@@ -1063,13 +1063,34 @@ auto Memory::spDma(bool toRam) -> void {
   if(watchAddr && toRam)
     std::fprintf(stderr, "[spDma] %s->RDRAM dram=0x%06x memOff=0x%03x len=%u count=%u skip=%u by pc=0x%08x\n",
                  imem ? "IMEM" : "DMEM", dramAddr, memOff, length, count, skip, (u32)storePc);
+  // El microcodigo mueve kilobytes por tarea con este motor, asi que el bucle byte a byte
+  // salia caro dentro del hilo del RSP. Cuando no hay vigilancia de memoria puesta se copia
+  // por tramos contiguos: la unica discontinuidad real es la vuelta de la memoria del SP a
+  // los 4 KB (el direccionamiento del motor es de 12 bits) y el final de la RDRAM. El
+  // resultado byte a byte es identico; lo que cambia es el numero de instrucciones que le
+  // cuesta al anfitrion.
+  const bool byByte = watchAddr != 0;
   for(u32 c = 0; c < count; c++) {
-    for(u32 i = 0; i < length; i++) {
-      u32 mo = (memOff + i) & 0xfff;
-      u32 d  = dramAddr + i;
-      if(d >= rdram.size()) break;
-      if(toRam) { watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
-      else      sp[mo]   = rdram[d];
+    if(byByte) {
+      for(u32 i = 0; i < length; i++) {
+        u32 mo = (memOff + i) & 0xfff;
+        u32 d  = dramAddr + i;
+        if(d >= rdram.size()) break;
+        if(toRam) { watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
+        else      sp[mo]   = rdram[d];
+      }
+    } else {
+      for(u32 i = 0; i < length; ) {
+        u32 mo = (memOff + i) & 0xfff;
+        u32 d  = dramAddr + i;
+        if(d >= rdram.size()) break;
+        u32 n = length - i;
+        if(n > 0x1000u - mo)                n = 0x1000u - mo;             // vuelta de la SP mem
+        if(n > (u32)(rdram.size() - d))     n = (u32)(rdram.size() - d);  // final de la RDRAM
+        if(toRam) std::memcpy(&rdram[d], &sp[mo], n);
+        else      std::memcpy(&sp[mo], &rdram[d], n);
+        i += n;
+      }
     }
     memOff  = (memOff + length) & 0xfff;
     dramAddr += length + skip;
