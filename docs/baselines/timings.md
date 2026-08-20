@@ -85,3 +85,21 @@ threaded-jit, luego krom. Total medido: **~7 min**.
 `validate.py bench --bench-runs 2` (600 campos VI de SM64, dos pasadas) = ~25 s en
 threaded-jit, ~160 s en interp. Si una pasada de threaded-jit pasa de ~15 s con la maquina
 ociosa, hay contencion (otro gate corriendo) o una regresion; no subir el timeout.
+
+## 2026-08-20 — `gate_all.sh` medido, y la prueba larga de SM64
+
+`sh scripts/gate_all.sh`: **282-293 s** de reloj de pared (tres medidas: 282, 283, 293 s),
+maquina ociosa. El propio script imprime `GATE_WALL=<s>` al final; si sale muy por encima
+de ~300 s, es contencion o cuelgue, **no** subir el timeout.
+
+Prueba larga de cuelgue (la que destapo la carrera del FIFO del RDP):
+
+```
+KESTREL_THREADS=1 KESTREL_JIT=1 KESTREL_HANGDOG=8 KESTREL_NOVIDEO=1 \
+KESTREL_MAXINSN=99000000000 KESTREL_MAXFLIPS=2500 ./build/kestrel64.exe "<sm64>" --run
+```
+
+= **118-120 s** para 2500 campos (~8.6 G instrucciones), y debe terminar con
+`[frames] 2500`, sin lineas `[rdp!]` ni `[hangdog]`. Borrar el `.eep` antes: con partida
+guardada la demo de attract toma otro camino y la comparacion no vale. Antes del fix esta
+misma prueba se iba a los 300 s y moria por timeout, con ~53 anomalias `[rdp!]`.
