@@ -103,3 +103,11 @@ KESTREL_MAXINSN=99000000000 KESTREL_MAXFLIPS=2500 ./build/kestrel64.exe "<sm64>"
 `[frames] 2500`, sin lineas `[rdp!]` ni `[hangdog]`. Borrar el `.eep` antes: con partida
 guardada la demo de attract toma otro camino y la comparacion no vale. Antes del fix esta
 misma prueba se iba a los 300 s y moria por timeout, con ~53 anomalias `[rdp!]`.
+
+## 2026-08-20 — likely-branches en el JIT + regulador CPU<->RSP (Threaded)
+- `sh scripts/gate_all.sh`: **ALL OK**, krom regress=0, md5 SM64 `466282775dbd0ac084946558a1c30771`
+  en los 5 modos. Wall ~285s (baseline 282-293s).
+- SM64 2500 swaps (`KFLIPS=2500 sh scripts/perf.sh`): **110.5s** (antes 119s), `[frames] 2500`,
+  sin `[rdp!]` ni `[hangdog]`.
+- SM64 500 swaps: 20.9s -> **20.2s**, 23.92 -> **24.70 swaps/s**, 1607M -> **1223M** instrucciones
+  de guest (el regulador quita el giro en vacio, no trabajo util).

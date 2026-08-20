@@ -15,6 +15,7 @@ namespace kestrel {
 static const bool g_noBlend  = std::getenv("KESTREL_NOBLEND")  != nullptr;
 static const bool g_noAA     = std::getenv("KESTREL_NOAA")     != nullptr;
 static const bool g_noFilter = std::getenv("KESTREL_NOFILTER") != nullptr;
+static const bool g_noRaster = std::getenv("KESTREL_NORASTER") != nullptr;  // DIAG: salta el rasterizado
 
 
 // --- raw big-endian RDRAM access (physical addresses) ------------------------
@@ -384,6 +385,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
 // Flat/Gouraud triangle from RDP edge coefficients. First light: correct geometry,
 // solid shade-base color (Gouraud/texture refined later).
 auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void {
+  if(g_noRaster) return;
   bool hasShade = op & 4, hasTex = op & 2, hasZ = op & 1;
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
   u64 w0 = w[0];
@@ -524,16 +526,29 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     };
     static const double subY[4] = {0.125, 0.375, 0.625, 0.875};
     static const double subX[2] = {0.25, 0.75};
+    // Las cuatro sub-scanlines no dependen de x: se evaluan UNA vez por linea, no por
+    // pixel. Y con el mayor de los bordes izquierdos y el menor de los derechos se
+    // reconoce el pixel enteramente dentro (cobertura 8/8) sin tocar los 8 subsamples,
+    // que es el caso comun en el interior del triangulo. Mismos comparadores => mismo
+    // recuento exacto que el bucle largo.
+    double sL[4], sR[4], Lmax = -1e30, Rmin = 1e30;
+    for(int sy = 0; sy < 4; sy++) {
+      edgesAt((double)y + subY[sy], sL[sy], sR[sy]);
+      if(sL[sy] > Lmax) Lmax = sL[sy];
+      if(sR[sy] < Rmin) Rmin = sR[sy];
+    }
     for(int x = xs; x < xe; x++) {
       if(x < 0) continue;
       rasterPx++;      // DPC counters: pixel entered the pipeline (may still be killed)
-      int hits = 0;
-      for(int sy = 0; sy < 4; sy++) {
-        double L, R; edgesAt((double)y + subY[sy], L, R);
-        for(int sx = 0; sx < 2; sx++) {
-          double px = (double)x + subX[sx];
-          if(px >= L && px < R) hits++;
-        }
+      int hits;
+      if((double)x + subX[0] >= Lmax && (double)x + subX[1] < Rmin) hits = 8;
+      else {
+        hits = 0;
+        for(int sy = 0; sy < 4; sy++)
+          for(int sx = 0; sx < 2; sx++) {
+            double px = (double)x + subX[sx];
+            if(px >= sL[sy] && px < sR[sy]) hits++;
+          }
       }
       double cvg = hits / 8.0;
       if(fillMode) {   // raw packed fill color straight to the color image (no AA)
@@ -854,6 +869,7 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
 }
 
 auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
+  if(g_noRaster) return;
   // TEXTURE_RECTANGLE: sample `tile` across a screen rect. word0 = XL,YL(10.2),
   // tile, XH,YH(10.2) [XH/YH top-left, XL/YL bottom-right]. word1 = S,T (s10.5,
   // 1/32-texel) and DsDx,DtDy (s5.10, 1/1024 texel-per-pixel). S starts at XH and

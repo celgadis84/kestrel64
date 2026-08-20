@@ -520,6 +520,23 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       // que un bloque de la cadena que lo arranque tiene que devolver el control. Es un byte
       // en una línea de caché propia (rsp.running); comprobarlo aquí cuesta lo mismo que en
       // el trampolín y deja el camino rápido válido en los dos modos del RCP.
+      //
+      // MEDIDO 2026-08-20, no quitar en THREADED aunque el trampolín no la mire ahí: esta
+      // guarda manda al trampolín en cada eslabón mientras el RSP tenga trabajo (376M veces
+      // por run contra 25M por permiso agotado) y parece puro desperdicio, pero quitarla
+      // EMPEORA el reloj de pared — 2500 campos de SM64 pasan de 119 s a 139 s y el guest
+      // ejecuta 20.3 G instrucciones en vez de 8.6 G. Sin ella la CPU emulada corre mucho
+      // por delante del RCP y todo el exceso se va en el spin del juego esperandolo, que
+      // ademas martillea los registros MMIO que los workers escriben. El emulador no tiene
+      // regulador de velocidad, asi que hoy esta guarda hace de freno.
+      //
+      // RE-MEDIDO con el regulador ya puesto (Memory::rcpPace): sigue siendo catastrofico
+      // quitarla — 500 campos de SM64 pasan de 20.3 s a 358 s y 1.2 G instrucciones a
+      // 56 G. O sea que la guarda no es solo un freno: sin ella el hilo CPU gira sobre los
+      // registros MMIO que los workers escriben y les hunde el subsistema de memoria
+      // (ping-pong de lineas entre nucleos), asi que el RSP tarda 18x en la misma tarea.
+      // No quitarla. Lo que falta para poder hacerlo no es un regulador, es que el guest
+      // no gire: esperar por interrupcion en vez de sondear registros del RCP.
       e.mov_r_imm64(RDX, (u64)&c.mem->rsp.running);
       e.cmp_m8_imm(RDX, 0, 0);
       fastToSlow[nSlow++] = e.jne_rel32_placeholder();
@@ -600,7 +617,10 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // limpia inDelay/justBranched y sale con el flag de control | ops retiradas (idx+2).
   // `cands` = destinos ESTÁTICOS posibles de este salto (0 para JR/JALR, 1 para J/JAL, 2 para
   // los branches condicionales: tomado y caída). Por cada uno se emite una guarda de enlace.
-  auto emitCtrlExit = [&](u32 idx, const u64* cands, int nc) {
+  // `nops` = ops que ESTA salida retira. Casi siempre idx+2 (rectas + salto + delay slot),
+  // pero un branch "likely" NO tomado anula su delay slot y retira una menos — el intérprete
+  // lo resuelve en un solo paso (pc += 8), así que la cuenta tiene que seguirle.
+  auto emitCtrlExit = [&](u32 idx, const u64* cands, int nc, u32 nops) {
     e.mov_m_r(RBX, pcOff, RCX);              // cpu->pc = target
     e.mov_r_r(RDX, RCX); e.add_r_imm8(RDX, 4);
     e.mov_m_r(RBX, nextOff, RDX);            // cpu->nextPc = target+4
@@ -621,12 +641,12 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       prevJne = e.jne_rel32_placeholder(); havePrev = true;
       // Enlazado: acumula las ops de ESTE bloque en jitPending (el prólogo del sucesor las
       // commitea) y salta a su punto de entrada sin pasar por el driver.
-      e.add_m32_imm32(RBX, pendOff, idx + 2);
+      e.add_m32_imm32(RBX, pendOff, nops);
       usize dispAt = e.jmp_rip_mem_placeholder();
       pending.push_back(Pending{ dispAt, immAt, cands[k], tp });
     }
     if(havePrev) e.patchRel32(prevJne);
-    e.mov_r_imm32(RAX, 0x80000000u | (idx + 2));
+    e.mov_r_imm32(RAX, 0x80000000u | nops);
     branchExits.push_back(e.jmp_rel32_placeholder());
   };
 
@@ -678,14 +698,25 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     bool isRegimmBr = (LO == 0x01 && (rtF == 0x00 || rtF == 0x01 || rtF == 0x10 || rtF == 0x11));
     bool isRegimmAL = (LO == 0x01 && (rtF == 0x10 || rtF == 0x11)); // BLTZAL / BGEZAL (enlazan $31)
     bool isBcondZ = isBlez || isBgtz || isRegimmBr;
+    // Variantes "likely": misma condición y mismo target que las normales, pero ANULAN el
+    // delay slot cuando no se toman. Son mayoría en el código que generan los compiladores
+    // de SGI (BNEL solo era el 65% de los líderes no compilables medidos en SM64), así que
+    // dejarlas fuera cortaba el bloque en cada una y devolvía el control al intérprete.
+    bool isBeqL   = (LO == 0x14 || LO == 0x15);              // BEQL / BNEL
+    bool isBlezL  = (LO == 0x16 && rtF == 0);                // BLEZL
+    bool isBgtzL  = (LO == 0x17 && rtF == 0);                // BGTZL
+    bool isRegimmL  = (LO == 0x01 && (rtF == 0x02 || rtF == 0x03 || rtF == 0x12 || rtF == 0x13));
+    bool isRegimmALL = (LO == 0x01 && (rtF == 0x12 || rtF == 0x13));  // BLTZALL/BGEZALL: enlazan $31
+    bool isLikely = isBeqL || isBlezL || isBgtzL || isRegimmL;
     // BLTZ(0x00)/BLTZAL(0x10) → rs<0 (setl); BGEZ(0x01)/BGEZAL(0x11) → rs>=0 (setge). bit0 decide.
-    u8 ccz = isBlez ? 0x9E /*setle*/ : isBgtz ? 0x9F /*setg*/
+    // Las likely de REGIMM (0x02/0x03/0x12/0x13) siguen la misma regla de bit0.
+    u8 ccz = (isBlez || isBlezL) ? 0x9E /*setle*/ : (isBgtz || isBgtzL) ? 0x9F /*setg*/
              : ((rtF & 1) == 0 ? 0x9C /*setl*/ : 0x9D /*setge*/);
     bool traced = false;   // la caída del branch sigue compilándose en este mismo bloque
     static const int noBranch = std::getenv("KESTREL_JIT_NOBRANCH") ? 1 : 0;
     static const int noJmp = std::getenv("KESTREL_JIT_NOJMP") ? 1 : 0;  // A/B: desactiva SOLO J/JAL/JR/JALR
     if(noJmp && (isJmp || isJr)) break;
-    if(!noBranch && (isBeq || isJmp || isJr || isBcondZ)) {
+    if(!noBranch && (isBeq || isJmp || isJr || isBcondZ || isLikely)) {
       u32 ad = a + 4;                              // delay slot
       bool delayOk = (ad + 4 <= c.mem->rdram.size()) &&
                      ((ad & ~0xFFFu) == (phys & ~0xFFFu));
@@ -697,25 +728,49 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         usize beforeBranch = c.jitCache->buf.used; // por si el delay no compila
         // Fase A (antes del delay slot): capturar la condición/target/enlace que el delay
         // slot podría pisar (el delay puede escribir gpr[rs]/gpr[rt] o hacer CALL).
-        if(isBeq) {
+        if(isBeq || isBeqL) {
           e.ld64(RAX, rs); e.cmp64_rm(RAX, rt);
-          e.setcc(LO == 0x04 ? 0x94 : 0x95, RAX);  // sete/setne al → [rsp+32]
+          e.setcc((LO == 0x04 || LO == 0x14) ? 0x94 : 0x95, RAX);  // sete/setne al → [rsp+32]
           e.st8_rsp(32);
-        } else if(isBcondZ) {
+        } else if(isBcondZ || isBlezL || isBgtzL || isRegimmL) {
           e.ld64(RAX, rs); e.cmp64_imm(RAX, 0);    // rs vs 0 (signed 64b; OF=0 → setl/ge/le/g ok)
           e.setcc(ccz, RAX);                       // condición → al → [rsp+32]
           e.st8_rsp(32);
-          // BLTZAL/BGEZAL: enlace INCONDICIONAL de $31 tras leer rs (el intérprete lee la
-          // condición ANTES de escribir $31; si rs==31 usa el valor pre-enlace).
-          if(isRegimmAL) emitLink(idx, 31);
+          // BLTZAL/BGEZAL (y sus likely): enlace INCONDICIONAL de $31 tras leer rs (el
+          // intérprete lee la condición ANTES de escribir $31; si rs==31 usa el pre-enlace).
+          if(isRegimmAL || isRegimmALL) emitLink(idx, 31);
         } else if(isJr) {
           e.ld64(RAX, rs); e.st64_rsp(RAX, 32);    // target = gpr[rs] (pre-delay) → [rsp+32]
           if(FN == 0x09) emitLink(idx, rd ? rd : 31);   // JALR enlaza tras leer rs (rd puede==rs)
         } else if(LO == 0x03) {
           emitLink(idx, 31);                       // JAL enlaza gpr[31]
         }
+        // Fase B/C de las "likely": el delay slot se emite DENTRO del camino tomado, porque
+        // cuando no se toma queda anulado. Las dos salidas son enlazables y cuentan distinto:
+        // tomada retira idx+2 ops (rectas + salto + delay), no tomada idx+1 (pc += 8 de una).
+        if(isLikely) {
+          e.ld8_rsp(32); e.test_al_al();
+          usize toNot = e.je_rel32_placeholder();
+          if(compileDelay(dop, idx)) {
+            s32 Ctaken = (s32)(4 * (idx + 1)) + simm * 4;
+            s32 Cfall  = (s32)(4 * (idx + 2));
+            e.mov_r_m(RCX, RBX, pcOff); e.add_r_imm32(RCX, Ctaken);
+            u64 ctaken = entryVA + (u64)(s64)Ctaken;
+            emitCtrlExit(idx, &ctaken, 1, idx + 2);
+            e.patchRel32(toNot);
+            e.mov_r_m(RCX, RBX, pcOff); e.add_r_imm32(RCX, Cfall);
+            u64 cfall = entryVA + (u64)(s64)Cfall;
+            emitCtrlExit(idx, &cfall, 1, idx + 1);
+            b.src.push_back(op); b.src.push_back(dop);
+            b.nOps += 2;
+            b.hasBranch = true;
+            endedInBranch = true;
+          } else {
+            c.jitCache->buf.used = beforeBranch;   // el delay no compila → descartar el salto
+          }
+        }
         // Fase B: delay slot.
-        if(compileDelay(dop, idx)) {
+        else if(compileDelay(dop, idx)) {
           // Fase C: computar target → RCX y salir por la cola de control común.
           u64 cands[2]; int nc = 0;   // destinos estáticos, para las guardas de block-linking
           if((isBeq || isBcondZ) && g_jitTrace && simm > 0 && i + 2 < kMaxOps) {
@@ -728,7 +783,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             e.mov_r_m(RCX, RBX, pcOff);
             e.add_r_imm32(RCX, Ctaken);                // rcx = target tomado
             u64 ctaken = entryVA + (u64)(s64)Ctaken;
-            emitCtrlExit(idx, &ctaken, 1);
+            emitCtrlExit(idx, &ctaken, 1, idx + 2);
             e.patchRel32(toFall);
             b.src.push_back(op); b.src.push_back(dop);
             b.nOps += 2;
@@ -759,7 +814,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             cands[nc++] = (entryVA & 0xFFFF'FFFF'F000'0000ull) | (u64)tgt;
           }
           if(!traced) {
-            emitCtrlExit(idx, cands, nc);
+            emitCtrlExit(idx, cands, nc, idx + 2);
             b.src.push_back(op); b.src.push_back(dop);
             b.nOps += 2;
             b.hasBranch = true;
@@ -863,6 +918,7 @@ namespace kestrel {
 // para decidir si la Etapa 2b (memoria/branches en bloque) merece la pena.
 static u64 g_jitCalls = 0, g_jitBlocks = 0, g_jitOps = 0;
 static const int g_jitStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
+extern u64 g_trampWhy[5];
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
                 extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32]; }
 // Diagnóstico: razón de decline (por qué jitTryBlock devuelve 0). Solo bajo stats.
@@ -955,14 +1011,27 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   return 1;
 }
 // Trampolín extern "C" (dirección plana, ABI Win64 RCX/RDX) que llama el prólogo emitido.
+// Diagnostico (KESTREL_JIT_STATS): POR QUE se llega al trampolin. El camino rapido en linea
+// solo cae aqui por una de sus guardas, y cada una se arregla de forma distinta, asi que el
+// numero de llamadas por si solo no dice nada accionable. Se reconstruyen los mismos
+// predicados que evaluo el prologo (jitGuard aun conserva el valor no consumido).
+u64 g_trampWhy[5] = {0};   // 0=permiso agotado 1=MI 2=latch timer 3=rsp corriendo 4=otro
 extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
-  return reinterpret_cast<CPU*>(cpu)->jitReenterProceed(K);
+  CPU* c = reinterpret_cast<CPU*>(cpu);
+  if(g_jitStats) {
+    if(c->jitGuard < K)                                          g_trampWhy[0]++;
+    else if(c->mem && (c->mem->rcp.mi_intr & c->mem->rcp.mi_mask)) g_trampWhy[1]++;
+    else if(c->timerIntr)                                        g_trampWhy[2]++;
+    else if(c->mem && c->mem->rsp.running)                       g_trampWhy[3]++;
+    else                                                         g_trampWhy[4]++;
+  }
+  return c->jitReenterProceed(K);
 }
 
 auto CPU::jitTryBlock() -> u32 {
   if(g_jitStats) {
     g_jitCalls++;
-    if((g_jitCalls & 0x3FFFFFF) == 0) {
+    if((g_jitCalls & 0xFFFFFF) == 0) {
       std::fprintf(stderr, "[jitstats] calls=%llu blocksRun=%llu opsJIT=%llu cover=%.1f%% avgK=%.2f\n",
                    (unsigned long long)g_jitCalls, (unsigned long long)g_jitBlocks,
                    (unsigned long long)g_jitOps,
@@ -973,9 +1042,13 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)g_decl[DR_INT], (unsigned long long)g_decl[DR_UNCACHED],
                    (unsigned long long)g_decl[DR_COMPILE], (unsigned long long)g_decl[DR_TIMER],
                    (unsigned long long)g_decl[DR_SMC], (unsigned long long)g_decl[DR_MISC]);
+      std::fprintf(stderr, "[tramp] guard=%lluM mi=%lluM timer=%lluM rsp=%lluM otro=%lluM\n",
+                   (unsigned long long)(g_trampWhy[0]/1000000), (unsigned long long)(g_trampWhy[1]/1000000),
+                   (unsigned long long)(g_trampWhy[2]/1000000), (unsigned long long)(g_trampWhy[3]/1000000),
+                   (unsigned long long)(g_trampWhy[4]/1000000));
       // Top opcodes que causan compile-fail (leader no compilable).
       std::fprintf(stderr, "[compfail]");
-      for(int o = 0; o < 64; o++) if(jit::g_compFailOp[o] > 1000000)
+      for(int o = 0; o < 64; o++) if(jit::g_compFailOp[o] > 10000)
         std::fprintf(stderr, " OP%02x=%llu", o, (unsigned long long)jit::g_compFailOp[o]);
       std::fprintf(stderr, "\n[blockend]");
       for(int o = 0; o < 64; o++) if(jit::g_endOp[o] > 50)
@@ -985,9 +1058,9 @@ auto CPU::jitTryBlock() -> u32 {
       for(int o = 0; o < 32; o++) if(jit::g_endRegimm[o] > 50)
         std::fprintf(stderr, " RI%02x=%llu", o, (unsigned long long)jit::g_endRegimm[o]);
       std::fprintf(stderr, " |");
-      for(int f = 0; f < 64; f++) if(jit::g_compFailSpecial[f] > 1000000)
+      for(int f = 0; f < 64; f++) if(jit::g_compFailSpecial[f] > 10000)
         std::fprintf(stderr, " SP%02x=%llu", f, (unsigned long long)jit::g_compFailSpecial[f]);
-      for(int r = 0; r < 32; r++) if(jit::g_compFailRegimm[r] > 1000000)
+      for(int r = 0; r < 32; r++) if(jit::g_compFailRegimm[r] > 10000)
         std::fprintf(stderr, " RI%02x=%llu", r, (unsigned long long)jit::g_compFailRegimm[r]);
       std::fprintf(stderr, "\n");
     }
@@ -1061,7 +1134,11 @@ auto CPU::jitTryBlock() -> u32 {
   // frente a una compilación entera.
   jit::CodeCache::NoComp& nc = cc->noComp[(phys >> 2) & (jit::CodeCache::kNoCompSlots - 1)];
   if(nc.phys == phys) {
-    if(jitFetchWord(phys) == nc.word) { JDECL(DR_COMPILE); return 0; }
+    if(jitFetchWord(phys) == nc.word) {
+      if(jit::g_compFailOn) { u32 LO = nc.word >> 26; jit::g_compFailOp[LO]++;
+        if(LO == 0) jit::g_compFailSpecial[nc.word & 63]++;
+        else if(LO == 1) jit::g_compFailRegimm[(nc.word >> 16) & 31]++; }
+      JDECL(DR_COMPILE); return 0; }
     nc.phys = ~0u;                              // el código cambió bajo el PC → reintentar
   }
 

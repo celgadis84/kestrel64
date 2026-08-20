@@ -1133,9 +1133,18 @@ auto Rsp::start() -> void {
 
 auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
-  u64 ran = 0;
+  u64 ran = 0, pub = 0;
+  // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo CPU
+  // (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final. Publicar cada
+  // 8K instrucciones (~200 us de RSP emulado) cuesta un fetch_add y un notify por bloque:
+  // nada frente a las 8K instrucciones, y evita que el regulador tenga que muestrear.
+  const bool pubMid = mem && mem->rcpMode == Memory::RcpMode::Threaded;
   while(!halt && maxInsns && budget) {
     maxInsns--; budget--; ran++;
+    if(pubMid && (ran & 0x1FFF) == 0) {
+      cyclesRun.fetch_add(ran - pub, std::memory_order_relaxed); pub = ran;
+      mem->rspCv.notify_all();
+    }
     u32 op = imword(pc);
     curpc = pc;
     if(profOn) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
@@ -1151,7 +1160,7 @@ auto Rsp::step(u64 maxInsns) -> void {
   // Threaded el worker llama a step() con la tarea entera y nadie los contaba: el heartbeat
   // decia "RSP 0.0%" justo cuando el RSP es el palo largo. Se publica una vez por llamada,
   // no por instruccion, asi que no toca la linea de cache en el bucle caliente.
-  cyclesRun.fetch_add(ran, std::memory_order_relaxed);
+  cyclesRun.fetch_add(ran - pub, std::memory_order_relaxed);
   mem->rcp.sp_pc = pc & 0xffc;
   if(halt) {
     // PC is final; now let the CPU see the task end. The release in the fetch_or

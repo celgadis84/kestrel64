@@ -92,6 +92,7 @@ auto System::stepCpu(u64 n) -> u64 {
   static const u32 qchkAfter = std::getenv("KESTREL_QCHKAFTER")
                              ? (u32)std::strtoul(std::getenv("KESTREL_QCHKAFTER"), nullptr, 0) : 30u;
   static u32 qchkTick = 0;
+  const bool paced = memory.rcpMode == Memory::RcpMode::Threaded;
   u64 i = 0;
   while(i < n && !cpu.halted) {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
@@ -102,10 +103,13 @@ auto System::stepCpu(u64 n) -> u64 {
       // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
       cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
       u32 k = cpu.jitTryBlock();
-      if(k) { i += k; continue; }
+      if(k) { i += k; if(paced) memory.rcpPace(cpu.retired); continue; }
     }
     cpu.step();
     i++;
+    // Regulador Threaded: el equivalente al interleave 2:3 de abajo. Cada 64 ops basta —
+    // es una lectura atomica relajada y el margen del regulador es de miles de ops.
+    if(paced && (i & 0x3F) == 0) memory.rcpPace(cpu.retired);
     // Solo se mira con interrupciones habilitadas y fuera de excepcion: dentro de
     // __osDisableInt el kernel esta a medio enlazar y el invariante no aplica.
     // El arranque no cuenta: bzero de las estructuras del kernel viola el invariante

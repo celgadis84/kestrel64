@@ -1323,6 +1323,65 @@ auto Memory::rspAwaitIdle() -> void {
                         std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
 }
 
+// Regulador de velocidad CPU<->RSP para el modo Threaded.
+//
+// En Lockstep el bucle del sistema intercala rsp.step() a 2 pasos de RSP por cada 3 de CPU
+// (62.5 MHz contra 93.75 MHz), asi que la CPU emulada NO puede adelantar al RSP. En Threaded
+// el worker corre la tarea entera por su cuenta y NADA acopla los dos relojes: la CPU emulada
+// se va millones de instrucciones por delante y todas se gastan girando en el bucle de espera
+// del juego, que ademas martillea los registros MMIO que el worker escribe (ping-pong de linea
+// de cache entre nucleos). Aqui se restaura el mismo acoplamiento que en Lockstep: mientras
+// haya tarea de RSP en vuelo, la CPU no puede haber retirado mas de 3 instrucciones por cada
+// 2 ciclos de RSP consumidos desde el enganche. Si se pasa DUERME en el condvar del RSP en vez
+// de girar: mismo trabajo util del guest, un nucleo del host libre para los workers, y el
+// adelanto entre dominios acotado como en el hardware.
+//
+// La holgura existe por la granularidad del dynarec: una cadena de bloques enlazados retira
+// hasta jit::kGuardMaxOps sin volver al bucle, asi que por debajo de eso el regulador no puede
+// mandar y solo generaria bloqueos inutiles.
+static constexpr u64 kPaceSlack   = 8192;             // ops de CPU de adelanto tolerado
+static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
+
+auto Memory::rcpPace(u64 cpuRetired) -> void {
+  if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return; }
+  u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
+  if(!pacePrimed) {
+    pacePrimed = true; paceGiveUp = false; paceWaitedNs = 0;
+    paceCpu0 = cpuRetired; paceRsp0 = rspNow;
+    paceEpisodes.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if(paceGiveUp) return;
+  for(;;) {
+    u64 ahead = cpuRetired - paceCpu0;
+    u64 allow = ((rspNow - paceRsp0) * 3) / 2 + kPaceSlack;
+    if(ahead <= allow) return;
+    paceHolds.fetch_add(1, std::memory_order_relaxed);
+    auto t0 = std::chrono::steady_clock::now();
+    {
+      // El worker publica ciclos y notifica cada pocos miles de instrucciones (ver
+      // Rsp::step), asi que esto despierta con el progreso real. El timeout solo cubre
+      // la notificacion perdida — no se usa como muestreo.
+      std::unique_lock<std::mutex> lk(rspMx);
+      rspCv.wait_for(lk, std::chrono::microseconds(500), [&]{
+        return !rspBusy.load(std::memory_order_acquire)
+            || rsp.cyclesRun.load(std::memory_order_relaxed) != rspNow;
+      });
+    }
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    paceBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
+    paceWaitedNs += dt;
+    if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return; }
+    rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
+    // Salvavidas: si el RSP deja de avanzar (microcodigo esperando algo de la CPU, worker
+    // que no arranca, reloj del host raro) se suelta el freno para este episodio. El
+    // regulador es una optimizacion, nunca puede ser una via de bloqueo.
+    if(paceWaitedNs > kPaceMaxWait) { paceGiveUp = true; return; }
+  }
+}
+
 auto Memory::rspSubmitKick() -> void {
   {
     std::unique_lock<std::mutex> lk(rspMx);

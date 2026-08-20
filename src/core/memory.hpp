@@ -215,6 +215,16 @@ struct Memory {
   auto rdpRunJob(u32 current, u32 end, bool xbus) -> void;  // rasterize + DP bookkeeping
   auto rspAwaitIdle() -> void;      // block until the RSP worker has published its task result
   auto rspSubmitKick() -> void;     // wake the RSP worker to run the armed task (threaded)
+
+  // --- regulador de velocidad CPU<->RSP (solo Threaded) -----------------------
+  // Estado privado del HILO CPU (nadie mas lo toca), salvo los contadores atomicos
+  // que son telemetria. Ver Memory::rcpPace en memory.cpp para el razonamiento.
+  u64  paceCpu0 = 0, paceRsp0 = 0;   // CPU retiradas / ciclos RSP al enganchar el episodio
+  bool pacePrimed = false;           // hay episodio enganchado
+  bool paceGiveUp = false;           // salvavidas: freno suelto en este episodio
+  u64  paceWaitedNs = 0;             // bloqueado en el episodio actual
+  std::atomic<u64> paceBlockNs{0}, paceEpisodes{0}, paceHolds{0};
+  auto rcpPace(u64 cpuRetired) -> void;   // frena la CPU si adelanta al RSP en vuelo
 private:
   auto rdpWorkerLoop() -> void;
   auto rspWorkerLoop() -> void;
