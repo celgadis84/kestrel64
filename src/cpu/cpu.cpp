@@ -615,6 +615,9 @@ auto CPU::unimplemented(u32 op) -> void {
       std::fprintf(stderr, "[cp0] Status=%08x (IE=%u EXL=%u ERL=%u IM=%02x) Cause=%08x (IP=%02x Exc=%u) EPC=%08x badv=%08x\n",
         st, st&1, (st>>1)&1, (st>>2)&1, (st>>8)&0xff, ca, (ca>>8)&0xff, (ca>>2)&0x1f,
         (u32)cop0[C0_EPC], (u32)cop0[C0_BadVAddr]); }
+    std::fprintf(stderr, "[exl] set@ret=%llu pc=0x%08x src=%s | cleared@ret=%llu | now=%llu\n",
+                 (unsigned long long)exlSetRet, exlSetPc, exlSetSrc==1?"exc":(exlSetSrc==2?"mtc0":"-"),
+                 (unsigned long long)exlClrRet, (unsigned long long)retired);
     if(mem)
       std::fprintf(stderr, "[vi] ctrl=%08x origin=%06x width=%u xscale=%08x yscale=%08x intr=%u\n",
                    mem->rcp.vi_ctrl, mem->rcp.vi_origin, mem->rcp.vi_width,
@@ -655,6 +658,40 @@ auto CPU::unimplemented(u32 op) -> void {
             id, pri, state<9?sn[state]:"?", state, tpc, tra, tsp, t==run?"<-RUNNING":"");
           t = rd(t+0x0c);   // tlnext
         }
+      }
+      // El walker de arriba depende de la direccion de __osRunningThread, que cambia
+      // con el juego. Este escaneo no depende de simbolos: una OSThread se reconoce por
+      // su forma (prioridad 0-255, estado en {1,2,4,8}, id pequeno, punteros a RDRAM y
+      // un PC guardado que apunta a codigo). Con eso se ve quien espera y en que cola,
+      // que es lo unico que importa cuando la maquina se queda sin hilo ejecutable.
+      if(std::getenv("KESTREL_THREADSCAN")) {
+        const auto& ram = mem->rdram;
+        auto p32 = [&](u32 p) -> u32 { if((usize)p + 3 >= ram.size()) return 0;
+          return ((u32)ram[p]<<24)|((u32)ram[p+1]<<16)|((u32)ram[p+2]<<8)|ram[p+3]; };
+        auto ptrOk = [&](u32 v) { return v == 0 || ((v >> 24) == 0x80 && (v & 0x1fffffff) + 0x1b0 < ram.size()); };
+        int found = 0;
+        for(u32 p = 0; p + 0x200 < (u32)ram.size() && found < 24; p += 8) {
+          u32 pri = p32(p + 0x04), st = p32(p + 0x10) >> 16, id = p32(p + 0x14);
+          if(pri > 255 || id == 0 || id > 64) continue;
+          if(st != 1 && st != 2 && st != 4 && st != 8) continue;
+          if(!ptrOk(p32(p + 0x00)) || !ptrOk(p32(p + 0x0c)) || !ptrOk(p32(p + 0x08))) continue;
+          // El desplazamiento exacto de context.pc depende de como quede alineado el
+          // contexto (u64 por registro), asi que se aceptan las dos posiciones vistas.
+          u32 pcA = p32(p + 0x118), pcB = p32(p + 0x11c);
+          u32 tpc = ((pcA >> 24) == 0x80 && !(pcA & 3)) ? pcA : pcB;
+          if((tpc >> 24) != 0x80 || (tpc & 3)) continue;
+          const char* sn = st==1?"STOPPED":st==2?"RUNNABLE":st==4?"RUNNING":"WAITING";
+          u32 q = p32(p + 0x08);
+          std::fprintf(stderr, "  [scan] thr@%08x id=%u pri=%u %s pc=%08x ra=%08x sp=%08x mq=%08x",
+                       0x80000000u + p, id, pri, sn, tpc, p32(p + 0x104), p32(p + 0xf4), q);
+          if(q && (q >> 24) == 0x80) {          // OSMesgQueue: validCount +8, msgCount +0x10
+            u32 qp = q & 0x1fffffff;
+            std::fprintf(stderr, " (mensajes %u de %u)", p32(qp + 0x08), p32(qp + 0x10));
+          }
+          std::fprintf(stderr, "\n");
+          found++;
+        }
+        std::fprintf(stderr, "  [scan] %d hilos plausibles\n", found);
       }
       std::fflush(stderr);
     }
@@ -1010,6 +1047,7 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
   }
 
   cop0[C0_Status] = sext32(status | 0x2);   // set EXL
+  if(!exl) { exlSetRet = retired; exlSetPc = (u32)epc; exlSetSrc = 1; }
   // Vector selection. The TLB-refill special vector (offset 0x000, or XTLB 0x080) is
   // only used on the *first* miss (EXL=0); a nested miss uses the general 0x180 vector.
   bool bev = status & 0x0040'0000u;
@@ -1602,7 +1640,11 @@ auto CPU::writeCop0(u32 reg, u64 v) -> void {
     case C0_XContext: cop0[reg] = (v & ~0x1'FFFF'FFFFull) | (cop0[reg] & 0x1'FFFF'FFFFull); return; // [63:33] writable
     case 17:/*LLAddr*/ cop0[reg] = (u32)v; return; // 32-bit, zero-extended
     case C0_Config:  cop0[reg] = sext32(((u32)v & 0x0F00'800Fu) | 0x7006'6460u); return;  // writable: 0-3,15,24-27; rest fixed
-    case C0_Status:  cop0[reg] = sext32((u32)v & ~(1u<<19)); bumpXlat(); return;  // bit19 not writable (modo/RE/bit64 cambian la traducción → invalida fetch fast-path)
+    case C0_Status: {
+      u32 ov = (u32)cop0[reg], nv = (u32)v & ~(1u<<19);
+      if(!(ov & 0x2) && (nv & 0x2)) { exlSetRet = retired; exlSetPc = (u32)curPc; exlSetSrc = 2; }
+      if((ov & 0x2) && !(nv & 0x2)) exlClrRet = retired;
+      cop0[reg] = sext32(nv); bumpXlat(); return; }  // bit19 not writable (modo/RE/bit64 cambian la traducción → invalida fetch fast-path)
     case C0_Compare: cop0[reg] = sext32((u32)v); timerIntr = false; return;  // writing acks timer
     case 7: case 21: case 22: case 23: case 24: case 25: case 31: return;    // no storage; latch only
     default: cop0[reg] = v; return;
@@ -1638,6 +1680,7 @@ auto CPU::cop0op(u32 op) -> void {
         bumpXlat();   // limpiar EXL/ERL cambia el modo → invalida el fetch fast-path
         if(cop0[C0_Status] & 0x4) { nextPc = cop0[30/*ErrorEPC*/]; cop0[C0_Status] &= ~0x4u; }
         else                      { nextPc = cop0[C0_EPC];         cop0[C0_Status] &= ~0x2u; }
+        exlClrRet = retired;
         if(excTrace && exceptions < 200)
           std::fprintf(stderr, "[eret] -> 0x%08x status=%08x retired=%llu\n",
                        (u32)nextPc, (u32)cop0[C0_Status], (unsigned long long)retired);

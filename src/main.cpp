@@ -70,6 +70,14 @@ int main(int argc, char** argv) {
       kestrel::u64 fails = rsp.fuzzVU(iters);
       return fails == 0 ? 0 : 1;
     }
+    else if(a == "--rspldfuzz") {               // fuzz de cargas/tiendas vectoriales
+      unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != 0x2d) ? std::strtoull(argv[++i], nullptr, 10) : 500000ull;
+      kestrel::Memory bus;
+      bus.reset(false);
+      kestrel::Rsp rsp; rsp.mem = &bus;
+      std::fprintf(stderr, "[rspldfuzz] %llu iteraciones...\n", iters);
+      return rsp.fuzzLdSt(iters) == 0 ? 0 : 1;
+    }
     else if(a == "--vubench") {                 // time scalar vs SSE VU path, then exit
       unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != '-') ? std::strtoull(argv[++i], nullptr, 10) : 100000000ull;
       kestrel::Rsp rsp;
@@ -124,7 +132,7 @@ int main(int argc, char** argv) {
   system.paused.store(!freeRun);
   system.exitOnHalt = freeRun;    // lote headless: halt = fin de sesión, no punto de inspección
   system.startTelemetry(port);
-  system.startVideo();
+  system.startVideo(freeRun);   // --run = lote: sin ventana salvo KESTREL_VIDEO
   std::printf("[system] running (M1: CPU interpreter, %s). Ctrl-C to quit.\n",
               freeRun ? "free-run" : "paused — step over MCP");
   std::fflush(stdout);

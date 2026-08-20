@@ -79,7 +79,7 @@ struct System {
 
   // Arm the VI presentation window (M3.1). No-op if disabled (KESTREL_VIDEO).
   // The window loop itself runs on the main thread inside runLoop().
-  auto startVideo() -> void;
+  auto startVideo(bool batch) -> void;
 
   // Top-level blocking loop. With video on: CPU on a worker thread, the GLFW/
   // Vulkan present loop on THIS (main) thread — GLFW requires the main thread.

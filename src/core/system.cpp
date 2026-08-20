@@ -151,8 +151,15 @@ auto System::startTelemetry(u16 port) -> bool {
   return true;
 }
 
-auto System::startVideo() -> void {
-  if(!std::getenv("KESTREL_VIDEO")) return;   // opt-in until the RDP fills a framebuffer
+auto System::startVideo(bool batch) -> void {
+  // La ventana viene por defecto en sesion interactiva: quien corre el emulador a mano
+  // quiere verlo. En lote (--run: gates, bench, krom) no, porque abrir una ventana por
+  // ROM cambia lo que se mide y encima requiere escritorio. KESTREL_VIDEO fuerza el si
+  // (util para ver un caso de gate), KESTREL_NOVIDEO fuerza el no.
+  bool want = !batch;
+  if(std::getenv("KESTREL_VIDEO"))   want = true;
+  if(std::getenv("KESTREL_NOVIDEO")) want = false;
+  if(!want) return;
   videoOn = presenter.start(&memory, &shutdown, &n64SpeedPct, &rspSpeedPct, &rdramSpeedPct,
                             rom.valid() ? rom.header.name.c_str() : nullptr);
   if(videoOn) std::printf("[video] VI presentation armed (window opens on main thread)\n");
@@ -361,6 +368,26 @@ auto System::run() -> void {
   u64  stableEvery = 0, stableNeed = 3, stableNext = 0, stableHash = 0;
   u32  stableRun = 0, maxFlips = 0, maxSyncs = 0;
   bool stableSawChange = false;
+  // KESTREL_HANGDOG=<segundos>: perro guardian de cuelgues.
+  //
+  // Un juego colgado no para: la CPU sigue retirando instrucciones a toda velocidad
+  // (bucle cerrado, o PC fuera de la RDRAM leyendo ceros) mientras el RCP se queda a
+  // cero y no vuelve a intercambiar buffer. Eso es indistinguible de "va lento" si solo
+  // se mira el reloj de pared, y obliga a esperar al timeout entero para saberlo. Con el
+  // guardian armado, N segundos sin un solo intercambio de buffer del VI, habiendo
+  // intercambiado antes al menos uno, se tratan como cuelgue: se dispara el mismo
+  // volcado que el tope de instrucciones (jumplog, historial de excepciones, hilos del
+  // OS) y se termina. No toca la emulacion: solo observa viFlips.
+  //
+  // Apagado por defecto: hay ROMs que legitimamente no intercambian nunca (los
+  // decodificadores de imagen por CPU dibujan un cuadro y ya), y esas se acotan con
+  // KESTREL_STABLE / KESTREL_MAXSYNCS.
+  double hangSecs = 0.0;
+  if(const char* h = std::getenv("KESTREL_HANGDOG")) hangSecs = std::strtod(h, nullptr);
+  auto  hangLast = winT0;             // ultimo momento en que se vio avanzar viFlips
+  u64   hangFlips = 0;                // valor de viFlips en ese momento
+  u64   hangInsn = 0;                 // instrucciones retiradas en ese momento
+
   if(const char* f = std::getenv("KESTREL_MAXFLIPS")) maxFlips = (u32)std::strtoul(f, nullptr, 0);
   if(const char* f = std::getenv("KESTREL_MAXSYNCS")) maxSyncs = (u32)std::strtoul(f, nullptr, 0);
   if(const char* s = std::getenv("KESTREL_STABLE")) {
@@ -432,6 +459,24 @@ auto System::run() -> void {
       // que ya la arma.
       cpu.refreshDebugArmed();
       maxFlips = maxSyncs = 0;    // ya disparado: no repetir el aviso cada campo
+    }
+
+    if(hangSecs > 0.0) {
+      u64 fl = memory.rcp.viFlips;
+      auto tnow = clock::now();
+      if(fl != hangFlips) { hangFlips = fl; hangLast = tnow; hangInsn = cpu.retired; }
+      else if(hangFlips > 0 &&
+              std::chrono::duration<double>(tnow - hangLast).count() >= hangSecs) {
+        std::fprintf(stderr,
+                     "[hangdog] %.1fs sin intercambiar buffer tras %llu campos, y la CPU ha"
+                     " retirado %llu instrucciones en ese hueco: cuelgue.\n",
+                     hangSecs, (unsigned long long)hangFlips,
+                     (unsigned long long)(cpu.retired - hangInsn));
+        std::lock_guard<std::mutex> lk(coreMutex);
+        cpu.maxInsn = cpu.retired + 1;   // reutiliza el volcado del tope de instrucciones
+        cpu.refreshDebugArmed();
+        hangSecs = 0.0;                  // un solo aviso
+      }
     }
 
     if(stableEvery && cpu.retired >= stableNext) {

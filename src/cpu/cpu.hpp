@@ -280,6 +280,9 @@ private:
   auto storeCart(u32 phys, u64 reg, u32 width) -> bool;
 
   auto execute(u32 op) -> void;
+  // Rastro de EXL: quien lo puso a 1 y cuando se limpio. Con EXL=1 el nucleo no
+  // acepta interrupciones, asi que un EXL pegado deja la maquina viva pero sorda.
+  u64 exlSetRet = 0, exlClrRet = 0;  u32 exlSetPc = 0;  u8 exlSetSrc = 0;  // 1=excepcion 2=mtc0
   auto writeCop0(u32 reg, u64 v) -> void;  // MTC0/DMTC0 with VR4300 per-register write masks
   auto readCop0(u32 reg) -> u64;           // MFC0/DMFC0 with unused-latch + read-only regs
   // FP register access honoring the FR bit (Status bit26). FR=1: 32 independent

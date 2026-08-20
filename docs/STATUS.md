@@ -2549,3 +2549,117 @@ palo largo esta medido y no es el interprete — con la telemetria de ocupacion 
 `cpuWait` ~0. Es decir, el hilo CPU casi nunca espera: manda SoftRDP en el host, y
 despues el RSP LLE. Orden de ataque que sale de ahi: (1) backend paraLLEl-RDP en GPU,
 (2) vectorizar el COP2 del RSP, (3) intereses menores del JIT.
+
+## 2026-08-20 — SM64 se cuelga tras ~1 min de attract; no es el rasterizador
+
+Sesion con el usuario delante, SM64 en ventana (`KESTREL_VIDEO=1`, threaded+JIT).
+
+**Sintoma.** Arranca, titulo, entra en la demo de attract, y al cabo de ~1-2 minutos
+de emulacion la imagen se congela: `fps 0`, `rdpBusyPct 0`, `rspBusyPct 0`, y la CPU
+sigue retirando instrucciones a toda velocidad (`cpuPct` 120-385 %). Ese trio
+(fps 0 + RCP 0 % + CPU alta) es la firma del cuelgue en `emu_status`.
+
+**Dos capturas del estado, dos finales distintos:**
+
+| backend | pc | pistas |
+|---------|----|--------|
+| SoftRDP | `0x835CE314` (fuera de RDRAM: 4 MB acaban en `0x803FFFFF`) | ejecutando ceros en el vacio; `EPC=0x80328578`, `ra=0x80328500` (rutina de DMA de PI: `lui t1,0xa460` … `sw t0,8(t1)`), `k0=0xA430000C` (MI_INTR_MASK) → venia del handler de interrupcion |
+| paraLLEl-RDP | `0x80246ddc`, `nextPc=EPC=ra=0x80246dd8` | bucle cerrado de dos instrucciones en el arranque de SM64 |
+
+**Lo que descarta el experimento.** La hipotesis era "sera SoftRDP en vez de
+paraLLEl-RDP". Se compilo el backend GPU (`-DKESTREL_PRDP=ON`, `build-prdp/`) y se
+corrio la misma sesion con `KESTREL_PRDP=1`: **se cuelga igual**. El rasterizador no
+es la causa; el fallo esta aguas arriba (CPU / RSP / DMA).
+
+**Lo que si cambia entre backends** (mismo frame, pantalla de titulo):
+- paraLLEl-RDP saca el Mario con la textura correcta y filtrada; SoftRDP lo saca
+  facetado y con bloques de basura → hay fallos de precision propios del SoftRDP.
+- El fondo de mosaicos sale roto en LOS DOS (SoftRDP: tiles repetidos con basura;
+  paraLLEl: ruido verde/rosa). Si los dos rasterizadores coinciden en romperlo, los
+  comandos/texeles ya llegan corruptos: mirar RSP (F3DEX2) y el camino de textura,
+  no el rasterizador.
+
+**Ruido del backend GPU a resolver antes de usarlo en serio:** spam continuo de
+`Exhausted LinkedDeviceHost memory` / `Will exceed memory budget` (heap host-visible
+de 256 MB de la RX 570) — se esta pidiendo memoria por trabajo sin reciclarla.
+
+**Gotcha de metodo (me ha mordido dos veces).** El video era opt-in silencioso
+(`KESTREL_VIDEO`): sin esa variable la ventana ni se abre y parece que el emulador
+"sale sin graficos". Cambiado: la ventana viene por defecto en sesion interactiva y
+se calla en lote (`--run`), con `KESTREL_VIDEO` / `KESTREL_NOVIDEO` para forzar.
+
+### 2026-08-20 - el cuelgue de SM64 es anterior a los cambios de RSP
+
+Bisect contra un worktree limpio en e6330bc (`k64-head`), misma ROM, mismo modo
+(JIT + hilos, que ya vienen por defecto), 2500 campos de tope:
+
+| binario | resultado |
+|---|---|
+| HEAD e6330bc, sin fichero de save | COLGADO a los 301 s (sin `[frames]`) |
+| arbol actual (RSP nuevo), sin save | cuelga igual |
+| HEAD, con save presente | 2500 campos limpios, 127 s |
+
+O sea: **el cuelgue no lo introducen los caminos rapidos del RSP**; sale tambien
+en HEAD. Lo que cambia el escenario es el fichero `.eep`: sin partida guardada
+SM64 recorre otra secuencia de attract y ahi aparece.
+
+Sintomas en el momento del cuelgue (`KESTREL_HANGDOG=<segundos>` fuerza el volcado):
+
+- CPU viva girando en `0x80246dd8`, que es el `while(1)` legitimo del hilo idle
+  de `main_func` (tras `osSetThreadPri(NULL,0)`). No es un bucle parasito.
+- `EXL` NO esta pegado: el rastro `[exl]` dice que se pone y se limpia cada
+  ~750k instrucciones, o sea las interrupciones entran y el handler retorna.
+- `mi_intr=08` (VI pendiente), `sp_status=0x203` (HALT|BROKE|SIG2 = tarea
+  terminada), `dpc_status=0`, `rspRun=0`: el RCP esta parado y en reposo.
+- Conclusion: no hay ningun hilo ejecutable. Alguien espera un mensaje que no
+  llega. Falta ver que hilo y en que cola.
+- Antes del cuelgue aparecen comandos `SET_COLOR_IMAGE addr=000000` con basura
+  (`[rdp!]`), tambien en HEAD: la lista de display llega corrupta al RDP.
+
+Herramientas anadidas para esto: `KESTREL_HANGDOG`, el rastro `[exl]` (quien
+pone y quita EXL) y `KESTREL_THREADSCAN`, que localiza las OSThread por su forma
+(prioridad, estado, id, punteros a RDRAM, PC guardado) en vez de por la direccion
+de `__osRunningThread`, que es distinta en cada juego.
+
+### 2026-08-20 — RESUELTO: el cuelgue de SM64 era una carrera en DPC_CURRENT
+
+**Sintoma**: SM64 en modo threaded (por defecto) se colgaba tras ~1-2k campos. El RDP
+recibia un `SET_COLOR_IMAGE` con `addr=000000`, rasterizaba sobre la fisica 0 y borraba
+el vector de excepcion 0x80000180; a partir de ahi la CPU saltaba a basura
+(`Cause=80000428`, Reserved Instruction en bucle) y ningun hilo del juego volvia a correr.
+Reproducible en HEAD e6330bc, o sea anterior al trabajo de RSP.
+
+**Causa raiz**: `DPC_CURRENT` es el puntero de LECTURA del command processor del RDP; en HW
+su unico dueno es el propio RDP. En kestrel lo escribian DOS hilos:
+
+- el worker del RDP, publicando su avance real mientras consume el FIFO, y
+- **el hilo CPU**, en la escritura de `DPC_END` con `START_VALID`, recargando
+  `dpc_current = dpc_start` (memory.cpp caso 0x04).
+
+F3DEX2 usa el buffer de salida del RDP como **FIFO circular** y hace flow-control leyendo
+DPC_CURRENT (medido: ~2.8M lecturas por run) antes de DMAear comandos nuevos encima. Con el
+worker por detras, la recarga desde la CPU y el `store` posterior del worker (direcciones
+altas del span viejo) se pisaban: el microcodigo leia un CURRENT **adelantado**, concluia que
+el RDP ya habia consumido la cabeza del buffer y la reescribia con comandos nuevos por debajo
+del rasterizador. De ahi los comandos rotos (`ffff000300000000`, mitad alta con datos, mitad
+baja a cero) y el `SET_COLOR_IMAGE addr=0`.
+
+**Fix** (semantica HW, no parche): la recarga CURRENT<-START sigue ocurriendo en el kick y la
+CPU la ve al momento (systemtest la exige: "RDP STATUS: Flags during a run", "RDP START & END
+REG (masking)" — y ocurre incluso congelado, sin rasterizar nada), pero **solo se publica desde
+el hilo CPU si el rasterizador esta parado**. Si el worker sigue consumiendo un span anterior,
+la recarga viaja con el trabajo — `rdpRunJob` publica `dpc_current = inicio del span` al abrirlo, y desde ahi
+solo avanza el consumidor. Como los trabajos se ejecutan en orden FIFO, CURRENT nunca puede
+indicar mas consumido de lo que realmente se consumio, que es la invariante que el ucode
+necesita. En lockstep el comportamiento es identico (rdpRunJob corre en el hilo CPU).
+
+**Verificacion**: SM64 2500 campos, 3 runs, 118-119 s, `anom=0 hangdog=0` (antes: colgado a
+los 300 s con 53 anomalias). Bisect previo que apuntaba al hilo del RDP:
+`KESTREL_THREADS=0` limpio, `KESTREL_THREADS=1 KESTREL_RDPINLINE=1` limpio,
+`KESTREL_THREADS=1` (worker RDP) roto — consistente con la carrera.
+
+**Herramientas nuevas** (se quedan): `KESTREL_HANGDOG=<s>` (vigilante de cuelgue con volcado),
+traza `[exl]` de quien puso/quito EXL, `KESTREL_THREADSCAN` (escaneo de OSThread agnostico de
+juego, no depende de simbolos de PD), aviso `[rdp!]` de SET_COLOR_IMAGE bajo con volcado del
+vecindario del FIFO, contador `dpcCurReads` (lecturas de DPC_CURRENT por el ucode) y
+`KESTREL_RDPINLINE=1` (rasterizar en el hilo CPU aun en modo threaded, para bisecar carreras).
