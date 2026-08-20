@@ -110,7 +110,7 @@ struct Memory {
   static constexpr u32 IMEM_SIZE = 0x1000;                 // 4 KB
   static constexpr u32 PIFRAM_SIZE = 0x40;                 // 64 B
 
-  std::vector<u8> rdram;
+  GuestBytes rdram;   // alineada a pagina: la importa Vulkan sin copia (ver AlignedAllocator)
   std::vector<u8> dmem;
   std::vector<u8> imem;
   std::vector<u8> pifram;

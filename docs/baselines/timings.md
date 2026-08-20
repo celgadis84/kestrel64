@@ -198,3 +198,89 @@ Barrido de elasticidad sobre SM64 (250 swaps, attract intercambia a 30/s = tiemp
 **Conclusión: SM64 corre al 84% de tiempo real y casi todo el hueco que queda es el
 rasterizador por software.** El siguiente palo largo no es el intérprete ni el JIT: es
 parallel-RDP.
+
+---
+
+## 2026-08-20 — parallel-RDP: de regresión a empate (RX 570)
+
+Punto de partida medido (SM64, `KFLIPS=250`, `build-prdp`):
+
+| variante | swaps/s |
+|----------|---------|
+| SoftRDP (`KESTREL_PRDP` sin poner) | 23.95 |
+| parallel-RDP (`KESTREL_PRDP=1`)    | **19.54** |
+
+El backend de GPU era **más lento** que el rasterizador por software. Dos causas reales,
+las dos arregladas.
+
+### 1. La RDRAM no estaba alineada a página → cero copia perdida
+
+parallel-rdp intenta importar la RDRAM del invitado directamente en la GPU con
+`VK_EXT_external_memory_host` (`create_imported_host_buffer`): la GPU lee y escribe la
+memoria del emulador *sin copia*. La importación exige que el puntero esté alineado a
+`minImportedHostPointerAlignment` = **4096 B** en escritorio. `Memory::rdram` era un
+`std::vector<u8>` corriente, que solo garantiza 16 B:
+
+```
+[vrdp] gpu="Radeon RX 570 Series" ext_mem_host=1 align=4096 rdram=0000018F2767B040  MISALIGNED -> slow copy path
+```
+
+Al fallar, parallel-rdp cae **en silencio** (el LOGW va al hilo con la interfaz de log
+silenciada) a un espejo de 16 MB en la GPU con máscara de escritura, que hay que sincronizar
+alrededor de cada sync: 8 MB de PCIe por campo.
+
+Arreglo: `AlignedAllocator<u8, 4096>` en `core/types.hpp` y `using GuestBytes` para la
+RDRAM. Los ayudantes `rd32/rd64/wr8/wr16/wr32` de `rdp/rdp.cpp` pasan a plantilla sobre el
+contenedor. Nada de esto toca semántica de la máquina: es alineación del host.
+
+**19.54 → 21.69 swaps/s (+11%).**
+
+### 2. El scanout esperaba a la GPU dos veces por campo
+
+`produceScanout()` se hacía **dentro del SYNC_FULL** y esperaba el fence al momento:
+`scanout_async_buffer()` → `fence->wait()` → `map` → `memcpy`. Es decir, justo después de
+haber esperado ya la línea de tiempo del DP, se volvía a bloquear el hilo esperando a la GPU.
+Cero solape.
+
+Modelo correcto (y el que usa ares): **el scanout lo manda el VI, no el DP**. El VI escupe
+lo que haya en el framebuffer en cada frontera de campo, pase lo que pase con el pipe del
+RDP. Ahora `pumpViState()`, cuando ve la frontera de campo:
+
+1. `harvestScanout()` — recoge el campo *anterior* (su fence ya está firmado hace rato),
+2. `begin_frame_context()`,
+3. `issueScanout()` — pide el siguiente y **no** espera.
+
+La GPU trabaja un campo entero mientras el emulador sigue.
+
+| tiempo del hilo RDP (250 campos, `KESTREL_PRDP_STATS=1`) | antes | después |
+|---|---|---|
+| recorrer/encolar la FIFO | 397 ms | 408 ms |
+| esperar la línea de tiempo en SYNC_FULL | 615 ms | 549 ms |
+| scanout (fence + map + memcpy) | **579 ms** | **0.55 ms** |
+
+**21.69 → 23.17 swaps/s.** El scanout deja de existir como coste: el fence siempre llega ya
+firmado.
+
+### Resultado y techo
+
+| variante | swaps/s | % de tiempo real (30/s) |
+|----------|---------|------------------------|
+| parallel-RDP inicial | 19.54 | 65% |
+| + RDRAM alineada     | 21.69 | 72% |
+| + scanout encauzado  | **23.17** | 77% |
+| SoftRDP              | 24.61 | 82% |
+| sin rasterizar (`KESTREL_NORASTER=1`) | 28.95 | 96% |
+
+En esta máquina parallel-RDP **empata** con SoftRDP, no gana. Lo que queda es
+`wait_for_timeline` en cada SYNC_FULL: 549 ms / 250 = **2.2 ms por campo** de latencia
+GPU+driver, y esa espera está en el camino serie del invitado (el juego duerme hasta la
+interrupción del DP). Es latencia de sumisión de una RX 570 en Windows, no trabajo nuestro.
+
+Ruido pendiente, medido pero no arreglado: **641 fallos de reserva por campo-y-pico**
+(`Exhausted LinkedDeviceHost memory` + `Will exceed memory budget` + `garbage_collect`).
+Granite quiere un bloque de 64 MiB en el heap BAR host-visible (256 MiB en la RX 570, ~199
+MiB ya ocupados por el escritorio) para un búfer de pocos cientos de bytes que
+`bind_horizontal_info_view()` crea en cada pasada del VI; falla, recolecta basura y cae a
+memoria de sistema **cada vez**, sin recordar el fallo. Arreglarlo exige parchear el árbol
+de parallel-rdp, que hoy vive dentro del checkout **congelado** de ares
+(`PRDP_DIR`); el paso limpio sería vendorizar parallel-rdp dentro de kestrel.

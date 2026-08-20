@@ -17,6 +17,9 @@
 #include "vrdp.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -55,12 +58,28 @@ struct Backend {
   std::atomic<u32> viDirty{0};              // bitmask of regs pending apply
   std::atomic<bool> frameReq{false};        // begin_frame_context() pending
 
+  // Scanout en vuelo: se pide al empezar el campo y se recoge al empezar el siguiente,
+  // asi la GPU trabaja mientras el emulador sigue. Esperar el fence justo despues de
+  // pedirlo (lo que haciamos antes) serializa CPU y GPU dos veces por campo.
+  ::RDP::VIScanoutBuffer pending;
+  bool              havePending = false;
+
   // Latest scanned-out picture, produced on the RDP thread, read by present.
   std::mutex        frameMutex;
   std::vector<u8>   frameRGBA;              // width*height*4, RGBA8888
   u32               frameW = 0, frameH = 0;
   bool              haveFrame = false;
+
+  // Reparto de tiempo del hilo RDP (KESTREL_PRDP_STATS=1). Sin esto no se sabe si el coste
+  // esta en trocear la FIFO, en esperar a la GPU o en bajarse los pixeles por PCIe.
+  bool  stats = false;
+  u64   nsEnq = 0, nsWait = 0, nsScan = 0, nEnq = 0, nSync = 0;
 };
+
+inline auto nowNs() -> u64 {
+  return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 Backend* g = nullptr;
 
@@ -69,23 +88,38 @@ inline auto rd32(const u8* p, u32 off) -> u32 {
   return (u32)p[off] << 24 | (u32)p[off + 1] << 16 | (u32)p[off + 2] << 8 | p[off + 3];
 }
 
+auto harvestScanout() -> void;
+auto issueScanout() -> void;
+
 // Apply any pending VI register writes + frame-context rotation. RDP thread only.
 auto pumpViState() -> void {
   u32 dirty = g->viDirty.exchange(0, std::memory_order_acquire);
   for(u32 i = 0; i < 14; i++)
     if(dirty & (1u << i))
       g->proc->set_vi_register(::RDP::VIRegister(i), g->viReg[i].load(std::memory_order_relaxed));
-  if(g->frameReq.exchange(false, std::memory_order_acq_rel))
+  if(g->frameReq.exchange(false, std::memory_order_acq_rel)) {
+    // Frontera de campo: el VI escupe lo que haya en el framebuffer, pase lo que pase con
+    // el DP. Recoger el campo anterior (ya terminado en la GPU) y pedir el siguiente.
+    harvestScanout();
     g->proc->begin_frame_context();
+    issueScanout();
+  }
 }
 
-// Produce the current scanout into frameRGBA. RDP thread only (Granite call).
-auto produceScanout() -> void {
-  ::RDP::VIScanoutBuffer sb;
+// Pedir el scanout del campo actual. No bloquea: deja el fence en vuelo. RDP thread only.
+auto issueScanout() -> void {
   ::RDP::ScanoutOptions opts;
   opts.persist_frame_on_invalid_input = true;
-  g->proc->scanout_async_buffer(sb, opts);
-  if(!sb.fence || !sb.width || !sb.height) return;
+  g->proc->scanout_async_buffer(g->pending, opts);
+  g->havePending = g->pending.fence && g->pending.width && g->pending.height;
+}
+
+// Recoger el scanout pedido en el campo anterior. RDP thread only (Granite call).
+auto harvestScanout() -> void {
+  if(!g->havePending) return;
+  g->havePending = false;
+  u64 t0 = g->stats ? nowNs() : 0;
+  ::RDP::VIScanoutBuffer& sb = g->pending;
   sb.fence->wait();
   const u8* rgba = (const u8*)g->device.map_host_buffer(*sb.buffer,
                                                         ::Vulkan::MEMORY_ACCESS_READ_BIT);
@@ -97,9 +131,12 @@ auto produceScanout() -> void {
     g->haveFrame = true;
   }
   g->device.unmap_host_buffer(*sb.buffer, ::Vulkan::MEMORY_ACCESS_READ_BIT);
+  if(g->stats) g->nsScan += nowNs() - t0;
 }
 
 }  // namespace
+
+auto dumpStats() -> void;
 
 auto init(u8* rdram, u32 size) -> bool {
   if(g) return g->ok;
@@ -118,16 +155,43 @@ auto init(u8* rdram, u32 size) -> bool {
   g->device.set_context(g->context);
   g->device.init_frame_contexts(3);
 
+  // parallel-rdp maps guest RDRAM straight into the GPU via VK_EXT_external_memory_host
+  // (zero copy). The import demands a page-aligned host pointer; if it fails, parallel-rdp
+  // silently drops to a device-side mirror that must be re-uploaded around every sync.
+  // Say out loud which path we got — the two differ by an 8 MB PCIe transfer per frame.
+  {
+    const auto& feat = g->device.get_device_features();
+    usize align = feat.supports_external_memory_host
+                ? (usize)feat.host_memory_properties.minImportedHostPointerAlignment : 0;
+    std::fprintf(stderr, "[vrdp] gpu=\"%s\" ext_mem_host=%d align=%zu rdram=%p%s\n",
+                 g->device.get_gpu_properties().deviceName,
+                 (int)feat.supports_external_memory_host, align, (void*)rdram,
+                 (align && ((uintptr_t)rdram & (align - 1))) ? "  MISALIGNED -> slow copy path" : "");
+  }
+
   // hidden RDRAM (coverage/AA aux bits) is sized at rdram/2 on hardware.
   g->proc = new ::RDP::CommandProcessor(g->device, rdram, 0, size, size / 2, 0);
   if(!g->proc->device_is_supported()) { shutdown(); return false; }
 
+  g->stats = std::getenv("KESTREL_PRDP_STATS") != nullptr;
+  if(g->stats) std::atexit([]{ dumpStats(); });
   g->ok = true;
   return true;
 }
 
+// Reparto de tiempo del hilo RDP. Se engancha a atexit cuando KESTREL_PRDP_STATS esta
+// puesto, porque nadie llama a shutdown() en la salida normal.
+auto dumpStats() -> void {
+  if(!g || !g->stats) return;
+  std::fprintf(stderr,
+      "[vrdp] fifo=%llu (%.2f ms) gpuwait=%llu (%.2f ms) scanout=%.2f ms\n",
+      (unsigned long long)g->nEnq, g->nsEnq / 1e6,
+      (unsigned long long)g->nSync, g->nsWait / 1e6, g->nsScan / 1e6);
+}
+
 auto shutdown() -> void {
   if(!g) return;
+  dumpStats();
   if(g->proc) { delete g->proc; g->proc = nullptr; }
   delete g;
   g = nullptr;
@@ -140,6 +204,8 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
   if(!active()) return false;
   pumpViState();                                    // apply CPU-side VI writes / frame rotate
 
+  u64 tEnq = g->stats ? nowNs() : 0;
+  u64 subEnq = g->stats ? g->nsWait + g->nsScan : 0;   // el bloqueo/lectura se cobra aparte
   bool sawSyncFull = false;
   u32 cur = start & ~7u, fin = end & ~7u;
   // Enqueue command-by-command, splitting on the length table (like ares render()).
@@ -167,12 +233,14 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     if(op >= 8) g->proc->enqueue_command(len * 2, words);
 
     if(::RDP::Op(op) == ::RDP::Op::SyncFull) {
+      u64 tw = g->stats ? nowNs() : 0;
       g->proc->wait_for_timeline(g->proc->signal_timeline());
-      produceScanout();                             // grab the finished frame's pixels
+      if(g->stats) { g->nsWait += nowNs() - tw; g->nSync++; }
       sawSyncFull = true;
     }
     cur += len * 8;
   }
+  if(g->stats) { g->nsEnq += nowNs() - tEnq - (g->nsWait + g->nsScan - subEnq); g->nEnq++; }
   return sawSyncFull;
 }
 

@@ -20,22 +20,27 @@ static const bool g_noRaster = std::getenv("KESTREL_NORASTER") != nullptr;  // D
 
 // --- raw big-endian RDRAM access (physical addresses) ------------------------
 namespace {
-inline auto rd32(const std::vector<u8>& m, u32 p) -> u32 {
+template<typename V>
+inline auto rd32(const V& m, u32 p) -> u32 {
   if(p + 3 >= m.size()) return 0;
   return (u32(m[p]) << 24) | (u32(m[p+1]) << 16) | (u32(m[p+2]) << 8) | u32(m[p+3]);
 }
-inline auto rd64(const std::vector<u8>& m, u32 p) -> u64 {
+template<typename V>
+inline auto rd64(const V& m, u32 p) -> u64 {
   return (u64(rd32(m, p)) << 32) | rd32(m, p + 4);
 }
-inline auto wr8(std::vector<u8>& m, u32 p, u8 v) -> void {
+template<typename V>
+inline auto wr8(V& m, u32 p, u8 v) -> void {
   if(p >= m.size()) return;
   m[p] = v;
 }
-inline auto wr16(std::vector<u8>& m, u32 p, u16 v) -> void {
+template<typename V>
+inline auto wr16(V& m, u32 p, u16 v) -> void {
   if(p + 1 >= m.size()) return;
   m[p] = u8(v >> 8); m[p+1] = u8(v);
 }
-inline auto wr32(std::vector<u8>& m, u32 p, u32 v) -> void {
+template<typename V>
+inline auto wr32(V& m, u32 p, u32 v) -> void {
   if(p + 3 >= m.size()) return;
   m[p] = u8(v >> 24); m[p+1] = u8(v >> 16); m[p+2] = u8(v >> 8); m[p+3] = u8(v);
 }
