@@ -1,17 +1,19 @@
 # parallel_rdp.cmake — build Themaister's paraLLEl-RDP as a static lib for kestrel.
 #
-# Mirrors ares' config.mk source/include list. Source lives (for now) in the ares
-# checkout; PRDP_DIR points at .../ares/n64/vulkan/parallel-rdp. Shaders are already
-# baked into shaders/slangmosh.hpp (SPIR-V embedded), so NO shader compiler is needed
-# at build time — we only compile C++ + volk.c. volk loads vulkan-1.dll at runtime,
+# Mirrors ares' config.mk source/include list. The tree is VENDORED under
+# third_party/parallel-rdp (upstream commit in COMMIT) because kestrel patches the
+# shaders: parallel-rdp assumes ares' word-swapped RDRAM layout and kestrel keeps
+# guest big-endian byte order (see docs/parallel-rdp-integration.md). Shaders are
+# baked into shaders/slangmosh.hpp (SPIR-V embedded) by tools/slangmosh_lite.py, so
+# NO shader compiler is needed at build time — we only compile C++ + volk.c. volk loads vulkan-1.dll at runtime,
 # so we do not link the Vulkan loader here.
 #
 # Off by default: the deterministic core (systemtest / lockstep md5) must never depend
 # on this. Enable with -DKESTREL_PRDP=ON.
 
 if(NOT DEFINED PRDP_DIR)
-  set(PRDP_DIR "E:/Claude/N64/ares-64/ares/n64/vulkan/parallel-rdp"
-      CACHE PATH "Path to the paraLLEl-RDP source tree (ares checkout)")
+  set(PRDP_DIR "${CMAKE_SOURCE_DIR}/third_party/parallel-rdp"
+      CACHE PATH "Path to the paraLLEl-RDP source tree (vendored under third_party/)")
 endif()
 
 # PRDP_DIR is the outer tree: it holds parallel-rdp/ (core), util/, volk/, vulkan/,
