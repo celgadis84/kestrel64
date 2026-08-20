@@ -86,6 +86,16 @@ struct Rsp {
   // el hilo RSP una vez por step(), lo lee el hilo CPU al refrescar el heartbeat.
   std::atomic<u64> cyclesRun{0};
 
+  // Base de DMEM/IMEM fijada en el objeto. Los dos viven en `Memory` como std::vector, y
+  // el compilador no puede sacar el `.data()` del bucle del interprete: cualquier llamada
+  // de dentro (execCop2, un DMA por MMIO) podria en teoria tocar el vector, asi que cada
+  // fetch y cada acceso a DMEM recargaba el puntero desde memoria. Se refresca en start()
+  // y al entrar en step(): los vectores se reservan una vez en Memory::reset y no cambian
+  // de tamano durante una tarea, y un reset entre tareas queda cubierto por el refresco.
+  u8* dmp = nullptr;
+  u8* imp = nullptr;
+  auto bindMem() -> void;
+
   alignas(64) bool running = false;    // reentrancy guard (microcode may poke SP_STATUS)
 
   // Vector unit SSE fast path (8 lanes = 1 XMM). Bit-exact with the scalar reference
@@ -107,6 +117,7 @@ struct Rsp {
   // Throughput A/B of the VU fast path: time `iters` COP2 ops with the scalar loop vs
   // the 8-lane SSE path over a fixed op mix. Prints ns/op and speedup.
   auto benchVU(u64 iters) -> void;
+  auto benchStep(u64 iters) -> void;   // mezcla real de opcodes en IMEM, mide el bucle entero
 
   // Run the loaded microcode from the current SP_PC until it halts (BREAK) or a
   // safety budget is exhausted, in one blocking call. Retained for callers that

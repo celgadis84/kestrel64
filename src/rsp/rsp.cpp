@@ -208,35 +208,36 @@ static inline auto vecFast(u32 a0, u32 e, u32 n) -> bool {
   return ((e | n) & 1) == 0 && e + n <= 16 && a0 + n <= 0x1000;
 }
 
-auto Rsp::rb(u32 a) const -> u8 { return mem->dmem[a & 0xfff]; }
-auto Rsp::wb(u32 a, u8 v) -> void { mem->dmem[a & 0xfff] = v; }
+auto Rsp::bindMem() -> void { dmp = mem->dmem.data(); imp = mem->imem.data(); }
+auto Rsp::rb(u32 a) const -> u8 { return dmp[a & 0xfff]; }
+auto Rsp::wb(u32 a, u8 v) -> void { dmp[a & 0xfff] = v; }
 // Accesos escalares a DMEM. El RSP no lanza excepciones de alineacion: una direccion
 // impar lee bytes sueltos envolviendo dentro de DMEM, de ahi el camino byte a byte.
 // Pero el codigo del microcodigo casi siempre esta alineado, y ahi una carga de 16/32
 // bits mas bswap sustituye a 2-4 lecturas de byte con sus mascaras. Mismos bytes.
 auto Rsp::rHalf(u32 a) const -> u16 {
   u32 a0 = a & 0xfff;
-  if((a0 & 1) == 0) { u16 w; std::memcpy(&w, mem->dmem.data() + a0, 2); return bswap16(w); }
+  if((a0 & 1) == 0) { u16 w; std::memcpy(&w, dmp + a0, 2); return bswap16(w); }
   return (u16)(rb(a) << 8 | rb(a + 1));
 }
 auto Rsp::rWord(u32 a) const -> u32 {
   u32 a0 = a & 0xfff;
-  if((a0 & 3) == 0) { u32 w; std::memcpy(&w, mem->dmem.data() + a0, 4); return bswap32(w); }
+  if((a0 & 3) == 0) { u32 w; std::memcpy(&w, dmp + a0, 4); return bswap32(w); }
   return (u32)rb(a) << 24 | rb(a + 1) << 16 | rb(a + 2) << 8 | rb(a + 3);
 }
 auto Rsp::wHalf(u32 a, u16 v) -> void {
   u32 a0 = a & 0xfff;
-  if((a0 & 1) == 0) { u16 w = bswap16(v); std::memcpy(mem->dmem.data() + a0, &w, 2); return; }
+  if((a0 & 1) == 0) { u16 w = bswap16(v); std::memcpy(dmp + a0, &w, 2); return; }
   wb(a, v >> 8); wb(a + 1, v);
 }
 auto Rsp::wWord(u32 a, u32 v) -> void {
   u32 a0 = a & 0xfff;
-  if((a0 & 3) == 0) { u32 w = bswap32(v); std::memcpy(mem->dmem.data() + a0, &w, 4); return; }
+  if((a0 & 3) == 0) { u32 w = bswap32(v); std::memcpy(dmp + a0, &w, 4); return; }
   wb(a, v >> 24); wb(a + 1, v >> 16); wb(a + 2, v >> 8); wb(a + 3, v);
 }
 auto Rsp::imword(u32 a) const -> u32 {
   a &= 0xfff;
-  const u8* p = mem->imem.data();
+  const u8* p = imp;
   // Camino normal: el PC del RSP siempre esta alineado a palabra (pc avanza de 4 en 4 y
   // take() enmascara el destino con 0xffc), asi que una carga de 32 bits + bswap sustituye
   // a cuatro cargas de byte con sus desplazamientos. El camino byte a byte se queda para
@@ -372,7 +373,7 @@ auto Rsp::execLoad(u32 op) -> void {
     u32 n = 2u << (sub - 1);                     // 2, 4 u 8 bytes
     u32 a = rsv + imm * (s32)n, a0 = a & 0xfff;
     u32 lim = e + n > 16u ? 16u - e : n;         // el registro no envuelve en estas cargas
-    if(vecfast && vecFast(a0, e, lim)) { dmemToVec(mem->dmem.data(), a0, (u8*)V.el, e, lim); break; }
+    if(vecfast && vecFast(a0, e, lim)) { dmemToVec(dmp, a0, (u8*)V.el, e, lim); break; }
     for(u32 o = e; o < e + n && o < 16; o++) V.sb(o & 15, rb(a++));
   } break;
   case 0x04: {  // LQV
@@ -385,7 +386,7 @@ auto Rsp::execLoad(u32 op) -> void {
     // cruzar el final de DMEM, asi que no hay envoltura que respetar.
     u32 end = (a | 15); u32 lim = end - a; if(lim > 15u - e) lim = 15u - e;
     if(vecfast && vecFast(a & 0xfff, e, lim + 1)) {
-      dmemToVec(mem->dmem.data(), a & 0xfff, (u8*)V.el, e, lim + 1); break;
+      dmemToVec(dmp, a & 0xfff, (u8*)V.el, e, lim + 1); break;
     }
     for(u32 o = 0; o <= lim; o++) V.sb((e + o) & 15, rb(a + o));
   } break;
@@ -441,13 +442,13 @@ auto Rsp::execStore(u32 op) -> void {
   case 0x01: case 0x02: case 0x03: {   // SSV / SLV / SDV
     u32 n = 2u << (sub - 1);                     // 2, 4 u 8 bytes
     u32 a = rsv + imm * (s32)n, a0 = a & 0xfff;
-    if(vecfast && vecFast(a0, e, n)) { vecToDmem(mem->dmem.data(), a0, (const u8*)V.el, e, n); break; }
+    if(vecfast && vecFast(a0, e, n)) { vecToDmem(dmp, a0, (const u8*)V.el, e, n); break; }
     for(u32 o = e; o < e + n; o++) wb(a++, V.gb(o & 15));   // aqui el elemento SI envuelve
   } break;
   case 0x04: {  // SQV
     u32 a = rsv + imm * 16;
     u32 n = 16u - (a & 15);
-    if(vecfast && vecFast(a & 0xfff, e, n)) { vecToDmem(mem->dmem.data(), a & 0xfff, (const u8*)V.el, e, n); break; }
+    if(vecfast && vecFast(a & 0xfff, e, n)) { vecToDmem(dmp, a & 0xfff, (const u8*)V.el, e, n); break; }
     u32 end = e + n; for(u32 o = e; o < end; o++) wb(a++, V.gb(o & 15));
   } break;
   case 0x05: {  // SRV
@@ -1045,6 +1046,7 @@ auto Rsp::fuzzVU(u64 iters) -> u64 {
 // reales). Se ejecuta la MISMA instruccion con vecfast apagado y encendido sobre el
 // mismo estado inicial y se comparan los 32 registros vectoriales y los 4 KB de DMEM.
 auto Rsp::fuzzLdSt(u64 iters) -> u64 {
+  bindMem();
   u32 st = 0x12345678u;
   auto rnd = [&]() -> u32 { st ^= st << 13; st ^= st >> 17; st ^= st << 5; return st; };
   if(mem == nullptr) { std::fprintf(stderr, "[rspldfuzz] sin bus\n"); return 1; }
@@ -1095,7 +1097,10 @@ auto Rsp::benchVU(u64 iters) -> void {
     0x10, 0x11, 0x14, 0x15,               // VADD/VSUB/VADDC/VSUBC
     0x20, 0x23, 0x27, 0x28, 0x2a, 0x2c,   // VLT/VGE/VMRG + logicals
   };
-  const u32 nm = (u32)(sizeof mix / sizeof mix[0]);
+  u32 nm = (u32)(sizeof mix / sizeof mix[0]);
+  static u32 one[1];
+  if(const char* q = std::getenv("KESTREL_VUOP")) { one[0] = (u32)strtoul(q, nullptr, 16); nm = 1; }
+  const u32* mixp = nm == 1 ? one : mix;
   for(int v = 0; v < 32; v++) for(int n = 0; n < 8; n++) vpr[v].el[n] = (u16)(0x1234 * v + 0x9e37 * n + 1);
   for(int n = 0; n < 8; n++) { acch.el[n] = 0x0111 * n; accm.el[n] = 0x2222; accl.el[n] = 0x3333; }
 
@@ -1107,14 +1112,14 @@ auto Rsp::benchVU(u64 iters) -> void {
     // carga y la llamada.
     static u32 ops[1024];
     for(u32 k = 0; k < 1024; k++)
-      ops[k] = (0x12u << 26) | (1u << 25) | ((k & 15) << 21) | (2u << 16) | (3u << 11) | (4u << 6) | mix[k % nm];
+      ops[k] = (0x12u << 26) | (1u << 25) | ((k & 15) << 21) | (2u << 16) | (3u << 11) | (4u << 6) | mixp[k % nm];
     auto t0 = std::chrono::steady_clock::now();
-    volatile u32 sink = 0;
-    for(u64 i = 0; i < iters; i++) {
-      execCop2(ops[i & 1023]);
-      sink ^= vpr[4].el[0];
-    }
-    (void)sink;
+    // Sin sumidero: execCop2 no esta en linea y escribe estado del objeto, asi que el
+    // compilador no puede quitar la llamada. El `sink ^= vpr[4].el[0]` que habia aqui leia
+    // 16 bits de un registro que la propia op acababa de escribir entero (16 bytes): eso es
+    // un store-forward fallido en CADA iteracion (~12 ciclos en Nehalem) y lo que medias
+    // era ese tropiezo, no la VU.
+    for(u64 i = 0; i < iters; i++) execCop2(ops[i & 1023]);
     auto t1 = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(t1 - t0).count();
   };
@@ -1126,8 +1131,106 @@ auto Rsp::benchVU(u64 iters) -> void {
   sse = true;
 }
 
+// --- rendimiento del interprete de RSP completo ------------------------------
+// `--vubench` solo mide la VU, y la VU resulto ser un tercio del coste: el resto son
+// cargas/tiendas vectoriales y ALU escalar, cada una con su propio despacho. Este banco
+// llena IMEM con la mezcla REAL medida sobre SM64 (KESTREL_VUSTAT) y cronometra step(),
+// que es exactamente el bucle que corre el worker, pero sin los otros dos hilos delante:
+// un numero de baja varianza para comparar builds del interprete.
+auto Rsp::benchStep(u64 iters) -> void {
+  bindMem();
+  // Reparto por opcode mayor, en milesimas, tal y como lo midio vustat sobre el arranque
+  // de SM64. Se omiten COP0 (toca MMIO) y los saltos (romperian el flujo lineal); su peso
+  // se reparte sobre ADDI, que es el relleno barato y no altera nada observable.
+  struct Slot { u32 op; u32 per1000; };
+  // Las subfamilias tambien van pesadas: un reparto redondo daria a VMULF el mismo peso que
+  // a VMADN (4x mas frecuente) y a LPV el mismo que a LDV (9x), y el numero medido seria el
+  // de un microcodigo que no existe. Las tablas repiten cada opcode tantas veces como su
+  // proporcion real dentro de su familia.
+  static const u8 cop2fn[100] = {
+    0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,0x0e,  // VMADN
+    0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,0x0f,                      // VMADH
+    0x0d,0x0d,0x0d,0x0d,0x0d,0x0d,0x0d,0x0d,                                               // VMADM
+    0x04,0x04,0x04,0x04,0x04,0x04,0x04,0x04,                                               // VMUDL
+    0x10,0x10,0x10,0x10,0x10,0x10,                                                         // VADD
+    0x06,0x06,0x06,0x06,0x06,                                                              // VMUDN
+    0x11,0x11,0x11,0x11,  0x00,0x00,0x00,0x00,                                             // VSUB / VMULF
+    0x15,0x15,0x15,  0x2a,0x2a,0x2a,  0x05,0x05,0x05,                                      // VSUBC / VRCPH / VMUDM
+    0x1d,0x1d,0x1d,  0x33,0x33,0x33,  0x23,0x23,0x23,                                      // VSAR / VMOV / VGE
+    0x27,0x27,  0x20,0x20,  0x07,0x07,  0x29,0x29,                                         // VMRG / VLT / VMUDH / VRCPL
+    0x2c,0x08,0x13,0x24,0x2a,0x25,0x28,0x14,0x2b };                                        // cola: VXOR VMACF VABS VCL ...
+  static const u8 lwc2sub[25] = { 3,3,3,3,3,3,3,3,3, 1,1,1,1,1,1, 2,2,2,2, 4,4,4, 7,7, 6 };
+  static const u8 swc2sub[20] = { 1,1,1,1,1,1,1,1,1, 3,3,3,3,3,3,3,3, 4,4, 2 };
+
+  auto vuOp   = [&](u32 fn, u32 e, u32 vt, u32 vs, u32 vd) {
+    return (0x12u << 26) | (1u << 25) | (e << 21) | (vt << 16) | (vs << 11) | (vd << 6) | fn; };
+  auto ldOp   = [&](u32 maj, u32 sub, u32 base, u32 vt, u32 e, u32 off) {
+    return (maj << 26) | (base << 21) | (vt << 16) | (sub << 11) | (e << 7) | (off & 0x7f); };
+  auto immOp  = [&](u32 maj, u32 rs, u32 rt, u32 imm) {
+    return (maj << 26) | (rs << 21) | (rt << 16) | (imm & 0xffff); };
+
+  // 1024 ranuras = IMEM entera; el PC del RSP envuelve a 0 al llegar al final, asi que el
+  // flujo se repite solo sin necesidad de un salto (que sesgaria la medida).
+  u32 prog[1024];
+  u32 k = 0;
+  auto fill = [&](u32 n, auto gen) { for(u32 j = 0; j < n && k < 1024; j++) prog[k++] = gen(j); };
+  // KESTREL_RSPMIX aisla una familia de opcodes para saber cual pesa. Sin el, la mezcla real.
+  const char* mixSel = std::getenv("KESTREL_RSPMIX");
+  auto only = [&](const char* w) { return mixSel && std::strcmp(mixSel, w) == 0; };
+  if(only("cop2"))  fill(1024, [&](u32 j){ return vuOp(cop2fn[j % 100], j & 15, 2 + (j % 6), 8 + (j % 7), 16 + (j % 8)); });
+  if(only("vecld")) fill(1024, [&](u32 j){ return (j & 1) ? ldOp(0x32, lwc2sub[j % 25], 1, 2 + (j % 6), (j * 2) & 14, j & 7)
+                                                          : ldOp(0x3a, swc2sub[j % 20], 1, 2 + (j % 6), (j * 2) & 14, j & 7); });
+  // Dos variantes de ALU a proposito: `alu1` encadena ADDI sobre el mismo registro (cada
+  // instruccion depende de la anterior a traves de r[], o sea de un reenvio tienda->carga)
+  // y `alu` rota el destino sobre cuatro registros, que es lo que mide el rendimiento real
+  // del bucle. La diferencia entre las dos = coste de la cadena de dependencia.
+  if(only("alu1"))  fill(1024, [&](u32 j){ return immOp(0x08, 4, 4, 1 + j); });
+  if(only("alu"))   fill(1024, [&](u32 j){ return immOp(0x08, 4 + (j & 3), 4 + (j & 3), 1 + j); });
+  // `nop` = SLL r0,r0,0 mil veces: no toca ni un registro, asi que lo que mida es el coste
+  // del bucle de step() mas el reparto por opcode, sin nada de trabajo util debajo. Es la
+  // linea base contra la que hay que restar cualquier otra mezcla.
+  if(only("nop"))   fill(1024, [&](u32 j){ (void)j; return 0u; });
+  if(only("scald")) fill(1024, [&](u32 j){ return (j & 1) ? immOp(0x23, 1, 11 + (j % 4), (j * 4) & 0x7fc)
+                                                          : immOp(0x2b, 1, 11 + (j % 4), (j * 4) & 0x7fc); });
+  fill(386, [&](u32 j){ return vuOp(cop2fn[j % 100], j & 15, 2 + (j % 6), 8 + (j % 7), 16 + (j % 8)); });
+  fill(123, [&](u32 j){ return (j & 1) ? immOp(0x00, 3 + (j % 4), 5, 0) | (j % 8) * 0x40 | 0x00u
+                                       : (0x00u << 26) | ((5 + (j % 3)) << 21) | (6u << 16) | ((7u + (j % 4)) << 11) | 0x21u; });
+  fill(103, [&](u32 j){ return ldOp(0x32, lwc2sub[j % 25], 1, 2 + (j % 6), (j * 2) & 14, j & 7); });
+  fill( 83, [&](u32 j){ return ldOp(0x3a, swc2sub[j % 20], 1, 2 + (j % 6), (j * 2) & 14, j & 7); });
+  fill(122, [&](u32 j){ return immOp(0x08, 4, 4, 1 + j); });                    // ADDI (mas el relleno)
+  fill( 38, [&](u32 j){ return immOp(0x21, 1, 9 + (j % 4), (j * 2) & 0x7fe); }); // LH
+  fill( 37, [&](u32 j){ return immOp(0x0c, 9, 10, 0x0fff); });                   // ANDI
+  fill( 24, [&](u32 j){ return immOp(0x23, 1, 11 + (j % 4), (j * 4) & 0x7fc); }); // LW
+  fill( 17, [&](u32 j){ return immOp(0x2b, 1, 11 + (j % 4), (j * 4) & 0x7fc); }); // SW
+  fill( 91, [&](u32 j){ return immOp(0x08, 4, 4, 3 + j); });                     // resto -> ADDI
+  while(k < 1024) prog[k++] = immOp(0x08, 4, 4, 1);
+  for(u32 j = 0; j < 1024; j++) {
+    u32 w = prog[j];
+    mem->imem[j * 4 + 0] = (u8)(w >> 24); mem->imem[j * 4 + 1] = (u8)(w >> 16);
+    mem->imem[j * 4 + 2] = (u8)(w >> 8);  mem->imem[j * 4 + 3] = (u8)w;
+  }
+  for(u32 j = 0; j < 4096; j++) mem->dmem[j] = (u8)(j * 7 + 3);
+  for(u32 v = 0; v < 32; v++) for(u32 n = 0; n < 8; n++) vpr[v].el[n] = (u16)(0x1234 * v + 0x9e37 * n + 1);
+  for(u32 g = 1; g < 32; g++) r[g] = g * 0x40;
+
+  auto runOnce = [&]() -> double {
+    pc = 0; halt = false; running = true; branch = false; inDelay = false;
+    budget = iters + 16;
+    auto t0 = std::chrono::steady_clock::now();
+    step(iters);
+    auto t1 = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(t1 - t0).count();
+  };
+  runOnce();                       // calentar I$/predictor
+  double dt = runOnce();
+  std::fprintf(stderr, "[rspbench] %llu instrucciones: %.3fs (%.2f ns/op, %.1f Mips) — el N64 pide 62.5\n",
+               (unsigned long long)iters, dt, dt * 1e9 / iters, iters / dt / 1e6);
+  std::fflush(stderr);
+}
+
 // --- run loop ---------------------------------------------------------------
 auto Rsp::start() -> void {
+  bindMem();
   running = true;
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;
@@ -1136,30 +1239,57 @@ auto Rsp::start() -> void {
   budget = 40'000'000;
 }
 
+__attribute__((flatten))
 auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
+  bindMem();
   u64 ran = 0, pub = 0;
   // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo CPU
   // (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final. Publicar cada
   // 8K instrucciones (~200 us de RSP emulado) cuesta un fetch_add y un notify por bloque:
   // nada frente a las 8K instrucciones, y evita que el regulador tenga que muestrear.
   const bool pubMid = mem && mem->rcpMode == Memory::RcpMode::Threaded;
+  // El bucle va por tandas. Este anfitrion (Nehalem) despacha UNA carga por ciclo, asi que
+  // en un interprete el numero de accesos a memoria por instruccion es el que manda: cada
+  // campo del objeto leido dentro del cuerpo cuesta un ciclo entero del unico puerto de
+  // carga. Sacando fuera lo que no cambia durante la tanda -- el puntero a IMEM, el
+  // interruptor del muestreador, los tres contadores (maxInsns, budget, ran) reducidos a
+  // uno solo -- el cuerpo se queda con las cargas que de verdad hacen falta.
+  // La tanda es la misma que ya usaba la publicacion al regulador (8K instrucciones), asi
+  // que tampoco se retrasa nada de lo que el hilo CPU necesita ver.
   while(!halt && maxInsns && budget) {
-    maxInsns--; budget--; ran++;
-    if(pubMid && (ran & 0x1FFF) == 0) {
+    u64 chunk = maxInsns < budget ? maxInsns : budget;
+    if(chunk > 8192) chunk = 8192;
+    const bool prof = profOn;
+    const u8* const limp = imp;
+    u64 c = chunk;
+    while(c && !halt) {
+      c--;
+      // Fetch: dentro del bucle el PC SIEMPRE esta alineado a palabra (avanza de 4 en 4 y
+      // take() enmascara con 0xffc), asi que aqui no hace falta la comprobacion de
+      // alineacion de imword() - ese camino byte a byte solo existe para las utilidades de
+      // depuracion, que si pueden pedir una direccion impar.
+      u32 w; std::memcpy(&w, limp + (pc & 0xffc), 4);
+      u32 op = bswap32(w);
+      curpc = pc;
+      if(prof) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
+      u32 nextpc = (pc + 4) & 0xfff;
+      branch = false;
+      exec(op);
+      // El `r[0] = 0` que habia aqui era una tienda por instruccion sin efecto: setR() es el
+      // unico camino que escribe en r[] y ya ignora el registro 0, que es cableado a cero.
+      if(inDelay)      { pc = pendingTarget; inDelay = false; }
+      else if(branch)  { pendingTarget = branchTarget; inDelay = true; pc = nextpc; }
+      else             { pc = nextpc; }
+    }
+    u64 done = chunk - c;
+    maxInsns -= done; budget -= done; ran += done;
+    if(pubMid) {
+      // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo
+      // CPU (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final.
       cyclesRun.fetch_add(ran - pub, std::memory_order_relaxed); pub = ran;
       mem->rspCv.notify_all();
     }
-    u32 op = imword(pc);
-    curpc = pc;
-    if(profOn) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
-    u32 nextpc = (pc + 4) & 0xfff;
-    branch = false;
-    exec(op);
-    r[0] = 0;
-    if(inDelay)      { pc = pendingTarget; inDelay = false; }
-    else if(branch)  { pendingTarget = branchTarget; inDelay = true; pc = nextpc; }
-    else             { pc = nextpc; }
   }
   // Ciclos de RSP ejecutados. En modo Lockstep los contaba el bucle del sistema, pero en
   // Threaded el worker llama a step() con la tarea entera y nadie los contaba: el heartbeat

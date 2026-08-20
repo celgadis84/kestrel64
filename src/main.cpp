@@ -78,6 +78,14 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "[rspldfuzz] %llu iteraciones...\n", iters);
       return rsp.fuzzLdSt(iters) == 0 ? 0 : 1;
     }
+    else if(a == "--rspbench") {                // rendimiento del interprete de RSP entero
+      unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != '-') ? std::strtoull(argv[++i], nullptr, 10) : 100000000ull;
+      kestrel::Memory bus;
+      bus.reset(false);
+      kestrel::Rsp rsp; rsp.mem = &bus;
+      rsp.benchStep(iters);
+      return 0;
+    }
     else if(a == "--vubench") {                 // time scalar vs SSE VU path, then exit
       unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != '-') ? std::strtoull(argv[++i], nullptr, 10) : 100000000ull;
       kestrel::Rsp rsp;
