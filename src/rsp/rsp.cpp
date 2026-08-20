@@ -6,8 +6,15 @@
 #include <cstring>
 #include <immintrin.h>   // SSE2..SSE4.2 (Nehalem host: -march=native)
 #include <chrono>
+#include <vector>
 
 namespace kestrel {
+
+// El reparto de instrucciones es diagnostico, no produccion: fuera del camino
+// caliente salvo build instrumentado (-DKESTREL_VUSTAT=1).
+#ifndef KESTREL_VUSTAT
+#define KESTREL_VUSTAT 0
+#endif
 
 // --- SSE lane helpers (8×s16 = one __m128i; el[n] = lane n) ------------------
 // R128.el is u16[8] (16 bytes) but not guaranteed 16-aligned → loadu/storeu.
@@ -31,6 +38,54 @@ static inline auto vstoreZero(R128& r) -> void { vstore(r, _mm_setzero_si128());
 
 // Physical bases of the SP and DPC register blocks; COP0 on the RSP routes
 // mfc0/mtc0 to these exactly as the CPU would over the RCP bus.
+// --- reparto de instrucciones del RSP (KESTREL_VUSTAT=1) ---------------------
+// Para decidir DONDE optimizar hace falta el mix real que ejecuta el microcodigo,
+// no una corazonada. Contadores fuera del camino normal: una comprobacion de un
+// bool estatico por instruccion cuando esta apagado.
+struct VuStat {
+  bool on = std::getenv("KESTREL_VUSTAT") != nullptr;
+  u64 maj[64]{}, cop2[64]{}, cop2sse[64]{}, lwc2[32]{}, swc2[32]{}, total = 0;
+  static auto nameCop2(u32 f) -> const char* {
+    static const char* n[64] = {
+      "VMULF","VMULU","VRNDP","VMULQ","VMUDL","VMUDM","VMUDN","VMUDH",
+      "VMACF","VMACU","VRNDN","VMACQ","VMADL","VMADM","VMADN","VMADH",
+      "VADD","VSUB","?12","VABS","VADDC","VSUBC","?16","?17",
+      "?18","?19","?1a","?1b","?1c","VSAR","?1e","?1f",
+      "VLT","VEQ","VNE","VGE","VCL","VCH","VCR","VMRG",
+      "VAND","VNAND","VOR","VNOR","VXOR","VNXOR","?2e","?2f",
+      "VRCP","VRCPL","VRCPH","VMOV","VRSQ","VRSQL","VRSQH","VNOP",
+      "?38","?39","?3a","?3b","?3c","?3d","?3e","?3f" };
+    return n[f & 63];
+  }
+  static auto nameLd(u32 s) -> const char* {
+    static const char* n[32] = { "LBV","LSV","LLV","LDV","LQV","LRV","LPV","LUV",
+                                 "LHV","LFV","LWV","LTV","?0c","?0d","?0e","?0f",
+                                 "?10","?11","?12","?13","?14","?15","?16","?17",
+                                 "?18","?19","?1a","?1b","?1c","?1d","?1e","?1f" };
+    return n[s & 31];
+  }
+  ~VuStat() {
+    if(!on || !total) return;
+    std::fprintf(stderr, "[vustat] %llu instrucciones de RSP\n", (unsigned long long)total);
+    static const char* majName[64] = {0};
+    for(int i = 0; i < 64; i++) if(maj[i])
+      std::fprintf(stderr, "[vustat] op mayor %02x  %6.2f%%  %llu\n", i,
+                   100.0 * maj[i] / total, (unsigned long long)maj[i]);
+    for(int i = 0; i < 64; i++) if(cop2[i])
+      std::fprintf(stderr, "[vustat]   cop2 %-6s %6.2f%%  %10llu  sse %5.1f%%\n",
+                   nameCop2(i), 100.0 * cop2[i] / total, (unsigned long long)cop2[i],
+                   100.0 * cop2sse[i] / (double)cop2[i]);
+    for(int i = 0; i < 32; i++) if(lwc2[i])
+      std::fprintf(stderr, "[vustat]   LWC2 %-4s %6.2f%%  %10llu\n", nameLd(i),
+                   100.0 * lwc2[i] / total, (unsigned long long)lwc2[i]);
+    for(int i = 0; i < 32; i++) if(swc2[i])
+      std::fprintf(stderr, "[vustat]   SWC2 %-4s %6.2f%%  %10llu\n", nameLd(i),
+                   100.0 * swc2[i] / total, (unsigned long long)swc2[i]);
+    std::fflush(stderr);
+  }
+};
+static VuStat g_vustat;
+
 static constexpr u32 PHYS_SP  = 0x0404'0000;
 static constexpr u32 PHYS_DPC = 0x0410'0000;
 
@@ -89,6 +144,7 @@ auto R128::operator()(u32 e) const -> R128 {
 
 Rsp::Rsp() {
   sse = !std::getenv("KESTREL_NORSPSSE");   // A/B toggle; default ON (proven by --rspfuzz)
+  vecfast = !std::getenv("KESTREL_NOVECFAST");   // A/B; probado por --rspldfuzz
   // reciprocal / inverse-sqrt ROMs (generated exactly as the hardware tables).
   reciprocals[0] = (u16)~0;
   for(u32 i = 1; i < 512; i++) {
@@ -105,14 +161,79 @@ Rsp::Rsp() {
 }
 
 // --- DMEM / IMEM access (12-bit wrapping, big-endian, unaligned OK) ----------
+// --- copia rapida DMEM <-> registro vectorial --------------------------------
+// El byte k del vector vive en el byte (k^1) de R128::el (u16 del host, DMEM es
+// big-endian dentro de la banda). Para un tramo que empieza en un elemento PAR y
+// tiene longitud PAR, el conjunto {k^1} es el mismo tramo: la conversion se reduce
+// a intercambiar los bytes de cada pareja. Asi LSV/LLV/LDV/LQV (y sus tiendas)
+// pasan de 2-16 lecturas de byte con lectura-modificacion-escritura sobre u16 a
+// una o dos operaciones de 64 bits. Mismos bytes, mismo orden: no cambia semantica.
+static inline auto laneSwap64(u64 x) -> u64 {
+  return ((x & 0x00ff00ff00ff00ffull) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffull);
+}
+static inline auto laneSwap32(u32 x) -> u32 {
+  return ((x & 0x00ff00ffu) << 8) | ((x >> 8) & 0x00ff00ffu);
+}
+static inline auto dmemToVec(const u8* dm, u32 a0, u8* vb, u32 e, u32 n) -> void {
+  if(n == 16) {   // registro entero (LQV alineado): un solo pshufb
+    __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(dm + a0));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(vb + e),
+                     _mm_shuffle_epi8(w, _mm_load_si128(reinterpret_cast<const __m128i*>(kLaneSwap))));
+    return;
+  }
+  while(n >= 8) { u64 w; std::memcpy(&w, dm + a0, 8); w = laneSwap64(w);
+                  std::memcpy(vb + e, &w, 8); a0 += 8; e += 8; n -= 8; }
+  if(n >= 4)    { u32 w; std::memcpy(&w, dm + a0, 4); w = laneSwap32(w);
+                  std::memcpy(vb + e, &w, 4); a0 += 4; e += 4; n -= 4; }
+  if(n >= 2)    { u16 w; std::memcpy(&w, dm + a0, 2); w = (u16)((w >> 8) | (w << 8));
+                  std::memcpy(vb + e, &w, 2); }
+}
+static inline auto vecToDmem(u8* dm, u32 a0, const u8* vb, u32 e, u32 n) -> void {
+  if(n == 16) {
+    __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(vb + e));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(dm + a0),
+                     _mm_shuffle_epi8(w, _mm_load_si128(reinterpret_cast<const __m128i*>(kLaneSwap))));
+    return;
+  }
+  while(n >= 8) { u64 w; std::memcpy(&w, vb + e, 8); w = laneSwap64(w);
+                  std::memcpy(dm + a0, &w, 8); a0 += 8; e += 8; n -= 8; }
+  if(n >= 4)    { u32 w; std::memcpy(&w, vb + e, 4); w = laneSwap32(w);
+                  std::memcpy(dm + a0, &w, 4); a0 += 4; e += 4; n -= 4; }
+  if(n >= 2)    { u16 w; std::memcpy(&w, vb + e, 2); w = (u16)((w >> 8) | (w << 8));
+                  std::memcpy(dm + a0, &w, 2); }
+}
+// Condicion del camino rapido: elemento y longitud pares, sin desbordar el registro
+// ni envolver DMEM (los dos casos que el camino byte a byte trata de otra forma).
+static inline auto vecFast(u32 a0, u32 e, u32 n) -> bool {
+  return ((e | n) & 1) == 0 && e + n <= 16 && a0 + n <= 0x1000;
+}
+
 auto Rsp::rb(u32 a) const -> u8 { return mem->dmem[a & 0xfff]; }
 auto Rsp::wb(u32 a, u8 v) -> void { mem->dmem[a & 0xfff] = v; }
-auto Rsp::rHalf(u32 a) const -> u16 { return (u16)(rb(a) << 8 | rb(a + 1)); }
+// Accesos escalares a DMEM. El RSP no lanza excepciones de alineacion: una direccion
+// impar lee bytes sueltos envolviendo dentro de DMEM, de ahi el camino byte a byte.
+// Pero el codigo del microcodigo casi siempre esta alineado, y ahi una carga de 16/32
+// bits mas bswap sustituye a 2-4 lecturas de byte con sus mascaras. Mismos bytes.
+auto Rsp::rHalf(u32 a) const -> u16 {
+  u32 a0 = a & 0xfff;
+  if((a0 & 1) == 0) { u16 w; std::memcpy(&w, mem->dmem.data() + a0, 2); return bswap16(w); }
+  return (u16)(rb(a) << 8 | rb(a + 1));
+}
 auto Rsp::rWord(u32 a) const -> u32 {
+  u32 a0 = a & 0xfff;
+  if((a0 & 3) == 0) { u32 w; std::memcpy(&w, mem->dmem.data() + a0, 4); return bswap32(w); }
   return (u32)rb(a) << 24 | rb(a + 1) << 16 | rb(a + 2) << 8 | rb(a + 3);
 }
-auto Rsp::wHalf(u32 a, u16 v) -> void { wb(a, v >> 8); wb(a + 1, v); }
-auto Rsp::wWord(u32 a, u32 v) -> void { wb(a, v >> 24); wb(a + 1, v >> 16); wb(a + 2, v >> 8); wb(a + 3, v); }
+auto Rsp::wHalf(u32 a, u16 v) -> void {
+  u32 a0 = a & 0xfff;
+  if((a0 & 1) == 0) { u16 w = bswap16(v); std::memcpy(mem->dmem.data() + a0, &w, 2); return; }
+  wb(a, v >> 8); wb(a + 1, v);
+}
+auto Rsp::wWord(u32 a, u32 v) -> void {
+  u32 a0 = a & 0xfff;
+  if((a0 & 3) == 0) { u32 w = bswap32(v); std::memcpy(mem->dmem.data() + a0, &w, 4); return; }
+  wb(a, v >> 24); wb(a + 1, v >> 16); wb(a + 2, v >> 8); wb(a + 3, v);
+}
 auto Rsp::imword(u32 a) const -> u32 {
   a &= 0xfff;
   const u8* p = mem->imem.data();
@@ -145,6 +266,7 @@ auto Rsp::accSat(int n, bool slice, u16 neg, u16 pos) const -> u16 {
 
 // --- COP0 register access (SP + DPC) ----------------------------------------
 auto Rsp::mfc0(int rt, int rd) -> void {
+  if((rd & 0xf) == 10) mem->rcp.dpcCurReads.fetch_add(1, std::memory_order_relaxed);  // DPC_CURRENT
   u32 data = (rd & 8) ? mem->read32(PHYS_DPC + ((rd & 7) << 2))
                       : mem->read32(PHYS_SP  + ((rd & 7) << 2));
   setR(rt, data);
@@ -160,6 +282,9 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
 // --- scalar dispatch --------------------------------------------------------
 auto Rsp::exec(u32 op) -> void {
   u32 maj = op >> 26;
+#if KESTREL_VUSTAT
+  if(g_vustat.on) { g_vustat.maj[maj]++; g_vustat.total++; }
+#endif
   int rs = op >> 21 & 31, rt = op >> 16 & 31, rd = op >> 11 & 31;
   u32 imm = op & 0xffff; s32 simm = (s16)imm;
   switch(maj) {
@@ -235,14 +360,21 @@ auto Rsp::exec(u32 op) -> void {
 auto Rsp::execLoad(u32 op) -> void {
   int base = op >> 21 & 31, vt = op >> 16 & 31;
   u32 sub = op >> 11 & 0x1f, e = op >> 7 & 0xf;
+#if KESTREL_VUSTAT
+  if(g_vustat.on) g_vustat.lwc2[sub]++;
+#endif
   s32 imm = (op & 0x7f); if(imm & 0x40) imm -= 0x80;
   u32 rsv = r[base];
   R128& V = vpr[vt];
   switch(sub) {
   case 0x00: V.sb(e, rb(rsv + imm)); break;                                  // LBV
-  case 0x01: { u32 a = rsv + imm * 2; for(u32 o = e; o < e + 2u && o < 16; o++) V.sb(o & 15, rb(a++)); } break;  // LSV
-  case 0x02: { u32 a = rsv + imm * 4; for(u32 o = e; o < e + 4u && o < 16; o++) V.sb(o & 15, rb(a++)); } break;  // LLV
-  case 0x03: { u32 a = rsv + imm * 8; for(u32 o = e; o < e + 8u && o < 16; o++) V.sb(o & 15, rb(a++)); } break;  // LDV
+  case 0x01: case 0x02: case 0x03: {   // LSV / LLV / LDV
+    u32 n = 2u << (sub - 1);                     // 2, 4 u 8 bytes
+    u32 a = rsv + imm * (s32)n, a0 = a & 0xfff;
+    u32 lim = e + n > 16u ? 16u - e : n;         // el registro no envuelve en estas cargas
+    if(vecfast && vecFast(a0, e, lim)) { dmemToVec(mem->dmem.data(), a0, (u8*)V.el, e, lim); break; }
+    for(u32 o = e; o < e + n && o < 16; o++) V.sb(o & 15, rb(a++));
+  } break;
   case 0x04: {  // LQV
     u32 a = rsv + imm * 16;
     // Camino rapido: cuarteto alineado y sin desplazamiento de elemento — el caso que usan
@@ -251,12 +383,10 @@ auto Rsp::execLoad(u32 op) -> void {
     // los bytes de cada banda de 16 bits (DMEM es big-endian dentro de la banda, el[] no),
     // en vez de dieciseis lecturas de byte con su enmascarado. Alineado a 16 no puede
     // cruzar el final de DMEM, asi que no hay envoltura que respetar.
-    if(sse && e == 0 && ((a & 0xfff) & 15) == 0) {
-      __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&mem->dmem[a & 0xfff]));
-      _mm_storeu_si128(reinterpret_cast<__m128i*>(V.el), _mm_shuffle_epi8(w, _mm_loadu_si128(reinterpret_cast<const __m128i*>(kLaneSwap))));
-      break;
-    }
     u32 end = (a | 15); u32 lim = end - a; if(lim > 15u - e) lim = 15u - e;
+    if(vecfast && vecFast(a & 0xfff, e, lim + 1)) {
+      dmemToVec(mem->dmem.data(), a & 0xfff, (u8*)V.el, e, lim + 1); break;
+    }
     for(u32 o = 0; o <= lim; o++) V.sb((e + o) & 15, rb(a + o));
   } break;
   case 0x05: {  // LRV
@@ -300,22 +430,25 @@ auto Rsp::execLoad(u32 op) -> void {
 auto Rsp::execStore(u32 op) -> void {
   int base = op >> 21 & 31, vt = op >> 16 & 31;
   u32 sub = op >> 11 & 0x1f, e = op >> 7 & 0xf;
+#if KESTREL_VUSTAT
+  if(g_vustat.on) g_vustat.swc2[sub]++;
+#endif
   s32 imm = (op & 0x7f); if(imm & 0x40) imm -= 0x80;
   u32 rsv = r[base];
   R128& V = vpr[vt];
   switch(sub) {
   case 0x00: wb(rsv + imm, V.gb(e)); break;                                  // SBV
-  case 0x01: { u32 a = rsv + imm * 2; for(u32 o = e; o < e + 2u; o++) wb(a++, V.gb(o & 15)); } break;   // SSV
-  case 0x02: { u32 a = rsv + imm * 4; for(u32 o = e; o < e + 4u; o++) wb(a++, V.gb(o & 15)); } break;   // SLV
-  case 0x03: { u32 a = rsv + imm * 8; for(u32 o = e; o < e + 8u; o++) wb(a++, V.gb(o & 15)); } break;   // SDV
+  case 0x01: case 0x02: case 0x03: {   // SSV / SLV / SDV
+    u32 n = 2u << (sub - 1);                     // 2, 4 u 8 bytes
+    u32 a = rsv + imm * (s32)n, a0 = a & 0xfff;
+    if(vecfast && vecFast(a0, e, n)) { vecToDmem(mem->dmem.data(), a0, (const u8*)V.el, e, n); break; }
+    for(u32 o = e; o < e + n; o++) wb(a++, V.gb(o & 15));   // aqui el elemento SI envuelve
+  } break;
   case 0x04: {  // SQV
     u32 a = rsv + imm * 16;
-    if(sse && e == 0 && ((a & 0xfff) & 15) == 0) {   // simetrico del camino rapido de LQV
-      __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(V.el));
-      _mm_storeu_si128(reinterpret_cast<__m128i*>(&mem->dmem[a & 0xfff]), _mm_shuffle_epi8(w, _mm_loadu_si128(reinterpret_cast<const __m128i*>(kLaneSwap))));
-      break;
-    }
-    u32 end = e + (16 - (a & 15)); for(u32 o = e; o < end; o++) wb(a++, V.gb(o & 15));
+    u32 n = 16u - (a & 15);
+    if(vecfast && vecFast(a & 0xfff, e, n)) { vecToDmem(mem->dmem.data(), a & 0xfff, (const u8*)V.el, e, n); break; }
+    u32 end = e + n; for(u32 o = e; o < end; o++) wb(a++, V.gb(o & 15));
   } break;
   case 0x05: {  // SRV
     u32 a = rsv + imm * 16; u32 end = e + (a & 15); u32 bse = 16 - (a & 15); a &= ~15u;
@@ -684,7 +817,14 @@ auto Rsp::execCop2(u32 op) -> void {
   R128& S = vpr[vs];
   R128& D = vpr[vd];
 
-  if(sse && execVuSse(fn, vte, S, D)) return;   // 8-lane fast path (bit-exact, --rspfuzz)
+#if KESTREL_VUSTAT
+  if(g_vustat.on) g_vustat.cop2[fn]++;
+#endif
+#if KESTREL_VUSTAT
+  if(sse && execVuSse(fn, vte, S, D)) { if(g_vustat.on) g_vustat.cop2sse[fn]++; return; }
+#else
+  if(sse && execVuSse(fn, vte, S, D)) return;
+#endif
 
   switch(fn) {
   case 0x00: case 0x01: {  // VMULF / VMULU
@@ -897,6 +1037,52 @@ auto Rsp::fuzzVU(u64 iters) -> u64 {
   std::fprintf(stderr, "[rspfuzz] %llu checked, %llu mismatches\n",
                (unsigned long long)checked, (unsigned long long)fails);
   sse = true;
+  return fails;
+}
+
+// --- fuzz diferencial de cargas/tiendas vectoriales --------------------------
+// Oraculo = el camino byte a byte (el que ya validaban systemtest y los microcodigos
+// reales). Se ejecuta la MISMA instruccion con vecfast apagado y encendido sobre el
+// mismo estado inicial y se comparan los 32 registros vectoriales y los 4 KB de DMEM.
+auto Rsp::fuzzLdSt(u64 iters) -> u64 {
+  u32 st = 0x12345678u;
+  auto rnd = [&]() -> u32 { st ^= st << 13; st ^= st >> 17; st ^= st << 5; return st; };
+  if(mem == nullptr) { std::fprintf(stderr, "[rspldfuzz] sin bus\n"); return 1; }
+
+  std::vector<u8> dm0(4096), dmSlow(4096), dmFast(4096);
+  R128 v0[32], vSlow[32], vFast[32];
+  u64 fails = 0, checked = 0;
+  for(u64 it = 0; it < iters; it++) {
+    for(u32 i = 0; i < 4096; i++) dm0[i] = (u8)rnd();
+    for(int v = 0; v < 32; v++) for(int n = 0; n < 8; n++) v0[v].el[n] = (u16)rnd();
+    u32 r0 = rnd();  // registro base: cualquier direccion, incluida no alineada
+
+    // sub 0x00-0x05 = B/S/L/D/Q/R, que son los que tocan los caminos rapidos.
+    u32 sub = rnd() % 6, e = rnd() & 15, imm7 = rnd() & 0x7f;
+    bool store = (rnd() & 1) != 0;
+    u32 op = ((store ? 0x3au : 0x32u) << 26) | (1u << 21) | (2u << 16) | (sub << 11) | (e << 7) | imm7;
+
+    for(int pass = 0; pass < 2; pass++) {
+      vecfast = pass != 0;
+      std::memcpy(mem->dmem.data(), dm0.data(), 4096);
+      std::memcpy(vpr, v0, sizeof vpr);
+      r[1] = r0;
+      if(store) execStore(op); else execLoad(op);
+      if(pass == 0) { std::memcpy(dmSlow.data(), mem->dmem.data(), 4096); std::memcpy(vSlow, vpr, sizeof vpr); }
+      else          { std::memcpy(dmFast.data(), mem->dmem.data(), 4096); std::memcpy(vFast, vpr, sizeof vpr); }
+    }
+    checked++;
+    if(std::memcmp(dmSlow.data(), dmFast.data(), 4096) != 0 ||
+       std::memcmp(vSlow, vFast, sizeof vpr) != 0) {
+      if(fails < 12)
+        std::fprintf(stderr, "[rspldfuzz] MISMATCH %s sub=0x%02x e=%u base=0x%08x imm=0x%02x\n",
+                     store ? "SWC2" : "LWC2", sub, e, r0, imm7);
+      fails++;
+    }
+  }
+  vecfast = true;
+  std::fprintf(stderr, "[rspldfuzz] %llu comprobadas, %llu diferencias\n",
+               (unsigned long long)checked, (unsigned long long)fails);
   return fails;
 }
 

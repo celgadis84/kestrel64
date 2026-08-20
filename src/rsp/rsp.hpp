@@ -86,6 +86,10 @@ struct Rsp {
   // Vector unit SSE fast path (8 lanes = 1 XMM). Bit-exact with the scalar reference
   // (proven by the differential fuzz, `--rspfuzz`). Disable with KESTREL_NORSPSSE for A/B.
   bool sse = true;
+  // Camino rapido de las cargas/tiendas vectoriales (LSV/LLV/LDV/LQV y sus tiendas):
+  // mismos bytes que el camino byte a byte, en operaciones de 64 bits. Apagable para
+  // bisecar y para que --rspldfuzz pueda usar el camino lento como oraculo.
+  bool vecfast = true;
   char coldPad_[62] = {};   // resto de la linea: nada mas debe caer aqui
 
   Rsp();
@@ -93,6 +97,7 @@ struct Rsp {
   // Differential VU fuzz: run each SSE-accelerated COP2 op against the scalar reference
   // over `iters` random states, return the number of mismatches (0 = bit-exact).
   auto fuzzVU(u64 iters) -> u64;
+  auto fuzzLdSt(u64 iters) -> u64;
 
   // Throughput A/B of the VU fast path: time `iters` COP2 ops with the scalar loop vs
   // the 8-lane SSE path over a fixed op mix. Prints ns/op and speedup.
