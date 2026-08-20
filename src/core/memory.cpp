@@ -1339,7 +1339,8 @@ auto Memory::rspAwaitIdle() -> void {
 // La holgura existe por la granularidad del dynarec: una cadena de bloques enlazados retira
 // hasta jit::kGuardMaxOps sin volver al bucle, asi que por debajo de eso el regulador no puede
 // mandar y solo generaria bloqueos inutiles.
-static constexpr u64 kPaceSlack   = 8192;             // ops de CPU de adelanto tolerado
+static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
+                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 8192;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
 
 auto Memory::rcpPace(u64 cpuRetired) -> void {
@@ -1374,12 +1375,34 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
     cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
     paceWaitedNs += dt;
     if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return; }
+    u64 rspPrev = rspNow;
     rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
     // Salvavidas: si el RSP deja de avanzar (microcodigo esperando algo de la CPU, worker
     // que no arranca, reloj del host raro) se suelta el freno para este episodio. El
     // regulador es una optimizacion, nunca puede ser una via de bloqueo.
+    //
+    // El contador se reinicia CON CADA AVANCE del RSP: lo que no se tolera es un atasco,
+    // no la espera acumulada. Una tarea de graficos larga hace esperar a la CPU mucho mas
+    // de kPaceMaxWait en total y es exactamente lo que el regulador tiene que hacer; con
+    // el contador acumulado el freno se soltaba a los 20 ms y la CPU volvia a correr al
+    // 175% de la velocidad del N64 mientras el RSP iba al 61%.
+    if(rspNow != rspPrev) { paceWaitedNs = 0; continue; }
     if(paceWaitedNs > kPaceMaxWait) { paceGiveUp = true; return; }
   }
+}
+
+// Ops de CPU que el regulador permite todavia sin volver a frenar. El prologo del JIT
+// consume este permiso en el camino rapido, asi que basta con volver al trampolin cuando se
+// agota: la regulacion es la misma que la de rcpPace pero se paga una llamada cada `allow`
+// ops en vez de una por bloque. Sin tarea de RSP en vuelo no hay limite.
+auto Memory::paceAllowance(u64 cpuRetired) -> u32 {
+  if(!pacePrimed || paceGiveUp || !rspBusy.load(std::memory_order_acquire)) return 0xFFFF'FFFFu;
+  u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
+  u64 allow  = ((rspNow - paceRsp0) * 3) / 2 + kPaceSlack;
+  u64 ahead  = cpuRetired - paceCpu0;
+  if(ahead >= allow) return 1;
+  u64 left = allow - ahead;
+  return left > 0xFFFF'FFFFull ? 0xFFFF'FFFFu : (u32)left;
 }
 
 auto Memory::rspSubmitKick() -> void {

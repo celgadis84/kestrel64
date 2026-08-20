@@ -537,9 +537,17 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       // (ping-pong de lineas entre nucleos), asi que el RSP tarda 18x en la misma tarea.
       // No quitarla. Lo que falta para poder hacerlo no es un regulador, es que el guest
       // no gire: esperar por interrupcion en vez de sondear registros del RCP.
-      e.mov_r_imm64(RDX, (u64)&c.mem->rsp.running);
-      e.cmp_m8_imm(RDX, 0, 0);
-      fastToSlow[nSlow++] = e.jne_rel32_placeholder();
+      // En THREADED la guarda no hace falta: el trampolin no la mira (corta por rcpMode) y
+      // la regulacion CPU<->RSP viaja ahora dentro del propio permiso (jitGuard, ver
+      // jitReenterProceed), que el camino rapido ya descuenta. Asi se paga una llamada cada
+      // `allow` ops en vez de una por bloque mientras el RSP tenga trabajo.
+      // KESTREL_JIT_RSPGUARD=1 la fuerza en los dos modos para poder medir el A/B.
+      static const bool forceRspGuard = std::getenv("KESTREL_JIT_RSPGUARD") != nullptr;
+      if(forceRspGuard || (c.mem && c.mem->rcpMode == Memory::RcpMode::Lockstep)) {
+        e.mov_r_imm64(RDX, (u64)&c.mem->rsp.running);
+        e.cmp_m8_imm(RDX, 0, 0);
+        fastToSlow[nSlow++] = e.jne_rel32_placeholder();
+      }
       e.mov_m_r32(RBX, guardOff, RAX);            // consume el permiso
       fastToBody = e.jmp_rel32_placeholder();
     }
@@ -1006,6 +1014,15 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
     u32 slack = (u32)(cmp - cnt) - K - 1;                 // > 0 garantizado por la línea de arriba
     u32 budg  = (K >= jitOpsBudget) ? 0 : (jitOpsBudget - K);
     u32 g     = slack < budg ? slack : budg;
+    // Regulador Threaded: duerme si la CPU emulada adelanta al RSP en vuelo y mete lo que
+    // le queda de adelanto en el permiso. Asi el camino rapido del prologo lo descuenta solo
+    // y vuelve aqui justo cuando toca frenar otra vez — misma regulacion que la guarda
+    // rsp.running, pero sin una llamada por bloque.
+    if(mem && mem->rcpMode == Memory::RcpMode::Threaded) {
+      mem->rcpPace(retired);
+      u32 pa = mem->paceAllowance(retired);
+      if(pa < g) g = pa;
+    }
     jitGuard  = g < kGuardMaxOps ? g : kGuardMaxOps;
   }
   return 1;

@@ -224,7 +224,8 @@ struct Memory {
   bool paceGiveUp = false;           // salvavidas: freno suelto en este episodio
   u64  paceWaitedNs = 0;             // bloqueado en el episodio actual
   std::atomic<u64> paceBlockNs{0}, paceEpisodes{0}, paceHolds{0};
-  auto rcpPace(u64 cpuRetired) -> void;   // frena la CPU si adelanta al RSP en vuelo
+  auto rcpPace(u64 cpuRetired) -> void;       // frena la CPU si adelanta al RSP en vuelo
+  auto paceAllowance(u64 cpuRetired) -> u32; // ops que quedan antes de la proxima frenada
 private:
   auto rdpWorkerLoop() -> void;
   auto rspWorkerLoop() -> void;

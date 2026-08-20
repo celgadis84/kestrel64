@@ -25,7 +25,12 @@ struct Memory;
 // One 128-bit vector register: 8 lanes of 16 bits, lane 0 = most significant
 // (big-endian), matching the wiki's VPR<n> convention. Byte 0 = high byte of
 // lane 0. Flag registers reuse this type storing 0/1 per lane.
-struct R128 {
+// alignas(16): el camino SSE carga y guarda estos 16 bytes de golpe. Sin alinear, `vpr`
+// caia en offset impar dentro de Rsp y CADA acceso vectorial era un load partido a caballo
+// de dos lineas de cache — penalizacion en cada una de las ~37% de instrucciones de
+// microcodigo que son COP2. Alineado a 16 nunca cruza linea y ademas permite el load/store
+// alineado en vez del unaligned. No cambia ninguna semantica: son los mismos 16 bytes.
+struct alignas(16) R128 {
   u16 el[8] = {};
 
   auto u(int n) -> u16& { return el[n & 7]; }

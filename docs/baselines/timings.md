@@ -111,3 +111,14 @@ misma prueba se iba a los 300 s y moria por timeout, con ~53 anomalias `[rdp!]`.
   sin `[rdp!]` ni `[hangdog]`.
 - SM64 500 swaps: 20.9s -> **20.2s**, 23.92 -> **24.70 swaps/s**, 1607M -> **1223M** instrucciones
   de guest (el regulador quita el giro en vacio, no trabajo util).
+
+## 2026-08-20 — permiso de guarda con regulacion (threaded)
+
+- `gate_all.sh`: ALL OK, krom regress=0, md5 sm64 `466282775dbd0ac084946558a1c30771`.
+- SM64 2500 swaps (threaded-jit): **110.8s / 22.55 swaps/s / 6678M insns / anom=0**
+  (antes del regulador: 119s).
+- SM64 300 swaps: 24.50 → 25.21 swaps/s (+2.9%) al mover la regulacion CPU<->RSP dentro
+  del permiso (`jitGuard`) y quitar la guarda `rsp.running` del codigo emitido en Threaded.
+- Barrido `KESTREL_PACESLACK` {64,256,1024,8192,32768,131072}: el default 8192 es el mejor.
+- `--vubench`: 21.28 → 18.27 ns/op tras quitar la division entera del propio banco de pruebas
+  y alinear `R128` a 16 (RSP: 34.9 → 36.1 Mips).

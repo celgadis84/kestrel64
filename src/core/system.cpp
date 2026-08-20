@@ -539,12 +539,19 @@ auto System::run() -> void {
       double rspBusyS = memory.rspBusyNs.load(std::memory_order_relaxed) / 1e9;
       double rspMips  = rspBusyS > 0.01 ? memory.rsp.cyclesRun.load(std::memory_order_relaxed)
                                           / 1e6 / rspBusyS : 0.0;
+      // Regulador: episodios (tareas de RSP vistas), frenadas y % de pared durmiendo en el
+      // freno. Si el freno esta puesto y aun asi la CPU va muy por delante del RSP, es que
+      // se esta soltando (salvavidas) y hay que mirarlo.
+      double pacePct = memory.paceBlockNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
       std::fprintf(stderr, "[hb] %.0fM insns, %.2f Mips avg | N64 speed: CPU %.1f%%  RSP %.1f%%"
-                           " | occupancy: rdp %.0f%% rsp %.0f%% cpuWait %.0f%% | rsp %.1f Mips busy\n",
+                           " | occupancy: rdp %.0f%% rsp %.0f%% cpuWait %.0f%% | rsp %.1f Mips busy"
+                           " | pace %.0f%% ep=%llu hold=%llu\n",
                    ri / 1e6, ri / 1e6 / s,
                    n64SpeedPct.load(std::memory_order_relaxed),
                    rspSpeedPct.load(std::memory_order_relaxed),
-                   rdpPct, rspPct, waitPct, rspMips);
+                   rdpPct, rspPct, waitPct, rspMips, pacePct,
+                   (unsigned long long)memory.paceEpisodes.load(std::memory_order_relaxed),
+                   (unsigned long long)memory.paceHolds.load(std::memory_order_relaxed));
       hbLast = now;
     }
   }

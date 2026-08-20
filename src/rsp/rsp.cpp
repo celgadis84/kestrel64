@@ -19,10 +19,10 @@ namespace kestrel {
 // --- SSE lane helpers (8×s16 = one __m128i; el[n] = lane n) ------------------
 // R128.el is u16[8] (16 bytes) but not guaranteed 16-aligned → loadu/storeu.
 static inline auto vload(const R128& r) -> __m128i {
-  return _mm_loadu_si128(reinterpret_cast<const __m128i*>(r.el));
+  return _mm_load_si128(reinterpret_cast<const __m128i*>(r.el));
 }
 static inline auto vstore(R128& r, __m128i v) -> void {
-  _mm_storeu_si128(reinterpret_cast<__m128i*>(r.el), v);
+  _mm_store_si128(reinterpret_cast<__m128i*>(r.el), v);
 }
 static inline auto vones() -> __m128i { __m128i z = _mm_setzero_si128(); return _mm_cmpeq_epi16(z, z); }
 static inline auto vnot(__m128i x) -> __m128i { return _mm_xor_si128(x, vones()); }
@@ -1101,12 +1101,17 @@ auto Rsp::benchVU(u64 iters) -> void {
 
   auto runOnce = [&](bool useSse) -> double {
     sse = useSse;
+    // Las palabras se precalculan: un `i % nm` dentro del bucle mete una division entera
+    // (~20 ciclos en este host) por cada op medida y el numero que sale es el de la
+    // division, no el de la VU. Con una tabla de 1024 y mascara, el bucle solo tiene la
+    // carga y la llamada.
+    static u32 ops[1024];
+    for(u32 k = 0; k < 1024; k++)
+      ops[k] = (0x12u << 26) | (1u << 25) | ((k & 15) << 21) | (2u << 16) | (3u << 11) | (4u << 6) | mix[k % nm];
     auto t0 = std::chrono::steady_clock::now();
     volatile u32 sink = 0;
     for(u64 i = 0; i < iters; i++) {
-      u32 fn = mix[i % nm];
-      u32 op = (0x12u << 26) | (1u << 25) | ((i & 15) << 21) | (2u << 16) | (3u << 11) | (4u << 6) | fn;
-      execCop2(op);
+      execCop2(ops[i & 1023]);
       sink ^= vpr[4].el[0];
     }
     (void)sink;
