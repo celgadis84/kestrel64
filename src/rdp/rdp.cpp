@@ -1139,6 +1139,18 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
         lowCi = true; lowMark = pxWrites;
         std::fprintf(stderr, "[rdp!] SET_COLOR_IMAGE bajo: addr=%06x cmd=%016llx fifo=%08x\n",
                      ci_addr, (unsigned long long)cmd, cur);
+        // Para distinguir "el escritor todavia no habia puesto el comando" (ceros o
+        // basura alrededor) de "el puntero del FIFO apunta mal" (el vecindario si
+        // tiene comandos validos), se vuelca el FIFO tal cual esta en RDRAM ahora.
+        std::fprintf(stderr, "[rdp!]   dpc start=%06x end=%06x current=%06x  ucode leyo CURRENT %llu veces\n",
+                     mem.rcp.dpc_start, mem.rcp.dpc_end, mem.rcp.dpc_current.load(),
+                     (unsigned long long)mem.rcp.dpcCurReads.load());
+        std::fprintf(stderr, "[rdp!]   span %06x..%06x  vecindario:\n", start & 0xffffff, end);
+        for(int k = -3; k <= 3; k++) {
+          u32 a = cur + (u32)(k * 8);
+          std::fprintf(stderr, "[rdp!]     %06x %016llx%s\n", a,
+                       (unsigned long long)fetch(a), k == 0 ? "  <- aqui" : "");
+        }
       } else if(lowCi) {
         lowCi = false;
         std::fprintf(stderr, "[rdp!]   ...se escribieron %llu pixeles con el CI bajo\n",

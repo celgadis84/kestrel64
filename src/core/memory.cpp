@@ -799,8 +799,25 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // CURRENT reloads from START only when a fresh START is pending (START_VALID).
       // Otherwise the RDP continues from where CURRENT sits — the streaming case,
       // where many END bumps follow a single START.
-      if(rcp.dpc_status & 0x400u) { rcp.dpc_current.store(rcp.dpc_start, std::memory_order_release);
-                                    rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u; }
+      // OJO: CURRENT no se recarga aqui. DPC_CURRENT es el puntero de LECTURA del command
+      // processor y su unico dueno es el consumidor (rdpRunJob). Si lo movemos desde el hilo
+      // CPU mientras el worker sigue rasterizando el span anterior, el worker publica despues
+      // su avance viejo (direcciones altas) sobre la recarga -> el microcodigo lee un CURRENT
+      // adelantado, cree consumido lo que aun no lo esta y reescribe el FIFO por debajo del
+      // RDP (F3DEX2 usa el buffer como FIFO circular y hace flow-control leyendo CURRENT).
+      // La recarga viaja con el trabajo: rdpRunJob publica CURRENT = inicio del span al empezar.
+      if(rcp.dpc_status & 0x400u) {
+        rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u;
+        // HW recarga CURRENT desde START en el propio kick y la CPU lo ve al momento
+        // (systemtest "RDP STATUS: Flags during a run", "RDP START & END REG"), incluso
+        // congelado, donde no se rasteriza nada. Publicarlo desde aqui solo es seguro si
+        // el rasterizador esta parado; si sigue consumiendo un span anterior publicaria
+        // un puntero de lectura ADELANTADO (y luego el worker lo pisa con su avance viejo),
+        // que es justo lo que rompia el flow-control del FIFO de F3DEX2. En ese caso la
+        // recarga viaja con el trabajo: rdpRunJob publica CURRENT = inicio del span.
+        if(rcpMode != RcpMode::Threaded || !rdpBusy.load(std::memory_order_acquire))
+          rcp.dpc_current.store(rcp.dpc_start, std::memory_order_release);
+      }
       if(!(rcp.dpc_status & (1u << 1))) { // not frozen
         bool xbus = rcp.dpc_status & 0x1u;   // DP_STATUS_XBUS: fetch commands from DMEM
         // Kicking the FIFO starts the graphics clock and marks the pipe busy; both
@@ -1206,6 +1223,7 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
     static bool tried = false;
     if(!tried) { tried = true; vrdp::init(rdram.data(), (u32)rdram.size()); }
   }
+  rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   if(vrdp::active()) {
     bool sync = vrdp::runFifo(rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus);
     rcp.dpc_current.store(end, std::memory_order_release);
@@ -1217,6 +1235,7 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   }
   // El rasterizador publica su puntero de lectura en DPC_CURRENT mientras consume el
   // FIFO: es lo que el microcodigo mira para saber cuanto buffer puede reutilizar.
+  rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   softRdp.curOut = &rcp.dpc_current;
   u32 nc = softRdp.run(*this, current, end, xbus);
   rcp.dpc_current.store(end, std::memory_order_release);

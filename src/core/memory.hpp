@@ -61,6 +61,10 @@ struct Rcp {
   // todavia no ha leido. Con el RDP en su propio hilo tiene que reflejar el avance
   // real, asi que lo publica el rasterizador (de ahi el atomico).
   std::atomic<u32> dpc_current{0};
+  // Cuantas veces el microcodigo ha mirado DPC_CURRENT. Es el unico mecanismo de
+  // control de flujo del FIFO: si sale 0, el ucode no comprueba nada y la seguridad
+  // tiene que venir de fuera (el juego esperando el DP done).
+  std::atomic<u64> dpcCurReads{0};
   u32 dpc_submitted = 0;   // hasta donde se ha encolado ya (vista del productor)
   std::atomic<u32> dpc_status{0};
   // DPC performance counters (24-bit, free-running). The RDP worker accumulates
