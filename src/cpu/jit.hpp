@@ -112,6 +112,12 @@ public:
   // extendidos a 64b, producto de dos valores de 32b cabe en 64b, low64 = producto exacto).
   auto imul64(Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(0x0F); buf.emit(0xAF); modrm(3,dst,src); }
   auto movzx_r8(Reg dst, Reg src) -> void { buf.emit(0x0F); buf.emit(0xB6); modrm(3,dst,src); }
+  // ---- variantes reg-reg de los helpers de gpr (residencia en registro del host) ----
+  // Mismo opcode que la forma memory-operand, con ModRM mod=11: el operando r/m pasa de
+  // [rbx+8*g] a un registro del host que aloja ese mismo gpr (ver RegCache en jit.cpp).
+  auto alu32_rr(u8 opc, Reg dst, Reg src) -> void { if((dst&8)||(src&8)) rex(false,dst,0,src); buf.emit(opc); modrm(3,dst,src); }
+  auto alu64_rr(u8 opc, Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(opc); modrm(3,dst,src); }
+  auto cmp64_rr(Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(0x3B); modrm(3,dst,src); }
 
   // 32-bit ALU: op r32, [rbx+off].  opc: ADD=0x03 SUB=0x2B AND=0x23 OR=0x0B XOR=0x33
   auto alu32_rm(u8 opc, Reg dst, u8 gi) -> void { buf.emit(opc); memOperand(dst, RBX, goff(gi)); }

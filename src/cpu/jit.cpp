@@ -246,6 +246,80 @@ auto CodeCache::unlinkAll() -> void {
 // memoria, cop, HI/LO) desde `phys`. Para en la primera op no soportada, en el tope,
 // o al final de RDRAM. gpr[0] se respeta no emitiendo el store cuando el destino=0.
 
+// ================= residencia de GPR guest en registros del host =================
+// Cada op emitia `mov eax,[rbx+8*rs] / <alu> / mov [rbx+8*rd],rax`, asi que dos ops
+// dependientes seguidas pagaban un store-to-load forward (~5 ciclos en Nehalem) donde el
+// VR4300 solo tiene un bypass de registro. Mantener los GPR calientes del bloque en
+// registros del host convierte esa cadena en un mov reg-reg de 1 ciclo.
+//
+// Invariante de correccion: cpu->gpr tiene que estar coherente en TODO punto donde el
+// bloque pueda ceder el control — antes de cualquier CALL a un helper (que lee/escribe gpr
+// por el puntero), en cada bail, en cada salida de control y al terminar el bloque. Por eso
+// writeback() precede a cada llamada y disable() corre antes de la maquinaria de branch.
+// Las ranuras son registros NO-volatiles de Win64, asi que sobreviven al CALL: tras el
+// helper solo se olvida lo que el helper haya escrito (gpr[rt] de un load) y el resto sigue
+// residente, que es lo que evita recargar el fichero de registros alrededor de cada memoria.
+static const Reg kRcRegs[] = { RSI, RDI, R13, R14, R15 };
+static constexpr int kRcN = (int)(sizeof(kRcRegs) / sizeof(kRcRegs[0]));
+
+// Cuenta ESTATICA (KESTREL_JIT_STATS): cuantos accesos a gpr del codigo emitido acaban en un
+// registro del host y cuantos siguen yendo a memoria. Dice si la residencia llega a enganchar.
+u64 g_rcReg = 0, g_rcMem = 0, g_rcSpill = 0;
+
+struct RegCache {
+  Emitter* e = nullptr;
+  bool on = false;
+  s8   gOf[kRcN];      // gpr guest residente en la ranura k, -1 = libre
+  bool dirty[kRcN];    // la ranura tiene un valor aun no escrito a cpu->gpr
+  s8   slotOf[32];     // ranura que aloja gpr[g], -1 = ninguna
+  int  rr = 0;         // round-robin de desalojo
+
+  auto reset(Emitter* em, bool enable) -> void {
+    e = em; on = enable; rr = 0;
+    for(int k = 0; k < kRcN; k++) { gOf[k] = -1; dirty[k] = false; }
+    for(int g = 0; g < 32; g++) slotOf[g] = -1;
+  }
+  auto evict(int k) -> void {
+    if(gOf[k] < 0) return;
+    if(dirty[k]) { e->st64(kRcRegs[k], (u8)gOf[k]); g_rcSpill++; }
+    slotOf[gOf[k]] = -1; gOf[k] = -1; dirty[k] = false;
+  }
+  auto pick() -> int {                  // libre > limpia > round-robin
+    for(int k = 0; k < kRcN; k++) if(gOf[k] < 0) return k;
+    for(int k = 0; k < kRcN; k++) { int j = (rr + k) % kRcN; if(!dirty[j]) { rr = (j + 1) % kRcN; return j; } }
+    int j = rr; rr = (rr + 1) % kRcN; return j;
+  }
+  // Ranura para gpr[g], o -1 si hay que ir a memoria. `load`=false cuando el uso es una
+  // escritura de 64 bits COMPLETA (todos los st64 del codegen lo son): no hace falta traer
+  // el valor previo, solo reservar la ranura.
+  auto slot(u32 g, bool load) -> int {
+    if(!on || g == 0 || g >= 32) { g_rcMem++; return -1; }
+    g_rcReg++;
+    if(slotOf[g] >= 0) return slotOf[g];
+    int k = pick(); evict(k);
+    if(load) e->ld64(kRcRegs[k], (u8)g);
+    gOf[k] = (s8)g; slotOf[g] = (s8)k; dirty[k] = !load;
+    return k;
+  }
+  auto ld32(Reg dst, u32 g) -> void { int k = slot(g, true); if(k < 0) e->ld32(dst, (u8)g); else e->mov_r_r32(dst, kRcRegs[k]); }
+  auto ld64(Reg dst, u32 g) -> void { int k = slot(g, true); if(k < 0) e->ld64(dst, (u8)g); else e->mov_r_r(dst, kRcRegs[k]); }
+  auto st64(Reg src, u32 g) -> void {
+    if(!g) return;
+    int k = slot(g, false);
+    if(k < 0) { e->st64(src, (u8)g); return; }
+    e->mov_r_r(kRcRegs[k], src); dirty[k] = true;
+  }
+  auto alu32(u8 opc, Reg dst, u32 g) -> void { int k = slot(g, true); if(k < 0) e->alu32_rm(opc, dst, (u8)g); else e->alu32_rr(opc, dst, kRcRegs[k]); }
+  auto alu64(u8 opc, Reg dst, u32 g) -> void { int k = slot(g, true); if(k < 0) e->alu64_rm(opc, dst, (u8)g); else e->alu64_rr(opc, dst, kRcRegs[k]); }
+  auto cmp64(Reg dst, u32 g) -> void { int k = slot(g, true); if(k < 0) e->cmp64_rm(dst, (u8)g); else e->cmp64_rr(dst, kRcRegs[k]); }
+  // Deja cpu->gpr coherente sin perder residencia (las ranuras quedan limpias).
+  auto writeback() -> void { for(int k = 0; k < kRcN; k++) if(dirty[k]) { e->st64(kRcRegs[k], (u8)gOf[k]); dirty[k] = false; g_rcSpill++; } }
+  // Olvida SIN escribir: solo para lo que un helper acaba de escribir en memoria.
+  auto forget(u32 g) -> void { if(g < 32 && slotOf[g] >= 0) { int k = slotOf[g]; slotOf[g] = -1; gOf[k] = -1; dirty[k] = false; } }
+  auto forgetAll() -> void { for(int k = 0; k < kRcN; k++) { if(gOf[k] >= 0) slotOf[gOf[k]] = -1; gOf[k] = -1; dirty[k] = false; } }
+  auto disable() -> void { writeback(); forgetAll(); on = false; }
+};
+
 // Trampolín C para loads/stores desde el código emitido (Win64: cpu en RCX, op en EDX).
 // Ejecuta la op espejando el intérprete; devuelve 1=ok / 0=faultaría (bail).
 extern "C" u8 jitMemThunk(void* cpu, u32 op) {
@@ -255,19 +329,23 @@ extern "C" u8 jitMemThunk(void* cpu, u32 op) {
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
 // al epílogo); *isStore = si muta memoria. Devuelve false si op no es un mem-op soportado.
-static auto emitMemOp(Emitter& e, u32 op, usize& bailSite, bool& isStore) -> bool {
+static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore) -> bool {
   u32 OP = op >> 26;
   switch(OP) {
     case 0x20: case 0x21: case 0x23: case 0x24: case 0x25: case 0x27: case 0x37: isStore = false; break;  // LB/LH/LW/LBU/LHU/LWU/LD
     case 0x28: case 0x29: case 0x2b: case 0x3f: isStore = true; break;                                    // SB/SH/SW/SD
     default: return false;
   }
+  // El helper lee cpu->gpr[rs] (direccion) y gpr[rt] (dato de un store) por el puntero, y en
+  // un load escribe gpr[rt] ahi mismo: cpu->gpr tiene que estar coherente ANTES del CALL.
+  rc.writeback();
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX; R12 no fiable)
   e.mov_r_imm32(RDX, op);                 // arg1 = op (32-bit, zero-ext)
   e.mov_r_imm64(RAX, (u64)&jitMemThunk);
   e.call_reg(RAX);
   e.test_al_al();
   bailSite = e.je_rel32_placeholder();    // al==0 (faulted) → salta al stub de bail
+  if(!isStore) rc.forget((op >> 16) & 31);   // el helper acaba de escribir gpr[rt] en memoria
   return true;
 }
 
@@ -292,7 +370,7 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 // Excluidos a propósito: COP0 (0x10, cambia TLB/Status → puede vectorizar), CACHE, LL/SC,
 // SYSCALL/BREAK/TRAP y todo lo que salte. Si la op falla o vectoriza, el thunk devuelve 0 y
 // el bloque sale con la bandera de control (pc/nextPc ya los dejó bien el intérprete).
-static auto emitInterpOp(Emitter& e, u32 op, u32 off, usize& exitSite) -> bool {
+static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite) -> bool {
   u32 OP = op >> 26;
   bool ok = false;
   switch(OP) {
@@ -308,6 +386,7 @@ static auto emitInterpOp(Emitter& e, u32 op, u32 off, usize& exitSite) -> bool {
     default: break;
   }
   if(!ok) return false;
+  rc.writeback();                         // el interprete lee cpu->gpr por el puntero
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX)
   e.mov_r_imm32(RDX, op);                 // arg1 = op
   e.mov_r_imm32(R8, off);                 // arg2 = offset de la op en el bloque
@@ -315,12 +394,13 @@ static auto emitInterpOp(Emitter& e, u32 op, u32 off, usize& exitSite) -> bool {
   e.call_reg(RAX);
   e.test_al_al();
   exitSite = e.je_rel32_placeholder();    // al==0 → salida de control (la op ya tuvo efecto)
+  rc.forgetAll();                         // MFC1/LWL/LWR/... pueden escribir cualquier gpr
   return true;
 }
 
 // Emite UNA op. Devuelve false si no es segura (fin del bloque). op ya validado != code
 // que cambie flujo. `c` solo se usa para leer palabras (icFetch) en el llamador.
-static auto emitSafeOp(Emitter& e, u32 op) -> bool {
+static auto emitSafeOp(Emitter& e, RegCache& rc, u32 op) -> bool {
   u32 OP = op >> 26;
   u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31, sa = (op >> 6) & 31;
   u32 funct = op & 63;
@@ -328,58 +408,58 @@ static auto emitSafeOp(Emitter& e, u32 op) -> bool {
   s32 simm  = (s16)imm16;
 
   auto store32 = [&](u32 dst) {   // rax(32) → sext32 → gpr[dst] (skip si dst==0)
-    if(dst) { e.movsxd(RAX, RAX); e.st64(RAX, (u8)dst); }
+    if(dst) { e.movsxd(RAX, RAX); rc.st64(RAX, dst); }
   };
-  auto store64 = [&](u32 dst) { if(dst) e.st64(RAX, (u8)dst); };
+  auto store64 = [&](u32 dst) { if(dst) rc.st64(RAX, dst); };
   const s32 hiOff = (s32)offsetof(CPU, hi);   // HI/LO son campos u64 del CPU (RBX==&cpu)
   const s32 loOff = (s32)offsetof(CPU, lo);
 
   static const int only = std::getenv("KESTREL_JIT_ONLY1") ? 1 : 0;
   if(only && !(OP == 0x09)) return false;   // narrowing: solo ADDIU
   switch(OP) {
-    case 0x09: /*ADDIU*/ if(!rt) return true; e.ld32(RAX, (u8)rs); e.alu32_imm(0, RAX, (u32)simm); store32(rt); return true;
+    case 0x09: /*ADDIU*/ if(!rt) return true; rc.ld32(RAX, rs); e.alu32_imm(0, RAX, (u32)simm); store32(rt); return true;
     // NOTA: DADDIU/DADDU/DSUBU/DSLL*/DSRA*/DSLLV* (64-bit ISA) NO se JITean: en VR4300 trapean
     // RI cuando el modo 64-bit está off (supervisor/user 32-bit, systemtest daddiu_supervisor_32).
     // El chequeo de modo es estado runtime (Status.KX/SX/UX + KSU) y no vale garantizarlo en compile.
     // Terminan el bloque → el intérprete las ejecuta con la semántica de trap correcta.
 
-    case 0x0c: /*ANDI*/  if(!rt) return true; e.ld64(RAX, (u8)rs); e.alu64_imm(4, RAX, imm16); store64(rt); return true;
-    case 0x0d: /*ORI*/   if(!rt) return true; e.ld64(RAX, (u8)rs); e.alu64_imm(1, RAX, imm16); store64(rt); return true;
-    case 0x0e: /*XORI*/  if(!rt) return true; e.ld64(RAX, (u8)rs); e.alu64_imm(6, RAX, imm16); store64(rt); return true;
-    case 0x0a: /*SLTI*/  if(!rt) return true; e.ld64(RAX,(u8)rs); e.cmp64_imm(RAX,(u32)simm); e.setcc(0x9C,RAX); e.movzx_r8(RAX,RAX); store64(rt); return true;
-    case 0x0b: /*SLTIU*/ if(!rt) return true; e.ld64(RAX,(u8)rs); e.cmp64_imm(RAX,(u32)simm); e.setcc(0x92,RAX); e.movzx_r8(RAX,RAX); store64(rt); return true;
+    case 0x0c: /*ANDI*/  if(!rt) return true; rc.ld64(RAX, rs); e.alu64_imm(4, RAX, imm16); store64(rt); return true;
+    case 0x0d: /*ORI*/   if(!rt) return true; rc.ld64(RAX, rs); e.alu64_imm(1, RAX, imm16); store64(rt); return true;
+    case 0x0e: /*XORI*/  if(!rt) return true; rc.ld64(RAX, rs); e.alu64_imm(6, RAX, imm16); store64(rt); return true;
+    case 0x0a: /*SLTI*/  if(!rt) return true; rc.ld64(RAX, rs); e.cmp64_imm(RAX,(u32)simm); e.setcc(0x9C,RAX); e.movzx_r8(RAX,RAX); store64(rt); return true;
+    case 0x0b: /*SLTIU*/ if(!rt) return true; rc.ld64(RAX, rs); e.cmp64_imm(RAX,(u32)simm); e.setcc(0x92,RAX); e.movzx_r8(RAX,RAX); store64(rt); return true;
     case 0x0f: /*LUI*/   if(!rt) return true; e.mov_r_imm32(RAX,(u32)(imm16<<16)); store32(rt); return true;
     case 0x00: /*SPECIAL*/
       switch(funct) {
-        case 0x00: /*SLL*/  if(!rd) return true; e.ld32(RAX,(u8)rt); if(sa) e.shift32_imm(4,RAX,(u8)sa); store32(rd); return true;
-        case 0x02: /*SRL*/  if(!rd) return true; e.ld32(RAX,(u8)rt); if(sa) e.shift32_imm(5,RAX,(u8)sa); store32(rd); return true;
-        case 0x03: /*SRA*/  if(!rd) return true; e.ld64(RAX,(u8)rt); if(sa) e.shift64_imm(7,RAX,(u8)sa); store32(rd); return true;  // VR4300: SRA aritmético de 64b, low32 sign-ext
-        case 0x04: /*SLLV*/ if(!rd) return true; e.ld32(RCX,(u8)rs); e.ld32(RAX,(u8)rt); e.shift32_cl(4,RAX); store32(rd); return true;
-        case 0x06: /*SRLV*/ if(!rd) return true; e.ld32(RCX,(u8)rs); e.ld32(RAX,(u8)rt); e.shift32_cl(5,RAX); store32(rd); return true;
-        case 0x07: /*SRAV*/ if(!rd) return true; e.ld32(RCX,(u8)rs); e.alu32_imm(4,RCX,31); e.ld64(RAX,(u8)rt); e.shift64_cl(7,RAX); store32(rd); return true;  // VR4300: 64b arith shift, cnt=rs&31, low32 sign-ext
-        case 0x21: /*ADDU*/ if(!rd) return true; e.ld32(RAX,(u8)rs); e.alu32_rm(0x03,RAX,(u8)rt); store32(rd); return true;
-        case 0x23: /*SUBU*/ if(!rd) return true; e.ld32(RAX,(u8)rs); e.alu32_rm(0x2B,RAX,(u8)rt); store32(rd); return true;
-        case 0x24: /*AND*/  if(!rd) return true; e.ld64(RAX,(u8)rs); e.alu64_rm(0x23,RAX,(u8)rt); store64(rd); return true;
-        case 0x25: /*OR*/   if(!rd) return true; e.ld64(RAX,(u8)rs); e.alu64_rm(0x0B,RAX,(u8)rt); store64(rd); return true;
-        case 0x26: /*XOR*/  if(!rd) return true; e.ld64(RAX,(u8)rs); e.alu64_rm(0x33,RAX,(u8)rt); store64(rd); return true;
-        case 0x27: /*NOR*/  if(!rd) return true; e.ld64(RAX,(u8)rs); e.alu64_rm(0x0B,RAX,(u8)rt); e.not64(RAX); store64(rd); return true;
-        case 0x2a: /*SLT*/  if(!rd) return true; e.ld64(RAX,(u8)rs); e.cmp64_rm(RAX,(u8)rt); e.setcc(0x9C,RAX); e.movzx_r8(RAX,RAX); store64(rd); return true;
-        case 0x2b: /*SLTU*/ if(!rd) return true; e.ld64(RAX,(u8)rs); e.cmp64_rm(RAX,(u8)rt); e.setcc(0x92,RAX); e.movzx_r8(RAX,RAX); store64(rd); return true;
+        case 0x00: /*SLL*/  if(!rd) return true; rc.ld32(RAX, rt); if(sa) e.shift32_imm(4,RAX,(u8)sa); store32(rd); return true;
+        case 0x02: /*SRL*/  if(!rd) return true; rc.ld32(RAX, rt); if(sa) e.shift32_imm(5,RAX,(u8)sa); store32(rd); return true;
+        case 0x03: /*SRA*/  if(!rd) return true; rc.ld64(RAX, rt); if(sa) e.shift64_imm(7,RAX,(u8)sa); store32(rd); return true;  // VR4300: SRA aritmético de 64b, low32 sign-ext
+        case 0x04: /*SLLV*/ if(!rd) return true; rc.ld32(RCX, rs); rc.ld32(RAX, rt); e.shift32_cl(4,RAX); store32(rd); return true;
+        case 0x06: /*SRLV*/ if(!rd) return true; rc.ld32(RCX, rs); rc.ld32(RAX, rt); e.shift32_cl(5,RAX); store32(rd); return true;
+        case 0x07: /*SRAV*/ if(!rd) return true; rc.ld32(RCX, rs); e.alu32_imm(4,RCX,31); rc.ld64(RAX, rt); e.shift64_cl(7,RAX); store32(rd); return true;  // VR4300: 64b arith shift, cnt=rs&31, low32 sign-ext
+        case 0x21: /*ADDU*/ if(!rd) return true; rc.ld32(RAX, rs); rc.alu32(0x03, RAX, rt); store32(rd); return true;
+        case 0x23: /*SUBU*/ if(!rd) return true; rc.ld32(RAX, rs); rc.alu32(0x2B, RAX, rt); store32(rd); return true;
+        case 0x24: /*AND*/  if(!rd) return true; rc.ld64(RAX, rs); rc.alu64(0x23, RAX, rt); store64(rd); return true;
+        case 0x25: /*OR*/   if(!rd) return true; rc.ld64(RAX, rs); rc.alu64(0x0B, RAX, rt); store64(rd); return true;
+        case 0x26: /*XOR*/  if(!rd) return true; rc.ld64(RAX, rs); rc.alu64(0x33, RAX, rt); store64(rd); return true;
+        case 0x27: /*NOR*/  if(!rd) return true; rc.ld64(RAX, rs); rc.alu64(0x0B, RAX, rt); e.not64(RAX); store64(rd); return true;
+        case 0x2a: /*SLT*/  if(!rd) return true; rc.ld64(RAX, rs); rc.cmp64(RAX, rt); e.setcc(0x9C,RAX); e.movzx_r8(RAX,RAX); store64(rd); return true;
+        case 0x2b: /*SLTU*/ if(!rd) return true; rc.ld64(RAX, rs); rc.cmp64(RAX, rt); e.setcc(0x92,RAX); e.movzx_r8(RAX,RAX); store64(rd); return true;
         // --- HI/LO move (32-bit base ISA, no gated) ---------------------------------------
-        case 0x10: /*MFHI*/ if(!rd) return true; e.mov_r_m(RAX,RBX,hiOff); e.st64(RAX,(u8)rd); return true;
-        case 0x12: /*MFLO*/ if(!rd) return true; e.mov_r_m(RAX,RBX,loOff); e.st64(RAX,(u8)rd); return true;
-        case 0x11: /*MTHI*/ e.ld64(RAX,(u8)rs); e.mov_m_r(RBX,hiOff,RAX); return true;
-        case 0x13: /*MTLO*/ e.ld64(RAX,(u8)rs); e.mov_m_r(RBX,loOff,RAX); return true;
+        case 0x10: /*MFHI*/ if(!rd) return true; e.mov_r_m(RAX,RBX,hiOff); rc.st64(RAX, rd); return true;
+        case 0x12: /*MFLO*/ if(!rd) return true; e.mov_r_m(RAX,RBX,loOff); rc.st64(RAX, rd); return true;
+        case 0x11: /*MTHI*/ rc.ld64(RAX, rs); e.mov_m_r(RBX,hiOff,RAX); return true;
+        case 0x13: /*MTLO*/ rc.ld64(RAX, rs); e.mov_m_r(RBX,loOff,RAX); return true;
         // --- MULT/MULTU (32×32→64): LO=sext32(low32), HI=sext32(high32). imul64 low64 = producto
         //     exacto (operandos extendidos a 64b; signo por movsxd sí/no). NO escribe gpr → no rd. -
         case 0x18: /*MULT*/ {
-          e.ld32(RAX,(u8)rs); e.movsxd(RAX,RAX); e.ld32(RCX,(u8)rt); e.movsxd(RCX,RCX);
+          rc.ld32(RAX, rs); e.movsxd(RAX,RAX); rc.ld32(RCX, rt); e.movsxd(RCX,RCX);
           e.imul64(RAX,RCX);                                  // rax = (s32)rs * (s32)rt (64b)
           e.mov_r_r(RDX,RAX); e.movsxd(RDX,RDX); e.mov_m_r(RBX,loOff,RDX);   // lo = sext32(low32)
           e.shift64_imm(5,RAX,32); e.movsxd(RAX,RAX); e.mov_m_r(RBX,hiOff,RAX); // hi = sext32(high32)
           return true; }
         case 0x19: /*MULTU*/ {
-          e.ld32(RAX,(u8)rs); e.ld32(RCX,(u8)rt);             // operandos zero-ext (u32)
+          rc.ld32(RAX, rs); rc.ld32(RCX, rt);             // operandos zero-ext (u32)
           e.imul64(RAX,RCX);                                  // low64 = (u32)rs*(u32)rt (cabe en 64b)
           e.mov_r_r(RDX,RAX); e.movsxd(RDX,RDX); e.mov_m_r(RBX,loOff,RDX);
           e.shift64_imm(5,RAX,32); e.movsxd(RAX,RAX); e.mov_m_r(RBX,hiOff,RAX);
@@ -389,8 +469,8 @@ static auto emitSafeOp(Emitter& e, u32 op) -> bool {
         // generado; terminan el bloque → el intérprete los ejecuta con la semántica correcta.
         // --- MOVZ/MOVN: mueve rs→rd si rt==0 / rt!=0, si no rd intacto (cmov 64b) ----------
         // No mode-gated (conditional-move ISA, disponibles en todos los modos; systemtest OK).
-        case 0x0a: /*MOVZ*/ if(!rd) return true; e.ld64(RAX,(u8)rd); e.ld64(RCX,(u8)rs); e.ld64(RDX,(u8)rt); e.cmp64_imm(RDX,0); e.cmovz(RAX,RCX); store64(rd); return true;
-        case 0x0b: /*MOVN*/ if(!rd) return true; e.ld64(RAX,(u8)rd); e.ld64(RCX,(u8)rs); e.ld64(RDX,(u8)rt); e.cmp64_imm(RDX,0); e.cmovnz(RAX,RCX); store64(rd); return true;
+        case 0x0a: /*MOVZ*/ if(!rd) return true; rc.ld64(RAX, rd); rc.ld64(RCX, rs); rc.ld64(RDX, rt); e.cmp64_imm(RDX,0); e.cmovz(RAX,RCX); store64(rd); return true;
+        case 0x0b: /*MOVN*/ if(!rd) return true; rc.ld64(RAX, rd); rc.ld64(RCX, rs); rc.ld64(RDX, rt); e.cmp64_imm(RDX,0); e.cmovnz(RAX,RCX); store64(rd); return true;
         default: return false;   // JR/JALR/MULT/DIV/ADD/SUB(trap)/etc → fin del bloque
       }
     default: return false;       // branches, loads/stores, cop, 64-bit, etc → fin
@@ -404,7 +484,8 @@ auto opSelfTest(u32 op, u64 rsVal, u64 rtVal, u32 dst) -> u64 {
   Emitter e(buf);
   u8* entry = buf.cursor();
   e.push_rbx(); e.mov_rbx_rcx();
-  bool ok = emitSafeOp(e, op);
+  RegCache rcOff; rcOff.reset(&e, false);   // diagnostico: gpr siempre por memoria
+  bool ok = emitSafeOp(e, rcOff, op);
   e.pop_rbx(); e.ret();
   buf.finalize(entry);
   u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31;
@@ -470,11 +551,19 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   u8* entry = c.jitCache->buf.cursor();
 
   // Prólogo Etapa 2b: rbx=gpr (rcx), r12=cpu (rdx). Ambos callee-saved → push/pop.
-  // RSP: entry≡8 (tras el call); push,push→≡8; sub 40 (40≡8) → ≡0 (16-alin para CALL Win64).
+  // RSP: entry≡8 (tras el call); 7 push→≡0; sub 48 (48≡0) → ≡0 (16-alin para CALL Win64).
+  // RSI/RDI/R13/R14/R15 son las ranuras de residencia de GPR (RegCache): no-volatiles en
+  // Win64, asi que sobreviven a los CALL de helper dentro del bloque. Se empujan siempre
+  // (con o sin residencia) para que TODOS los bloques compartan marco: un salto enlazado
+  // aterriza en el linkEntry del sucesor y reutiliza el marco del predecesor.
   e.push_reg(RBX); e.push_reg(R12);
+  e.push_reg(RSI); e.push_reg(RDI); e.push_reg(R13); e.push_reg(R14); e.push_reg(R15);
   e.mov_r_r(RBX, RCX);
   e.mov_r_r(R12, RDX);
-  e.sub_rsp_imm8(40);
+  e.sub_rsp_imm8(48);
+
+  static const bool g_jitRegCache = std::getenv("KESTREL_JIT_NOREGCACHE") == nullptr;
+  RegCache rc; rc.reset(&e, g_jitRegCache);
 
   const s32 guardOff   = (s32)((char*)&c.jitGuard     - (char*)&c);
   const s32 timerOff   = (s32)((char*)&c.timerIntr    - (char*)&c);
@@ -602,10 +691,10 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // si el delay slot no es compilable (→ se descarta la absorción del salto completo).
   auto compileDelay = [&](u32 dop, u32 idx) -> bool {
     usize dBefore = c.jitCache->buf.used;
-    if(emitSafeOp(e, dop)) return true;
+    if(emitSafeOp(e, rc, dop)) return true;
     c.jitCache->buf.used = dBefore;
     usize dsite; bool dStore;
-    if(emitMemOp(e, dop, dsite, dStore)) {
+    if(emitMemOp(e, rc, dop, dsite, dStore)) {
       bailSites.push_back(dsite); bailIdx.push_back(idx);
       b.hasMem = true; if(dStore) b.hasStore = true;
       return true;
@@ -667,17 +756,17 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     if((a & ~0xFFFu) != (phys & ~0xFFFu)) break;
     u32 op = c.jitFetchWord(a);
     usize before = c.jitCache->buf.used;
-    if(emitSafeOp(e, op)) { b.src.push_back(op); b.nOps++; continue; }
+    if(emitSafeOp(e, rc, op)) { b.src.push_back(op); b.nOps++; continue; }
     c.jitCache->buf.used = before;
     usize site; bool isStore;
-    if(emitMemOp(e, op, site, isStore)) {
+    if(emitMemOp(e, rc, op, site, isStore)) {
       bailSites.push_back(site); bailIdx.push_back(b.nOps);
       b.hasMem = true; if(isStore) b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
     usize isite;
-    if(emitInterpOp(e, op, 4 * i, isite)) {
+    if(emitInterpOp(e, rc, op, 4 * i, isite)) {
       interpSites.push_back(isite); interpIdx.push_back(b.nOps + 1);
       // Conservador: la op puede tocar memoria y estado FPU → fuera del modo jitdiff puro.
       b.hasMem = true; b.hasStore = true;
@@ -733,6 +822,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
         s32 simm = (s32)(s16)(op & 0xFFFF);
         u32 idx = b.nOps;                          // rectas antes del salto (= i)
+        // A partir de aqui manda la maquinaria de branch: dos caminos de salida, delay slot
+        // que puede emitirse dos veces y rollback del bloque entero si el delay no compila.
+        // Volcar y apagar la residencia deja todos esos caminos con cpu->gpr coherente, y el
+        // volcado queda FUERA del rango de rollback (antes de beforeBranch) a proposito.
+        rc.disable();
         usize beforeBranch = c.jitCache->buf.used; // por si el delay no compila
         // Fase A (antes del delay slot): capturar la condición/target/enlace que el delay
         // slot podría pisar (el delay puede escribir gpr[rs]/gpr[rt] o hacer CALL).
@@ -858,6 +952,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // control (con pc/nextPc escritos y flag 0x80000000) → no hay caída secuencial.
   usize toDoneMain = 0; bool haveMain = false;
   if(!endedInBranch) {
+    rc.writeback();                          // el driver lee cpu->gpr tras el bloque
     e.mov_r_imm32(RAX, b.nOps);
     toDoneMain = e.jmp_rel32_placeholder();
     haveMain = true;
@@ -892,7 +987,8 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   if(haveMain) e.patchRel32(toDoneMain);
   for(usize k = 0; k < branchExits.size(); k++) e.patchRel32(branchExits[k]);
   for(usize k = 0; k < toDone.size(); k++) e.patchRel32(toDone[k]);
-  e.add_rsp_imm8(40);
+  e.add_rsp_imm8(48);
+  e.pop_reg(R15); e.pop_reg(R14); e.pop_reg(R13); e.pop_reg(RDI); e.pop_reg(RSI);
   e.pop_reg(R12); e.pop_reg(RBX);
   e.ret();
 
@@ -929,6 +1025,7 @@ static const int g_jitStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 extern u64 g_trampWhy[5];
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
                 extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32]; }
+namespace jit { extern u64 g_rcReg, g_rcMem, g_rcSpill; }
 // Diagnóstico: razón de decline (por qué jitTryBlock devuelve 0). Solo bajo stats.
 enum { DR_RSP=0, DR_CTRL, DR_INT, DR_UNCACHED, DR_COMPILE, DR_TIMER, DR_SMC, DR_MISC, DR_N };
 static u64 g_decl[DR_N] = {0};
@@ -1059,6 +1156,10 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)g_decl[DR_INT], (unsigned long long)g_decl[DR_UNCACHED],
                    (unsigned long long)g_decl[DR_COMPILE], (unsigned long long)g_decl[DR_TIMER],
                    (unsigned long long)g_decl[DR_SMC], (unsigned long long)g_decl[DR_MISC]);
+      std::fprintf(stderr, "[regcache] reg=%llu mem=%llu spill=%llu hit=%.1f%%\n",
+                   (unsigned long long)jit::g_rcReg, (unsigned long long)jit::g_rcMem,
+                   (unsigned long long)jit::g_rcSpill,
+                   100.0 * jit::g_rcReg / (double)(jit::g_rcReg + jit::g_rcMem + 1));
       std::fprintf(stderr, "[tramp] guard=%lluM mi=%lluM timer=%lluM rsp=%lluM otro=%lluM\n",
                    (unsigned long long)(g_trampWhy[0]/1000000), (unsigned long long)(g_trampWhy[1]/1000000),
                    (unsigned long long)(g_trampWhy[2]/1000000), (unsigned long long)(g_trampWhy[3]/1000000),
