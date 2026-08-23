@@ -609,10 +609,11 @@ auto Memory::mmioRead32(u32 a) -> u32 {
       // spins on `VI_CURRENT == N` (the standard vsync wait in bare-metal roms)
       // needs it to advance every few thousand CPU cycles. The interrupt cadence
       // (viTick, unchanged) is coarse-per-batch; the *polled* value must be fine, so
-      // derive it from the retired-instruction clock (CPI≈1) at ~60 fields/s.
-      u32 total = rcp.vi_vsync ? (rcp.vi_vsync & 0x3ff) : 525;
-      if(total < 2) total = 525;
-      u64 cph = 93'750'000ull / (60ull * total);   // CPU cycles per halfline
+      // derive it from the retired-instruction clock at the SAME field length the tick
+      // uses (viFieldInsns, set by System from Clocks::fieldInsns()). Con dos constantes
+      // distintas el emulador corria dos relojes de video a la vez.
+      u32 total = rcp.viHalflines();
+      u64 cph = viFieldInsns / total;   // instrucciones retiradas por media-linea
       if(cph == 0) cph = 1;
       u64 cyc = cartClock ? *cartClock : 0;
       return (u32)((cyc / cph) % total);
@@ -885,6 +886,12 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     // Count buffer flips, not writes: a single-buffered ROM rewrites VI_ORIGIN with the
     // same address every field. The count is what tells an animating ROM (flips) apart
     // from one still drawing a single picture (never flips) — see KESTREL_MAXFLIPS.
+    //
+    // Se probo contar el intercambio en el LATCH del VI (comienzo de campo) en vez de en la
+    // escritura, que es lo que hace el HW. Resultado medido: el volcado headless pasa a
+    // ensenar el buffer VIEJO, que un juego de doble buffer esta reescribiendo ya — en
+    // threaded eso depende del reloj de pared y los cinco modos dejaron de coincidir en
+    // SM64. El punto de captura tiene que ser el buffer recien publicado, que nadie toca.
     case 0x04: { u32 nv = v & 0xffffff;
                  if(rcp.vi_origin && nv != rcp.vi_origin) rcp.viFlips++;
                  rcp.vi_origin = nv; } break;
@@ -1209,19 +1216,34 @@ auto Memory::pifProcessJoybus() -> void {
 }
 
 // --- VI field tick -----------------------------------------------------------
-auto Memory::viTick() -> void {
-  // Advance the scanline counter one field; raise the VI interrupt when the
-  // programmed halfline is reached. A real field is ~525 halflines; we model the
-  // wrap so main loops that wait on VI make progress each host tick.
-  u32 prevLine = rcp.vi_current;
-  rcp.vi_current = (rcp.vi_current + 2) % 525;
-  if(rcp.vi_current >= (rcp.vi_intr & 0x3fe) && rcp.vi_intr != 0)
-    raiseIntr(MI_VI);
-  // Field boundary (counter wrapped): rotate the GPU backend's per-frame context. Runs on
-  // the emulation thread, same thread that enqueues RDP commands — begin_frame_context must
-  // be serialized with submission (scanout is the only cross-thread call). No-op when off.
-  if(rcp.vi_current < prevLine) vrdp::frameBegin();
-  aiTick();
+auto Memory::viTick(u64 retiredNow) -> bool {
+  // Reloj de video derivado del contador de instrucciones retiradas: un campo dura
+  // viFieldInsns instrucciones (lo fija System desde Clocks::fieldInsns(), y la lectura de
+  // VI_V_CURRENT usa EXACTAMENTE el mismo numero, para que interrupcion y sondeo midan el
+  // mismo tiempo). El bucle llama aqui varias veces por campo, asi que hay que detectar
+  // cruces, no "estar por encima": la version anterior levantaba MI_VI en casi todas las
+  // llamadas (vi_current >= vi_intr se cumple casi siempre) y solo cerraba campo al dar la
+  // vuelta entera al contador, o sea una vez cada 263 llamadas.
+  u32 total = rcp.viHalflines();   // medias-lineas por campo (mismo sitio que VI_V_CURRENT)
+  u64 field = viFieldInsns ? viFieldInsns : 1;
+  // Instante del campo (en instrucciones) en que el barrido pasa por la linea programada.
+  u64 off = (u64)(rcp.vi_intr & 0x3fe) * field / total;
+  auto crossings = [&](u64 x) -> u64 { return x >= off ? (x - off) / field + 1 : 0ull; };
+  bool intrFire   = rcp.vi_intr != 0 && crossings(retiredNow) > crossings(viLastRetired);
+  bool fieldClose = (retiredNow / field) > (viLastRetired / field);
+  viLastRetired = retiredNow;
+  rcp.vi_current = (u32)((retiredNow % field) * total / field) & ~1u;
+  if(intrFire) raiseIntr(MI_VI);
+  if(fieldClose) {
+    rcp.viFields++;
+    // Cierre de campo: rota el contexto por-cuadro del backend GPU. Corre en el hilo de
+    // emulacion, el mismo que encola comandos del RDP — begin_frame_context tiene que ir
+    // serializado con la emision (el scanout es la unica llamada entre hilos). No-op si
+    // esta apagado. Antes practicamente no se llamaba (solo al dar la vuelta el contador).
+    vrdp::frameBegin();
+    aiTick();   // el drenaje de audio va por campo, no por subtramo
+  }
+  return fieldClose;
 }
 
 // Drain the AI playback FIFO ~one field's worth of samples per call. When the

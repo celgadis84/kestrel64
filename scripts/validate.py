@@ -46,6 +46,9 @@ KROM = ROMS / "PeterLemon-N64"
 EXE = Path(os.environ.get("KESTREL_EXE", ROOT / "build" / "kestrel64.exe"))
 BASELINES = ROOT / "docs" / "baselines"
 OUT = ROOT / "out"
+# Ritmo de campos NTSC (59.94 Hz). Es el MISMO reloj que usa el nucleo
+# (Clocks::viFieldHz en src/core/system.hpp): tiempo de guest = campos / 59.94.
+VI_FIELD_HZ = 59.94
 
 # Los conmutadores llevan valor explicito ("0" apaga) porque hilos+JIT van ON por
 # defecto en el binario: sin el "0" el modo oraculo `interp` no seria interp.
@@ -447,7 +450,7 @@ def _bench_once(mode, args, flips):
     rom = Path(args.bench_rom) if args.bench_rom else ROMS / "Super Mario 64 (USA).z64"
     save = rom.with_suffix(".eep")
     dump = OUT / f"bench-{mode}.bmp"
-    times, lines = [], []
+    times, lines, fields = [], [], []
     for i in range(args.bench_runs):
         if save.exists():
             save.unlink()
@@ -460,19 +463,21 @@ def _bench_once(mode, args, flips):
         rc, log = run_rom(rom, dump, mode, args.bench_insn, args.sm64_timeout,
                           frames=(flips, 0), extra_env={"KESTREL_HEARTBEAT": "1"})
         dt = time.time() - t0
-        got = re.search(r"\[frames\] (\d+) buffer swaps", log)
+        got = re.search(r"\[frames\] (\d+) buffer swaps, (\d+) VI fields", log)
         if not got or int(got.group(1)) < flips:
-            print(f"bench[{mode}]: INVALIDO — la corrida no llego a {flips} campos "
-                  f"({'sin [frames]' if not got else got.group(1)+' campos'}); sube --bench-insn")
+            print(f"bench[{mode}]: INVALIDO — la corrida no llego a {flips} intercambios "
+                  f"({'sin [frames]' if not got else got.group(1)}); sube --bench-insn")
             return None, ""
         hb = [l for l in log.splitlines() if l.startswith("[hb]")]
         times.append(dt)
+        fields.append(int(got.group(2)))
         lines.append(hb[-1] if hb else "")
         print(f"bench[{mode}] {flips} campos, run {i+1}/{args.bench_runs}: {dt:.2f}s")
     if save.exists():
         save.unlink()
     best = min(times)
-    return best, lines[times.index(best)]
+    k = times.index(best)
+    return best, lines[k], fields[k]
 
 
 def gate_bench(mode, args):
@@ -495,22 +500,27 @@ def gate_bench(mode, args):
         print(f"bench: SKIP (missing {rom})")
         return True
     n1 = args.bench_flips
-    best1, hb1 = _bench_once(mode, args, n1)
+    best1, hb1, f1 = _bench_once(mode, args, n1)
     if best1 is None:
         return False
-    guest1 = n1 / 60.0
-    print(f"bench[{mode}]: {n1} campos VI  min {best1:.2f}s  ->  {100.0*guest1/best1:.1f}% realtime (total)")
+    # Tiempo de guest = CAMPOS de video emitidos / 59.94, no intercambios de buffer / 60:
+    # SM64 en la demo no llega a 60 fps, asi que 200 intercambios son bastantes mas de
+    # 200 campos. Contar swaps como si fueran campos infravalora el % de tiempo real.
+    guest1 = f1 / VI_FIELD_HZ
+    print(f"bench[{mode}]: {n1} intercambios ({f1} campos VI = {guest1:.2f}s de video)  "
+          f"min {best1:.2f}s  ->  {100.0*guest1/best1:.1f}% realtime (total)")
     if args.bench_flips2:
         n0 = args.bench_flips2
-        best0, _ = _bench_once(mode, args, n0)
+        best0, _, f0 = _bench_once(mode, args, n0)
         if best0 is None:
             return False
-        dwall, dguest = best1 - best0, (n1 - n0) / 60.0
+        dwall, dguest = best1 - best0, (f1 - f0) / VI_FIELD_HZ
         if dwall <= 0:
             print(f"bench[{mode}]: dos puntos INVALIDO (mas campos tardaron menos: {best0:.2f}s -> {best1:.2f}s)")
         else:
             print(f"bench[{mode}]: en regimen {100.0*dguest/dwall:.1f}% realtime "
-                  f"({dguest:.2f}s de video en {dwall:.2f}s)  |  arranque fijo {best0 - n0/60.0*dwall/dguest:.2f}s")
+                  f"({dguest:.2f}s de video en {dwall:.2f}s)  |  arranque fijo "
+                  f"{best0 - f0/VI_FIELD_HZ*dwall/dguest:.2f}s")
     if hb1:
         print("   " + hb1)
     return True
@@ -536,9 +546,11 @@ def main():
                     help="krom: stop after N displayed-buffer swaps (0 = never). Pins animated "
                          "double-buffered ROMs to an early frame, which is what the reference "
                          "captures show.")
-    ap.add_argument("--maxsyncs", type=int, default=1,
+    ap.add_argument("--maxsyncs", type=int, default=2,
                     help="krom: stop after N RDP SYNC_FULLs (0 = never). Same idea for animation "
-                         "that redraws one buffer in place.")
+                         "that redraws one buffer in place. Dos, no uno: un SYNC_FULL es el final "
+                         "de UNA display list, y hay ROMs que dibujan la escena con dos (RDPTest "
+                         "marcaba 88.60 con uno y 99.65 exacto con dos, con el mismo render).")
     ap.add_argument("--stable", default="8000000,3",
                     help="krom: KESTREL_STABLE=<insns per check>,<checks> — stop when the "
                          "framebuffer stops changing. Empty string disables it.")

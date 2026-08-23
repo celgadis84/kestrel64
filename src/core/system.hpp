@@ -45,9 +45,34 @@ struct System {
     double rspHz   = 62'500'000.0;   // RSP
     double rdramHz = 250'000'000.0;  // RDRAM (DDR)
     double cpuOc = 1.0, rspOc = 1.0, rdramOc = 1.0;
+    // Video field rate. NTSC halfline counter free-runs at 60 fields/s (59.94 exact);
+    // everything that measures guest time hangs off this.
+    double viFieldHz = 59.94;
+    // Modelo de CPI del interprete. El unico anclaje duro que hay entre "instruccion
+    // retirada" y "ciclo de CPU" es COP0 Count: en el VR4300 avanza a MEDIO reloj, y aqui
+    // avanza +1 por instruccion retirada (CPU::step). Eso fija el modelo:
+    //   1 instruccion retirada = 2 ciclos de CPU (CPI 2).
+    // De ahi sale todo lo demas — cuantas instrucciones dura un campo de video y a que
+    // ritmo hay que retirar para ir a tiempo real — y sale UNA sola vez, para que no
+    // vuelva a haber dos relojes distintos en el mismo emulador (los habia: el tick del VI
+    // contaba 750k instrucciones por campo y la lectura de VI_V_CURRENT contaba 1.56M,
+    // asi que un juego que mezclara interrupcion y sondeo veia dos campos por cada uno).
+    double cyclesPerInsn = 2.0;
     auto cpuTarget()   const -> double { return cpuHz   * cpuOc; }
     auto rspTarget()   const -> double { return rspHz   * rspOc; }
     auto rdramTarget() const -> double { return rdramHz * rdramOc; }
+    // Instrucciones retiradas por segundo que equivalen a tiempo real (= ciclos / CPI).
+    auto insnTarget()  const -> double { return cpuTarget() / cyclesPerInsn; }
+    // Instrucciones retiradas que dura un campo de video.
+    auto fieldInsns()  const -> u64    { return (u64)(insnTarget() / viFieldHz + 0.5); }
+    // El bucle no puede correr un campo entero de golpe: hay ROMs (y juegos con efectos de
+    // rastreo) que reprograman VI_INTR dentro del campo para que la interrupcion salte a
+    // media pantalla. Se trocea el campo en subtramos y el VI se mira en cada uno, asi que
+    // la interrupcion cae con precision de 1/viTicksPerField de campo (~1 ms) en vez de una
+    // sola vez por campo. Subirlo afina la interrupcion y cuesta mas vueltas del bucle;
+    // KESTREL_VITICKS lo mueve para experimentar.
+    u32 viTicksPerField = 16;
+    auto tickInsns()   const -> u64    { u64 n = fieldInsns() / viTicksPerField; return n ? n : 1; }
   } clocks;
 
   // Speed telemetry. The interpreter models 1 emulated CPU cycle per retired

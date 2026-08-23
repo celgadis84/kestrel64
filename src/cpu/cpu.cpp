@@ -82,8 +82,7 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   // picked from the VI_V_SYNC total). Hardcoding 240 left the bottom half black and
   // mis-sized the dump vs the reference for every non-240 test.
   u32 ysc = mem->rcp.vi_yscale & 0xfff;
-  u32 vtotal = mem->rcp.vi_vsync & 0x3ff;
-  u32 baseH = (vtotal >= 550) ? 288 : 240;            // PAL (625) vs NTSC (525)
+  u32 baseH = (mem->rcp.viHalflines() >= 550) ? 288 : 240;   // PAL (625) vs NTSC (525)
   u32 h = ysc ? ((baseH * ysc) >> 10) : baseH;
   if(h == 0 || h > 576) h = baseH;
   const auto& ram = mem->rdram;

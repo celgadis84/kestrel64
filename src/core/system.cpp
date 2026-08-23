@@ -37,6 +37,13 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
     std::printf("[watch] store watchpoint at phys 0x%08x len %u\n", memory.watchAddr, memory.watchLen);
   }
   cpu.connect(&memory);
+  if(const char* t = std::getenv("KESTREL_VITICKS")) {
+    u32 n = (u32)std::strtoul(t, nullptr, 0);
+    if(n) clocks.viTicksPerField = n;
+  }
+  // Un solo reloj de video para todo el emulador: el mismo numero de instrucciones
+  // por campo que usa el bucle de System (stepCpu) lo usa la lectura de VI_V_CURRENT.
+  memory.viFieldInsns = clocks.fieldInsns();
   cpu.fastBoot(rom.header.entryPoint);  // HLE IPL3: boot segment in RDRAM, PC at entry
   std::printf("[cpu] HLE boot, pc=0x%08x\n", (u32)cpu.pc);
   if(envFlag("KESTREL_THREADS", true)) {
@@ -191,7 +198,7 @@ static auto framebufferHash(Memory& mem) -> u64 {
   u32 w = mem.rcp.vi_width ? mem.rcp.vi_width : 320;
   if(w == 0 || w > 640) w = 320;
   u32 ysc = mem.rcp.vi_yscale & 0xfff;
-  u32 baseH = ((mem.rcp.vi_vsync & 0x3ff) >= 550) ? 288 : 240;
+  u32 baseH = (mem.rcp.viHalflines() >= 550) ? 288 : 240;
   u32 h = ysc ? ((baseH * ysc) >> 10) : baseH;
   if(h == 0 || h > 576) h = baseH;
   usize bytes = (usize)w * h * (type == 2 ? 2 : 4);
@@ -420,9 +427,12 @@ auto System::run() -> void {
     u64 did;
     {
       std::lock_guard<std::mutex> lk(coreMutex);
-      // ~one video field of CPU work per tick, then a VI field boundary. Keeps
-      // main loops that block on the VI interrupt progressing.
-      did = stepCpu(750000);
+      // Un subtramo de campo de trabajo de CPU por vuelta, y despues el VI. La duracion
+      // sale del modelo de reloj (clocks.tickInsns() = campo / viTicksPerField), no de una
+      // constante suelta: el mismo campo lo usa la lectura de VI_V_CURRENT en Memory, para
+      // que la interrupcion y el sondeo del contador de medias-lineas midan el MISMO tiempo.
+      did = stepCpu(clocks.tickInsns());
+      bool fieldClosed = memory.viTick(cpu.retired);
       // Diagnostico de divergencia entre modos, opt-in. El md5 final solo dice "difieren";
       // estos dicen DONDE: KESTREL_FIELDHASH=1 imprime un FNV del estado CPU al cierre de
       // cada campo (primer campo distinto = ventana a bisecar) y KESTREL_FIELDDUMP=<n>
@@ -430,7 +440,7 @@ auto System::run() -> void {
       static const u64  fieldDump = std::getenv("KESTREL_FIELDDUMP")
                                   ? std::strtoull(std::getenv("KESTREL_FIELDDUMP"), nullptr, 0) : 0;
       static const bool fieldHash = std::getenv("KESTREL_FIELDHASH") != nullptr;
-      if(fieldDump || fieldHash) {
+      if((fieldDump || fieldHash) && fieldClosed) {
         static u64 nField = 0; nField++;
         if(nField == fieldDump) {
           for(int r = 0; r < 32; r++) std::fprintf(stderr, "[fd] gpr%02d=%016llx\n", r, (unsigned long long)cpu.gpr[r]);
@@ -449,16 +459,20 @@ auto System::run() -> void {
         }
         std::fflush(stderr);
       }
-      memory.viTick();
     }
     retiredInsns.fetch_add(did, std::memory_order_relaxed);
     winInsn += did;
 
     if((maxFlips && memory.rcp.viFlips >= maxFlips) ||
        (maxSyncs && memory.rcp.dpSyncs >= maxSyncs)) {
-      std::fprintf(stderr, "[frames] %u buffer swaps, %u RDP syncs after %lluM insns, stopping\n",
-                   memory.rcp.viFlips, memory.rcp.dpSyncs,
-                   (unsigned long long)(cpu.retired / 1'000'000));
+      // viFields = campos de video emitidos = tiempo del guest (a viFieldHz). viFlips solo
+      // cuenta intercambios de buffer, y un juego que no llega a 60 fps intercambia menos
+      // veces que campos hay: medir "tiempo real" con los swaps mide de menos.
+      std::fprintf(stderr, "[frames] %u buffer swaps, %u VI fields, %u RDP syncs after %lluM insns, "
+                   "origin=%06x, stopping\n",
+                   memory.rcp.viFlips, memory.rcp.viFields, memory.rcp.dpSyncs,
+                   (unsigned long long)(cpu.retired / 1'000'000),
+                   memory.rcp.vi_origin);
       std::lock_guard<std::mutex> lk(coreMutex);
       cpu.maxInsn = cpu.retired + 1;
       // El tope de instrucciones se comprueba en la guarda de depuracion del interprete, y
@@ -510,9 +524,12 @@ auto System::run() -> void {
     auto now = clock::now();
     double ws = std::chrono::duration<double>(now - winT0).count();
     if(ws >= 0.25) {
-      double cpuCps = winInsn / ws;                          // CPI≈1 baseline
+      double cpuCps = winInsn / ws;                          // instrucciones retiradas/s
       double rspCps = (rspNow() - winRsp) / ws;
-      n64SpeedPct.store(cpuCps / clocks.cpuTarget() * 100.0, std::memory_order_relaxed);
+      // 100 % = tiempo real. El denominador es el ritmo de RETIRADA que equivale a tiempo
+      // real (ciclos / CPI), no el reloj de ciclos: comparar instrucciones contra 93.75 MHz
+      // daba la mitad del numero real bajo el modelo de Count de este interprete.
+      n64SpeedPct.store(cpuCps / clocks.insnTarget() * 100.0, std::memory_order_relaxed);
       rspSpeedPct.store(rspCps / clocks.rspTarget() * 100.0, std::memory_order_relaxed);
       // RDRAM has no per-transaction cycle model yet → leave at 0 (unmodeled).
       // Ocupacion en la misma ventana: nanosegundos de pared que cada worker paso DENTRO

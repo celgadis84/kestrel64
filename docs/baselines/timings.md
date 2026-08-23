@@ -298,5 +298,15 @@ de reloj de pared en total (15:56:03 -> 16:00:56).
 | krom 371 ROMs (4 jobs, solo interp) | 164-186 s | — | — | — | — |
 
 Los tramos JIT bajaron mucho respecto a la tabla de arriba porque aquella medicion
-era anterior al block linking. Si un tramo pasa de ~3x su fila, es cuelgue: bisecar
-con `git stash`, no subir el timeout.
+era anterior al block linking.
+
+Re-medido 2026-08-20 con el reloj del VI unificado (`docs/VI-CLOCK.md`) y el gate de krom
+parando en 2 SYNC_FULL en vez de 1: systemtest 16 s / 8-9 s / 9 s / 18 s / 9-10 s, sm64
+14-15 s / 7 s / 10 s / 11-12 s / 2 s, krom 181-246 s. Igual dentro del ruido; los 246 s de
+krom son el coste de dejar terminar la segunda display list.
+
+El gate de sm64 para a los 60 **campos de video**, que es un estado del juego y no del
+reloj de pared: por eso threaded-jit tarda 2 s y interp 14 s para la misma imagen. Esa
+diferencia entre modos es normal; lo que seria fallo es que el md5 no coincidiera.
+
+Si un tramo pasa de ~3x su fila, es cuelgue: bisecar con `git stash`, no subir el timeout.

@@ -2711,3 +2711,52 @@ en `docs/parallel-rdp-integration.md`. Arbol vendorizado en `third_party/paralle
 **Pendiente conocido**: SoftRDP corrompe el titulo de SM64 a los 250 flips (80.0 % de pixeles
 distintos frente a parallel-rdp, delta medio 28.69); la puerta de 60 flips no lo ve.
 parallel-rdp escupe `[WARN]: Exhausted LinkedDeviceHost memory` en corridas largas.
+
+## 2026-08-20 (bis) — Un solo reloj de video: el tick del VI contaba 263 veces menos campos de los que había
+
+Detalle completo en `docs/VI-CLOCK.md`. Resumen de lo medido:
+
+**El bug.** `Memory::viTick()` avanzaba `vi_current` **+2 medias-líneas por llamada** y el
+bucle del sistema lo llamaba **una vez por cada lote de un campo entero**. Un campo real
+(524 medias-líneas) necesitaba 263 llamadas → 263 campos de tiempo emulado por campo de
+verdad. Consecuencias medidas:
+
+- `viFields` = **2** en 421M instrucciones (deberían ser ~538).
+- `vrdp::frameBegin()` cuelga del cierre de campo → el contexto por-cuadro de parallel-rdp
+  casi nunca rotaba. Es el origen de los WARN `Exhausted LinkedDeviceHost memory`.
+- La interrupción del VI se levantaba por NIVEL (`vi_current >= vi_intr`), o sea en casi
+  todas las llamadas.
+- Y había **dos** relojes de video: la lectura de `VI_V_CURRENT` usaba `93.75e6/(60*total)`
+  (1.5625M instrucciones por campo) y el tick usaba otra cuenta (750k). Un juego que
+  mezclara interrupción y sondeo veía dos relojes distintos.
+
+**El arreglo.** Un solo sitio define el tiempo (`Clocks`): `fieldInsns()` = 782k
+instrucciones por campo (46.875 Mops/s ÷ 59.94; CPI 2 sale de que `Count` avanza +1 por
+instrucción y en el VR4300 corre a medio reloj). El bucle corre `tickInsns()` (1/16 de
+campo, `KESTREL_VITICKS`) y `viTick(retired)` deriva todo del contador absoluto:
+interrupción por **cruce** de `VI_INTR`, cierre de campo por cruce de múltiplo de campo.
+`Rcp::viHalflines()` unifica las cuatro copias de "medias-líneas por campo" que había
+(máscaras `0x3ff`/`0x3fe` y defaults 524/525 mezclados).
+
+**Lo que se probó y NO entró: latchear `VI_ORIGIN`.** Es lo que hace el HW (una escritura
+en el vblank se ve en el campo siguiente), pero mueve el punto de captura del volcado al
+buffer VIEJO, que un juego de doble buffer ya está reescribiendo: en threaded eso depende
+del reloj de pared y los cinco modos dejaron de coincidir en SM64 (tres md5 distintos).
+Revertido entero; el intercambio se sigue contando en la escritura de `VI_ORIGIN`.
+
+**El gate de krom capturaba escenas a medias.** `--maxsyncs` pasa de 1 a 2: un `SYNC_FULL`
+es el final de UNA display list y hay ROMs que dibujan la escena con dos. `RDPTest/CPU` y
+`RDPTest/RSP` marcaban 88.60 con uno y **99.65 exacto** con dos, con el mismo render.
+
+**Resultado.** systemtest 0/3721·0/2·0/6 y SM64 `466282775dbd0ac084946558a1c30771` en los
+cinco modos (lockstep == threaded). krom 371/371, `mean_exact` 88.83 → **88.71**, con tres
+movimientos, los tres de fase de animación y ninguno de render: `VIScrollingBGDMA32BPP`
+100.00 → 0.21 (scrollea +1 línea por campo moviendo `VI_ORIGIN`; antes el emulador no
+avanzaba campos y capturaba justo el cuadro 0 de la referencia) y `CubeFillTriangle`
+{16,32}BPP 59.54 → 53.10 (cubo que rota +1° por cuadro).
+
+**Pendiente que esto destapa.** El core lleva DOS conversiones instrucción→ciclo: `Count`
+y el reloj de video usan CPI 2, mientras el interleave CPU↔RSP (lockstep y el regulador
+threaded) usa CPI 1. Al RSP le estamos dando la mitad del tiempo relativo que implica
+nuestro propio `Count`. Los dos tienen que salir de `Clocks::cyclesPerInsn`; se trata
+aparte porque mueve el orden de eventos CPU/RSP (md5, krom, tests de timing).

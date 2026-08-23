@@ -6,7 +6,7 @@ weak-single-thread / idle-GPU hosts, where cooperative-single-thread cycle-accur
 emulators (ares, cen64) hit an architectural ceiling.
 
 Live status: `docs/STATUS.md`. Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
-`docs/TEXTURE-FORMATS.md`, `docs/parallel-rdp-integration.md`.
+`docs/TEXTURE-FORMATS.md`, `docs/parallel-rdp-integration.md`, `docs/VI-CLOCK.md`.
 
 ## Architecture bet
 
@@ -80,6 +80,23 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   cpu/rsp/rcp registers, disasm, breakpoints, `run_until`.
 - **When a capability is missing, ADD it** to the server — don't fall back to guessing.
 
+### Ejecutar el emulador a mano (reglas de depuracion)
+
+- **SIEMPRE `--run`.** Sin `--run` el exe arranca PAUSADO (modo MCP, espera `resume`) y
+  ademas abre ventana: se queda ahi para siempre y la ventana se ve NEGRA. No es un cuelgue
+  del emulador, es que nadie le dijo que corriera.
+- **SIEMPRE `timeout <segundos>` delante**, con un numero sacado del baseline de
+  `docs/baselines/timings.md` (una ROM de krom = ~2 s, SM64 60 campos = ~15 s). Si se pasa
+  del baseline es CUELGUE, no lentitud: cortar y bisecar, nunca subir el timeout.
+- **SIEMPRE topes de parada**: `KESTREL_MAXINSN`, y `KESTREL_MAXFLIPS`/`KESTREL_MAXSYNCS`
+  o `KESTREL_STABLE` segun el caso. Sin tope, una ROM que no intercambia buffer corre eterna.
+- Lo normal es no lanzarlo a mano: `scripts/validate.py` ya pone entorno, topes y timeout.
+- **Umbral de paciencia = segundos, no minutos.** Un juego arrancado emite campos de video
+  sin parar (59.94/s de guest, y el emulador va a ~1x). Cualquier prueba de una ROM da
+  senal en 1-5 s: si en ~5 s no suben campos VI / swaps, es CUELGUE, no lentitud. Timeout
+  de una ROM de krom = 10 s, SM64 60 campos = 30 s. Nada de esperas de minutos "a ver si
+  sale".
+
 ### MCP gotchas
 - `read_memory` inside a block-capture returns 0 — read `mem->rdram` directly instead.
 - Never declare "hung" from capped/truncated log output.
@@ -100,7 +117,8 @@ block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` 
 `KESTREL_JIT_TRACE=1` superblocks = measured negative) ·
 `KESTREL_HEARTBEAT=1` · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=1` ·
 `KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_FIELDHASH=1` /
-`KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n fields) ·
+`KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n buffer swaps) ·
+`KESTREL_VITICKS=<n>` (VI ticks per field, default 16 — ver `docs/VI-CLOCK.md`) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
 `KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_SAVETYPE` ·
 `KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST` · `KESTREL_FAULTSTOP=1` (halt on a guest fault with

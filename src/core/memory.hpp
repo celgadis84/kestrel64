@@ -75,9 +75,15 @@ struct Rcp {
   // VI
   u32 vi_ctrl = 0, vi_origin = 0, vi_width = 0, vi_intr = 256, vi_current = 0;
   u32 viFlips = 0;    // VI_ORIGIN changed to a different address = displayed buffer swapped
+  u32 viFields = 0;   // campos de video emitidos = reloj de tiempo del guest (59.94 Hz)
   u32 dpSyncs = 0;    // RDP SYNC_FULL count = display lists completed
   u32 vi_burst = 0, vi_vsync = 0, vi_hsync = 0, vi_leap = 0, vi_hstart = 0;
   u32 vi_vstart = 0, vi_vburst = 0, vi_xscale = 0, vi_yscale = 0;
+  // Medias-lineas que dura un campo de video. VI_V_SYNC guarda ese total (NTSC 525,
+  // PAL 625); a 0 el registro aun no esta programado y se asume NTSC. Un solo sitio: el
+  // tick del VI, la lectura de VI_V_CURRENT y el alto del framebuffer tenian tres copias
+  // de esta expresion con mascaras distintas (0x3ff / 0x3fe) y dos valores por defecto.
+  auto viHalflines() const -> u32 { u32 t = vi_vsync & 0x3ff; return t >= 2 ? t : 525; }
   // AI — models a 2-deep DMA buffer FIFO so the audio driver blocks (STATUS
   // FIFO_FULL) instead of generating frames forever, and gets MI_AI when a
   // buffer drains. Without this the audio thread spins in the frame builder and
@@ -268,6 +274,11 @@ public:
   bool cartLatchValid = false;
   u64  cartLatchExpiry = 0;
   const u64* cartClock = nullptr;       // CPU retired-instruction counter (decay clock)
+  // Instrucciones retiradas por campo de video. La fija System desde Clocks::fieldInsns()
+  // (unico reloj de tiempo del emulador) y la usa la lectura de VI_V_CURRENT, para que el
+  // sondeo de medias-lineas y la interrupcion del VI midan EL MISMO tiempo. Antes habia
+  // dos relojes distintos (750k por campo en el tick, 1.5625M en la lectura).
+  u64 viFieldInsns = 782'000;
   static constexpr u64 CART_LATCH_TTL = 200;
   auto isCart(u32 phys) const -> bool { return !rom.empty() && phys >= 0x1000'0000 && phys < 0x1fc0'0000; }
   auto cartRom32(u32 phys) -> u32;               // aligned 32-bit ROM word (0 if past image)
@@ -380,8 +391,11 @@ public:
   static auto spTrace() -> bool { static int t = std::getenv("KESTREL_RSPTRACE")?1:0; return t; }
   auto interruptPending() const -> bool { return (rcp.mi_intr & rcp.mi_mask) != 0; }
 
-  // --- VI field tick (drives VI_CURRENT + VI interrupt), called by the run loop --
-  auto viTick() -> void;
+  // --- VI tick (drives VI_CURRENT + VI interrupt), called by the run loop --
+  // Recibe el contador de instrucciones retiradas (el reloj de tiempo del emulador) y
+  // devuelve true cuando ese tramo ha cerrado un campo de video.
+  auto viTick(u64 retiredNow) -> bool;
+  u64  viLastRetired = 0;   // posicion del VI en el tick anterior
   // --- AI drain tick (paces audio DMA FIFO), called once per field from viTick --
   auto aiTick() -> void;
 
