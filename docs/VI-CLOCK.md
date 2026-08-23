@@ -77,27 +77,39 @@ Contar el intercambio en la escritura de `VI_ORIGIN` da exactamente eso. Si alg�
 hace falta el latch para precisión de presentación, tiene que ser solo para el
 presentador/scanout, nunca para el punto de parada del gate.
 
-## Inconsistencia pendiente: el core tiene DOS CPI
+## RESUELTO: el core tenía DOS CPI
 
-Al unificar el reloj de video sale a la luz que el emulador usa dos conversiones
-distintas de "instrucción retirada → ciclos de CPU":
+Al unificar el reloj de vídeo salió a la luz que el emulador usaba dos conversiones
+distintas de "instrucción retirada -> ciclos de CPU":
 
-| Sitio | Regla | CPI implícito |
-|-------|-------|---------------|
+| Sitio | Regla vieja | CPI implícito |
+|-------|-------------|---------------|
 | COP0 `Count` / `Clocks::fieldInsns()` / VI | `Count += 1` por op, y `Count` corre a medio reloj | **2.0** |
-| Interleave CPU↔RSP en Lockstep (`rspPhase += 2; while(>=3) rsp.step()`) | 2 pasos de RSP por 3 ops de CPU | **1.0** |
+| Interleave CPU<->RSP en Lockstep | `rspPhase += 2; while(>=3) rsp.step()` = 2/3 | **1.0** |
 | Regulador Threaded (`Memory::rcpPace`) | `opsCPU <= 1.5 * ciclosRSP` | **1.0** (espeja el de arriba) |
 
-Con CPI=1 el reparto CPU:RSP sale de 93.75/62.5 = 1.5 ops por ciclo de RSP; con el CPI=2
-que ya usa el reloj de video saldría 0.75. O sea: al RSP le estamos dando **la mitad** del
-tiempo relativo que implica nuestro propio modelo de `Count`.
+El error está en el comentario que lo acompañaba: *"interleave the RSP at ~2/3 the CPU
+rate (62.5 MHz vs 93.75 MHz)"*. Eso compara **reloj contra reloj**, pero la unidad con la
+que avanza el bucle son **instrucciones retiradas**, y una retirada cuesta 2 ciclos de CPU.
+El RSP retira una instrucción por ciclo suyo, así que lo correcto es
 
-Los dos tienen que salir del mismo `Clocks::cyclesPerInsn`. No se toca en este cambio
-porque mover el interleave altera el orden de eventos CPU/RSP (md5 de SM64, suite krom,
-tests de timing de systemtest) y además hace la CPU emulada **más lenta** en relación al
-RSP, no más rápida: es trabajo de precisión, no de rendimiento, y hay que medirlo aparte.
-El CPI de verdad de un VR4300 es ~1.5, así que ninguno de los dos números es el correcto;
-lo correcto es un modelo de ciclos por instrucción y un solo sitio del que salga.
+```
+62.5 MHz / (93.75 MHz / 2) = 4/3 instrucciones de RSP por instrucción de CPU
+```
+
+y su inverso, 3/4, para el regulador. Los dos sitios estaban **exactamente al doble**: al
+RSP se le daba la mitad del tiempo relativo que implica nuestro propio modelo de `Count`.
+
+Arreglado: el ratio sale una sola vez de `Clocks::rspInsnsPerCpuInsn()`, y de ahí se
+derivan el acumulador entero del interleave (`rspStepNum/rspStepDen`, 16.16, para que el
+reparto no dependa del redondeo de un `double`) y la fracción del regulador
+(`Memory::paceCpuNum/paceCpuDen`). Cambiar los relojes o el CPI en `Clocks` mueve ahora
+los tres a la vez.
+
+Queda un frente distinto y más profundo: el CPI de verdad de un VR4300 es **~1.5**, no 2.0,
+porque depende de la instrucción y de los fallos de caché. `cyclesPerInsn` es un promedio
+fijo. Modelar el coste real por instrucción es trabajo de precisión aparte; lo que este
+cambio garantiza es que cuando se haga, se hará en **un solo sitio**.
 
 ## Efecto en la suite krom (re-muestreo, no regresión de render)
 

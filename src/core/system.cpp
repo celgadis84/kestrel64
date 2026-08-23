@@ -44,6 +44,11 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   // Un solo reloj de video para todo el emulador: el mismo numero de instrucciones
   // por campo que usa el bucle de System (stepCpu) lo usa la lectura de VI_V_CURRENT.
   memory.viFieldInsns = clocks.fieldInsns();
+  // ...y un solo modelo de CPI: el mismo ratio CPU:RSP para el interleave de Lockstep
+  // (aqui) y para el regulador de Threaded (Memory::rcpPace).
+  rspStepNum = (u64)(clocks.rspInsnsPerCpuInsn() * 65536.0 + 0.5);
+  rspStepDen = 65536;
+  memory.paceCpuNum = rspStepDen; memory.paceCpuDen = rspStepNum;   // inverso: CPU por RSP
   cpu.fastBoot(rom.header.entryPoint);  // HLE IPL3: boot segment in RDRAM, PC at entry
   std::printf("[cpu] HLE boot, pc=0x%08x\n", (u32)cpu.pc);
   if(envFlag("KESTREL_THREADS", true)) {
@@ -145,12 +150,14 @@ auto System::stepCpu(u64 n) -> u64 {
         if(b == pcv) { lastBpHit.store(pcv); paused.store(true); return i; }
       }
     }
-    // Lockstep: interleave the RSP at ~2/3 the CPU rate (62.5 MHz vs 93.75 MHz).
+    // Lockstep: interleave the RSP at Clocks::rspInsnsPerCpuInsn() (4/3 stock).
     // Threaded: the RSP runs to completion on its own worker (see rspWorkerLoop),
     // so the CPU thread must NOT also step it — that would double-execute the core.
     if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running) {
-      rspPhase += 2;
-      while(rspPhase >= 3) { rspPhase -= 3; memory.rsp.step(1); if(!memory.rsp.running) break; }
+      rspPhase += rspStepNum;
+      while(rspPhase >= rspStepDen) {
+        rspPhase -= rspStepDen; memory.rsp.step(1); if(!memory.rsp.running) break;
+      }
     }
   }
   return i;

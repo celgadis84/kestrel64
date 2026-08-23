@@ -2760,3 +2760,22 @@ y el reloj de video usan CPI 2, mientras el interleave CPU↔RSP (lockstep y el 
 threaded) usa CPI 1. Al RSP le estamos dando la mitad del tiempo relativo que implica
 nuestro propio `Count`. Los dos tienen que salir de `Clocks::cyclesPerInsn`; se trata
 aparte porque mueve el orden de eventos CPU/RSP (md5, krom, tests de timing).
+
+## 2026-08-20 (ter) — Un solo modelo de CPI: al RSP le faltaba la mitad de su tiempo
+
+Cerrado el pendiente de la entrada anterior. El error estaba a la vista en el comentario
+del interleave: *"interleave the RSP at ~2/3 the CPU rate (62.5 MHz vs 93.75 MHz)"*. Eso
+compara **reloj contra reloj**, pero la unidad con la que avanza `stepCpu` son
+**instrucciones retiradas**, y una retirada cuesta dos ciclos de CPU (CPI 2, que es lo que
+fija COP0 `Count`). El RSP retira una instrucción por ciclo suyo, así que el reparto bueno
+es `62.5 / (93.75/2) = 4/3` instrucciones de RSP por instrucción de CPU, y `3/4` para el
+regulador de threaded. Los dos sitios estaban exactamente al **doble** de lo debido.
+
+Ahora el ratio sale una sola vez de `Clocks::rspInsnsPerCpuInsn()`. De ahí se derivan el
+acumulador entero del interleave de Lockstep (`rspStepNum/rspStepDen` en 16.16 — enteros
+para que el reparto no dependa del redondeo de un `double`) y la fracción del regulador
+(`Memory::paceCpuNum/paceCpuDen`). Tocar los relojes o el CPI en `Clocks` mueve los tres.
+
+Lo que NO cambia: el CPI real de un VR4300 es ~1.5 y depende de la instrucción y de los
+fallos de caché; `cyclesPerInsn` sigue siendo un promedio fijo. La ganancia de este cambio
+no es ese modelo, es que cuando se haga habrá **un solo sitio** que tocar.

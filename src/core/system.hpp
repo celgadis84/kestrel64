@@ -73,6 +73,17 @@ struct System {
     // KESTREL_VITICKS lo mueve para experimentar.
     u32 viTicksPerField = 16;
     auto tickInsns()   const -> u64    { u64 n = fieldInsns() / viTicksPerField; return n ? n : 1; }
+    // Instrucciones de RSP que entran en UNA instruccion retirada de CPU.
+    //
+    // NO es la razon de los dos relojes (62.5/93.75 = 2/3): esa compara ciclos con
+    // ciclos, y la unidad con la que avanza el bucle son instrucciones retiradas. El
+    // RSP retira una por ciclo suyo; la CPU, una cada cyclesPerInsn ciclos del suyo:
+    //   62.5 MHz / (93.75 MHz / 2) = 4/3
+    // Ponerlo en 2/3 -- que es lo que habia, en el interleave de Lockstep y en el
+    // regulador de Threaded -- le daba al RSP la MITAD del tiempo relativo que implica
+    // nuestro propio modelo de Count. Sale de aqui, del mismo sitio que el reloj de
+    // video, para que no vuelva a haber dos modelos de CPI en el mismo emulador.
+    auto rspInsnsPerCpuInsn() const -> double { return rspTarget() / insnTarget(); }
   } clocks;
 
   // Speed telemetry. The interpreter models 1 emulated CPU cycle per retired
@@ -115,11 +126,14 @@ struct System {
   auto run() -> void;
 
   // Step the CPU n instructions (caller holds coreMutex). Returns steps taken.
-  // While the RSP is running, it is advanced interleaved with the CPU at the
-  // hardware clock ratio (RSP 62.5 MHz : CPU 93.75 MHz = 2:3) so the two cores make
-  // progress together — required for CPU<->RSP SIGNAL handshakes.
+  // While the RSP is running, it is advanced interleaved with the CPU at
+  // Clocks::rspInsnsPerCpuInsn() (4/3 stock) so the two cores make progress
+  // together - required for CPU<->RSP SIGNAL handshakes.
   auto stepCpu(u64 n) -> u64;
-  u32 rspPhase = 0;   // fractional accumulator for the 2:3 RSP:CPU step ratio
+  // Acumulador en punto fijo del ratio: por cada instruccion de CPU se suma rspStepNum
+  // y se ejecuta una instruccion de RSP por cada rspStepDen acumulados. En enteros para
+  // que el reparto sea identico en cada corrida; el constructor los fija desde clocks.
+  u64 rspPhase = 0, rspStepNum = 87'381, rspStepDen = 65'536;   // 4/3 en 16.16
 
   // PC breakpoints (debug). stepCpu checks these only while the vector is
   // non-empty, so there is zero hot-path cost when nothing is set. A hit auto-

@@ -279,6 +279,10 @@ public:
   // sondeo de medias-lineas y la interrupcion del VI midan EL MISMO tiempo. Antes habia
   // dos relojes distintos (750k por campo en el tick, 1.5625M en la lectura).
   u64 viFieldInsns = 782'000;
+  // Instrucciones de CPU que le tocan por cada instruccion de RSP, en fraccion. La fija
+  // System desde Clocks::rspInsnsPerCpuInsn() (3/4 con relojes de serie) y la usa el
+  // regulador rcpPace: es el MISMO ratio que el interleave de Lockstep, invertido.
+  u64 paceCpuNum = 3, paceCpuDen = 4;
   static constexpr u64 CART_LATCH_TTL = 200;
   auto isCart(u32 phys) const -> bool { return !rom.empty() && phys >= 0x1000'0000 && phys < 0x1fc0'0000; }
   auto cartRom32(u32 phys) -> u32;               // aligned 32-bit ROM word (0 if past image)

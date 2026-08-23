@@ -1393,8 +1393,11 @@ auto Memory::rspAwaitIdle() -> void {
 // se va millones de instrucciones por delante y todas se gastan girando en el bucle de espera
 // del juego, que ademas martillea los registros MMIO que el worker escribe (ping-pong de linea
 // de cache entre nucleos). Aqui se restaura el mismo acoplamiento que en Lockstep: mientras
-// haya tarea de RSP en vuelo, la CPU no puede haber retirado mas de 3 instrucciones por cada
-// 2 ciclos de RSP consumidos desde el enganche. Si se pasa DUERME en el condvar del RSP en vez
+// haya tarea de RSP en vuelo, la CPU no puede haber retirado mas de paceCpuNum/paceCpuDen
+// instrucciones por cada ciclo de RSP consumido desde el enganche (3/4 con los relojes de
+// serie: la CPU retira una instruccion cada dos ciclos de 93.75 MHz y el RSP una por ciclo
+// de 62.5 MHz). Era 3/2 -- el doble -- por comparar los dos relojes en vez de comparar
+// instrucciones retiradas; el ratio sale ahora de Clocks, igual que el de Lockstep. Si se pasa DUERME en el condvar del RSP en vez
 // de girar: mismo trabajo util del guest, un nucleo del host libre para los workers, y el
 // adelanto entre dominios acotado como en el hardware.
 //
@@ -1417,7 +1420,7 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
   if(paceGiveUp) return;
   for(;;) {
     u64 ahead = cpuRetired - paceCpu0;
-    u64 allow = ((rspNow - paceRsp0) * 3) / 2 + kPaceSlack;
+    u64 allow = ((rspNow - paceRsp0) * paceCpuNum) / paceCpuDen + kPaceSlack;
     if(ahead <= allow) return;
     paceHolds.fetch_add(1, std::memory_order_relaxed);
     auto t0 = std::chrono::steady_clock::now();
@@ -1460,7 +1463,7 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
 auto Memory::paceAllowance(u64 cpuRetired) -> u32 {
   if(!pacePrimed || paceGiveUp || !rspBusy.load(std::memory_order_acquire)) return 0xFFFF'FFFFu;
   u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
-  u64 allow  = ((rspNow - paceRsp0) * 3) / 2 + kPaceSlack;
+  u64 allow  = ((rspNow - paceRsp0) * paceCpuNum) / paceCpuDen + kPaceSlack;
   u64 ahead  = cpuRetired - paceCpu0;
   if(ahead >= allow) return 1;
   u64 left = allow - ahead;
