@@ -110,9 +110,12 @@ dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP) · `vrdp/` (parallel-rdp glue
 ## Env-var toggles
 
 `KESTREL_THREADS` (threaded RCP, **default ON**) · `KESTREL_JIT` (dynarec, **default ON**, oracle=interp;
-los dos leen VALOR: `=0` apaga. Medido honesto en SM64, `bench` de 200 campos VI:
-threaded-jit 8.8 s, threaded (CPU interp) 26.3 s, jit lockstep ~30 s. El "99% de tiempo
-real" que se cito aqui era el bench viejo midiendo mal, ver `docs/PERF-CPU.md` §12;
+los dos leen VALOR: `=0` apaga. Medido honesto en SM64, `bench` de 200 intercambios de
+buffer: **threaded-jit 9.2 s = 131% de tiempo real**, threaded (CPU interp) 26.6 s = 38%,
+jit lockstep 30.6 s = 35%, interp lockstep 39.6 s = 27%. Los tres ultimos son oraculos de
+correctitud, no configuraciones de uso. Las cifras viejas (33.9%/11.0%) salian de contar
+un intercambio de buffer como un campo de video, cuando SM64 gasta tres; ver
+`docs/PERF-CPU.md` §12-bis;
 block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` to bisect,
 `KESTREL_JIT_TRACE=1` superblocks = measured negative) ·
 `KESTREL_HEARTBEAT=1` · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=1` ·

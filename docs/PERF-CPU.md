@@ -343,6 +343,88 @@ STATUS), así que 600 campos nunca se alcanzaban.
 | threaded-jit | 9.84 s | 33.9 % |
 | jit (lockstep) | 30.4 s | 11.0 % |
 
+## 12-bis. El `bench` seguía midiendo mal: un intercambio de buffer NO es un campo
+
+Corregido el tope de instrucciones (§12), quedaba un segundo error, y este valía un
+factor 3,4. `--bench-flips 200` para en **200 intercambios de buffer**, y el cálculo del
+porcentaje los trataba como **200 campos de vídeo** = 3,34 s de vídeo a 59,94 Hz. Pero un
+juego no intercambia una vez por campo: SM64 va a ~20 fps internos, o sea **tres campos
+por intercambio**. El vídeo realmente producido son ~690 campos = 11,5 s.
+
+No se pudo ver hasta arreglar el reloj del VI (`docs/VI-CLOCK.md`): el contador de campos
+estaba roto — 2 campos en 421M instrucciones — así que no había de dónde sacar el número
+bueno. Ahora `bench` cuenta los campos que el emulador declara e imprime los dos:
+`200 intercambios (721 campos VI = 12.03s de video) min 9.19s -> 130.9% realtime`.
+
+**Números honestos, SM64, 200 intercambios de buffer (i7-870):**
+
+| modo | vídeo producido | tiempo de pared | % tiempo real |
+|------|-----------------|-----------------|---------------|
+| **threaded-jit** (los dos defaults ON) | 12.03 s | 9.19 s | **130.9 %** |
+| threaded (CPU interp) | 10.16 s | 26.58 s | 38.2 % |
+| jit (lockstep) | 10.59 s | 30.56 s | 34.7 % |
+| interp (lockstep) | 10.59 s | 39.57 s | 26.8 % |
+
+La configuración por defecto corre SM64 **por encima de tiempo real** en este anfitrión.
+Los otros tres modos son oráculos de correctitud, no configuraciones de uso: pagan
+lockstep o intérprete a propósito.
+
+Las cifras de §12 y las que estaban en `CLAUDE.md` (33,9 % / 11,0 %) son ese mismo error:
+divídanse por 0,29 para leerlas.
+
+### El regulador no se toca
+
+Tentación obvia: `rcpPace` frena la CPU el ~41 % del tiempo, quitarlo tiene que ir más
+rápido. Medido: con el freno suelto (`KESTREL_PACESLACK=1e9`) el mismo bench da 307 %
+"realtime"… porque el guest emite **2005 campos para los mismos 200 intercambios**. Eso no
+es velocidad, es el juego perdiendo la noción del tiempo: la CPU adelanta tanto al RSP que
+SM64 se cree en cámara lenta y suelta campos repetidos. El trabajo deja de ser fijo y la
+métrica deja de significar nada.
+
+## 12-ter. Dónde NO optimizar el RSP: el mix real del microcódigo
+
+Antes de escribir una línea de SSE nueva, medir qué ejecuta de verdad el microcódigo.
+Build instrumentado (el contador está fuera del camino caliente salvo que se compile):
+
+```bash
+cmake -S . -B build-vustat -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-DKESTREL_VUSTAT=1
+KESTREL_VUSTAT=1 ./build-vustat/kestrel64.exe <rom> --run
+```
+
+SM64, 60 intercambios, **37,0 M instrucciones de RSP**:
+
+| grupo | % de las instrucciones RSP |
+|-------|---------------------------|
+| COP2 (matemática vectorial) | **41,6 %** |
+| LWC2 + SWC2 (load/store vectorial) | **19,3 %** |
+| SPECIAL | 11,2 % |
+| resto escalar MIPS | 27,9 % |
+
+Dos conclusiones que **descartan** el trabajo que parecía obvio:
+
+1. **COP2 ya está vectorizado al 85,6 %.** De ese 41,6 %, solo **5,99 %** del total cae al
+   camino escalar, y **3,84 %** de ese resto es `VRCP*`/`VMOV`, que operan sobre UNA banda
+   y no son vectorizables ni en principio. Portar `VABS` + `VSAR` + `VCL` a SSE tocaría el
+   **2,15 %** de las instrucciones del RSP: no mueve la aguja.
+2. **Los load/store vectoriales ya tienen camino rápido** (`vecFast` + `pshufb` para el
+   registro entero, 64 bits por paso para el resto). No queda ahí el bulto que sugiere
+   su 19,3 %.
+
+Y el perfilador de host sobre el hilo del RSP (`KESTREL_HOSTPROF=1
+KESTREL_HOSTPROF_WHO=rsp`, símbolos resueltos con `llvm-nm`, RVA + 0x140000000):
+
+| símbolo | % del hilo RSP |
+|---------|----------------|
+| `Rsp::step` (fetch + despacho + escalar) | 59,9 % |
+| `Rsp::execCop2` | 31,6 % |
+| `Rsp::execStore` | 4,8 % |
+| `Rsp::execLoad` | 3,7 % |
+
+COP2 es el 41,6 % de las instrucciones y solo el 31,6 % del tiempo: la parte vectorial
+**rinde por encima de su peso**. El coste está en el bucle de despacho, que es el problema
+que en la CPU resolvió el dynarec. El RSP no tiene JIT. Esa es la palanca que queda, y es
+obra grande — no micro-optimización de opcodes.
+
 ## 13. El camino rápido del prólogo JIT: correcto, y casi irrelevante
 
 El perfilador de host decía `kestrel_jitProceedTramp` = 34% del HILO de CPU (se llamaba en
