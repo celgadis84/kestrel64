@@ -62,6 +62,11 @@ MODES = {
     "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1"},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1"},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
+    # Backend RDP en GPU (parallel-rdp). Necesitan un exe de `build-prdp/`, que se
+    # elige con KESTREL_EXE; el toggle solo dice al exe cual de los dos RDP usar.
+    # `prdp` es el oraculo lento (interp lockstep), `prdp-jit` la configuracion real.
+    "prdp":          {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_PRDP": "1"},
+    "prdp-jit":      {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_PRDP": "1"},
 }
 
 # Accuracy below this counts as "broken" rather than "imperfect" — used only to
@@ -431,7 +436,13 @@ def gate_sm64(mode, args):
         print(f"sm64[{mode}]: FAIL no framebuffer dump (rc={rc})")
         return False
     md5 = hashlib.md5(dump.read_bytes()).hexdigest()
-    bl = BASELINES / "sm64.txt"
+    # El md5 depende del BACKEND de RDP, no del modo de CPU: los cinco modos de SoftRDP
+    # coinciden byte a byte entre si, y los dos de parallel-rdp entre si, pero los dos
+    # grupos no tienen por que coincidir (ni deben: son rasterizadores distintos). Un
+    # unico sm64.txt hacia que congelar la referencia de PRDP pisara la de SoftRDP y
+    # los cinco modos normales salieran DIVERGE. Fichero por backend, y el de SoftRDP
+    # conserva el nombre historico.
+    bl = BASELINES / ("sm64-prdp.txt" if MODES[mode].get("KESTREL_PRDP") else "sm64.txt")
     want = bl.read_text(encoding="utf-8").split()[0] if bl.exists() else None
     if args.update_baseline:
         BASELINES.mkdir(parents=True, exist_ok=True)

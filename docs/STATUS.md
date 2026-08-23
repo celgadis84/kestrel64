@@ -2779,3 +2779,51 @@ para que el reparto no dependa del redondeo de un `double`) y la fracción del r
 Lo que NO cambia: el CPI real de un VR4300 es ~1.5 y depende de la instrucción y de los
 fallos de caché; `cyclesPerInsn` sigue siendo un promedio fijo. La ganancia de este cambio
 no es ese modelo, es que cuando se haga habrá **un solo sitio** que tocar.
+
+## 2026-08-23 — parallel-rdp pasa a ser la vía principal; dos divergencias entendidas
+
+Orden del usuario: *"SoftRDP no me interesa. Vamos con parallel-rdp y en un futuro igual
+creamos en nuestro propio sobre Vulkan, OpenGL o Directx11-12, lo que entregue mas
+rendimiento"*. Con la barrida completa hecha, el backend GPU ya gana en el material de
+krom, y a partir de aquí es la vía de trabajo. Lo que faltaba para poder decirlo con
+datos, y lo que salió al medirlo:
+
+**El volcado de framebuffer estaba corriendo una carrera contra el RDP.** `KESTREL_FBDUMP`
+se atendía sin drenar el RCP. Con el dynarec la CPU quema un tope de 8M instrucciones en
+~20 ms; el hilo del RDP puede no haber consumido aún la lista, y parallel-rdp encima paga
+arranque de GPU. La matriz PRDP×JIT sobre `FillRectangle32BPP` lo enseñaba: tres celdas
+con 3 colores y la celda PRDP+JIT con **uno solo** (todo negro). Subir el tope a 300M hacía
+aparecer la imagen correcta, que es lo que identificó el problema como temporal y no de
+render. `mem->rdpDrain()` antes del volcado; las cuatro celdas coinciden. Esto contaminaba
+cualquier medida de PRDP hecha con JIT.
+
+**Barrida krom con `KESTREL_PRDP=1`** (baseline congelado en `docs/baselines/krom-prdp.tsv`,
+modo `prdp`): 371/371, `mean_exact=88.95`, **perfect=178** frente a 88.71 / perfect=148 de
+SoftRDP. Ganancias grandes donde SoftRDP arrastraba deuda: CombinerOverflow 42.71→100,
+CombinerLongTailConstants 71.13→100, AlphaCoverage 72.28→100, los 12 `TexturesMaskShiftMirror`
+→100, TextureCoordinates 87.39→100, todos los `LoadTLUT_*` →100.
+
+**Dos divergencias, ninguna arreglable sin mentir sobre el hardware** (ambas con su
+análisis completo en `docs/parallel-rdp-integration.md`):
+
+1. *GRB12/15/24 Decode 100→0.* Esos decodificadores hacen `TEXEL0 * COMBINED_ALPHA` en
+   modo 1-ciclo. `COMBINED` en el RDP es un **registro de pipeline**: conserva el resultado
+   del píxel anterior, que en régimen estacionario vale 1.0. SoftRDP lo modela; parallel-rdp
+   mete un cero literal, porque sombrea píxeles en paralelo en la GPU y ahí "el píxel
+   anterior" no existe. 3 ROMs de 371, todas sintéticas.
+2. *Cuatro casos "RDP STATUS" de systemtest en `prdp-jit`.* No es que se olviden los flags:
+   es que SYNC_FULL bloquea ~1.6 ms de host esperando a la GPU, y en threaded la CPU sigue
+   corriendo y agota el presupuesto de ciclos de guest del test. El mismo backend en
+   lockstep pasa 0/3721, que es la confirmación limpia.
+
+**Infra nueva**: modos `prdp` / `prdp-jit` en `validate.py` (el exe se elige con
+`KESTREL_EXE`), `scripts/gate_prdp.sh`, baselines krom+sm64 propias del backend GPU
+(sm64 PRDP = `b5521b24d8fc280fbf102df22d7d30cb`, idéntico en lockstep y threaded = el
+backend es determinista), y `KESTREL_DPSYNCLOG=1` ahora también registra cada `[dpkick]`
+encolado, no solo los SYNC_FULL retirados — que es lo que permitió ver que el segundo kick
+del test no llegaba a existir. `gate_all.sh` sigue siendo el oráculo determinista sobre
+SoftRDP y no depende de que haya GPU.
+
+**Siguiente en el RDP**: dejar de bloquear en SYNC_FULL (retirar la interrupción DP ya y
+sincronizar sólo cuando alguien lea esos píxeles) — mejora de latencia real, y de paso se
+lleva por delante la divergencia (2).

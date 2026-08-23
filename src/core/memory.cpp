@@ -852,6 +852,12 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // Diagnostico: KESTREL_RDPINLINE corre el RDP en el hilo CPU aun en modo threaded.
         // Sirve para bisecar que worker introduce una carrera, no para uso normal.
         static const int rdpInline = std::getenv("KESTREL_RDPINLINE") ? 1 : 0;
+        if(std::getenv("KESTREL_DPSYNCLOG")) {
+          std::fprintf(stderr, "[dpkick] span=%06x..%06x xbus=%u busy=%u\n",
+                       cur, rcp.dpc_end, (unsigned)xbus,
+                       (unsigned)rdpBusy.load(std::memory_order_relaxed));
+          std::fflush(stderr);
+        }
         if(rcpMode == RcpMode::Threaded && !rdpInline) rdpSubmit(cur, rcp.dpc_end, xbus);
         else                             rdpRunJob(cur, rcp.dpc_end, xbus);
       }
@@ -1279,15 +1285,19 @@ auto Memory::aiTick() -> void {
 // stays single-threaded. On SYNC_FULL it clears the busy flags and raises MI_DP —
 // the atomic fetch_or in raiseIntr publishes (release) the pixel writes above it
 // before the CPU can observe the interrupt (acquire on its mi_intr load).
+// Arranque idempotente del backend GPU. Lo llama el hilo del RDP nada mas nacer y
+// tambien rdpRunJob(), que es el unico camino en modo lockstep (ahi no hay hilo).
+// std::call_once y no un bool: en modo threaded los dos sitios pueden coincidir.
+auto Memory::vrdpBringUp() -> void {
+  std::call_once(vrdpOnce, [this]{ vrdp::init(rdram.data(), (u32)rdram.size()); });
+}
+
 auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   // GPU path (paraLLEl-RDP): opt-in via KESTREL_PRDP. Lazily brought up on first job with
   // this RDRAM block; when live it consumes the FIFO on the GPU instead of SoftRDP. The
   // guest RDRAM vector is allocated once and never resized, so its pointer is stable for
   // the CommandProcessor's lifetime. Stubs make this a no-op in non-PRDP builds.
-  {
-    static bool tried = false;
-    if(!tried) { tried = true; vrdp::init(rdram.data(), (u32)rdram.size()); }
-  }
+  vrdpBringUp();
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   if(vrdp::active()) {
     bool sync = vrdp::runFifo(rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus);
@@ -1351,6 +1361,17 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
 
 auto Memory::rdpWorkerLoop() -> void {
   hostprof::start("rdp");   // opt-in: KESTREL_HOSTPROF_WHO=rdp
+  // Levantar parallel-rdp AQUI, antes de esperar el primer trabajo. Traer arriba
+  // Vulkan (device, colas, banco SPIR-V, importar los 8 MB de RDRAM) cuesta cientos
+  // de milisegundos, y si se hace de forma perezosa dentro del primer job ese coste
+  // sale del reloj del RDP: la CPU ya escribio DPC_END y esta mirando DPC_STATUS.
+  // systemtest lo caza -- los cuatro casos "RDP STATUS" agotan su espera y leen 0xa8
+  // (START_GCLK|PIPE_BUSY todavia puestos) porque el trabajo aun no ha empezado.
+  // El hilo del RDP existe desde el arranque y no tiene nada que hacer hasta el
+  // primer comando, asi que el arranque se solapa con el boot de la CPU. Va en este
+  // hilo, no en el que llama a startRcpThreads(), para que todo el uso de Vulkan
+  // siga ocurriendo en el mismo hilo que antes.
+  vrdpBringUp();
   for(;;) {
     RdpJob job;
     {

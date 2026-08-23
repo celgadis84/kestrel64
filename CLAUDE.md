@@ -46,7 +46,16 @@ python scripts/validate.py sm64       --mode <mode>   # framebuffer md5
 python scripts/validate.py krom                       # 371-ROM RDP accuracy vs baseline
 python scripts/validate.py bench      --mode <mode>   # wall clock for N VI fields (speed)
 sh scripts/gate_all.sh                                # las cinco modalidades + krom, un log
+sh scripts/gate_prdp.sh                               # backend GPU (parallel-rdp), exe de build-prdp
 ```
+
+`gate_all.sh` es el oraculo determinista y corre sobre SoftRDP, que no depende de que
+haya GPU. `gate_prdp.sh` corre el mismo material con `KESTREL_PRDP=1` contra el exe de
+`build-prdp/` (modos `prdp` = interp lockstep y `prdp-jit` = threaded+dynarec) y tiene
+baselines propias: krom `docs/baselines/krom-prdp.tsv`, sm64 `docs/baselines/sm64-prdp.txt`.
+El md5 de sm64 depende del BACKEND, no del modo de CPU. Dos divergencias PRDP conocidas y
+entendidas (registro de pipeline COMBINED, latencia de sumision a GPU) en
+`docs/parallel-rdp-integration.md`.
 
 **Speed is measured with `bench`, never with Mips.** In threaded mode a faster CPU
 thread just burns more spin-wait instructions, so Mips can rise while the emulator

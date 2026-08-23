@@ -234,6 +234,8 @@ struct Memory {
   auto paceAllowance(u64 cpuRetired) -> u32; // ops que quedan antes de la proxima frenada
 private:
   auto rdpWorkerLoop() -> void;
+  auto vrdpBringUp() -> void;      // trae parallel-rdp arriba una sola vez
+  std::once_flag vrdpOnce;
   auto rspWorkerLoop() -> void;
 public:
 

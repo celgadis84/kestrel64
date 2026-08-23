@@ -246,3 +246,47 @@ sweep is still a net win overall (mean_exact 88.95 vs 88.71, perfect 178 vs
 148). Anything that samples COMBINED/COMBINED_ALPHA in the first cycle will
 read zero under PRDP — worth remembering if a real game ever looks black in
 one pass.
+
+## Known divergence: GPU submit latency (systemtest "RDP STATUS")
+
+`sh scripts/gate_prdp.sh` runs systemtest in **lockstep only**. In `prdp-jit`
+(threaded + dynarec) four cases fail:
+
+```
+Test 'RDP STATUS: Flags during a run' failed: Time out waiting for RDP status 0x80.
+    RDP status at timeout: 0xa8
+Test 'RDP STATUS: Run from DMEM (xbus)' ... 0x81 / 0xa9      (x3 variants)
+```
+
+`0xa8` is `CBUF_READY | PIPE_BUSY | START_GCLK`: the pipe never reports drained.
+The tempting reading is that the glue forgets to clear the flags, and it is
+wrong — `rdpRunJob` clears `0x8|0x20` on SYNC_FULL on both backends, from the
+same lines.
+
+What actually happens, from `KESTREL_DPSYNCLOG=1` (which logs every `[dpkick]`
+span queued and every `[dpsync]` retired, backend-independent):
+
+```
+SoftRDP   [dpkick] 1fa020..1fa028   [dpsync] 1fa020   [dpkick] 1fa028..1fa030  [dpsync] 1fa028
+PRDP      [dpkick] 1fa020..1fa028   [dpsync] 1fa020   (nothing more)
+```
+
+The second kick never happens: the guest gave up and moved on. SYNC_FULL blocks
+the RDP thread in `wait_for_timeline(signal_timeline())` until the GPU has
+retired the work — about 1.6 ms of host time per sync on an RX 570
+(`KESTREL_PRDP_STATS=1`: 4 syncs, 6.65 ms). A real RDP drains in microseconds.
+The test polls DPC_STATUS with a guest-cycle budget, and in threaded mode the
+CPU keeps running at full speed through those 1.6 ms, burning millions of guest
+cycles before the answer arrives.
+
+The clean confirmation is the lockstep run: same backend, same GPU, same
+1.6 ms — and it **passes 0/3721**, because there the CPU is stopped while the
+GPU works, so no guest cycles elapse. The divergence is submit latency, not
+semantics.
+
+Not worth faking: pretending the pipe drained instantly, or freezing guest time
+around the wait, would both be lies about the hardware. The real fix is to stop
+blocking on SYNC_FULL at all — retire the DP interrupt immediately and only
+synchronise when someone actually reads those pixels (CPU or VI). That is a
+genuine latency improvement rather than a test workaround, and it is filed as
+future work; SoftRDP remains the deterministic oracle in the meantime.
