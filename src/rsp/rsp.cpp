@@ -838,6 +838,60 @@ auto Rsp::execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool {
     vstoreZero(vcoh); vstoreZero(vcol);
     return true;
   }
+  // --- VABS: sign of S applied to T. No toca banderas -------------------------
+  // El unico caso que no es una negacion normal es T=-32768: el acumulador se queda con
+  // el patron que sale de negar en 16 bits (0x8000) y el destino con el valor saturado
+  // (0x7fff). _mm_sub_epi16 da lo primero y _mm_subs_epi16 lo segundo, asi que las dos
+  // salidas son la misma resta hecha con dos saturaciones distintas.
+  case 0x13: {
+    __m128i zero = _mm_setzero_si128();
+    __m128i sNeg  = _mm_cmpgt_epi16(zero, s);       // S<0
+    __m128i sZero = _mm_cmpeq_epi16(s, zero);       // S==0
+    __m128i al = _mm_blendv_epi8(t, _mm_sub_epi16 (zero, t), sNeg);
+    __m128i dv = _mm_blendv_epi8(t, _mm_subs_epi16(zero, t), sNeg);
+    vstore(accl, _mm_andnot_si128(sZero, al));      // S==0 -> 0 en las dos
+    vstore(D,    _mm_andnot_si128(sZero, dv));
+    return true;
+  }
+
+  // --- VCL: cierre del clip que VCH empezo. Cuatro ramas por carril ----------
+  // El escalar decide con VCO.low (carry) y VCO.high, y cada rama escribe una bandera
+  // distinta: solo (carry && !high) toca VCC.low y solo (!carry && !high) toca VCC.high;
+  // las otras dos leen la que ya habia. Aqui se calculan las cuatro y se mezclan, y las
+  // banderas se actualizan con blendv usando la mascara de la rama que las escribe, que
+  // es lo que conserva las que no se tocan.
+  case 0x24: {
+    __m128i zero = _mm_setzero_si128();
+    __m128i col = vmaskFromFlag(vcol), coh = vmaskFromFlag(vcoh), ce = vmaskFromFlag(vce);
+    __m128i cclOld = vmaskFromFlag(vccl), cchOld = vmaskFromFlag(vcch);
+    __m128i negT = _mm_sub_epi16(zero, t);
+
+    // rama carry && !high: suma sin signo de 16 bits; hubo acarreo si el resultado
+    // envuelto queda por debajo de S (comparacion sin signo, de ahi el max_epu16).
+    __m128i sum      = _mm_add_epi16(s, t);
+    __m128i carry    = vnot(_mm_cmpeq_epi16(_mm_max_epu16(sum, s), sum));   // sum <u S
+    __m128i notCarry = vnot(carry);
+    __m128i sumZero  = _mm_cmpeq_epi16(sum, zero);
+    __m128i cclNew   = _mm_blendv_epi8(_mm_and_si128(sumZero, notCarry),    // !VCE: !sum && !carry
+                                       _mm_or_si128 (sumZero, notCarry),    //  VCE: !sum || !carry
+                                       ce);
+    // rama !carry && !high: S >= T sin signo
+    __m128i cchNew = _mm_cmpeq_epi16(_mm_max_epu16(s, t), s);
+
+    __m128i acclA = _mm_blendv_epi8(s, negT, cclOld);   // carry &&  high
+    __m128i acclB = _mm_blendv_epi8(s, negT, cclNew);   // carry && !high
+    __m128i acclC = _mm_blendv_epi8(s, t,    cchOld);   // !carry &&  high
+    __m128i acclD = _mm_blendv_epi8(s, t,    cchNew);   // !carry && !high
+    __m128i al = _mm_blendv_epi8(_mm_blendv_epi8(acclD, acclC, coh),
+                                 _mm_blendv_epi8(acclB, acclA, coh), col);
+    vstore(accl, al); vstore(D, al);
+
+    __m128i notCoh = vnot(coh);
+    vstore(vccl, vflagFromMask(_mm_blendv_epi8(cclOld, cclNew, _mm_and_si128(col, notCoh))));
+    vstore(vcch, vflagFromMask(_mm_blendv_epi8(cchOld, cchNew, _mm_andnot_si128(col, notCoh))));
+    vstoreZero(vcol); vstoreZero(vcoh); vstoreZero(vce);
+    return true;
+  }
   }
   return false;   // not implemented here → scalar fallback
 }
@@ -924,6 +978,9 @@ auto Rsp::execCop2(u32 op) -> void {
   } break;
   case 0x14: for(int n = 0; n < 8; n++) { u32 rr = S.uc(n) + vte.uc(n); accl.u(n) = (u16)rr; vcol.set(n, rr >> 16); } vcoh = R128{}; D = accl; break;  // VADDC
   case 0x15: for(int n = 0; n < 8; n++) { u32 rr = (u32)(S.uc(n) - vte.uc(n)); accl.u(n) = (u16)rr; vcol.set(n, (rr >> 16) & 1); vcoh.set(n, rr != 0); } D = accl; break;  // VSUBC
+  // VSAR se queda aqui a proposito: es copiar una de las tres mitades del acumulador
+  // al destino, 16 bytes, que el compilador ya emite como un movdqa. No hay bucle por
+  // carril que vectorizar, meterlo en execVuSse solo cambiaria de sitio la misma copia.
   case 0x1d:  // VSAR
     D = (e == 8) ? acch : (e == 9) ? accm : (e == 10) ? accl : R128{};
     break;
@@ -1044,6 +1101,10 @@ auto Rsp::fuzzVU(u64 iters) -> u64 {
     u16 divin, divout; bool divdp;
   };
   auto save = [&](Snap& z) {
+    // El memcmp de abajo compara la instantanea entera, relleno incluido: R128 va
+    // alineado a 16 y Snap acaba con hueco tras divdp. Sin borrarlo, dos instantaneas
+    // distintas traen basura de pila distinta y TODA comparacion sale desigual.
+    std::memset(&z, 0, sizeof z);
     std::memcpy(z.vpr, vpr, sizeof vpr);
     z.acch = acch; z.accm = accm; z.accl = accl;
     z.vcoh = vcoh; z.vcol = vcol; z.vcch = vcch; z.vccl = vccl; z.vce = vce;
@@ -1063,7 +1124,8 @@ auto Rsp::fuzzVU(u64 iters) -> u64 {
   // fns handled by execVuSse (kept in sync with that switch).
   static const u32 fns[] = {
     0x00, 0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0c, 0x0d, 0x0e, 0x0f,   // VMUL*/VMAC*/VMUD*
-    0x10, 0x11, 0x14, 0x15, 0x20, 0x21, 0x22, 0x23, 0x25, 0x26, 0x27,         // add/sub, compares, clip, merge
+    0x10, 0x11, 0x13, 0x14, 0x15, 0x20, 0x21, 0x22, 0x23,                     // add/sub, abs, compares
+    0x24, 0x25, 0x26, 0x27,                                                   // clip, merge
     0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,                                       // logicals
   };
   const u32 nf = (u32)(sizeof fns / sizeof fns[0]);
