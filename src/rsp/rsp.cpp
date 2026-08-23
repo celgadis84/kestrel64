@@ -1,6 +1,7 @@
 // kestrel64 — RSP low-level interpreter implementation. See rsp.hpp.
 #include "rsp.hpp"
 #include "../core/memory.hpp"
+#include "rspjit.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -143,6 +144,17 @@ auto R128::operator()(u32 e) const -> R128 {
 }
 
 Rsp::Rsp() {
+  // Dynarec del RSP. Por defecto encendido, igual que el de la CPU, y con el interprete
+  // como oraculo: KESTREL_RSPJIT=0 lo apaga y el md5 del framebuffer tiene que salir igual.
+  {
+    const char* v = std::getenv("KESTREL_RSPJIT");
+    jitOn = !(v && v[0] == '0');
+    statsOn = std::getenv("KESTREL_RSPJIT_STATS") != nullptr;
+    if(jitOn) {
+      jc = new rspjit::Cache();
+      if(!jc->init()) { std::fprintf(stderr, "[rspjit] RWX alloc fallo: dynarec apagado\n"); delete jc; jc = nullptr; jitOn = false; }
+    }
+  }
   sse = !std::getenv("KESTREL_NORSPSSE");   // A/B toggle; default ON (proven by --rspfuzz)
   vecfast = !std::getenv("KESTREL_NOVECFAST");   // A/B; probado por --rspldfuzz
   // reciprocal / inverse-sqrt ROMs (generated exactly as the hardware tables).
@@ -158,6 +170,54 @@ Rsp::Rsp() {
     while(a * (b + 1) * (b + 1) < ((u64)1 << 44)) b++;
     invSqrts[i] = (u16)(b >> 1);
   }
+}
+
+Rsp::~Rsp() { if(statsOn) jitStatsDump(); delete jc; }
+
+// La escritura de IMEM por DMA es la unica forma de que el microcodigo cambie mientras la
+// tarea corre (carga de overlay), y ahi la huella que se comprueba en start() ya no vale:
+// hay que tirar la tabla en el acto, antes de volver a entrar en ningun bloque.
+// Cobertura del dynarec (KESTREL_RSPJIT_STATS=1). Lo que hay que mirar es el porcentaje de
+// instrucciones de microcodigo que salen por codigo compilado: lo que quede en el interprete
+// son bloques demasiado cortos o instrucciones que el compilador no absorbe todavia.
+auto Rsp::jitStatsDump() -> void {
+  if(!jc) return;
+  u64 tot = jc->jitOps + jc->interpOps;
+  std::fprintf(stderr, "[rspjit] ops jit=%llu (%.1f%%) interp=%llu | entradas=%llu bloques=%llu vaciados=%llu\n",
+               (unsigned long long)jc->jitOps, tot ? 100.0 * (double)jc->jitOps / (double)tot : 0.0,
+               (unsigned long long)jc->interpOps, (unsigned long long)jc->entries,
+               (unsigned long long)jc->compiles, (unsigned long long)jc->flushes);
+}
+
+auto Rsp::jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void {
+  if(!jc) return;
+  // OJO: no se puede usar bindMem() aqui. El DMA que carga microcodigo suele llegar
+  // ANTES de la primera escritura a SP_STATUS, que es donde Memory le asigna a este Rsp
+  // su puntero mem; tocarlo antes lee de un puntero nulo. La memoria del SP la trae
+  // quien llama, que ya la tiene delante.
+  // Invalidacion POR RANGO, no global. F3DEX2 carga overlays de microcodigo cada pocas
+  // decenas de miles de instrucciones, y tirar las 1024 entradas en cada carga obligaba a
+  // recompilar el microcodigo entero una y otra vez (185k compilaciones y 4156 vaciados en
+  // 200 intercambios de SM64). Un overlay toca unos cientos de bytes: basta con marcar como
+  // desconocidas las ranuras que caen dentro del tramo escrito, mas kMaxOps-1 palabras por
+  // delante, que son los bloques que pueden EMPEZAR antes y llegar hasta aqui.
+  const u32 back = 4u * (rspjit::kMaxOps - 1);
+  if(bytes + back >= 4096u) {
+    jc->clear();
+  } else {
+    u32 first = (off - back) & 0xfff;
+    for(u32 i = 0; i < bytes + back; i += 4) {
+      u32 idx = ((first + i) & 0xfff) >> 2;
+      jc->state[idx] = rspjit::State::Unknown;
+      jc->blocks[idx] = rspjit::Block{};
+    }
+  }
+  // El codigo emitido de los bloques muertos se queda en el buffer hasta el siguiente
+  // reciclado: es un asignador de tope, no hay nada que liberar pieza a pieza.
+  //
+  // Y se reanota la huella: si no, el chequeo de Rsp::start veria IMEM cambiado en la
+  // siguiente tarea y volveria a tirar la tabla entera, que es justo lo que se evita aqui.
+  jc->imemFp = rspjit::imemFingerprint(imem);
 }
 
 // --- DMEM / IMEM access (12-bit wrapping, big-endian, unaligned OK) ----------
@@ -1231,6 +1291,13 @@ auto Rsp::benchStep(u64 iters) -> void {
 // --- run loop ---------------------------------------------------------------
 auto Rsp::start() -> void {
   bindMem();
+  // Una tarea nueva puede traer microcodigo nuevo. La huella de los 4 KB de IMEM cuesta
+  // ~1500 ciclos una vez por tarea y cubre a CUALQUIER escritor (DMA, tienda de la CPU,
+  // escritura por MCP) sin poner un gancho en ningun camino caliente.
+  if(jc) {
+    u64 fp = rspjit::imemFingerprint(imp);
+    if(fp != jc->imemFp) { jc->clear(); jc->imemFp = fp; }
+  }
   running = true;
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;
@@ -1261,10 +1328,33 @@ auto Rsp::step(u64 maxInsns) -> void {
     u64 chunk = maxInsns < budget ? maxInsns : budget;
     if(chunk > 8192) chunk = 8192;
     const bool prof = profOn;
+    const bool useJit = jitOn && jc && !prof;
+    const bool jitStats = statsOn;
     const u8* const limp = imp;
     u64 c = chunk;
     while(c && !halt) {
+      // Dynarec: si en este PC hay un bloque compilado y cabe en lo que queda de tanda, se
+      // ejecuta entero y el bucle se salta sus instrucciones. Nunca dentro de un delay-slot
+      // (ahi el destino ya esta decidido y el bloque no lo sabe) ni con el muestreador
+      // puesto (contaria por bloque en vez de por instruccion).
+      if(useJit && !inDelay) {
+        const u32 bi = (pc >> 2) & 1023;
+        if(jitStats) jc->entries++;
+        if(jc->state[bi] == rspjit::State::Unknown) { rspjit::compile(*this, *jc, pc & 0xffc); continue; }
+        // Copia, no referencia: el hilo del CPU puede invalidar esta ranura por un DMA a
+        // IMEM mientras se mira, y leer fn y nOps por separado de la tabla viva daria un
+        // par incoherente (fn valido con nOps=0 = avance de pc nulo = bucle infinito).
+        const rspjit::Block blk = jc->blocks[bi];
+        if(blk.fn && blk.nOps && blk.nOps <= c) {
+          blk.fn(this);
+          pc = (pc + 4u * blk.nOps) & 0xfff;
+          c -= blk.nOps;
+          if(jitStats) jc->jitOps += blk.nOps;
+          continue;
+        }
+      }
       c--;
+      if(jitStats && jc) jc->interpOps++;
       // Fetch: dentro del bucle el PC SIEMPRE esta alineado a palabra (avanza de 4 en 4 y
       // take() enmascara con 0xffc), asi que aqui no hace falta la comprobacion de
       // alineacion de imword() - ese camino byte a byte solo existe para las utilidades de

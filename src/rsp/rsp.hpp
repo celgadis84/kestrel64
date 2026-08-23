@@ -21,6 +21,7 @@
 namespace kestrel {
 
 struct Memory;
+namespace rspjit { struct Cache; }
 
 // One 128-bit vector register: 8 lanes of 16 bits, lane 0 = most significant
 // (big-endian), matching the wiki's VPR<n> convention. Byte 0 = high byte of
@@ -107,7 +108,27 @@ struct Rsp {
   bool vecfast = true;
   char coldPad_[62] = {};   // resto de la linea: nada mas debe caer aqui
 
+  // --- dynarec (src/rsp/rspjit.*) ------------------------------------------
+  // Interruptor y tabla de bloques. La tabla vive en el heap y detras de un puntero para
+  // que rsp.hpp no tenga que arrastrar el emisor x86 a todo el que incluya el RSP.
+  bool jitOn = false;
+  rspjit::Cache* jc = nullptr;
+  // Tira la tabla de bloques. La llama el motor de DMA del SP cuando escribe en IMEM: es
+  // la unica via por la que el microcodigo puede cambiar bajo un bloque ya compilado
+  // mientras la tarea corre (carga de overlay). Al arrancar cada tarea se comprueba ademas
+  // la huella de IMEM, que cubre a cualquier otro escritor.
+  auto jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void;
+  bool statsOn = false;            // KESTREL_RSPJIT_STATS: cobertura del dynarec
+  auto jitStatsDump() -> void;
+  // Puentes publicos para el codigo compilado: llaman EXACTAMENTE al mismo helper que el
+  // interprete, de modo que el JIT no puede tener otra semantica que el oraculo.
+  auto jitCop2 (u32 op) -> void { execCop2(op); }
+  auto jitLoad (u32 op) -> void { execLoad(op); }
+  auto jitStore(u32 op) -> void { execStore(op); }
+  auto jitExec (u32 op) -> void { exec(op); }
+
   Rsp();
+  ~Rsp();
 
   // Differential VU fuzz: run each SSE-accelerated COP2 op against the scalar reference
   // over `iters` random states, return the number of mismatches (0 = bit-exact).

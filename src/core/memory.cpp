@@ -1075,6 +1075,7 @@ auto Memory::spDma(bool toRam) -> void {
   u32 memAddr  = rcp.sp_mem_addr & 0x1fff;
   bool imem    = (memAddr & 0x1000) != 0;
   u32 memOff   = memAddr & 0xff8;
+  const u32 memOff0 = memOff;   // el bucle de abajo lo avanza; el dynarec necesita el inicial
   u32 dramAddr = rcp.sp_dram_addr & 0xfffff8;
   // Invariante: los vectores de excepcion (0x0-0x400) no son destino legitimo de
   // ningun DMA. Si alguno apunta ahi, el kernel del juego queda sin manejador y la
@@ -1118,6 +1119,11 @@ auto Memory::spDma(bool toRam) -> void {
     memOff  = (memOff + length) & 0xfff;
     dramAddr += length + skip;
   }
+  // Si el DMA acaba de reescribir IMEM, el microcodigo cambio bajo cualquier bloque que el
+  // dynarec del RSP tuviera compilado (esto es como se cargan los overlays de F3DEX2). Tirar
+  // la tabla aqui es la unica invalidacion que necesita: el resto de escritores de IMEM los
+  // caza la huella que Rsp::start comprueba al arrancar cada tarea.
+  if(imem && !toRam) rsp.jitInvalidate(memOff0, count * length, sp.data());
   rcp.sp_mem_addr  = (imem ? 0x1000 : 0) | memOff;
   rcp.sp_dram_addr = dramAddr & 0xffffff;
   // After any SP DMA completes the length register counts down to a fixed 0xFF8

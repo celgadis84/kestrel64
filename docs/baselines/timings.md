@@ -310,3 +310,10 @@ reloj de pared: por eso threaded-jit tarda 2 s y interp 14 s para la misma image
 diferencia entre modos es normal; lo que seria fallo es que el md5 no coincidiera.
 
 Si un tramo pasa de ~3x su fila, es cuelgue: bisecar con `git stash`, no subir el timeout.
+
+### Pasada con el dynarec del RSP (2026-08-23)
+
+`gate_all.sh` completo **5 min 53 s** (18:54:51 -> 19:00:44) con `KESTREL_RSPJIT` por
+defecto ON. systemtest 24/16/17/18/10 s, sm64 14/6/9/11/2 s, krom 218 s (4 jobs).
+La diferencia con los 4 min 53 s de la fila anterior esta toda en krom, que ya venia
+oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.

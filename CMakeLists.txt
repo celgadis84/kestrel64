@@ -31,6 +31,7 @@ add_executable(kestrel64
   src/video/present.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
   src/audio/audio.cpp
 )
 
@@ -47,9 +48,11 @@ endif()
 # RSP core unit test (hand-assembled microcode; no windowing deps).
 add_executable(rsp_test EXCLUDE_FROM_ALL
   test/rsp_test.cpp
+  src/cpu/jit.cpp
   src/core/memory.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
   src/audio/audio.cpp
 )
 target_include_directories(rsp_test PRIVATE src)
@@ -60,9 +63,11 @@ endif()
 # Cartridge save-device unit test (SRAM + FlashRAM state machine; no windowing deps).
 add_executable(save_test EXCLUDE_FROM_ALL
   test/save_test.cpp
+  src/cpu/jit.cpp
   src/core/memory.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
   src/audio/audio.cpp
 )
 target_include_directories(save_test PRIVATE src)
