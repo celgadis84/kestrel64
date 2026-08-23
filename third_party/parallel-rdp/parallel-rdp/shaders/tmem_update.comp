@@ -281,7 +281,10 @@ void update_tmem_32(UploadInfo info, int tmem16_index, bool upper_tmem, bool yuv
     uint word;
     if ((rdram_addr & 3) == 0)
     {
-        word = uint(vram32.data[rdram_addr >> 2]);
+        // kestrel: RDRAM se guarda en el orden big-endian del N64, no en el de ares.
+        // La vista vram32 cae sobre palabras con los bytes al reves, igual que en el
+        // resto del port; sin el swap esta subida de tile mete la textura girada.
+        word = RDRAM_BSWAP32(uint(vram32.data[rdram_addr >> 2]));
     }
     else
     {

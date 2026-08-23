@@ -44,7 +44,17 @@ constexpr u32 kCmdLen[64] = {
 };
 
 struct SilentLog : Util::LoggingInterface {
-  auto log(const char*, const char*, va_list) -> bool override { return true; }
+  // Por defecto se traga TODO: parallel-rdp escupe mucho ruido informativo. Con
+  // KESTREL_VRDPLOG deja pasar sus mensajes, que es la unica forma de ver un
+  // LOGE("Unimplemented!") suyo cuando un pase entero desaparece.
+  auto log(const char* tag, const char* fmt, va_list va) -> bool override {
+    static const bool on = std::getenv("KESTREL_VRDPLOG") != nullptr;
+    if(!on) return true;
+    std::fprintf(stderr, "[prdp %s] ", tag ? tag : "?");
+    std::vfprintf(stderr, fmt, va);
+    std::fflush(stderr);
+    return true;
+  }
 } gLog;
 
 struct Backend {
@@ -230,6 +240,11 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
       }
     }
 
+    static const bool cmdLog = std::getenv("KESTREL_VRDPLOG") != nullptr;
+    if(cmdLog) {
+      std::fprintf(stderr, "[vrdp] %06x op=%02x len=%u w0=%08x w1=%08x\n",
+                   cur, op, len, words[0], words[1]);
+    }
     if(op >= 8) g->proc->enqueue_command(len * 2, words);
 
     if(::RDP::Op(op) == ::RDP::Op::SyncFull) {

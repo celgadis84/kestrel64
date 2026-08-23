@@ -317,3 +317,5 @@ Si un tramo pasa de ~3x su fila, es cuelgue: bisecar con `git stash`, no subir e
 defecto ON. systemtest 24/16/17/18/10 s, sm64 14/6/9/11/2 s, krom 218 s (4 jobs).
 La diferencia con los 4 min 53 s de la fila anterior esta toda en krom, que ya venia
 oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
+- gate_all (rebuild build/, 5 modos + krom 371): **5m30s** (2026-08-23, tras fix rdpDrain+FBDUMP). Desglose: systemtest 26/16/18/19/11s, sm64 15/6/9/11/2s, krom 214s @4 jobs.
+- krom 371 ROMs bajo `KESTREL_PRDP=1` (build-prdp, RX 570): **266s** @4 jobs.

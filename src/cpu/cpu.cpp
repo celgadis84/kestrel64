@@ -625,6 +625,14 @@ auto CPU::unimplemented(u32 op) -> void {
       std::fprintf(stderr, "[rcp] mi_intr=%02x mi_mask=%02x sp_status=%08x sp_pc=%03x dpc_status=%08x rspRun=%u\n",
                    mem->rcp.mi_intr.load(), mem->rcp.mi_mask, mem->rcp.sp_status.load(), mem->rcp.sp_pc,
                    mem->rcp.dpc_status.load(), (unsigned)mem->rsp.running);
+    // Antes de mirar el framebuffer hay que dejar quieto al RCP. En modo threaded el
+    // hilo del RDP puede tener la lista de comandos todavia sin consumir cuando la CPU
+    // llega al tope de instrucciones: el volcado saldria de un frame a medio pintar, o
+    // directamente vacio. Con el dynarec la CPU quema el tope tan rapido que el RDP no
+    // ha empezado siquiera, y con parallel-rdp (que ademas paga arranque de GPU) la
+    // carrera se pierde SIEMPRE: la imagen salia entera a cero. rdpDrain() espera a que
+    // la cola quede vacia, y el SYNC_FULL de dentro del trabajo ya espera a la GPU.
+    if(mem && std::getenv("KESTREL_FBDUMP")) mem->rdpDrain();
     if(const char* fb = std::getenv("KESTREL_FBDUMP")) dumpFramebufferBmp(mem, fb);
     if(const char* md = std::getenv("KESTREL_MEMDUMP")) {   // dump real guest words direct from RDRAM (KSEG0/1 phys)
       const auto& ram = mem->rdram;

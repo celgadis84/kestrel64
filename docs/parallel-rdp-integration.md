@@ -194,3 +194,55 @@ PRDP keeps pixels in VRAM. If a title needs RDRAM readback, PRDP exposes hidden-
 7. Later: vendor source into third_party/; expose upscale (2x/4x) toggle.
 ```
 ```
+
+---
+
+## Known divergence: the COMBINED pipeline register (krom GRB decoders)
+
+**Symptom.** With `KESTREL_PRDP=1` the three ROMs `GRB12/GRB15/GRB24 Decode`
+go from 100.00 to 0.00 against the hardware capture: the fill rectangle is
+painted, but not one of the 27 texture rectangles shows up. Under SoftRDP the
+same ROMs are pixel-exact.
+
+**It is not** the FIFO parse, the TLUT, the address masking or the tile upload.
+Ruled out one by one: all 200 DP commands reach `enqueue_command`, clearing
+`EN_TLUT` in the ROM leaves the image just as black under PRDP while SoftRDP
+starts drawing raw CI4 nibbles, and parallel-rdp's own log has no `LOGE`.
+
+**Root cause.** These decoders program the combiner as
+
+```
+cycle1 RGB   = (TEXEL0 - 0) * COMBINED_ALPHA + 0
+cycle1 ALPHA = (TEXEL0_A - 0) * LOD_FRACTION + 0
+```
+
+and run it in 1-cycle mode, where the RDP evaluates the *second* cycle's
+equation. `COMBINED` on the RDP is a pipeline register: it is not zeroed per
+pixel, it still holds the previous pixel's combiner output. In steady state
+that alpha is 1.0, so `TEXEL0 * COMBINED_ALPHA` is just `TEXEL0` — which is
+exactly what krom is counting on, and what the hardware capture shows.
+`src/rdp/rdp.cpp` models it that way (`combined[]` persists across pixels).
+
+parallel-rdp instead feeds a literal zero, in `shaders/shading.h`:
+
+```glsl
+CombinerInputs(derived.constant_muladd1, ..., shade, u8x4(0), texel0, texel1, ...)
+                                                     ^^^^^^^ COMBINED
+```
+
+so the multiply collapses to zero and every texel comes out transparent black.
+
+**Why we are not "fixing" it.** The zero is not an oversight, it is forced by
+the architecture. parallel-rdp shades pixels in parallel on the GPU; "the
+previous pixel" does not exist there, and there is no cheap way to serialise a
+combiner-wide dependency without giving up the parallelism that is the whole
+point of the backend. Any workaround (iterating the cycle twice to chase the
+fixed point, pinning COMBINED_ALPHA to 1.0) would be a guess dressed up as
+hardware, i.e. exactly the hardcoding the hard rules forbid.
+
+Recorded as a **known, accepted divergence**: 3 ROMs out of 371, all three
+synthetic video decoders that deliberately exploit a sequential quirk. The PRDP
+sweep is still a net win overall (mean_exact 88.95 vs 88.71, perfect 178 vs
+148). Anything that samples COMBINED/COMBINED_ALPHA in the first cycle will
+read zero under PRDP — worth remembering if a real game ever looks black in
+one pass.
