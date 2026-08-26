@@ -80,7 +80,7 @@ struct Cache {
 
 // Longitud minima de bloque. Por debajo de esto el prologo+epilogo del bloque cuesta mas
 // que interpretar las instrucciones, asi que no merece la pena compilar.
-static constexpr u32 kMinOps = 3;
+static constexpr u32 kMinOps = 2;
 // Tope de instrucciones por bloque: una linea recta mas larga que esto no existe en
 // microcodigo real, y acota el codigo emitido por entrada de la tabla.
 static constexpr u32 kMaxOps = 64;

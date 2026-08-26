@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <emmintrin.h>   // __m128i: el camino rapido de COP2 lo lleva en la firma
 // kestrel64 — Reality Signal Processor, low-level interpreter (M3.3).
 //
 // The RSP is a MIPS-ish scalar core (no mult/div/HI/LO, 32 GPRs, 12-bit PC over
@@ -21,7 +22,12 @@
 namespace kestrel {
 
 struct Memory;
+struct Rsp;
 namespace rspjit { struct Cache; }
+
+// Direccion de la entrada de COP2 ya especializada para el fn de `op` (solo aritmetica,
+// sub>=0x10). El dynarec la usa para emitir un CALL directo. Definida en rsp.cpp.
+auto rspCop2Entry(u32 op) -> void*;
 
 // One 128-bit vector register: 8 lanes of 16 bits, lane 0 = most significant
 // (big-endian), matching the wiki's VPR<n> convention. Byte 0 = high byte of
@@ -50,6 +56,11 @@ struct alignas(16) R128 {
 
   // broadcast modifier: produce vt(e) per the element-field table.
   auto operator()(u32 e) const -> R128;
+  // Igual, pero devolviendo el registro SSE sin pasar por memoria. El camino rapido de
+  // COP2 solo quiere el valor barajado para operar con el: materializarlo en un R128 de
+  // la pila obligaba a un store de 16 bytes seguido del load de vuelta en execVuSse --
+  // un reenvio tienda->carga en la instruccion mas frecuente del microcodigo.
+  auto bcast(u32 e) const -> __m128i;
 };
 
 struct Rsp {
@@ -177,9 +188,14 @@ private:
 
   auto exec(u32 op) -> void;
   auto execCop2(u32 op) -> void;
+  auto execCop2Move(u32 op) -> void;
+public:
+  template<u32 FN> auto execCop2T(u32 op) -> void;   // usada por la tabla de entradas del dynarec
+private:
+  auto execCop2Scalar(u32 op, __m128i tv) -> void;
   // 8-lane SSE fast path for the parallelizable COP2 ops. Returns true if it handled
   // `fn` (bit-exact with the scalar switch), false to fall through to scalar.
-  auto execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool;
+  template<u32 FN> auto vuOpT(__m128i t, R128& S, R128& D) -> bool;
   auto execLoad(u32 op) -> void;
   auto execStore(u32 op) -> void;
   auto mfc0(int rt, int rd) -> void;

@@ -8,6 +8,8 @@
 #include <immintrin.h>   // SSE2..SSE4.2 (Nehalem host: -march=native)
 #include <chrono>
 #include <vector>
+#include <array>
+#include <utility>
 
 namespace kestrel {
 
@@ -135,11 +137,13 @@ constexpr BcastMasks kBcast = makeBcastMasks();
 alignas(16) constexpr u8 kLaneSwap[16] = {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};
 }  // namespace
 
+auto R128::bcast(u32 e) const -> __m128i {
+  return _mm_shuffle_epi8(_mm_load_si128(reinterpret_cast<const __m128i*>(el)),
+                          _mm_loadu_si128(reinterpret_cast<const __m128i*>(kBcast.b[e & 15])));
+}
 auto R128::operator()(u32 e) const -> R128 {
   R128 v;
-  _mm_storeu_si128(reinterpret_cast<__m128i*>(v.el),
-                   _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(el)),
-                                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(kBcast.b[e & 15]))));
+  _mm_store_si128(reinterpret_cast<__m128i*>(v.el), bcast(e));
   return v;
 }
 
@@ -637,8 +641,15 @@ static inline auto vsatMacU(const V48& a) -> __m128i {
 // --- COP2 SSE fast path (8 lanes at once) ------------------------------------
 // Bit-exact with the scalar switch below. `--rspfuzz` proves scalar==sse over random
 // states for every fn handled here. Returns false for ops it doesn't implement.
-auto Rsp::execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool {
-  const __m128i s = vload(S), t = vload(vte);
+// FN es parametro de plantilla, no argumento: el switch de abajo se pliega a un solo caso en
+// cada instanciacion. Es la misma tabla de semanticas de siempre -- no hay una segunda copia
+// de las reglas del VU -- pero el llamante que conoce el opcode (el dynarec, y el
+// despachador de execCop2) entra directo en el caso, sin el salto indirecto que con la
+// mezcla real de microcodigo falla la prediccion casi siempre.
+template<u32 FN>
+auto Rsp::vuOpT(__m128i t, R128& S, R128& D) -> bool {
+  constexpr u32 fn = FN;
+  const __m128i s = vload(S);
 
   switch(fn) {
   // --- MAC / multiply-accumulate chain (48-bit acc via limb helpers) ---------
@@ -715,6 +726,7 @@ auto Rsp::execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool {
     return true;
   }
 
+
   // --- bitwise logicals: accl = op; D = accl ---------------------------------
   case 0x28: { __m128i r = _mm_and_si128(s, t);        vstore(accl, r); vstore(D, r); return true; }  // VAND
   case 0x29: { __m128i r = vnot(_mm_and_si128(s, t));  vstore(accl, r); vstore(D, r); return true; }  // VNAND
@@ -784,6 +796,30 @@ auto Rsp::execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool {
     vstoreZero(vcch); vstoreZero(vcol); vstoreZero(vcoh);
     return true;
   }
+  // --- VMRG: select S/vte by VCC.low, clear VCO ------------------------------
+  case 0x27: {
+    __m128i al = _mm_blendv_epi8(t, s, vmaskFromFlag(vccl));
+    vstore(accl, al); vstore(D, al);
+    vstoreZero(vcoh); vstoreZero(vcol);
+    return true;
+  }
+  // --- VABS: sign of S applied to T. No toca banderas -------------------------
+  // El unico caso que no es una negacion normal es T=-32768: el acumulador se queda con
+  // el patron que sale de negar en 16 bits (0x8000) y el destino con el valor saturado
+  // (0x7fff). _mm_sub_epi16 da lo primero y _mm_subs_epi16 lo segundo, asi que las dos
+  // salidas son la misma resta hecha con dos saturaciones distintas.
+  case 0x13: {
+    __m128i zero = _mm_setzero_si128();
+    __m128i sNeg  = _mm_cmpgt_epi16(zero, s);       // S<0
+    __m128i sZero = _mm_cmpeq_epi16(s, zero);       // S==0
+    __m128i al = _mm_blendv_epi8(t, _mm_sub_epi16 (zero, t), sNeg);
+    __m128i dv = _mm_blendv_epi8(t, _mm_subs_epi16(zero, t), sNeg);
+    vstore(accl, _mm_andnot_si128(sZero, al));      // S==0 -> 0 en las dos
+    vstore(D,    _mm_andnot_si128(sZero, dv));
+    return true;
+  }
+
+
   // --- VCH: clip compare, sets all of VCC/VCO/VCE from S,T (element-wise) -----
   case 0x25: {
     __m128i zero = _mm_setzero_si128();
@@ -831,29 +867,6 @@ auto Rsp::execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool {
     vstoreZero(vcol); vstoreZero(vcoh); vstoreZero(vce);
     return true;
   }
-  // --- VMRG: select S/vte by VCC.low, clear VCO ------------------------------
-  case 0x27: {
-    __m128i al = _mm_blendv_epi8(t, s, vmaskFromFlag(vccl));
-    vstore(accl, al); vstore(D, al);
-    vstoreZero(vcoh); vstoreZero(vcol);
-    return true;
-  }
-  // --- VABS: sign of S applied to T. No toca banderas -------------------------
-  // El unico caso que no es una negacion normal es T=-32768: el acumulador se queda con
-  // el patron que sale de negar en 16 bits (0x8000) y el destino con el valor saturado
-  // (0x7fff). _mm_sub_epi16 da lo primero y _mm_subs_epi16 lo segundo, asi que las dos
-  // salidas son la misma resta hecha con dos saturaciones distintas.
-  case 0x13: {
-    __m128i zero = _mm_setzero_si128();
-    __m128i sNeg  = _mm_cmpgt_epi16(zero, s);       // S<0
-    __m128i sZero = _mm_cmpeq_epi16(s, zero);       // S==0
-    __m128i al = _mm_blendv_epi8(t, _mm_sub_epi16 (zero, t), sNeg);
-    __m128i dv = _mm_blendv_epi8(t, _mm_subs_epi16(zero, t), sNeg);
-    vstore(accl, _mm_andnot_si128(sZero, al));      // S==0 -> 0 en las dos
-    vstore(D,    _mm_andnot_si128(sZero, dv));
-    return true;
-  }
-
   // --- VCL: cierre del clip que VCH empezo. Cuatro ramas por carril ----------
   // El escalar decide con VCO.low (carry) y VCO.high, y cada rama escribe una bandera
   // distinta: solo (carry && !high) toca VCC.low y solo (!carry && !high) toca VCC.high;
@@ -897,9 +910,12 @@ auto Rsp::execVuSse(u32 fn, const R128& vte, R128& S, R128& D) -> bool {
 }
 
 // --- COP2 (vector unit) -----------------------------------------------------
-auto Rsp::execCop2(u32 op) -> void {
+// Los movimientos entre banco escalar y vectorial (MFC2/CFC2/MTC2/CTC2) viven aparte del
+// camino aritmetico por la misma razon que el switch de execVuSse esta partido: el prologo
+// lo dimensiona el peor caso de la funcion entera. Ver execCop2 mas abajo.
+auto Rsp::execCop2Move(u32 op) -> void {
   u32 sub = op >> 21 & 0x1f;
-  if(sub < 0x10) {  // register moves
+  {
     int rt = op >> 16 & 31, vs = op >> 11 & 31, velem = op >> 7 & 0xf;
     switch(sub) {
     case 0x00: {  // MFC2
@@ -925,10 +941,24 @@ auto Rsp::execCop2(u32 op) -> void {
     }
     return;
   }
+}
 
-  u32 fn = op & 0x3f, e = op >> 21 & 0xf;
-  int vt = op >> 16 & 31, vs = op >> 11 & 31, vd = op >> 6 & 31, de = op >> 11 & 7;
-  R128 vte = vpr[vt](e);
+// Camino rapido de COP2. Aqui SOLO va lo que se ejecuta siempre: decodificar, construir
+// vt(e) y llamar al SSE. Todo lo demas (los movimientos de arriba y el respaldo escalar de
+// abajo) esta en funciones propias, y no por limpieza: con el switch escalar de 64 casos
+// dentro, el asignador de registros dimensionaba el prologo de ESTA funcion con el peor caso
+// de todo el fichero -- 8 push de GPR, 264 bytes de pila y 10 volcados de xmm6..xmm15 a la
+// entrada, mas sus 10 recargas a la salida. Eran ~36 accesos a memoria pagados por CADA
+// instruccion vectorial, incluido un VXOR que solo toca dos registros, y COP2 es ~37% del
+// microcodigo. Partido, el prologo del camino caliente es el que le corresponde.
+template<u32 FN>
+auto Rsp::execCop2T(u32 op) -> void {
+  constexpr u32 fn = FN;
+  u32 e = op >> 21 & 0xf;
+  int vt = op >> 16 & 31, vs = op >> 11 & 31, vd = op >> 6 & 31;
+  // El valor de vt con su modificador de elemento se queda en registro para el camino
+  // rapido; solo el respaldo escalar lo materializa en memoria (ver mas abajo).
+  const __m128i tv = vpr[vt].bcast(e);
   R128& S = vpr[vs];
   R128& D = vpr[vd];
 
@@ -936,11 +966,46 @@ auto Rsp::execCop2(u32 op) -> void {
   if(g_vustat.on) g_vustat.cop2[fn]++;
 #endif
 #if KESTREL_VUSTAT
-  if(sse && execVuSse(fn, vte, S, D)) { if(g_vustat.on) g_vustat.cop2sse[fn]++; return; }
+  if(sse && vuOpT<FN>(tv, S, D)) { if(g_vustat.on) g_vustat.cop2sse[fn]++; return; }
 #else
-  if(sse && execVuSse(fn, vte, S, D)) return;
+  if(sse && vuOpT<FN>(tv, S, D)) return;
 #endif
 
+  execCop2Scalar(op, tv);
+}
+
+// Tabla de entradas especializadas, una por fn. La rellena el desplegado de abajo, y de ella
+// salen tanto el despachador del interprete como los destinos que emite el dynarec: los dos
+// ejecutan LA MISMA funcion, asi que no pueden divergir.
+using Cop2Fn = void (*)(Rsp*, u32);
+namespace {
+template<u32 FN> auto cop2Thunk(Rsp* r, u32 op) -> void { r->execCop2T<FN>(op); }
+template<u32... I> constexpr auto makeCop2Tab(std::integer_sequence<u32, I...>) {
+  return std::array<Cop2Fn, 64>{ &cop2Thunk<I>... };
+}
+constexpr std::array<Cop2Fn, 64> kCop2Tab = makeCop2Tab(std::make_integer_sequence<u32, 64>{});
+}  // namespace
+
+// Punto de entrada del dynarec: le da la direccion ya resuelta para un opcode concreto, de
+// modo que el codigo compilado emite un CALL directo en vez de decodificar y saltar.
+auto rspCop2Entry(u32 op) -> void* { return (void*)kCop2Tab[op & 0x3f]; }
+
+auto Rsp::execCop2(u32 op) -> void {
+  u32 sub = op >> 21 & 0x1f;
+  if(sub < 0x10) { execCop2Move(op); return; }
+  kCop2Tab[op & 0x3f](this, op);
+}
+
+// Respaldo escalar: la referencia bit a bit de la que sale el camino SSE. Se llega aqui solo
+// con los fn que execVuSse no cubre (y con KESTREL_NORSPSSE). Funcion propia: ver execCop2.
+auto Rsp::execCop2Scalar(u32 op, __m128i tv) -> void {
+  u32 fn = op & 0x3f, e = op >> 21 & 0xf;
+  int vt = op >> 16 & 31, vs = op >> 11 & 31, vd = op >> 6 & 31, de = op >> 11 & 7;
+  (void)vt; (void)e;
+  R128& S = vpr[vs];
+  R128& D = vpr[vd];
+
+  R128 vte; _mm_store_si128(reinterpret_cast<__m128i*>(vte.el), tv);
   switch(fn) {
   case 0x00: case 0x01: {  // VMULF / VMULU
     bool U = fn & 1;
@@ -1300,6 +1365,16 @@ auto Rsp::benchStep(u64 iters) -> void {
   const char* mixSel = std::getenv("KESTREL_RSPMIX");
   auto only = [&](const char* w) { return mixSel && std::strcmp(mixSel, w) == 0; };
   if(only("cop2"))  fill(1024, [&](u32 j){ return vuOp(cop2fn[j % 100], j & 15, 2 + (j % 6), 8 + (j % 7), 16 + (j % 8)); });
+  // Una sola operacion vectorial repetida (VMADN, la mas frecuente del reparto real). La
+  // diferencia contra "cop2" aisla lo que cuesta el DESPACHO por opcode -- el switch de
+  // execVuSse es un salto indirecto que con la mezcla real falla la prediccion casi siempre,
+  // y con una sola operacion la acierta siempre.
+  // KESTREL_RSPMIXFN elige que func vectorial se repite (por defecto VMADN).
+  const u32 oneFn = std::getenv("KESTREL_RSPMIXFN") ? (u32)std::strtoul(std::getenv("KESTREL_RSPMIXFN"), nullptr, 0) : 0x0eu;
+  if(only("cop2one")) fill(1024, [&](u32 j){ return vuOp(oneFn, j & 15, 2 + (j % 6), 8 + (j % 7), 16 + (j % 8)); });
+  // Igual pero ademas con el modificador de elemento fijo a 0 (sin barajado): aisla lo que
+  // cuesta construir vt(e).
+  if(only("cop2one0")) fill(1024, [&](u32 j){ return vuOp(0x0e, 0, 2 + (j % 6), 8 + (j % 7), 16 + (j % 8)); });
   if(only("vecld")) fill(1024, [&](u32 j){ return (j & 1) ? ldOp(0x32, lwc2sub[j % 25], 1, 2 + (j % 6), (j * 2) & 14, j & 7)
                                                           : ldOp(0x3a, swc2sub[j % 20], 1, 2 + (j % 6), (j * 2) & 14, j & 7); });
   // Dos variantes de ALU a proposito: `alu1` encadena ADDI sobre el mismo registro (cada

@@ -358,19 +358,38 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   if(c.buf.used + worst > c.buf.cap) c.clear();
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 
+  // Que necesita este bloque. Un bloque de solo ALU y un salto -- que es la forma de casi
+  // todo bucle de microcodigo -- no toca DMEM ni llama a ningun helper, asi que no tiene
+  // por que pagar el puntero a DMEM ni el hueco de sombra de la ABI. El prologo se queda
+  // en push rbx / mov rbx,rcx, y el epilogo en pop rbx / ret.
+  bool needsDmem = false, needsCall = false;
+  for(u32 i = 0; i < n; i++) {
+    u32 op = at((pc0 + 4 * i) & 0xffc), maj = op >> 26;
+    switch(classify(op)) {
+    case Kind::Cop2: case Kind::Lwc2: case Kind::Swc2: case Kind::ExecMem:
+      needsCall = true; break;
+    case Kind::Native:
+      if(maj == 0x20 || maj == 0x24 || maj == 0x28) needsDmem = true;  // LB / LBU / SB
+      break;
+    default: break;
+    }
+  }
+
   u8* entry = c.buf.cursor();
   Ctx ctx{ E(c.buf), (s32)((const u8*)&rsp.r[0] - (const u8*)&rsp),
                      (s32)((const u8*)&rsp.pc   - (const u8*)&rsp) };
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
   E& e = ctx.e;
 
-  // Prologo. RBX = Rsp*, RDI = DMEM. Los dos son callee-saved en Win64, de ahi los push.
-  // Alineacion: al entrar RSP=8 (mod 16); dos push -> 8; sub 40 -> 0, que es lo que exige
-  // un CALL, y esos 40 bytes cubren de sobra los 32 de shadow space de la ABI.
-  e.push(rBX); e.push(rDI);
+  // Prologo. RBX = Rsp*, RDI = DMEM (solo si hace falta). Los dos son callee-saved en Win64,
+  // de ahi los push. Alineacion: al entrar RSP=8 (mod 16) y un CALL exige RSP=0, asi que el
+  // hueco depende de cuantos push hubo -- 40 con dos, 32 con uno; sin CALL no hace falta.
+  const u8 frame = needsCall ? (needsDmem ? 40 : 32) : 0;
+  e.push(rBX);
+  if(needsDmem) e.push(rDI);
   e.mov64_rr(rBX, rCX);
-  e.ld64(rDI, rBX, dmpOff);
-  e.sub_rsp(40);
+  if(needsDmem) e.ld64(rDI, rBX, dmpOff);
+  if(frame) e.sub_rsp(frame);
 
   for(u32 i = 0; i < n; i++) {
     const u32 a = (pc0 + 4 * i) & 0xffc;
@@ -379,7 +398,12 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     switch(classify(op)) {
     case Kind::Branch:  emitBranch(ctx, op, a); break;
     case Kind::Native:  emitNative(ctx, op); break;
-    case Kind::Cop2:    emitCall(ctx, (void*)&kestrel_rspjit_cop2,  op); break;
+    // Para la aritmetica vectorial se llama a la entrada ya especializada para ESE fn:
+    // el destino es constante en tiempo de compilacion del bloque, asi que sale un CALL
+    // directo y dentro no queda ningun switch que predecir. Los movimientos escalar<->vector
+    // (sub<0x10) siguen por el puente generico, que es donde se decide.
+    case Kind::Cop2:    emitCall(ctx, ((op >> 21 & 0x1f) < 0x10) ? (void*)&kestrel_rspjit_cop2
+                                                                 : rspCop2Entry(op), op); break;
     case Kind::Lwc2:    emitCall(ctx, (void*)&kestrel_rspjit_load,  op); break;
     case Kind::Swc2:    emitCall(ctx, (void*)&kestrel_rspjit_store, op); break;
     case Kind::ExecMem: emitCall(ctx, (void*)&kestrel_rspjit_exec,  op); break;
@@ -387,7 +411,9 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     }
   }
 
-  e.add_rsp(40); e.pop(rDI); e.pop(rBX); e.ret();
+  if(frame) e.add_rsp(frame);
+  if(needsDmem) e.pop(rDI);
+  e.pop(rBX); e.ret();
 
   if(c.buf.overflowed()) { c.clear(); return; }
   c.buf.finalize(entry);
