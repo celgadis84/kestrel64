@@ -1540,9 +1540,16 @@ template<u32 OPc>
 auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
   constexpr u32 sz = (OPc == 0x20 || OPc == 0x24 || OPc == 0x28) ? 1
                    : (OPc == 0x21 || OPc == 0x25 || OPc == 0x29) ? 2
-                   : (OPc == 0x23 || OPc == 0x27 || OPc == 0x2b) ? 4 : 8;
-  constexpr bool store = (OPc == 0x28 || OPc == 0x29 || OPc == 0x2b || OPc == 0x3f);
+                   : (OPc == 0x23 || OPc == 0x27 || OPc == 0x2b || OPc == 0x31 || OPc == 0x39) ? 4
+                   : 8;
+  constexpr bool store = (OPc == 0x28 || OPc == 0x29 || OPc == 0x2b || OPc == 0x3f
+                       || OPc == 0x39 || OPc == 0x3d);
+  // LWC1/LDC1/SWC1/SDC1: el "rt" indexa el banco FPU, no los gpr, y el dato del store sale
+  // de fpr (el bloque no lo pasa). Con CU1=0 se bailea para que el interprete levante la
+  // Coprocessor Unusable exacta (ExcCode 11, CE=1).
+  constexpr bool fp = (OPc == 0x31 || OPc == 0x35 || OPc == 0x39 || OPc == 0x3d);
   if(!mem) return 0;
+  if constexpr(fp) { if(!((u32)cop0[C0_Status] & 0x2000'0000u)) return 0; }
   // LWU/LD/SD: reservadas (RI) en modo no-kernel sin UX/SX. Bail para que el interprete
   // levante la RI exacta.
   if constexpr(OPc == 0x27 || OPc == 0x37 || OPc == 0x3f) {
@@ -1570,10 +1577,13 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
     else if constexpr(OPc == 0x24) set(rt, (u64)(u8) raw);
     else if constexpr(OPc == 0x25) set(rt, (u64)(u16)raw);
     else if constexpr(OPc == 0x27) set(rt, (u64)(u32)raw);
+    else if constexpr(OPc == 0x31) fprSet32(rt, (u32)raw);   // LWC1
+    else if constexpr(OPc == 0x35) fprSet64(rt, raw);        // LDC1
     else                           set(rt, raw);            // LD
     return 1;
   } else {
     u32 pm = (u32)p & 0x1fff'ffff;
+    if constexpr(fp) rtVal = (sz == 4) ? (u64)fprGet32(rt) : fprGet64(rt);
     if(storeRepeat(pm, rtVal, sz)) return 1;
     if constexpr(sz == 1 || sz == 2) { if(storeCart(pm, rtVal, sz)) return 1; }
     if constexpr(sz != 4)            { if(mem->wordStoreQuirk(pm, rtVal, sz)) return 1; }
@@ -1595,6 +1605,8 @@ KJM(kestrel_jitLB,  0x20) KJM(kestrel_jitLH,  0x21) KJM(kestrel_jitLW,  0x23)
 KJM(kestrel_jitLBU, 0x24) KJM(kestrel_jitLHU, 0x25) KJM(kestrel_jitLWU, 0x27)
 KJM(kestrel_jitLD,  0x37) KJM(kestrel_jitSB,  0x28) KJM(kestrel_jitSH,  0x29)
 KJM(kestrel_jitSW,  0x2b) KJM(kestrel_jitSD,  0x3f)
+KJM(kestrel_jitLWC1, 0x31) KJM(kestrel_jitLDC1, 0x35)
+KJM(kestrel_jitSWC1, 0x39) KJM(kestrel_jitSDC1, 0x3d)
 #undef KJM
 
 auto CPU::special(u32 op) -> void {

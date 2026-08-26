@@ -359,6 +359,8 @@ extern "C" u8 kestrel_jitLHU(void*, u64, u32, u64); extern "C" u8 kestrel_jitLWU
 extern "C" u8 kestrel_jitLD (void*, u64, u32, u64); extern "C" u8 kestrel_jitSB (void*, u64, u32, u64);
 extern "C" u8 kestrel_jitSH (void*, u64, u32, u64); extern "C" u8 kestrel_jitSW (void*, u64, u32, u64);
 extern "C" u8 kestrel_jitSD (void*, u64, u32, u64);
+extern "C" u8 kestrel_jitLWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitLDC1(void*, u64, u32, u64);
+extern "C" u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitSDC1(void*, u64, u32, u64);
 
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
@@ -367,6 +369,7 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
                       RcSnap& snap) -> bool {
   u32 OP = op >> 26;
   void* fn = nullptr;
+  bool isFp = false;
   switch(OP) {
     case 0x20: fn = (void*)&kestrel_jitLB;  isStore = false; break;
     case 0x21: fn = (void*)&kestrel_jitLH;  isStore = false; break;
@@ -379,6 +382,12 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
     case 0x29: fn = (void*)&kestrel_jitSH;  isStore = true;  break;
     case 0x2b: fn = (void*)&kestrel_jitSW;  isStore = true;  break;
     case 0x3f: fn = (void*)&kestrel_jitSD;  isStore = true;  break;
+    // COP1: el "rt" indexa fpr, no gpr. El helper lee/escribe el banco FPU por su cuenta,
+    // asi que el store no pasa dato y el load no invalida ninguna ranura del cache.
+    case 0x31: fn = (void*)&kestrel_jitLWC1; isStore = false; isFp = true; break;
+    case 0x35: fn = (void*)&kestrel_jitLDC1; isStore = false; isFp = true; break;
+    case 0x39: fn = (void*)&kestrel_jitSWC1; isStore = true;  isFp = true; break;
+    case 0x3d: fn = (void*)&kestrel_jitSDC1; isStore = true;  isFp = true; break;
     default: return false;
   }
   // La direccion se calcula AQUI, con gpr[rs] donde ya este (ranura del cache o memoria), y
@@ -388,7 +397,7 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   s32 simm = (s32)(s16)(op & 0xFFFF);
   rc.ld64(RDX, rs);                       // arg1 = gpr[rs]
   if(simm) e.add_r_imm32(RDX, simm);      //        + sext(imm16)  (add de 64 bits)
-  if(isStore) rc.ld64(R9, rt);            // arg3 = dato del store
+  if(isStore && !isFp) rc.ld64(R9, rt);   // arg3 = dato del store (COP1 lo saca de fpr)
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX; R12 no fiable)
   e.mov_r_imm32(R8, rt);                  // arg2 = rt
   e.mov_r_imm64(RAX, (u64)fn);
@@ -396,7 +405,7 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   e.test_al_al();
   bailSite = e.je_rel32_placeholder();    // al==0 (faulted) → salta al stub de bail
   snap = rc.snap();                       // lo sucio aqui lo escribe el stub de bail
-  if(!isStore) rc.forget((op >> 16) & 31);   // el helper acaba de escribir gpr[rt] en memoria
+  if(!isStore && !isFp) rc.forget(rt);    // el helper acaba de escribir gpr[rt] en memoria
   return true;
 }
 

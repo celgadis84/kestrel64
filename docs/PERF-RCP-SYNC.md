@@ -258,3 +258,21 @@ Puertas: `gate_all` regress=0, seis modos MATCH `466282775dbd0ac084946558a1c3077
 3. **Camino rapido de D-cache inline** (~6.4% entre `dcRead`/`dcWrite`/`dcFill`).
 4. **Block linking** (~7.2% en `jitTryBlock`) - cada salto vuelve al driver a buscar bloque.
 
+### LWC1/LDC1/SWC1/SDC1 al JIT (2026-08-26)
+
+Los cuatro accesos de memoria COP1 seguian yendo por `jitInterpOp` -> `cop1op`. Ahora los
+cubre la misma plantilla `jitMemOp<OPc>`: el "rt" indexa `fpr` en vez de `gpr`, el dato del
+store lo saca el helper de `fprGet32/64` (el bloque no lo pasa) y con CU1=0 se bailea para
+que el interprete levante la Coprocessor Unusable exacta. 46.6 -> ~47.0 fps.
+
+### Camino rapido de kseg0/kseg1 en `translate`: MEDIDO PEOR, descartado
+
+Anadir al principio de `translate()` un atajo para `0xFFFF'FFFF'8000'0000..BFFF'FFFF` en modo
+kernel (mismo resultado en direccionamiento de 32 y de 64 bits) hundio el rendimiento:
+**42.3/41.4/43.8 fps frente a 46.4/46.8/46.8/46.7 sin el**. A/B con `git stash`, mismo binario,
+mismo protocolo. La rama extra no ahorra trabajo real -- el camino de 32 bits ya salia por
+`seg`/`direct` en pocas comparaciones -- y en cambio engorda `translate`, que esta en linea en
+los caminos calientes. Revertido; `translate` sigue como estaba. Si se vuelve a atacar el 4.85%
+de `translate`, la via es cachear la traduccion (micro-TLB de datos indexado por pagina), no
+anadir ramas al principio.
+
