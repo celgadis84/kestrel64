@@ -998,7 +998,8 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
       std::fflush(stderr);
       // KESTREL_FAULTSTOP=1: un fallo del guest (deref nulo, direccion mala) es la ventana
       // exacta del bug; parar AQUI conserva el anillo de eventos del RCP intacto.
-      if(std::getenv("KESTREL_FAULTSTOP")) {
+      static const bool faultStop = std::getenv("KESTREL_FAULTSTOP") != nullptr;
+      if(faultStop) {
         if(mem) mem->evDump(std::getenv("KESTREL_EVDUMP")
                             ? (u32)std::strtoul(std::getenv("KESTREL_EVDUMP"), nullptr, 0) : 120);
         pcRingDump(120);
@@ -1053,7 +1054,8 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
       }
     }
   }
-  if((excCode == 10 || excCode == 2 || excCode == 3 || excCode == 11) && std::getenv("KESTREL_TRAPRI")) {
+  static const bool trapRi = std::getenv("KESTREL_TRAPRI") != nullptr;
+  if((excCode == 10 || excCode == 2 || excCode == 3 || excCode == 11) && trapRi) {
     memAbort=false; u32 fop = read32(epc); memAbort=false;
     std::fprintf(stderr, "[exc %u] epc=0x%08x badv=0x%08x insn=%08x %s ra=0x%08x retired=%llu\n",
                  excCode, (u32)epc, (u32)cop0[C0_BadVAddr], fop, disasm(fop, epc).c_str(),
@@ -1678,7 +1680,10 @@ auto CPU::cop0op(u32 op) -> void {
   switch(rs) {
   case 0x00: /*MFC0*/ set(RT, sext32((u32)readCop0(RD))); break;
   case 0x04: /*MTC0*/
-    if(RD == C0_Status && std::getenv("KESTREL_STATTRACE")) {
+    // Cacheado: esto corre en CADA MTC0 a Status y getenv recorre el entorno entero bajo
+    // candado. El perfilador de host lo veia, junto al de ERET, como el 7% del hilo de CPU.
+    static const bool statTrace = std::getenv("KESTREL_STATTRACE") != nullptr;
+    if(RD == C0_Status && statTrace) {
       u32 ov=(u32)cop0[C0_Status], nv=(u32)gpr[RT];
       if((ov^nv)&0x2000'0000u) std::fprintf(stderr,"[stat] CU1 %s @pc=0x%08x %08x->%08x ra=0x%08x ret=%llu\n",
         (nv&0x2000'0000u)?"ON ":"OFF",(u32)curPc,ov,nv,(u32)gpr[31],(unsigned long long)retired);
@@ -1706,7 +1711,8 @@ auto CPU::cop0op(u32 op) -> void {
           std::fflush(stderr); fpTraceEret = 0;
         }
         static bool seen15done=false;
-        if(std::getenv("KESTREL_SEENFIND") && eretKind==2 && !seen15done) {
+        static const bool seenFind = std::getenv("KESTREL_SEENFIND") != nullptr;
+        if(seenFind && eretKind==2 && !seen15done) {
           memAbort=false;
           std::fprintf(stderr, "[SEENDUMP15@eret ret=%llu] (epc was code-15)\n",(unsigned long long)retired);
           for(u32 a=0x801acf50;a<0x801ad010;a+=4){u32 w=read32(a); if(w) std::fprintf(stderr,"  0x%08x=0x%08x\n",a,w);}

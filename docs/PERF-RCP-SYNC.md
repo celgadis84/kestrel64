@@ -173,3 +173,46 @@ El JIT de CPU no cambia el resultado (35.1 con `KESTREL_JIT=1`, 36.5 con `+JIT_L
 interprete): en esta carga el hilo de CPU no es el palo largo. El que sigue por debajo es el
 RSP, al 74-77% del reloj del hardware, y ese es el que marcara el techo en un juego con mas
 carga de microcodigo.
+
+## Tercera tanda (2026-08-26): getenv en el hilo de CPU
+
+El perfilador de host sobre el hilo de CPU (build `build-prof-prdp`, parallel-rdp) daba
+`ucrtbase` al 7.17% del hilo, alcanzado desde dos sitios de `src/cpu/cpu.cpp`:
+
+| Sitio | % hilo CPU | Frecuencia |
+|---|---|---|
+| `cpu.cpp:1681` (`KESTREL_STATTRACE`) | 6.77% | cada `MTC0` a `C0_Status` |
+| `cpu.cpp:1706` (`KESTREL_SEENFIND`) | 1.20% | cada `ERET` |
+
+Misma raiz que en `memory.cpp`: `std::getenv` de la CRT recorre el bloque de entorno
+entero con un candado dentro. En un kernel de libultra que entra y sale de excepciones
+constantemente, `MTC0 Status` + `ERET` son de lo mas caliente que hay. Cacheados en
+`static const bool` (mas los dos de `KESTREL_TRAPRI` y `KESTREL_FAULTSTOP`, del mismo
+camino de excepcion). Exacto: el entorno no cambia despues de arrancar.
+
+Medido con SM64, `KESTREL_MAXFLIPS=400`, parallel-rdp:
+
+```
+antes:  36.74 frames/s  (122% de consola)
+despues 41.07 / 41.95   (137-140% de consola)
+[hb] N64 speed: CPU 147.2%  RSP 89.1% | occupancy: rdp 17%(cpu 28%) rsp 51% cpuWait 8%
+```
+
+### Recorrido completo de la sesion (SM64, consola = 30 fps)
+
+| Estado | frames/s | % consola |
+|---|---|---|
+| Punto de partida | 23.04 | 77% |
+| Sync RCP (commit `de8f768`) | 28.85 | 96% |
+| Sin drenado RDP en START + getenv de `memory.cpp` (`4d6569d`) | 32.11 (SoftRDP) | 107% |
+| parallel-rdp | 36.74 | 122% |
+| getenv de `cpu.cpp` | 41.95 | 140% |
+
+### Palancas que quedan, medidas (no adivinadas)
+
+- **Regulador de ritmo**: ~15% del hilo de CPU en `condition_variable.h:142` llamado desde
+  `memory.cpp`. Es el mayor bloque unico que queda en ese hilo.
+- **Trafico de submit al RDP**: ~40 000 trabajos/s bajo parallel-rdp. El worker de GPU vacia
+  al instante, asi que no coalesce nada. `KESTREL_RDPINLINE=1` solo vale +2.4%.
+- **RSP al 87-89% del reloj de hardware**: sera el techo en un juego con microcodigo pesado.
+  Toca enlazado de bloques y asignacion de registros en el dynarec del RSP.

@@ -325,3 +325,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-26 | gate_all.sh | 432 s | gate_prdp.sh | 326 s | COP2 especializado por fn |
 | 2026-08-26 | gate_all.sh | 357 s | gate_prdp.sh | 312 s | sync RCP: coalesce FIFO RDP + notify condicional + dmaCopy + paceSlack 512K |
 | 2026-08-26 | gate_all.sh | 350 s | gate_prdp.sh | 301 s | sin drenado RDP en START + getenv cacheado + stack-scan filtrado |
+| 2026-08-26 | gate_all.sh | ~370 s | gate_prdp.sh | ~320 s | getenv cacheado en cpu.cpp (MTC0 Status / ERET / excepciones) |
