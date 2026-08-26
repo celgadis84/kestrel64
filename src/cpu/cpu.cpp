@@ -1433,6 +1433,29 @@ auto CPU::execute(u32 op) -> void {
 // de excepción si execute() la levantó, o la op siguiente si simplemente hay que parar. El
 // llamador sale del bloque con la bandera de "control ya escrito" contando esta op como
 // retirada, así que nunca se re-ejecuta.
+// Movimientos COP1 (MFC1/DMFC1/CFC1/MTC1/DMTC1) emitidos por el JIT como CALL directo.
+// Son una cuarta parte de todo lo que el bloque cede al interprete en SM64 y no pueden
+// desviar el control: mueven 32/64 bits entre un gpr y el banco FPU y nada mas. El camino
+// normal se salta entero el montaje de contexto de jitInterpOp (guardar pc/nextPc/curPc,
+// fabricar la VA de la op, y las seis comprobaciones de desviacion al volver) y el switch
+// de cop1op. El unico caso que SI puede desviar -- CU1=0, que vectoriza Coprocessor
+// Unusable -- delega en jitInterpOp, que monta el contexto exacto que necesita la excepcion.
+template<u32 RSc>
+auto CPU::jitCop1Move(u32 op, u32 off) -> u8 {
+  if(__builtin_expect(!((u32)cop0[C0_Status] & 0x2000'0000u), 0)) return jitInterpOp(op, off);
+  u32 rt = (op >> 16) & 31, rd = (op >> 11) & 31;
+  if      constexpr(RSc == 0) set(rt, sext32(fprGet32(rd)));                       // MFC1
+  else if constexpr(RSc == 1) set(rt, fprGet64(rd));                               // DMFC1
+  else if constexpr(RSc == 2) set(rt, sext32(rd == 31 ? fcr31 : rd == 0 ? fcr0 : 0));  // CFC1
+  else if constexpr(RSc == 4) fprSet32(rd, (u32)gpr[rt]);                          // MTC1
+  else                        fprSet64(rd, gpr[rt]);                               // DMTC1
+  return 1;
+}
+#define KC1(name, rs)   extern "C" u8 name(void* c, u32 op, u32 off) {     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Move<rs>(op, off); }
+KC1(kestrel_jitMFC1, 0) KC1(kestrel_jitDMFC1, 1) KC1(kestrel_jitCFC1, 2)
+KC1(kestrel_jitMTC1, 4) KC1(kestrel_jitDMTC1, 5)
+#undef KC1
+
 auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
   u64 va      = pc + off;
   u64 savedPc = pc, savedNext = nextPc, savedCur = curPc;

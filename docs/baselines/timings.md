@@ -328,3 +328,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-26 | gate_all.sh | ~370 s | gate_prdp.sh | ~320 s | getenv cacheado en cpu.cpp (MTC0 Status / ERET / excepciones) |
 | 2026-08-26 | gate_all.sh | 361 s | gate_prdp.sh | 303 s | JIT: spill perezoso + forget dirigido + COP1 directo + helpers de memoria especializados |
 | 2026-08-26 | gate_all.sh | 359 s | gate_prdp.sh | 304 s | JIT: LWC1/LDC1/SWC1/SDC1 por helper especializado |
+| 2026-08-26 | gate_all.sh | 363 s | gate_prdp.sh | 309 s | JIT: MFC1/DMFC1/CFC1/MTC1/DMTC1 por trampolin propio |

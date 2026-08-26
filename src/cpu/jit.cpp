@@ -361,6 +361,9 @@ extern "C" u8 kestrel_jitSH (void*, u64, u32, u64); extern "C" u8 kestrel_jitSW 
 extern "C" u8 kestrel_jitSD (void*, u64, u32, u64);
 extern "C" u8 kestrel_jitLWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitLDC1(void*, u64, u32, u64);
 extern "C" u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitSDC1(void*, u64, u32, u64);
+extern "C" u8 kestrel_jitMFC1 (void*, u32, u32); extern "C" u8 kestrel_jitDMFC1(void*, u32, u32);
+extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
+extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
 
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
@@ -460,10 +463,22 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     else if(OP == 0x00) { rc.writebackOne(rsF); rc.writebackOne(rtF); }
     else { rc.writebackOne(rsF); if(OP != 0x31 && OP != 0x35) rc.writebackOne(rtF); }
   }
+  // Los movimientos COP1 tienen su propio trampolin: misma firma, pero sin el montaje de
+  // contexto de jitInterpOp en el camino normal (ver cpu.cpp). El resto de la mecanica --
+  // volcado dirigido, sitio de salida, olvido -- es identica.
+  void* fn = (void*)&jitInterpThunk;
+  if(OP == 0x11) switch((op >> 21) & 31) {
+    case 0x00: fn = (void*)&kestrel_jitMFC1;  break;
+    case 0x01: fn = (void*)&kestrel_jitDMFC1; break;
+    case 0x02: fn = (void*)&kestrel_jitCFC1;  break;
+    case 0x04: fn = (void*)&kestrel_jitMTC1;  break;
+    case 0x05: fn = (void*)&kestrel_jitDMTC1; break;
+    default: break;
+  }
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX)
   e.mov_r_imm32(RDX, op);                 // arg1 = op
   e.mov_r_imm32(R8, off);                 // arg2 = offset de la op en el bloque
-  e.mov_r_imm64(RAX, (u64)&jitInterpThunk);
+  e.mov_r_imm64(RAX, (u64)fn);
   e.call_reg(RAX);
   e.test_al_al();
   exitSite = e.je_rel32_placeholder();    // al==0 → salida de control (la op ya tuvo efecto)

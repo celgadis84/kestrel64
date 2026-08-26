@@ -276,3 +276,50 @@ los caminos calientes. Revertido; `translate` sigue como estaba. Si se vuelve a 
 de `translate`, la via es cachear la traduccion (micro-TLB de datos indexado por pagina), no
 anadir ramas al principio.
 
+### Que cede el JIT al interprete, medido (2026-08-26)
+
+Histograma temporal a la entrada de `jitInterpOp` (SM64, 200 flips, 7.64 M cesiones):
+
+| Familia | % de las cesiones |
+|---|---|
+| COP1 | **99.20%** |
+| SPECIAL (DIV/DDIV/DMULT...) | 0.71% |
+| todo lo demas | ~0.09% |
+
+Dentro de COP1: MUL ~37%, ADD ~25%, MTC1 ~10%, CTC1 ~6%, MFC1 ~6%, SUB ~4%, SQRT ~3%,
+CFC1 ~3%, TRUNC.W ~2%, C.cond ~2%. Es decir **la FPU es lo unico que el JIT no compila**, y
+una cuarta parte de eso son movimientos triviales entre gpr y el banco FPU.
+
+### Movimientos COP1 con trampolin propio
+
+`MFC1/DMFC1/CFC1/MTC1/DMTC1` no pueden desviar el control: mueven 32/64 bits y nada mas. Su
+trampolin (`CPU::jitCop1Move<RSc>`) se salta el montaje de contexto de `jitInterpOp` -- guardar
+`pc`/`nextPc`/`curPc`, fabricar la VA, y las seis comprobaciones de desviacion al volver -- y
+tambien el `switch` de `cop1op`. El unico caso que si puede desviar, CU1=0, delega en
+`jitInterpOp`, que monta el contexto exacto que la excepcion necesita.
+
+`CTC1` se queda fuera a proposito: escribir FCSR con una Cause armada vectoriza una FPE ahi
+mismo, con un quirk de pipeline en `Cause.CE`; ese camino tiene que seguir siendo el del
+interprete.
+
+**Banco de precision.** El banco de fps (PRDP, threaded) tiene ~±1 fps de ruido de host, que
+tapa mejoras de esta talla. Para decidir se usa lockstep con tope de instrucciones
+(`KESTREL_THREADS=0 KESTREL_MAXINSN=300000000`), que es reproducible al ~0.5%:
+
+| | 3 tiradas (s) | min |
+|---|---|---|
+| sin | 8.764 / 8.692 / 8.628 | 8.628 |
+| con | 8.602 / 8.581 / 8.609 | 8.581 |
+
+Lockstep diluye una mejora de CPU (serializa RSP y RDP en el mismo hilo), asi que ese -0.55%
+del total es una mejora mayor en el hilo de CPU. fps PRDP: sin cambio medible fuera del ruido
+(~47).
+
+### Descartado por medida: testigo de generacion para la validacion SMC
+
+Idea: dar a cada linea de I-cache un contador `gen` que sube en cada `icFill`, y que el bloque
+recuerde las gens de las lineas que cubre, para saltarse la recomparacion palabra a palabra en
+cada entrada del driver. Medido (max de 7 tiradas de fps): **47.02 con, 47.62 sin**. El bucle
+de validacion ya opera sobre lineas calientes en L1 del host; el testigo anade una indireccion
+a heap (`std::vector`) y ramas que cuestan mas que lo que ahorran. Revertido.
+
