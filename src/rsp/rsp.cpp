@@ -1409,7 +1409,9 @@ auto Rsp::step(u64 maxInsns) -> void {
         const rspjit::Block blk = jc->blocks[bi];
         if(blk.fn && blk.nOps && blk.nOps <= c) {
           blk.fn(this);
-          pc = (pc + 4u * blk.nOps) & 0xfff;
+          // Si el bloque cerraba en un salto ya se llevo el delay-slot dentro y dejo el PC
+          // final escrito; avanzarlo aqui lo tiraria. Y no queda pestillo de delay pendiente.
+          if(!blk.setsPc) pc = (pc + 4u * blk.nOps) & 0xfff;
           c -= blk.nOps;
           if(jitStats) jc->jitOps += blk.nOps;
           continue;

@@ -60,6 +60,9 @@ MODES = {
     "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", "KESTREL_JIT_NOLINK": "1"},
     "threaded":      {"KESTREL_THREADS": "1", "KESTREL_JIT": "0"},
     "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1"},
+    # Oraculo del dynarec del RSP: mismo modo que threaded-jit pero con el RSP
+    # interpretado. El md5 tiene que salir identico o el JIT del RSP diverge.
+    "rspinterp":     {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_RSPJIT": "0"},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1"},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
     # Backend RDP en GPU (parallel-rdp). Necesitan un exe de `build-prdp/`, que se

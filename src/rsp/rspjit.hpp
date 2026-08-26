@@ -25,8 +25,8 @@
 //   * un bloque nunca puede fallar a medias. No hay excepciones que vectorizar, asi que la
 //     firma no necesita devolver "instrucciones retiradas antes del fallo".
 //
-// Etapa 1 (esto): bloques de linea recta. El bloque termina ANTES de la primera instruccion
-// que pueda cambiar el flujo o parar el nucleo -- salto, BREAK, COP0 -- y esas las sigue
+// Etapa 1: bloques de linea recta. El bloque termina ANTES de la primera instruccion que
+// pueda cambiar el flujo o parar el nucleo -- salto, BREAK, COP0 -- y esas las sigue
 // ejecutando el interprete con su pestillo de delay-slot intacto. Dentro del bloque:
 //
 //   * ALU / desplazamientos / LUI / LB / LBU / SB se emiten NATIVOS en x86-64;
@@ -34,6 +34,12 @@
 //     llamada a los MISMOS helpers que usa el interprete (Rsp::execCop2/execLoad/execStore
 //     /exec). La semantica no se duplica en ningun sitio: el JIT no puede divergir del
 //     interprete porque ejecuta su codigo.
+//
+// Etapa 2: el bloque se lleva TAMBIEN el salto que lo cierra y su delay-slot (BEQ/BNE/
+// BLEZ/BGTZ, los cuatro REGIMM, J/JAL, JR/JALR). El par salto+delay era el 2x mas caro del
+// interprete -- dos vueltas del despachador mas el pestillo `inDelay` -- y ademas cortaba
+// el bloque en cada bucle del microcodigo, que es justo donde se pasa el tiempo. El bloque
+// escribe Rsp::pc y marca Block::setsPc; siguen fuera BREAK, COP0 y todo lo no reconocido.
 //
 // El oraculo es el propio interprete: mismo md5 de framebuffer con KESTREL_RSPJIT=0 y =1.
 #include "../core/types.hpp"
@@ -54,6 +60,9 @@ enum class State : u8 { Unknown = 0, Compiled = 1, NoComp = 2 };
 struct Block {
   BlockFn fn = nullptr;
   u16     nOps = 0;
+  // El bloque termina en un salto con su delay-slot absorbido y ya ha dejado Rsp::pc
+  // puesto: el llamante NO debe avanzarlo el mismo. Ver rspjit.cpp emitBranch().
+  bool    setsPc = false;
 };
 
 struct Cache {

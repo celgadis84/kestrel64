@@ -77,6 +77,7 @@ struct E {
   auto shift_imm(u8 digit, u8 dst, u8 sa) -> void { u8_(0xC1); modrm(3, digit, dst); u8_(sa); }
   auto shift_cl(u8 digit, u8 dst) -> void { u8_(0xD3); modrm(3, digit, dst); }
   auto not32(u8 dst) -> void { u8_(0xF7); modrm(3, 2, dst); }
+  auto neg32(u8 dst) -> void { u8_(0xF7); modrm(3, 3, dst); }
   auto mov_imm32(u8 dst, u32 imm) -> void { u8_((u8)(0xB8 + dst)); u32_(imm); }
   auto setcc(u8 cc, u8 dst) -> void { u8_(0x0F); u8_(cc); modrm(3, 0, dst); }
   auto movzx8(u8 dst, u8 src) -> void { u8_(0x0F); u8_(0xB6); modrm(3, dst, src); }
@@ -102,9 +103,10 @@ enum : u8 { OP_ADD = 0x03, OP_SUB = 0x2B, OP_AND = 0x23, OP_OR = 0x0B, OP_XOR = 
 // digitos /d para la forma con inmediato y para los desplazamientos
 enum : u8 { D_ADD = 0, D_OR = 1, D_AND = 4, D_SUB = 5, D_XOR = 6, D_CMP = 7 };
 enum : u8 { D_SHL = 4, D_SHR = 5, D_SAR = 7 };
-enum : u8 { CC_L = 0x9C, CC_B = 0x92 };
+enum : u8 { CC_L = 0x9C, CC_B = 0x92, CC_E = 0x94, CC_NE = 0x95,
+           CC_LE = 0x9E, CC_G = 0x9F, CC_GE = 0x9D };
 
-enum class Kind : u8 { Stop, Native, Cop2, Lwc2, Swc2, ExecMem };
+enum class Kind : u8 { Stop, Native, Cop2, Lwc2, Swc2, ExecMem, Branch };
 
 // Que hace el compilador con cada instruccion. Stop = la ejecuta el interprete y el bloque
 // termina ANTES de ella: saltos (necesitan el pestillo de delay-slot), BREAK y COP0 (pueden
@@ -119,8 +121,17 @@ auto classify(u32 op) -> Kind {
     case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: case 0x25:
     case 0x26: case 0x27: case 0x2a: case 0x2b:
       return Kind::Native;
-    default: return Kind::Stop;      // JR / JALR / BREAK / codificacion invalida
+    case 0x08: case 0x09: return Kind::Branch;   // JR / JALR
+    default: return Kind::Stop;      // BREAK / codificacion invalida
     }
+  case 0x01:   // REGIMM: solo los cuatro branches definidos; el resto no se toca
+    switch(op >> 16 & 31) {
+    case 0x00: case 0x01: case 0x10: case 0x11: return Kind::Branch;
+    default: return Kind::Stop;
+    }
+  case 0x02: case 0x03:               // J / JAL
+  case 0x04: case 0x05: case 0x06: case 0x07:   // BEQ / BNE / BLEZ / BGTZ
+    return Kind::Branch;
   case 0x08: case 0x09: case 0x0a: case 0x0b:
   case 0x0c: case 0x0d: case 0x0e: case 0x0f:
     return Kind::Native;
@@ -138,6 +149,7 @@ auto classify(u32 op) -> Kind {
 struct Ctx {
   E   e;
   s32 rOff;      // offset de Rsp::r[0] dentro de Rsp
+  s32 pcOff;     // offset de Rsp::pc dentro de Rsp
   auto RG(u32 n) const -> s32 { return rOff + (s32)(4 * n); }
 };
 
@@ -242,6 +254,73 @@ auto emitNative(Ctx& c, u32 op) -> void {
   e.st8(rCX, rAX, 0);
 }
 
+// Salto (condicional o no) con su delay-slot ABSORBIDO en el bloque. Es lo ultimo que
+// emite un bloque: escribe Rsp::pc con el PC que toca DESPUES del delay-slot y el llamante
+// no vuelve a tocarlo (Block::setsPc). El delay-slot se emite justo detras con el camino
+// normal, que es exactamente el orden del hardware: la condicion y el enlace se resuelven
+// con los registros de ANTES del delay-slot, y el delay-slot corre igual salte o no.
+//
+// La condicion se resuelve SIN salto de host: setcc -> mascara 0/-1 -> select entre los dos
+// PC constantes. Un bloque de microcodigo se ejecuta millones de veces con la misma
+// direccion pero condicion alterna (bucles de vertices), asi que un jcc mal predicho ahi
+// costaria mas que las cuatro ALU de esta forma sin ramas.
+auto emitBranch(Ctx& c, u32 op, u32 bpc) -> void {
+  E& e = c.e;
+  const u32 maj = op >> 26, rs = op >> 21 & 31, rt = op >> 16 & 31, rd = op >> 11 & 31;
+  const s32 simm = (s16)(op & 0xffff);
+  const u32 fall = (bpc + 8) & 0xfff;                    // no tomado: tras el delay-slot
+  const u32 tgt  = (bpc + 4 + (simm << 2)) & 0xffc;      // take() alinea a palabra
+
+  // rAX tiene el resultado de setcc; deja en Rsp::pc  cond ? tgt : fall.
+  auto selPc = [&](u8 cc) {
+    e.setcc(cc, rAX); e.movzx8(rAX, rAX); e.neg32(rAX);  // 0 -> 0, 1 -> 0xffffffff
+    e.alu_imm(D_AND, rAX, fall ^ tgt);
+    e.alu_imm(D_XOR, rAX, fall);
+    e.st32(rAX, rBX, c.pcOff);
+  };
+  // setR(n, fall): el enlace de JAL/JALR/B*AL. r0 es cableado a cero, no se escribe.
+  auto link = [&](u32 n) {
+    if(!n) return;
+    e.mov_imm32(rCX, fall);
+    e.st32(rCX, rBX, c.RG(n));
+  };
+
+  if(maj == 0x00) {                       // JR / JALR: destino en un registro
+    e.ld32(rAX, rBX, c.RG(rs));           // se LEE rs antes de escribir rd (pueden coincidir)
+    e.alu_imm(D_AND, rAX, 0xffc);
+    e.st32(rAX, rBX, c.pcOff);
+    if((op & 0x3f) == 0x09) link(rd);
+    return;
+  }
+
+  if(maj == 0x02 || maj == 0x03) {        // J / JAL: destino inmediato
+    if(maj == 0x03) link(31);             // el interprete enlaza antes del take; da igual,
+    e.mov_imm32(rAX, ((op & 0x3ffffff) << 2) & 0xffc);   // ninguno de los dos lee el otro
+    e.st32(rAX, rBX, c.pcOff);
+    return;
+  }
+
+  if(maj == 0x01) {                       // REGIMM: BLTZ / BGEZ / BLTZAL / BGEZAL
+    e.ld32(rAX, rBX, c.RG(rs));
+    e.alu_imm(D_CMP, rAX, 0);
+    selPc((rt & 1) ? CC_GE : CC_L);
+    if(rt & 0x10) link(31);               // el enlace de B*AL es INCONDICIONAL
+    return;
+  }
+
+  if(maj == 0x04 || maj == 0x05) {        // BEQ / BNE
+    e.ld32(rAX, rBX, c.RG(rs));
+    e.alu_rm(OP_CMP, rAX, rBX, c.RG(rt));
+    selPc(maj == 0x04 ? CC_E : CC_NE);
+    return;
+  }
+
+  // BLEZ / BGTZ: contra cero, con signo
+  e.ld32(rAX, rBX, c.RG(rs));
+  e.alu_imm(D_CMP, rAX, 0);
+  selPc(maj == 0x06 ? CC_LE : CC_G);
+}
+
 }  // namespace
 
 auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
@@ -249,13 +328,26 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   c.state[idx] = State::NoComp;                // por defecto: si algo falla, no se reintenta
   if(!c.ready) return;
 
-  // Cuantas instrucciones seguidas son compilables desde aqui.
-  u32 n = 0;
+  // Cuantas instrucciones seguidas son compilables desde aqui. Un salto reconocido cierra
+  // el bloque LLEVANDOSE su delay-slot: los dos entran, y el bloque deja Rsp::pc puesto.
+  u32 n = 0; bool endsBranch = false;
+  auto at = [&](u32 a) -> u32 { u32 w; std::memcpy(&w, rsp.imp + a, 4); return bswap32(w); };
   while(n < kMaxOps) {
     u32 a = (pc0 + 4 * n) & 0xffc;
     if(n && a < pc0) break;                    // no compilamos bloques que envuelvan IMEM
-    u32 w; std::memcpy(&w, rsp.imp + a, 4);
-    if(classify(bswap32(w)) == Kind::Stop) break;
+    Kind k = classify(at(a));
+    if(k == Kind::Stop) break;
+    if(k == Kind::Branch) {
+      if(n + 2 > kMaxOps) break;               // no cabe el par salto+delay
+      u32 ad = (a + 4) & 0xffc;
+      if(ad != a + 4) break;                   // el delay-slot envolveria IMEM
+      Kind dk = classify(at(ad));
+      // Un salto en el delay-slot de otro salto no esta definido en el R4000 y el
+      // interprete lo resuelve con su pestillo; el bloque no sabe hacerlo, asi que corta.
+      if(dk == Kind::Stop || dk == Kind::Branch) break;
+      n += 2; endsBranch = true;
+      break;
+    }
     n++;
   }
   if(n < kMinOps) return;                      // el prologo costaria mas que interpretarlas
@@ -267,7 +359,8 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 
   u8* entry = c.buf.cursor();
-  Ctx ctx{ E(c.buf), (s32)((const u8*)&rsp.r[0] - (const u8*)&rsp) };
+  Ctx ctx{ E(c.buf), (s32)((const u8*)&rsp.r[0] - (const u8*)&rsp),
+                     (s32)((const u8*)&rsp.pc   - (const u8*)&rsp) };
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
   E& e = ctx.e;
 
@@ -280,9 +373,11 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   e.sub_rsp(40);
 
   for(u32 i = 0; i < n; i++) {
-    u32 w; std::memcpy(&w, rsp.imp + ((pc0 + 4 * i) & 0xffc), 4);
+    const u32 a = (pc0 + 4 * i) & 0xffc;
+    u32 w; std::memcpy(&w, rsp.imp + a, 4);
     u32 op = bswap32(w);
     switch(classify(op)) {
+    case Kind::Branch:  emitBranch(ctx, op, a); break;
     case Kind::Native:  emitNative(ctx, op); break;
     case Kind::Cop2:    emitCall(ctx, (void*)&kestrel_rspjit_cop2,  op); break;
     case Kind::Lwc2:    emitCall(ctx, (void*)&kestrel_rspjit_load,  op); break;
@@ -296,7 +391,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
 
   if(c.buf.overflowed()) { c.clear(); return; }
   c.buf.finalize(entry);
-  c.blocks[idx] = Block{ (BlockFn)entry, (u16)n };
+  c.blocks[idx] = Block{ (BlockFn)entry, (u16)n, endsBranch };
   c.state[idx]  = State::Compiled;
   c.compiles++;
 }
