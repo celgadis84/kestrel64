@@ -183,6 +183,32 @@ auto System::startVideo(bool batch) -> void {
   if(videoOn) std::printf("[video] VI presentation armed (window opens on main thread)\n");
 }
 
+// Espera hasta `due`. El sleep normal de Windows tiene una granularidad de ~15.6 ms, que es
+// inservible para un campo de video de 16.68 ms: dormiria un campo entero de mas. El
+// temporizador de alta resolucion (Win10 1803+, solo kernel32) baja a ~0.5 ms. El ultimo
+// medio milisegundo se gira, que es lo que cuesta despertar de todas formas.
+static auto sleepUntilPrecise(std::chrono::steady_clock::time_point due) -> void {
+  using namespace std::chrono;
+#ifdef _WIN32
+  static HANDLE hTimer = CreateWaitableTimerExW(nullptr, nullptr,
+                            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  if(hTimer) {
+    auto left = due - steady_clock::now() - microseconds(500);
+    if(left > microseconds(0)) {
+      LARGE_INTEGER li;                                   // negativo = tiempo relativo, 100 ns
+      li.QuadPart = -(LONGLONG)(duration_cast<nanoseconds>(left).count() / 100);
+      if(li.QuadPart < 0 && SetWaitableTimer(hTimer, &li, 0, nullptr, nullptr, FALSE))
+        WaitForSingleObject(hTimer, INFINITE);
+    }
+    while(steady_clock::now() < due) std::this_thread::yield();
+    return;
+  }
+#endif
+  auto left = due - steady_clock::now() - microseconds(1500);
+  if(left > microseconds(0)) std::this_thread::sleep_for(left);
+  while(steady_clock::now() < due) std::this_thread::yield();
+}
+
 auto System::runLoop() -> void {
   if(!videoOn) { run(); return; }
   // Bring up Vulkan/GLFW on THIS (main) thread BEFORE the CPU worker starts —
@@ -367,6 +393,14 @@ auto System::run() -> void {
   auto  hbT0 = winT0, hbLast = winT0;   // heartbeat lifetime baseline
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
 
+  // Limitador de velocidad, ver mas abajo. Armado cuando hay ventana; KESTREL_THROTTLE=0/1 manda.
+  const char* thEnv = std::getenv("KESTREL_THROTTLE");
+  bool  throttleOn = thEnv ? (thEnv[0] != '0') : videoOn;
+  const double throttleFieldNs = 1e9 / clocks.viFieldHz;
+  auto  throttleT0 = winT0;
+  u64   throttleField = 0;
+
+
   // KESTREL_STABLE=<insns per check>[,<checks>] — stop once the picture stops moving.
   //
   // A fixed instruction cap is the wrong yardstick for a screenshot oracle: ROMs that
@@ -432,6 +466,7 @@ auto System::run() -> void {
       continue;
     }
     u64 did;
+    bool fieldClosed = false;
     {
       std::lock_guard<std::mutex> lk(coreMutex);
       // Un subtramo de campo de trabajo de CPU por vuelta, y despues el VI. La duracion
@@ -439,7 +474,7 @@ auto System::run() -> void {
       // constante suelta: el mismo campo lo usa la lectura de VI_V_CURRENT en Memory, para
       // que la interrupcion y el sondeo del contador de medias-lineas midan el MISMO tiempo.
       did = stepCpu(clocks.tickInsns());
-      bool fieldClosed = memory.viTick(cpu.retired);
+      fieldClosed = memory.viTick(cpu.retired);
       // Diagnostico de divergencia entre modos, opt-in. El md5 final solo dice "difieren";
       // estos dicen DONDE: KESTREL_FIELDHASH=1 imprime un FNV del estado CPU al cierre de
       // cada campo (primer campo distinto = ventana a bisecar) y KESTREL_FIELDDUMP=<n>
@@ -466,6 +501,24 @@ auto System::run() -> void {
         }
         std::fflush(stderr);
       }
+    }
+    // Limitador de velocidad. Sin el, el emulador corre a lo que de el host: a 157% de
+    // consola el audio sale acelerado y el juego responde a destiempo, o sea sirve para medir
+    // pero no para jugar. El reloj es el campo de video (Clocks::viFieldHz), el mismo que ancla
+    // todo el tiempo del guest, y el vencimiento es ABSOLUTO (campo n-esimo desde el ancla) para
+    // que los errores de un campo no se acumulen.
+    //
+    // Apagado cuando no hay ventana: gates, bench y krom corren headless y deben ir a tope, o
+    // medirian 30 fps siempre. KESTREL_THROTTLE=0/1 fuerza cualquiera de los dos.
+    if(throttleOn && fieldClosed) {
+      throttleField++;
+      auto due = throttleT0 + std::chrono::nanoseconds(
+                   (u64)((double)throttleField * throttleFieldNs));
+      auto now = clock::now();
+      // Reancla si vamos MUY atrasados (pausa, carga de estado, un campo carisimo): recuperar
+      // el tiempo perdido corriendo al doble se ve peor que perderlo y seguir a ritmo.
+      if(now - due > std::chrono::milliseconds(250)) { throttleT0 = now; throttleField = 0; }
+      else if(now < due) sleepUntilPrecise(due);
     }
     retiredInsns.fetch_add(did, std::memory_order_relaxed);
     winInsn += did;

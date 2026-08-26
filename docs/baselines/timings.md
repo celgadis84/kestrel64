@@ -331,3 +331,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-26 | gate_all.sh | 363 s | gate_prdp.sh | 309 s | JIT: MFC1/DMFC1/CFC1/MTC1/DMTC1 por trampolin propio |
 | 2026-08-26 | gate_all | 426 s | fpalu + kPaceSlack 256K; regress=0, 12/12 |
 | 2026-08-26 | gate_prdp | 311 s | idem; regress=0 |
+| 2026-08-27 | gate_all | 390 s | limitador de velocidad; 12/12, regress=0 |
+| 2026-08-27 | gate_prdp | 322 s | idem; regress=0 |

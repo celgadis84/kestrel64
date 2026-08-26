@@ -384,3 +384,37 @@ ha quedado corto es exactamente la de esta tanda: `N64 speed: CPU` se dispara mi
 se mueve.
 
 Resultado: **47.2–48.0 fps** en SM64 (antes 46.2–46.9), 157–160% de consola.
+
+## Sexta tanda (2026-08-27): limitador de velocidad
+
+Hasta ahora el emulador **no tenia limitador**: corria a lo que diese el host. Lo detecto el
+usuario por el oido — "diria que va acelerado por el audio que sale". Correcto: el bench mide
+157-250% de consola, y a 250% el audio sale acelerado y el juego responde a destiempo. Servia
+para medir, no para jugar.
+
+**Reloj elegido: el campo de video.** `Memory::viTick()` ya devuelve `fieldClose` una vez por
+cada `viFieldInsns` instrucciones retiradas, y ese es el mismo reloj que ancla todo el tiempo
+del guest (VI_V_CURRENT, MI_VI, `aiTick`). Limitar los cierres de campo a `Clocks::viFieldHz`
+(59.94 Hz) de tiempo real deja el guest exactamente a 100%, sin un segundo reloj que pueda
+discrepar del primero.
+
+Detalles que importan:
+
+- **Vencimiento absoluto, no relativo.** `due = T0 + n * (1/59.94 s)` con `n` = campos cerrados.
+  Dormir "16.68 ms desde ahora" acumula el error de cada despertar y el guest queda por debajo
+  del 100% de forma creciente.
+- **Reancla al atrasarse mucho.** Si vamos >250 ms tarde (pausa del depurador, carga de estado,
+  un campo carisimo) se reinicia el ancla. Recuperar el tiempo perdido corriendo al doble se ve
+  y se oye peor que perderlo.
+- **Fuera de `coreMutex`.** `fieldClosed` se saca del bloque con el lock; dormir con el lock
+  cogido bloquearia al hilo de telemetria durante todo el campo.
+- **Temporizador de alta resolucion.** El sleep normal de Windows tiene granularidad ~15.6 ms,
+  inservible para un campo de 16.68 ms (dormiria un campo entero de mas). Se usa
+  `CreateWaitableTimerExW(..., CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, ...)` (Win10 1803+, solo
+  kernel32, sin dependencias nuevas) que baja a ~0.5 ms, y el ultimo medio milisegundo se gira
+  con `yield()` porque eso es lo que cuesta despertar de todas formas.
+- **Armado solo con ventana** (`videoOn`). Gates, bench y krom corren headless y deben seguir a
+  tope: si no, todo mediria 30 fps. `KESTREL_THROTTLE=0/1` fuerza cualquiera de los dos.
+
+Medido (SM64, PRDP, threaded, 200 flips): `N64 speed: CPU 95.4-98.0%` con el limitador armado,
+frente a 157-250% sin el. El 2-4% que falta es el coste de despertar y no se oye.
