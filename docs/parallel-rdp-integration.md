@@ -290,3 +290,32 @@ blocking on SYNC_FULL at all — retire the DP interrupt immediately and only
 synchronise when someone actually reads those pixels (CPU or VI). That is a
 genuine latency improvement rather than a test workaround, and it is filed as
 future work; SoftRDP remains the deterministic oracle in the meantime.
+
+## Fixed: LOD_FRACTION was undefined in the single-cycle path
+
+`shaders/shading.h` declared `i16 lod_frac;` and only assigned it inside
+`if (uses_lod)`. `RASTERIZATION_USES_LOD_BIT` is set by `combiner_uses_lod_frac()`,
+which returns `false` unconditionally when the primitive is not in 2-cycle mode
+(`rdp_renderer.cpp:1128`), and by `RASTERIZATION_TEX_LOD_ENABLE_BIT`. So every
+1-cycle primitive read an undefined variable, which the GPU materialises as 0.
+
+LOD_FRACTION is a register in the TX pipe, not a per-pixel temporary. When the LOD
+unit does not run, hardware leaves it saturated at `0xff` — parallel-rdp itself
+already writes `0xff` for the "no mipmap" cases inside `compute_lod_2cycle()`
+(`texture.h:937/954/963/974`), and SoftRDP has used `0xff` since `src/rdp/rdp.hpp:75`.
+
+The visible effect: krom's texture tests program 1-cycle
+`ALPHA = (TEXEL0_A - 0) * LOD_FRACTION + 0`. With `lod_frac = 0` every textured
+pixel came out alpha 0, and under `FORCE_BLEND` the blender kept the background —
+the framebuffer was a single flat fill colour, 76800 identical pixels. That is the
+whole story behind the two suspicious exact-value clusters in the krom sweep
+(93.99 × 28 ROMs and 89.71 × 16 ROMs: those numbers were just the background's
+share of the image).
+
+Fix: `i16 lod_frac = i16(0xff);`. 38 ROMs improve, 0 regress; the suite goes
+`mean_exact 88.95 → 89.26`, `perfect 178 → 179`.
+
+Note this is *not* the same defect as the COMBINED one above: the GRB decoders also
+multiply by LOD_FRACTION, so the ROM-patch experiment that replaced both cycles with
+plain TEXEL0 had changed the alpha equation too. With LOD_FRACTION fixed they are
+still black, which re-confirms COMBINED as their independent root cause.

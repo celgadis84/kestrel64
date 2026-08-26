@@ -204,7 +204,11 @@ bool shade_pixel(int x, int y, uint primitive_index, out ShadedData shaded)
 	uint max_level = uint(setup_tile) >> 3u;
 	int min_lod = derived.min_lod;
 
-	i16 lod_frac;
+	// LOD_FRACTION is a real register in the TX pipe, not a per-pixel temporary. When the
+	// LOD unit does not run (1-cycle mode, or 2-cycle with LOD off) hardware leaves it
+	// saturated at 0xff, so a combiner that multiplies by LOD_FRAC gets a pass-through.
+	// Leaving it undefined here reads as 0 on GPU and silently kills every such primitive.
+	i16 lod_frac = i16(0xff);
 	if (uses_lod)
 	{
 		compute_lod_2cycle(tile0, tile1, lod_frac, max_level, min_lod, st, st_dx, st_dy, perspective_overflow,
