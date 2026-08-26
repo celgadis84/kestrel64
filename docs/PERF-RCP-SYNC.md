@@ -150,3 +150,26 @@ microcodigo se frena solo leyendo CURRENT, igual que en la consola.
 El cuello de botella se ha movido: el RSP ya emula por encima de la velocidad de la consola y
 el RDP es ahora el hilo mas ocupado. La siguiente palanca esta en el rasterizador (SoftRDP en
 esta medida) o en el reparto de nucleos, no en el RSP.
+
+---
+
+## Que significan estos "fps" (leer antes de comparar)
+
+`viFlips` cuenta **cambios de VI_ORIGIN**, es decir frames de juego presentados, no campos VI.
+SM64 corre a **30 fps de juego** en la consola (dos campos VI por frame). Asi que la escala es:
+
+| medida | frames/s | % de consola |
+|---|---|---|
+| antes de esta sesion, SoftRDP | 23.04 | 77% |
+| tras la 1a tanda, SoftRDP | 28.85 | 96% |
+| tras la 2a tanda, SoftRDP | 32.11 | 107% |
+| tras la 2a tanda, parallel-rdp | 36.74 | **122%** |
+
+El contador `N64 speed: CPU` del heartbeat coincide (122%), porque compara instrucciones
+retiradas contra el ritmo de retirada que equivale a tiempo real, no contra el reloj de ciclos.
+SM64 con parallel-rdp corre **por encima de la consola** en este host (i7-870 de 2009).
+
+El JIT de CPU no cambia el resultado (35.1 con `KESTREL_JIT=1`, 36.5 con `+JIT_LINK`, 36.7 con
+interprete): en esta carga el hilo de CPU no es el palo largo. El que sigue por debajo es el
+RSP, al 74-77% del reloj del hardware, y ese es el que marcara el techo en un juego con mas
+carga de microcodigo.
