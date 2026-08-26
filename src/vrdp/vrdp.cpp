@@ -83,7 +83,13 @@ struct Backend {
   // Reparto de tiempo del hilo RDP (KESTREL_PRDP_STATS=1). Sin esto no se sabe si el coste
   // esta en trocear la FIFO, en esperar a la GPU o en bajarse los pixeles por PCIe.
   bool  stats = false;
-  u64   nsEnq = 0, nsWait = 0, nsScan = 0, nEnq = 0, nSync = 0;
+  u64   nsEnq = 0, nsWait = 0, nsScan = 0, nEnq = 0, nSync = 0, nSkip = 0;
+
+  // Comandos encolados desde el ultimo SYNC_FULL que pueden ESCRIBIR en RDRAM. Un
+  // SYNC_FULL solo obliga a esperar a la GPU si hay pixeles nuevos que el CPU podria
+  // leer; si el display list solo toco estado (Set_*, Load_*, Sync_*) no hay nada que
+  // sincronizar y el fence de la GPU cuesta ~1.6 ms de reloj de host por nada.
+  u32   drawsSinceSync = 0;
 };
 
 inline auto nowNs() -> u64 {
@@ -194,9 +200,10 @@ auto init(u8* rdram, u32 size) -> bool {
 auto dumpStats() -> void {
   if(!g || !g->stats) return;
   std::fprintf(stderr,
-      "[vrdp] fifo=%llu (%.2f ms) gpuwait=%llu (%.2f ms) scanout=%.2f ms\n",
+      "[vrdp] fifo=%llu (%.2f ms) gpuwait=%llu (%.2f ms) syncskip=%llu scanout=%.2f ms\n",
       (unsigned long long)g->nEnq, g->nsEnq / 1e6,
-      (unsigned long long)g->nSync, g->nsWait / 1e6, g->nsScan / 1e6);
+      (unsigned long long)g->nSync, g->nsWait / 1e6,
+      (unsigned long long)g->nSkip, g->nsScan / 1e6);
 }
 
 auto shutdown() -> void {
@@ -247,12 +254,26 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     }
     if(op >= 8) g->proc->enqueue_command(len * 2, words);
 
+    // Solo estos escriben en el color/z image; el resto es estado o carga de TMEM.
+    if((op >= 0x08 && op <= 0x0f) || op == 0x24 || op == 0x25 || op == 0x36)
+      g->drawsSinceSync++;
+
     if(::RDP::Op(op) == ::RDP::Op::SyncFull) {
       static const bool sfLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
       if(sfLog) { std::fprintf(stderr, "[dpsync] at=%06x span=%06x..%06x xbus=%u\n", cur, start, end, (unsigned)xbus); std::fflush(stderr); }
-      u64 tw = g->stats ? nowNs() : 0;
-      g->proc->wait_for_timeline(g->proc->signal_timeline());
-      if(g->stats) { g->nsWait += nowNs() - tw; g->nSync++; }
+      // El fence NO se difiere: SYNC_FULL significa "pipe drenado" y la interrupcion DP
+      // que sigue autoriza a la CPU a reescribir el buffer. Diferirlo dejaria a la GPU
+      // leyendo RDRAM que la CPU ya puede pisar. Medido ademas que no compensa: con el
+      // fence saltado (experimento) SM64 no acelera -- el hilo RDP esta ocioso ~89% y el
+      // fence cae dentro de ese hueco, no en el camino critico. Ver docs.
+      if(g->drawsSinceSync) {
+        u64 tw = g->stats ? nowNs() : 0;
+        g->proc->wait_for_timeline(g->proc->signal_timeline());
+        if(g->stats) { g->nsWait += nowNs() - tw; g->nSync++; }
+        g->drawsSinceSync = 0;
+      } else if(g->stats) {
+        g->nSkip++;
+      }
       sawSyncFull = true;
     }
     cur += len * 8;

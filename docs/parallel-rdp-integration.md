@@ -343,3 +343,42 @@ So both backends are wrong and neither pattern is the hardware one. Worth resolv
 because the residual -0.06/-0.10 regressions on the 16bpp texture ROMs are likely the
 same dither path. Not resolved here: guessing a threshold to move a score would be
 hardcoding to the test.
+
+## Closed: the SYNC_FULL GPU fence is not the bottleneck
+
+`runFifo()` blocks on `wait_for_timeline(signal_timeline())` when it retires a
+`SYNC_FULL`. Measured cost on SM64 (200 fields, `prdp-jit`):
+
+```
+[vrdp] fifo=296946 (246.96 ms) gpuwait=200 (489.79 ms) syncskip=0 scanout=50.64 ms
+```
+
+490 ms of a 9.64 s run — 2.45 ms per sync, ~5 % of wall clock. That looked like an
+easy win, so the wait was measured away (temporary `KESTREL_VRDP_NOFENCE`, which
+enqueues the timeline signal and never waits):
+
+| run | 900 M insn, `prdp-jit` |
+|-----|------------------------|
+| base     | 25 s, 25 s |
+| no-fence | 26 s, 26 s |
+
+**No gain.** The reason is visible in the same bench: RDP thread occupancy is 11 %.
+The fence lands inside the ~89 % the RDP worker spends idle, not on the critical
+path. The CPU thread only touches it through `rdpDrain()` (FIFO backpressure on a
+fresh `DPC_START`), and that is one drain per frame.
+
+Deferring the fence to the next display list was rejected on top of that: `SYNC_FULL`
+means "pipe drained", and the DP interrupt that follows is exactly the signal that
+authorises the game to reuse the buffer. Retiring DP before the GPU has read RDRAM
+would let the CPU overwrite textures/DL still in flight — a real corruption window,
+traded for zero measured throughput. The experiment toggle was removed; the comment
+at the wait records the finding.
+
+What *did* stay is `drawsSinceSync`: a `SYNC_FULL` whose display list only touched
+state (`Set_*`, `Load_*`, `Sync_*`) has no new pixels for the CPU to observe, so it
+skips the fence. That is honest hardware semantics and free, but both current
+workloads report `syncskip=0` — every SYNC_FULL in systemtest and SM64 follows real
+drawing. It is there for display lists that genuinely draw nothing.
+
+Real ceiling for `prdp-jit` stays where the bench puts it: RSP 52 % / cpuWait 47 %.
+The RSP is the long pole, not the GPU.
