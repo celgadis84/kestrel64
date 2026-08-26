@@ -364,6 +364,9 @@ extern "C" u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitSD
 extern "C" u8 kestrel_jitMFC1 (void*, u32, u32); extern "C" u8 kestrel_jitDMFC1(void*, u32, u32);
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
+extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
+extern "C" u8 kestrel_jitMULS(void*, u32, u32); extern "C" u8 kestrel_jitADDD(void*, u32, u32);
+extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(void*, u32, u32);
 
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
@@ -473,6 +476,20 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     case 0x02: fn = (void*)&kestrel_jitCFC1;  break;
     case 0x04: fn = (void*)&kestrel_jitMTC1;  break;
     case 0x05: fn = (void*)&kestrel_jitDMTC1; break;
+    // ADD/SUB/MUL de formato: dos tercios de las cesiones en SM64. Trampolin con camino
+    // rapido; los casos raros los sigue resolviendo el interprete (ver cpu.cpp).
+    case 0x10: switch(op & 63) {
+      case 0x00: fn = (void*)&kestrel_jitADDS; break;
+      case 0x01: fn = (void*)&kestrel_jitSUBS; break;
+      case 0x02: fn = (void*)&kestrel_jitMULS; break;
+      default: break;
+    } break;
+    case 0x11: switch(op & 63) {
+      case 0x00: fn = (void*)&kestrel_jitADDD; break;
+      case 0x01: fn = (void*)&kestrel_jitSUBD; break;
+      case 0x02: fn = (void*)&kestrel_jitMULD; break;
+      default: break;
+    } break;
     default: break;
   }
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX)

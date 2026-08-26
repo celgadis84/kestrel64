@@ -323,3 +323,64 @@ cada entrada del driver. Medido (max de 7 tiradas de fps): **47.02 con, 47.62 si
 de validacion ya opera sobre lineas calientes en L1 del host; el testigo anade una indireccion
 a heap (`std::vector`) y ramas que cuestan mas que lo que ahorran. Revertido.
 
+
+## Quinta tanda (2026-08-26): FPU en el JIT y el despeñadero del regulador
+
+Dos cambios que sólo tienen sentido juntos, porque el primero destapó al segundo.
+
+### 1. ADD/SUB/MUL de COP1 con camino rápido
+
+El histograma de la tanda anterior decía que el 99.20% de lo que el JIT cede al intérprete es
+COP1, y que dentro de eso MUL (~37%) + ADD (~25%) + SUB (~4%) son dos tercios. `jitCop1Alu<FN,FMT>`
+resuelve el caso limpio en C —operandos normales o cero, sin enables armados, resultado normal y
+sin más excepción que Inexact— y delega en el intérprete todo lo demás (subnormal, NaN, inf,
+overflow, underflow, trap armado). Escribe exactamente lo que escribiría `setS`/`setD`:
+`fcr31` con Cause I y la bandera pegajosa, y el destino con `(u64)rb` (32 bits limpian el alto).
+
+Validado con un oráculo temporal (`KESTREL_FPORACLE`): el camino rápido calculaba, dejaba que el
+intérprete ejecutase la misma op, y comparaba destino y `fcr31`. Cero discrepancias en 1200 M
+instrucciones de SM64. El oráculo se retiró después; el patrón queda anotado aquí porque es la
+forma barata de validar las siguientes (DIV, SQRT, CVT, C.cond).
+
+### 2. El regulador de ritmo estaba calibrado para un emulador más lento
+
+Al medir el cambio anterior en PRDP+threaded salió una regresión brutal y reproducible:
+**46.7 → 34 fps**, con A/B intercalado de dos binarios para descartar deriva del host. Pero en
+lockstep el mismo cambio medía ligeramente *mejor*. Contradicción real, no ruido.
+
+Callejones descartados por medida, para que nadie los repita:
+
+- **No era divergencia numérica.** El oráculo no encontró ninguna. Ojo con el atajo de comparar
+  volcados de framebuffer en modo threaded: **no son deterministas** — el mismo binario da md5 e
+  `Int(0)` distintos entre corridas, porque el punto donde cae el corte por instrucciones pilla al
+  RCP en otro estado. Ese veredicto no vale en threaded.
+- **No era coste del camino rápido.** Un stub que delegaba en la primera línea medía igual que la
+  base, así que ni el despacho ni los trampolines costaban nada.
+- **No era contabilidad.** `retired` y `Count` avanzan una unidad por op pase por donde pase.
+
+Lo que sí era, lo dijo el heartbeat: `N64 speed: CPU 202% → 451%` con el RSP clavado en ~110%.
+La CPU emulada se había acelerado y gastaba lo ganado **girando**. `kPaceSlack` —cuántas
+instrucciones puede adelantarse la CPU al RSP antes de dormir en el condvar— llevaba el valor de
+una calibración vieja, hecha cuando el hilo de CPU rendía 29 fps. Barrido con el hilo ya en ~47:
+
+| slack | base | +fpalu |
+|-------|------|--------|
+| 16 K  | 36.2 | 38.2 |
+| 64 K  | 38.5 | 41.0 |
+| 128 K | —    | 43.6 |
+| 192 K | —    | 46.9 |
+| **256 K** | **46.5** | **47.8** |
+| 320 K | —    | 44.2 |
+| 384 K | —    | 41.7 |
+| 512 K (viejo default) | 46.4 | 36.0 |
+
+El pico se había desplazado de 512 K a 256 K, y el viejo default había quedado justo en el borde:
+acelerar la CPU un 3% costaba 11 fps. Con el default en 256 K el camino rápido de FPU gana en
+**todo** el rango, que es lo que decía el lockstep desde el principio.
+
+**Regla que sale de aquí: `kPaceSlack` es función de la velocidad del hilo de CPU. Cada vez que
+el intérprete o el JIT se aceleren de forma apreciable, hay que rebarrerlo.** La señal de que se
+ha quedado corto es exactamente la de esta tanda: `N64 speed: CPU` se dispara mientras el RSP no
+se mueve.
+
+Resultado: **47.2–48.0 fps** en SM64 (antes 46.2–46.9), 157–160% de consola.

@@ -331,6 +331,7 @@ public:
   // dcWrite/storeRepeat/storeCart/wordStoreQuirk), byte a byte.
   template<u32 OPc> auto jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8;
   template<u32 RSc> auto jitCop1Move(u32 op, u32 off) -> u8;
+  template<u32 FN, u32 FMT> auto jitCop1Alu(u32 op, u32 off) -> u8;
   // Ejecuta UNA op no compilable con el intérprete desde dentro de un bloque JIT.
   // `off` = desplazamiento en bytes de la op respecto a la entrada del bloque (pc).
   // Devuelve 1 si la op terminó normal (el bloque sigue), 0 si hubo excepción/parada:

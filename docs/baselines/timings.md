@@ -329,3 +329,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-26 | gate_all.sh | 361 s | gate_prdp.sh | 303 s | JIT: spill perezoso + forget dirigido + COP1 directo + helpers de memoria especializados |
 | 2026-08-26 | gate_all.sh | 359 s | gate_prdp.sh | 304 s | JIT: LWC1/LDC1/SWC1/SDC1 por helper especializado |
 | 2026-08-26 | gate_all.sh | 363 s | gate_prdp.sh | 309 s | JIT: MFC1/DMFC1/CFC1/MTC1/DMTC1 por trampolin propio |
+| 2026-08-26 | gate_all | 426 s | fpalu + kPaceSlack 256K; regress=0, 12/12 |
+| 2026-08-26 | gate_prdp | 311 s | idem; regress=0 |

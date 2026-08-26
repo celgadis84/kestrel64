@@ -1433,6 +1433,68 @@ auto CPU::execute(u32 op) -> void {
 // de excepción si execute() la levantó, o la op siguiente si simplemente hay que parar. El
 // llamador sale del bloque con la bandera de "control ya escrito" contando esta op como
 // retirada, así que nunca se re-ejecuta.
+// ADD/SUB/MUL de FPU con camino rapido, emitidos por el JIT como CALL directo. Son dos
+// tercios de todo lo que el bloque cede al interprete en SM64. El caso comun -- operandos
+// normales o cero, resultado normal o cero, sin mas bandera IEEE que Inexact y sin el Enable
+// de Inexact armado -- no puede desviar el control ni necesita nada del contexto de
+// instruccion, asi que se resuelve aqui y se vuelve al bloque. CUALQUIER otra cosa (CU1=0,
+// NaN, infinito o subnormal en una entrada o en el resultado, Overflow/Underflow/Invalid,
+// un Enable que atrape) delega en jitInterpOp, que ejecuta la op entera por el interprete
+// con el contexto exacto que la excepcion necesita. Delegar es seguro en cualquier punto de
+// aqui: lo unico que se ha tocado hasta entonces es el MXCSR del anfitrion, que el
+// interprete vuelve a fijar en su propio mx::prep.
+template<u32 FN, u32 FMT>
+auto CPU::jitCop1Alu(u32 op, u32 off) -> u8 {
+  if(__builtin_expect(!((u32)cop0[C0_Status] & 0x2000'0000u), 0)) return jitInterpOp(op, off);
+  u32 fs = (op >> 11) & 31, ft = (op >> 16) & 31, fd = (op >> 6) & 31;
+  // Mismo emparejamiento de registro que el interprete: con FR=0 el campo fuente se alinea
+  // a par, y solo el campo fuente (ft y fd conservan su indice crudo).
+  if(!((u32)cop0[C0_Status] & (1u << 26))) fs &= ~1u;
+  u32 rm = fcr31 & 3;
+  u32 rc = (rm == 1) ? mx::RZ : (rm == 2) ? mx::RP : (rm == 3) ? mx::RM : mx::RN;
+  if constexpr(FMT == 0x10) {
+    u32 ab = (u32)fpr[fs], bb = (u32)fpr[ft];
+    // Normal o cero: exponente ni todo-ceros-con-mantisa (subnormal) ni todo-unos (inf/NaN).
+    auto plain = [](u32 x) { u32 e = x & 0x7f80'0000u;
+                             return (e != 0 || (x & 0x007f'ffffu) == 0) && e != 0x7f80'0000u; };
+    if(__builtin_expect(!(plain(ab) && plain(bb)), 0)) return jitInterpOp(op, off);
+    mx::prep(rc);
+    float a = std::bit_cast<float>(ab), b = std::bit_cast<float>(bb);
+    float r = (FN == 0) ? a + b : (FN == 1) ? a - b : a * b;
+    u32 rb = std::bit_cast<u32>(r);
+    u32 ex = mx::flags();
+    if(__builtin_expect(!plain(rb) || (ex & ~mx::INEXACT), 0)) return jitInterpOp(op, off);
+    u32 cause = (ex & mx::INEXACT) ? (1u << 12) : 0;
+    if(__builtin_expect(cause != 0 && ((fcr31 >> 7) & 1) != 0, 0)) return jitInterpOp(op, off);
+    fcr31 = (fcr31 & ~0x0003'F000u) | cause | (cause >> 10);   // Cause I + Flag I pegajosa
+    fpr[fd] = (u64)rb;                                          // resultado de 32 bits: limpia el alto
+    return 1;
+  } else {
+    u64 ab = fpr[fs], bb = fpr[ft];
+    auto plain = [](u64 x) { u64 e = x & 0x7ff0'0000'0000'0000ull;
+                             return (e != 0 || (x & 0x000f'ffff'ffff'ffffull) == 0)
+                                    && e != 0x7ff0'0000'0000'0000ull; };
+    if(__builtin_expect(!(plain(ab) && plain(bb)), 0)) return jitInterpOp(op, off);
+    mx::prep(rc);
+    double a = std::bit_cast<double>(ab), b = std::bit_cast<double>(bb);
+    double r = (FN == 0) ? a + b : (FN == 1) ? a - b : a * b;
+    u64 rb = std::bit_cast<u64>(r);
+    u32 ex = mx::flags();
+    if(__builtin_expect(!plain(rb) || (ex & ~mx::INEXACT), 0)) return jitInterpOp(op, off);
+    u32 cause = (ex & mx::INEXACT) ? (1u << 12) : 0;
+    if(__builtin_expect(cause != 0 && ((fcr31 >> 7) & 1) != 0, 0)) return jitInterpOp(op, off);
+    fcr31 = (fcr31 & ~0x0003'F000u) | cause | (cause >> 10);
+    fpr[fd] = rb;
+    return 1;
+  }
+}
+#define KC1A(name, fn, fmt) \
+  extern "C" u8 name(void* c, u32 op, u32 off) { \
+    return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Alu<fn, fmt>(op, off); }
+KC1A(kestrel_jitADDS, 0, 0x10) KC1A(kestrel_jitSUBS, 1, 0x10) KC1A(kestrel_jitMULS, 2, 0x10)
+KC1A(kestrel_jitADDD, 0, 0x11) KC1A(kestrel_jitSUBD, 1, 0x11) KC1A(kestrel_jitMULD, 2, 0x11)
+#undef KC1A
+
 // Movimientos COP1 (MFC1/DMFC1/CFC1/MTC1/DMTC1) emitidos por el JIT como CALL directo.
 // Son una cuarta parte de todo lo que el bloque cede al interprete en SM64 y no pueden
 // desviar el control: mueven 32/64 bits entre un gpr y el banco FPU y nada mas. El camino

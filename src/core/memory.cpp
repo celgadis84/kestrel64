@@ -1524,14 +1524,23 @@ auto Memory::rspAwaitIdle() -> void {
 // La holgura existe por la granularidad del dynarec: una cadena de bloques enlazados retira
 // hasta jit::kGuardMaxOps sin volver al bucle, asi que por debajo de eso el regulador no puede
 // mandar y solo generaria bloqueos inutiles.
-// Holgura por defecto: 512 K instrucciones de CPU. Medido en SM64 (400 campos, i7-870) con
-// todo lo demas igual: 8 K -> 22.0 fps, 128 K -> 26.1, 512 K -> 29.0, 2 M -> 26.7. Con la
-// holgura corta el freno entra tantas veces por campo que la CPU pasa mas tiempo en el
-// condvar que emulando, y el RSP se queda sin trabajo encolado por delante; con la holgura
-// larga el adelanto entre dominios crece hasta que el hilo de CPU se come el nucleo que el
-// worker necesita. El tope real lo sigue poniendo kPaceMaxWait, que corta cualquier episodio.
+// Holgura por defecto: 256 K instrucciones de CPU. Con la holgura corta el freno entra tantas
+// veces por campo que la CPU pasa mas tiempo en el condvar que emulando, y el RSP se queda sin
+// trabajo encolado por delante; con la holgura larga el adelanto entre dominios crece hasta que
+// el hilo de CPU se come el nucleo que el worker necesita. El tope real lo sigue poniendo
+// kPaceMaxWait, que corta cualquier episodio.
+//
+// El optimo se MUEVE con la velocidad del hilo de CPU, asi que hay que recalibrarlo cuando el
+// interprete/JIT se acelera. Primera calibracion (SM64, 400 campos, i7-870), cuando el hilo de
+// CPU rendia ~29 fps: 8 K -> 22.0, 128 K -> 26.1, 512 K -> 29.0, 2 M -> 26.7 -> optimo 512 K.
+// Recalibrado 2026-08-26 con el hilo de CPU ya en ~47 fps: 16 K -> 38.2, 64 K -> 41.0,
+// 128 K -> 43.6, 192 K -> 46.9, 256 K -> 47.8, 320 K -> 44.2, 384 K -> 41.7, 512 K -> 36.0.
+// El pico se habia desplazado de 512 K a 256 K y el viejo default habia quedado justo en el
+// borde del despenadero: acelerar la CPU un 3% costaba 11 fps porque el adelanto acumulado
+// entre frenadas crecia con ella. Sintoma reconocible: "N64 speed: CPU" se dispara (aqui
+// 202% -> 451%) mientras el RSP se queda igual, es decir la CPU gasta lo ganado girando.
 static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
-                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 524288;
+                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 262144;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
 
 auto Memory::rcpPace(u64 cpuRetired) -> void {
