@@ -319,3 +319,27 @@ Note this is *not* the same defect as the COMBINED one above: the GRB decoders a
 multiply by LOD_FRACTION, so the ROM-patch experiment that replaced both cycles with
 plain TEXEL0 had changed the alpha equation too. With LOD_FRACTION fixed they are
 still black, which re-confirms COMBINED as their independent root cause.
+
+## Open: RGB dither in a 32bpp colour image (`Video/I8Decode/RDP`, 78.73 soft / 63.73 PRDP)
+
+The ROM draws 24 texture rectangles of an I8 frame into a 32bpp colour image with
+`Set_Other_Modes SAMPLE_TYPE|BI_LERP_0|ALPHA_DITHER_SEL_NO_DITHER|B_M2A_0_1`, i.e.
+RGB_DITHER_SEL is left at 0 = magic square. The combiner is
+`RGB = (TEXEL0 - 0) * TEXEL0`, so the flat texel 253 gives `(253*253)>>8 = 250`.
+
+The hardware capture holds exactly two values there, 250 (0xFA) and 255 (0xFF), in a
+spatial pattern: rows 0-1 are entirely 255, row 2 alternates on even x, rows 3-4 are
+entirely 250, row 5 alternates on odd x, row 6 on even x, rows 7-8 none, and from row 2
+onward it repeats with period 4 in y.
+
+- SoftRDP writes a flat 250 — it applies no RGB dither at all to a 32bpp target, so it
+  misses the 12530 pixels the hardware raised to 255 (and matches the other 35516).
+- parallel-rdp does dither, and its row-0 pattern (`255,250,255,250,...`) is exactly the
+  magic-square row `0,6,1,7` under a threshold — but hardware's row 0 is uniformly 255,
+  so the phase/threshold is wrong and it now misses in *both* directions: 27856 wrong
+  pixels vs SoftRDP's 16335.
+
+So both backends are wrong and neither pattern is the hardware one. Worth resolving
+because the residual -0.06/-0.10 regressions on the 16bpp texture ROMs are likely the
+same dither path. Not resolved here: guessing a threshold to move a score would be
+hardcoding to the test.
