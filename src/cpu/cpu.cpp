@@ -1488,6 +1488,24 @@ auto CPU::jitCop1Alu(u32 op, u32 off) -> u8 {
     return 1;
   }
 }
+// CTC1 es un tercio de todo lo que el JIT cedia al interprete en SM64: el compilador de SGI
+// reprograma el modo de redondeo de FCSR antes de cada conversion a entero. El caso comun es
+// una escritura que NO arma ninguna trampa; solo eso se atiende aqui.
+auto CPU::jitCTC1w(u32 op, u32 off) -> u8 {
+  if(__builtin_expect(!((u32)cop0[C0_Status] & 0x2000'0000u), 0)) return jitInterpOp(op, off);
+  u32 rd = (op >> 11) & 31;
+  if(rd != 31) return 1;                     // FCR0 es de solo lectura; el resto no existe
+  u32 v = (u32)gpr[(op >> 16) & 31] & 0x0183'FFFFu;
+  // Una CTC1 que deja armado E (bit 17) o un Cause con su Enable puesto dispara la excepcion
+  // FP en el acto, y eso arrastra el apaño de Cause.CE: al interprete.
+  if(__builtin_expect(((v >> 17) & 1) || (((v >> 12) & 0x1f) & ((v >> 7) & 0x1f)), 0))
+    return jitInterpOp(op, off);
+  fcr31 = v;
+  return 1;
+}
+extern "C" u8 kestrel_jitCTC1(void* c, u32 op, u32 off) {
+  return reinterpret_cast<kestrel::CPU*>(c)->jitCTC1w(op, off); }
+
 #define KC1A(name, fn, fmt) \
   extern "C" u8 name(void* c, u32 op, u32 off) { \
     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Alu<fn, fmt>(op, off); }

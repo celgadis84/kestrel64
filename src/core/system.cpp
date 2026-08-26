@@ -213,8 +213,19 @@ auto System::runLoop() -> void {
   if(!videoOn) { run(); return; }
   // Bring up Vulkan/GLFW on THIS (main) thread BEFORE the CPU worker starts —
   // a CPU-bound sibling stalls the driver's device bring-up on this box.
-  if(!presenter.open()) { std::printf("[video] init failed; running headless\n"); run(); return; }
+  // El backend GPU tiene que estar arriba ANTES de abrir la ventana: el presentador comparte
+  // su contexto Vulkan (ver vrdp::sharedVk), y dos contextos vivos se pisan la tabla global de
+  // punteros de volk. Pero levantarlo aqui NO vale: Granite ata su estado al hilo que lo crea
+  // y ese tiene que seguir siendo el del RDP. Asi que se arranca la CPU primero (con ella los
+  // hilos del RCP) y aqui solo se espera a que el hilo del RDP lo tenga listo.
   std::thread cpuThread([this] { run(); });
+  const char* pe = std::getenv("KESTREL_PRDP");
+  bool prdpWanted = pe && pe[0] != '0';
+  bool prdpReady  = memory.vrdpWaitReady(15000);
+  if(prdpWanted && !prdpReady)
+    std::printf("[video] parallel-rdp no arranco a tiempo; sin ventana\n");
+  else if(!presenter.open())
+    std::printf("[video] init failed; running headless\n");
   while(!shutdown.load() && presenter.pumpFrame()) {}
   shutdown.store(true);      // window closed or stop → unwind the CPU worker
   cpuThread.join();

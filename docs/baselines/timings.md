@@ -333,3 +333,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-26 | gate_prdp | 311 s | idem; regress=0 |
 | 2026-08-27 | gate_all | 390 s | limitador de velocidad; 12/12, regress=0 |
 | 2026-08-27 | gate_prdp | 322 s | idem; regress=0 |
+| 2026-08-27 | gate_all | ~400 s | contexto Vulkan compartido + candado de cola; 12/12, regress=0 |
+| 2026-08-27 | gate_prdp | ~330 s | idem; regress=0 |

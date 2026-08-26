@@ -253,6 +253,10 @@ struct Memory {
   std::atomic<u64> paceBlockNs{0}, paceEpisodes{0}, paceHolds{0};
   auto rcpPace(u64 cpuRetired) -> void;       // frena la CPU si adelanta al RSP en vuelo
   auto paceAllowance(u64 cpuRetired) -> u32; // ops que quedan antes de la proxima frenada
+  // Publico: System espera aqui antes de abrir la ventana, porque el presentador comparte el
+  // contexto Vulkan del backend. Lo LEVANTA el hilo del RDP (Granite ata su estado por hilo),
+  // asi que esto solo espera; devuelve false si expira el plazo o si el backend no esta pedido.
+  auto vrdpWaitReady(u32 timeoutMs) -> bool;
 private:
   auto rdpWorkerLoop() -> void;
   auto vrdpBringUp() -> void;      // trae parallel-rdp arriba una sola vez

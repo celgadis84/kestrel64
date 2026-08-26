@@ -167,8 +167,25 @@ auto init(u8* rdram, u32 size) -> bool {
   if(!::Vulkan::Context::init_loader(nullptr)) return false;
 
   g = new Backend();
-  if(!g->context.init_instance_and_device(nullptr, 0, nullptr, 0, 0)) { shutdown(); return false; }
+  // Extensiones de presentacion: el contexto lo comparte el presentador (ver sharedVk), asi
+  // que la instancia necesita las de superficie y el dispositivo la de swapchain aunque
+  // parallel-rdp por si solo no presente nada.
+  static const char* kInstExt[] = { "VK_KHR_surface",
+#ifdef _WIN32
+                                    "VK_KHR_win32_surface"
+#else
+                                    "VK_KHR_xlib_surface"
+#endif
+                                  };
+  static const char* kDevExt[]  = { "VK_KHR_swapchain" };
+  if(!g->context.init_instance_and_device(kInstExt, 2, kDevExt, 1, 0)) { shutdown(); return false; }
   g->device.set_context(g->context);
+  // El presentador comparte esta cola grafica (ver sharedVk) y submite desde el hilo de la
+  // ventana mientras Granite submite desde el hilo del RDP. vkQueueSubmit NO es seguro entre
+  // hilos sobre la misma cola: sin esto el driver pierde el dispositivo (VK_ERROR_DEVICE_LOST)
+  // al primer solape. Granite toma este candado alrededor de cada submit suyo; el presentador
+  // toma el mismo por vrdp::queueLock/queueUnlock.
+  g->device.set_queue_lock([] { queueLock(); }, [] { queueUnlock(); });
   g->device.init_frame_contexts(3);
 
   // parallel-rdp maps guest RDRAM straight into the GPU via VK_EXT_external_memory_host
@@ -204,6 +221,21 @@ auto dumpStats() -> void {
       (unsigned long long)g->nEnq, g->nsEnq / 1e6,
       (unsigned long long)g->nSync, g->nsWait / 1e6,
       (unsigned long long)g->nSkip, g->nsScan / 1e6);
+}
+
+static auto queueMutex() -> std::mutex& { static std::mutex m; return m; }
+auto queueLock()   -> void { queueMutex().lock(); }
+auto queueUnlock() -> void { queueMutex().unlock(); }
+
+auto sharedVk() -> const SharedVk* {
+  if(!g || !g->ok) return nullptr;
+  static SharedVk sh{};
+  sh.instance    = (void*)g->context.get_instance();
+  sh.gpu         = (void*)g->context.get_gpu();
+  sh.device      = (void*)g->context.get_device();
+  sh.queueFamily = g->context.get_queue_info().family_indices[::Vulkan::QUEUE_INDEX_GRAPHICS];
+  sh.queue       = (void*)g->context.get_queue_info().queues[::Vulkan::QUEUE_INDEX_GRAPHICS];
+  return &sh;
 }
 
 auto shutdown() -> void {

@@ -362,6 +362,7 @@ extern "C" u8 kestrel_jitSD (void*, u64, u32, u64);
 extern "C" u8 kestrel_jitLWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitLDC1(void*, u64, u32, u64);
 extern "C" u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitSDC1(void*, u64, u32, u64);
 extern "C" u8 kestrel_jitMFC1 (void*, u32, u32); extern "C" u8 kestrel_jitDMFC1(void*, u32, u32);
+extern "C" u8 kestrel_jitCTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
@@ -474,6 +475,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     case 0x00: fn = (void*)&kestrel_jitMFC1;  break;
     case 0x01: fn = (void*)&kestrel_jitDMFC1; break;
     case 0x02: fn = (void*)&kestrel_jitCFC1;  break;
+      case 0x06: fn = (void*)&kestrel_jitCTC1; break;
     case 0x04: fn = (void*)&kestrel_jitMTC1;  break;
     case 0x05: fn = (void*)&kestrel_jitDMTC1; break;
     // ADD/SUB/MUL de formato: dos tercios de las cesiones en SM64. Trampolin con camino

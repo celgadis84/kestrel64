@@ -1364,6 +1364,21 @@ auto Memory::vrdpBringUp() -> void {
   std::call_once(vrdpOnce, [this]{ vrdp::init(rdram.data(), (u32)rdram.size()); });
 }
 
+// Espera a que el hilo del RDP haya levantado parallel-rdp. El presentador comparte ese
+// contexto Vulkan, pero NO puede levantarlo el mismo: Granite registra indice de hilo y ata
+// su estado al hilo que lo crea, asi que traerlo arriba fuera del hilo del RDP deja al worker
+// sin sus lookups por hilo y el RDP acaba sin completar trabajos (el juego se queda esperando
+// MESG_DP_COMPLETE para siempre). De ahi que esto solo espere.
+auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
+  const char* e = std::getenv("KESTREL_PRDP");
+  if(!e || e[0] == '0') return false;                 // backend no pedido: nada que esperar
+  for(u32 i = 0; i < timeoutMs; i++) {
+    if(vrdp::active()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
 auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   // GPU path (paraLLEl-RDP): opt-in via KESTREL_PRDP. Lazily brought up on first job with
   // this RDRAM block; when live it consumes the FIFO on the GPU instead of SoftRDP. The

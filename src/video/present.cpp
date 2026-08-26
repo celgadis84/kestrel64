@@ -54,6 +54,7 @@ struct Vk {
   VkSemaphore semAcquire = VK_NULL_HANDLE, semRender = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
 
+  bool shared = false;        // instancia/dispositivo prestados por parallel-rdp: no destruir
   bool presentable = false;   // false → surface unusable (e.g. no desktop session); compose only
 };
 
@@ -127,26 +128,52 @@ auto createSwapchain(Vk& v) -> bool {
   return true;
 }
 
+// La cola grafica puede ser la de parallel-rdp (ver initVulkan). vkQueueSubmit y
+// vkQueuePresentKHR sobre una misma cola no son seguros entre hilos, y Granite submite desde
+// el hilo del RDP mientras esto corre en el de la ventana: sin el candado el driver pierde el
+// dispositivo. Con contexto propio no hay contienda y el guarda no hace nada.
+struct QueueGuard {
+  bool on;
+  explicit QueueGuard(bool shared) : on(shared) { if(on) vrdp::queueLock(); }
+  ~QueueGuard() { if(on) vrdp::queueUnlock(); }
+};
+
 auto initVulkan(Vk& v) -> bool {
+  // Con parallel-rdp activo hay que COMPARTIR su contexto Vulkan en vez de crear uno propio:
+  // volk resuelve todos los vk* en UNA tabla global de punteros, asi que el segundo contexto
+  // que se carga pisa las entradas del primero y la siguiente llamada del otro salta a un
+  // puntero nulo. La caida al abrir la ventana con PRDP era exactamente eso (host RIP 0).
+  // De paso ahorra un dispositivo logico entero en la GPU.
+  const vrdp::SharedVk* sh = vrdp::sharedVk();
+  if(sh) {
+    v.shared   = true;
+    v.instance = (VkInstance)sh->instance;
+    v.phys     = (VkPhysicalDevice)sh->gpu;
+    v.dev      = (VkDevice)sh->device;
+    v.qfamily  = sh->queueFamily;
+    v.queue    = (VkQueue)sh->queue;
+  }
 #ifdef KESTREL_PRDP
-  if(volkInitialize() != VK_SUCCESS) {
+  if(!v.shared && volkInitialize() != VK_SUCCESS) {
     std::fprintf(stderr, "[video] volkInitialize failed\n"); return false;
   }
 #endif
   // Create the instance BEFORE glfwInit: on this box glfwInit() poisons the AMD
   // driver so vkCreateInstance hangs. Hardcode the surface extensions GLFW needs.
-  const char* ext[] = { "VK_KHR_surface", "VK_KHR_win32_surface" };
-  VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
-  app.pApplicationName = "kestrel64"; app.apiVersion = VK_API_VERSION_1_1;
-  VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
-  ici.pApplicationInfo = &app;
-  ici.enabledExtensionCount = 2; ici.ppEnabledExtensionNames = ext;
-  if(vkCreateInstance(&ici, nullptr, &v.instance) != VK_SUCCESS) {
-    std::fprintf(stderr, "[video] vkCreateInstance failed\n"); return false;
-  }
+  if(!v.shared) {
+    const char* ext[] = { "VK_KHR_surface", "VK_KHR_win32_surface" };
+    VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+    app.pApplicationName = "kestrel64"; app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+    ici.pApplicationInfo = &app;
+    ici.enabledExtensionCount = 2; ici.ppEnabledExtensionNames = ext;
+    if(vkCreateInstance(&ici, nullptr, &v.instance) != VK_SUCCESS) {
+      std::fprintf(stderr, "[video] vkCreateInstance failed\n"); return false;
+    }
 #ifdef KESTREL_PRDP
-  volkLoadInstance(v.instance);   // populate instance-level entry points
+    volkLoadInstance(v.instance);   // populate instance-level entry points
 #endif
+  }
 
   if(!glfwInit()) { std::fprintf(stderr, "[video] glfwInit failed\n"); return false; }
 
@@ -163,45 +190,58 @@ auto initVulkan(Vk& v) -> bool {
   glfwShowWindow(v.win);
   for(int i = 0; i < 20; i++) { glfwPollEvents(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
 
-  u32 nphys = 0; vkEnumeratePhysicalDevices(v.instance, &nphys, nullptr);
-  if(!nphys) { std::fprintf(stderr, "[video] no Vulkan devices\n"); return false; }
-  std::vector<VkPhysicalDevice> devs(nphys);
-  vkEnumeratePhysicalDevices(v.instance, &nphys, devs.data());
-  // Pick a device with a graphics+present queue family, preferring discrete GPUs.
-  int bestScore = -1;
-  for(auto pd : devs) {
-    u32 nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
-    std::vector<VkQueueFamilyProperties> qs(nq);
-    vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qs.data());
-    for(u32 i = 0; i < nq; i++) {
-      VkBool32 present = VK_FALSE;
-      vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, v.surface, &present);
-      if((qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
-        VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(pd, &p);
-        int score = (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 2 : 1;
-        if(score > bestScore) { bestScore = score; v.phys = pd; v.qfamily = i; }
-        break;
+  if(v.shared) {
+    // El dispositivo ya lo eligio parallel-rdp; aqui solo hay que verificar que su cola
+    // grafica sepa presentar en esta superficie. Si no puede, se queda en compose-only.
+    VkBool32 present = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(v.phys, v.qfamily, v.surface, &present);
+    if(!present) {
+      std::fprintf(stderr, "[video] shared queue cannot present here; compose-only\n");
+      return true;
+    }
+  } else {
+    u32 nphys = 0; vkEnumeratePhysicalDevices(v.instance, &nphys, nullptr);
+    if(!nphys) { std::fprintf(stderr, "[video] no Vulkan devices\n"); return false; }
+    std::vector<VkPhysicalDevice> devs(nphys);
+    vkEnumeratePhysicalDevices(v.instance, &nphys, devs.data());
+    // Pick a device with a graphics+present queue family, preferring discrete GPUs.
+    int bestScore = -1;
+    for(auto pd : devs) {
+      u32 nq = 0; vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, nullptr);
+      std::vector<VkQueueFamilyProperties> qs(nq);
+      vkGetPhysicalDeviceQueueFamilyProperties(pd, &nq, qs.data());
+      for(u32 i = 0; i < nq; i++) {
+        VkBool32 present = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, v.surface, &present);
+        if((qs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) {
+          VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(pd, &p);
+          int score = (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 2 : 1;
+          if(score > bestScore) { bestScore = score; v.phys = pd; v.qfamily = i; }
+          break;
+        }
       }
     }
+    if(v.phys == VK_NULL_HANDLE) { std::fprintf(stderr, "[video] no graphics+present queue\n"); return false; }
   }
-  if(v.phys == VK_NULL_HANDLE) { std::fprintf(stderr, "[video] no graphics+present queue\n"); return false; }
   { VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(v.phys, &p);
     std::fprintf(stderr, "[video] Vulkan device: %s\n", p.deviceName); }
 
-  float prio = 1.0f;
-  VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
-  qci.queueFamilyIndex = v.qfamily; qci.queueCount = 1; qci.pQueuePriorities = &prio;
-  const char* devExt[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-  VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
-  dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = devExt;
-  if(vkCreateDevice(v.phys, &dci, nullptr, &v.dev) != VK_SUCCESS) {
-    std::fprintf(stderr, "[video] vkCreateDevice failed\n"); return false;
-  }
+  if(!v.shared) {
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+    qci.queueFamilyIndex = v.qfamily; qci.queueCount = 1; qci.pQueuePriorities = &prio;
+    const char* devExt[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+    dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
+    dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = devExt;
+    if(vkCreateDevice(v.phys, &dci, nullptr, &v.dev) != VK_SUCCESS) {
+      std::fprintf(stderr, "[video] vkCreateDevice failed\n"); return false;
+    }
 #ifdef KESTREL_PRDP
-  volkLoadDevice(v.dev);   // populate device-level entry points (swapchain etc.)
+    volkLoadDevice(v.dev);   // populate device-level entry points (swapchain etc.)
 #endif
-  vkGetDeviceQueue(v.dev, v.qfamily, 0, &v.queue);
+    vkGetDeviceQueue(v.dev, v.qfamily, 0, &v.queue);
+  }
 
   // Swapchain may fail if there's no usable desktop surface (headless launch).
   // Keep the window+compose path alive (presentable stays false) instead of
@@ -255,10 +295,14 @@ auto initVulkan(Vk& v) -> bool {
   vkEndCommandBuffer(v.cmd);
   VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
   si.commandBufferCount = 1; si.pCommandBuffers = &v.cmd;
-  vkQueueSubmit(v.queue, 1, &si, VK_NULL_HANDLE);
-  vkQueueWaitIdle(v.queue);
+  {
+    QueueGuard qg(v.shared);
+    vkQueueSubmit(v.queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(v.queue);
+  }
   return true;
 }
+
 
 auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   // Upload the frame into the mapped source image, honoring its row pitch.
@@ -302,12 +346,15 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   si.commandBufferCount = 1; si.pCommandBuffers = &v.cmd;
   si.signalSemaphoreCount = 1; si.pSignalSemaphores = &v.semRender;
   vkResetFences(v.dev, 1, &v.fence);
-  vkQueueSubmit(v.queue, 1, &si, v.fence);
+  {
+    QueueGuard qg(v.shared);
+    vkQueueSubmit(v.queue, 1, &si, v.fence);
 
-  VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-  pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &v.semRender;
-  pi.swapchainCount = 1; pi.pSwapchains = &v.swap; pi.pImageIndices = &idx;
-  vkQueuePresentKHR(v.queue, &pi);
+    VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+    pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &v.semRender;
+    pi.swapchainCount = 1; pi.pSwapchains = &v.swap; pi.pImageIndices = &idx;
+    vkQueuePresentKHR(v.queue, &pi);
+  }
 
   vkWaitForFences(v.dev, 1, &v.fence, VK_TRUE, UINT64_MAX);   // simple: one frame in flight
 }
@@ -322,9 +369,11 @@ auto destroyVulkan(Vk& v) -> void {
   if(v.srcImage) vkDestroyImage(v.dev, v.srcImage, nullptr);
   if(v.srcMem) vkFreeMemory(v.dev, v.srcMem, nullptr);
   if(v.swap) vkDestroySwapchainKHR(v.dev, v.swap, nullptr);
-  if(v.dev) vkDestroyDevice(v.dev, nullptr);
+  // El dispositivo y la instancia prestados son de parallel-rdp: los destruye su Context.
+  // La superficie si es nuestra aunque la instancia no lo sea.
+  if(v.dev && !v.shared) vkDestroyDevice(v.dev, nullptr);
   if(v.surface) vkDestroySurfaceKHR(v.instance, v.surface, nullptr);
-  if(v.instance) vkDestroyInstance(v.instance, nullptr);
+  if(v.instance && !v.shared) vkDestroyInstance(v.instance, nullptr);
   if(v.win) glfwDestroyWindow(v.win);
   glfwTerminate();
 }

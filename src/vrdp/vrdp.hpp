@@ -25,6 +25,10 @@ inline auto viWrite(u32, u32) -> void {}
 inline auto frameBegin() -> void {}
 inline auto scanout(u32& w, u32& h) -> const u8* { w = h = 0; return nullptr; }
 inline auto scanoutDone() -> void {}
+struct SharedVk { void* instance; void* gpu; void* device; u32 queueFamily; void* queue; };
+inline auto sharedVk() -> const SharedVk* { return nullptr; }
+inline auto queueLock()   -> void {}
+inline auto queueUnlock() -> void {}
 #else
 
 // Bring up the GPU backend over the guest RDRAM block. Returns false (and stays inactive)
@@ -54,6 +58,20 @@ auto frameBegin() -> void;
 // Call scanoutDone() when finished reading the returned pointer.
 auto scanout(u32& width, u32& height) -> const u8*;
 auto scanoutDone() -> void;
+
+// Handles del contexto Vulkan de parallel-rdp. El presentador los reutiliza en vez de crear
+// un segundo dispositivo: volk resuelve los punteros de funcion en UNA tabla global, asi que
+// dos contextos vivos se pisan las entradas y la siguiente llamada salta a un puntero nulo.
+// Se dan como void* para no arrastrar vulkan.h hasta el nucleo; present.cpp los recastea.
+// Devuelve nullptr si el backend no esta activo.
+struct SharedVk { void* instance; void* gpu; void* device; u32 queueFamily; void* queue; };
+auto sharedVk() -> const SharedVk*;
+
+// Candado de la cola grafica compartida. vkQueueSubmit/vkQueuePresentKHR sobre una misma cola
+// no son seguros entre hilos, y aqui submiten dos: Granite desde el hilo del RDP y el
+// presentador desde el de la ventana. Ambos pasan por este mismo mutex.
+auto queueLock()   -> void;
+auto queueUnlock() -> void;
 
 #endif  // KESTREL_PRDP
 
