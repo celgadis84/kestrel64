@@ -422,9 +422,17 @@ auto Rsp::exec(u32 op) -> void {
 }
 
 // --- vector loads (LWC2) ----------------------------------------------------
-auto Rsp::execLoad(u32 op) -> void {
+// SUB es parametro de plantilla, no argumento. Mismo motivo que en vuOpT: con los dieciseis
+// casos vivos dentro de una sola funcion, el asignador dimensiona el prologo con el peor
+// caso -- LFV/LTV, que gastan un R128 en pila y varios xmm -- y ESO lo paga tambien un LQV,
+// que es una carga de 128 bits y un pshufb. Instanciado por sub, cada entrada tiene el
+// prologo que le toca y el llamante que conoce el opcode (el dynarec) entra sin salto
+// indirecto. Las reglas son las mismas de siempre; no hay una segunda copia.
+template<u32 SUB>
+auto Rsp::execLoadT(u32 op) -> void {
+  constexpr u32 sub = SUB;
   int base = op >> 21 & 31, vt = op >> 16 & 31;
-  u32 sub = op >> 11 & 0x1f, e = op >> 7 & 0xf;
+  u32 e = op >> 7 & 0xf;
 #if KESTREL_VUSTAT
   if(g_vustat.on) g_vustat.lwc2[sub]++;
 #endif
@@ -491,10 +499,26 @@ auto Rsp::execLoad(u32 op) -> void {
   }
 }
 
+using Lwc2Fn = void (*)(Rsp*, u32);
+namespace {
+template<u32 S> auto lwc2Thunk(Rsp* r, u32 op) -> void { r->execLoadT<S>(op); }
+template<u32... I> constexpr auto makeLwc2Tab(std::integer_sequence<u32, I...>) {
+  return std::array<Lwc2Fn, 32>{ &lwc2Thunk<I>... };
+}
+constexpr std::array<Lwc2Fn, 32> kLwc2Tab = makeLwc2Tab(std::make_integer_sequence<u32, 32>{});
+}  // namespace
+
+auto rspLwc2Entry(u32 op) -> void* { return (void*)kLwc2Tab[op >> 11 & 0x1f]; }
+auto Rsp::execLoad(u32 op) -> void { kLwc2Tab[op >> 11 & 0x1f](this, op); }
+
 // --- vector stores (SWC2) ---------------------------------------------------
-auto Rsp::execStore(u32 op) -> void {
+// Instanciado por sub por la misma razon que las cargas: SFV/STV son los que marcan el
+// prologo y no tiene por que pagarlo un SQV.
+template<u32 SUB>
+auto Rsp::execStoreT(u32 op) -> void {
+  constexpr u32 sub = SUB;
   int base = op >> 21 & 31, vt = op >> 16 & 31;
-  u32 sub = op >> 11 & 0x1f, e = op >> 7 & 0xf;
+  u32 e = op >> 7 & 0xf;
 #if KESTREL_VUSTAT
   if(g_vustat.on) g_vustat.swc2[sub]++;
 #endif
@@ -564,6 +588,18 @@ auto Rsp::execStore(u32 op) -> void {
   } break;
   }
 }
+
+using Swc2Fn = void (*)(Rsp*, u32);
+namespace {
+template<u32 S> auto swc2Thunk(Rsp* r, u32 op) -> void { r->execStoreT<S>(op); }
+template<u32... I> constexpr auto makeSwc2Tab(std::integer_sequence<u32, I...>) {
+  return std::array<Swc2Fn, 32>{ &swc2Thunk<I>... };
+}
+constexpr std::array<Swc2Fn, 32> kSwc2Tab = makeSwc2Tab(std::make_integer_sequence<u32, 32>{});
+}  // namespace
+
+auto rspSwc2Entry(u32 op) -> void* { return (void*)kSwc2Tab[op >> 11 & 0x1f]; }
+auto Rsp::execStore(u32 op) -> void { kSwc2Tab[op >> 11 & 0x1f](this, op); }
 
 // --- 48-bit accumulator as three 16-bit limbs, 8 lanes wide ------------------
 struct V48 { __m128i h, m, l; };   // h=acch, m=accm, l=accl (bits 47:32 / 31:16 / 15:0)
@@ -1517,7 +1553,10 @@ auto Rsp::step(u64 maxInsns) -> void {
       // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo
       // CPU (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final.
       cyclesRun.fetch_add(ran - pub, std::memory_order_relaxed); pub = ran;
-      mem->rspCv.notify_all();
+      // Notificar solo si hay alguien dormido. Sin esperador, notify_all sigue siendo
+      // una llamada a la CRT y un candado; con esperador, una llamada al kernel. El
+      // fetch_add anterior publica cyclesRun ANTES de leer el contador (ver rspWaiters).
+      if(mem->rspWaiters.load()) mem->rspCv.notify_all();
     }
   }
   // Ciclos de RSP ejecutados. En modo Lockstep los contaba el bucle del sistema, pero en

@@ -8,8 +8,44 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace kestrel {
+
+// Tiempo de CPU (usuario+nucleo) que lleva gastado un hilo, en nanosegundos. 0 si no se
+// puede saber. Es lo que hay que comparar contra el tiempo de PARED que miden rspBusyNs y
+// rdpBusyNs: si un worker esta dentro de un trabajo el 80% de la pared pero solo ha gastado
+// el 40% de CPU, no va lento -- es que no le estan dando nucleo.
+static auto threadCpuNs(void* h) -> u64 {
+#ifdef _WIN32
+  if(!h) return 0;
+  FILETIME cre, ex, kern, usr;
+  if(!GetThreadTimes((HANDLE)h, &cre, &ex, &kern, &usr)) return 0;
+  auto to64 = [](const FILETIME& f) { return ((u64)f.dwHighDateTime << 32) | f.dwLowDateTime; };
+  return (to64(kern) + to64(usr)) * 100ull;   // unidades de 100 ns
+#else
+  (void)h; return 0;
+#endif
+}
+
+// Duplica el pseudo-handle del hilo actual en uno real y utilizable desde otro hilo.
+static auto selfThreadHandle() -> void* {
+#ifdef _WIN32
+  HANDLE h = nullptr;
+  DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h,
+                  0, FALSE, DUPLICATE_SAME_ACCESS);
+  return h;
+#else
+  return nullptr;
+#endif
+}
+
+auto Memory::sampleWorkerCpu() -> void {
+  rspCpuNs.store(threadCpuNs(rspThreadH), std::memory_order_relaxed);
+  rdpCpuNs.store(threadCpuNs(rdpThreadH), std::memory_order_relaxed);
+}
 
 // Physical base addresses of the N64 memory map.
 enum : u32 {
@@ -1070,6 +1106,24 @@ auto Memory::piDma(bool toCart) -> void {
   raiseIntr(MI_PI);
 }
 
+// Copia corta sin salir a la CRT. El motor DMA del SP mueve tramos pequenos MUY a menudo
+// (F3DEX2 trae matrices, vertices y trozos de display list de 8 a 128 bytes por rafaga), y
+// el memcpy de ucrtbase resuelve su despacho por tamano en cada llamada: para 32 bytes eso
+// cuesta mas que la copia. El perfilador de host lo veia como ~20% del hilo del RSP dentro
+// de ucrtbase, con spDma como llamante. Para tramos largos se sigue delegando en memcpy,
+// que ahi si gana con sus rutinas anchas.
+static inline auto dmaCopy(u8* dst, const u8* src, u32 n) -> void {
+  if(n >= 256) { std::memcpy(dst, src, n); return; }
+  u32 i = 0;
+  for(; i + 16 <= n; i += 16) {
+    u64 a, b;
+    std::memcpy(&a, src + i, 8); std::memcpy(&b, src + i + 8, 8);
+    std::memcpy(dst + i, &a, 8); std::memcpy(dst + i + 8, &b, 8);
+  }
+  for(; i + 8 <= n; i += 8) { u64 a; std::memcpy(&a, src + i, 8); std::memcpy(dst + i, &a, 8); }
+  for(; i < n; i++) dst[i] = src[i];
+}
+
 auto Memory::spDma(bool toRam) -> void {
   // SP_RD/WR_LEN: bits 0-11 length-1, 12-19 count-1, 20-31 skip. Model row/count.
   u32 len = toRam ? rcp.sp_wr_len : rcp.sp_rd_len;
@@ -1117,8 +1171,8 @@ auto Memory::spDma(bool toRam) -> void {
         u32 n = length - i;
         if(n > 0x1000u - mo)                n = 0x1000u - mo;             // vuelta de la SP mem
         if(n > (u32)(rdram.size() - d))     n = (u32)(rdram.size() - d);  // final de la RDRAM
-        if(toRam) std::memcpy(&rdram[d], &sp[mo], n);
-        else      std::memcpy(&sp[mo], &rdram[d], n);
+        if(toRam) dmaCopy(&rdram[d], &sp[mo], n);
+        else      dmaCopy(&sp[mo], &rdram[d], n);
         i += n;
       }
     }
@@ -1346,21 +1400,36 @@ auto Memory::evDump(u32 n) -> void {
 }
 
 auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
+  bool wake;
   {
     std::lock_guard<std::mutex> lk(rdpMx);
     ev("dp.sub", current, end);
-    rdpQueue.push_back({current, end, xbus});
+    // El FIFO del RDP es UNO: escribir DPC_END no encola "un trabajo", solo adelanta el
+    // puntero final del mismo buffer de comandos. Si el ultimo tramo encolado todavia no ha
+    // empezado (el worker saca de la cola ANTES de ejecutar, asi que todo lo que sigue aqui
+    // esta sin empezar) y este continua exactamente donde acababa, con el mismo modo de bus,
+    // es el mismo tramo de FIFO partido en dos escrituras: unirlos es lo que hace el
+    // hardware. DPC_CURRENT acaba en el mismo sitio y se ejecutan los mismos comandos.
+    if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus)
+      rdpQueue.back().end = end;
+    else
+      rdpQueue.push_back({current, end, xbus});
     rdpBusy.store(true, std::memory_order_relaxed);
+    // Si el worker no esta dormido en el condvar, volvera a coger este mutex al terminar el
+    // trabajo en curso y vera la cola llena: la notificacion sobra. Con esperador, notify_all
+    // es una llamada al kernel, y a 38.000 DPC_END/s eso era el grueso del hilo del RSP.
+    wake = rdpWaiting;
   }
   // notify_ALL, no _one: en este condvar esperan DOS clases de hilo con predicados
   // distintos (el worker, "hay trabajo"; el drenador de la CPU, "cola vacia"). notify_one
   // puede despertar al drenador, cuyo predicado sigue falso, y el worker se queda dormido
-  // con trabajo encolado — wakeup perdido: la CPU espera un BREAK que nunca llega.
-  rdpCv.notify_all();
+  // con trabajo encolado -- wakeup perdido: la CPU espera un BREAK que nunca llega.
+  if(wake) rdpCv.notify_all();
 }
 
 auto Memory::rdpWorkerLoop() -> void {
   hostprof::start("rdp");   // opt-in: KESTREL_HOSTPROF_WHO=rdp
+  rdpThreadH = selfThreadHandle();
   // Levantar parallel-rdp AQUI, antes de esperar el primer trabajo. Traer arriba
   // Vulkan (device, colas, banco SPIR-V, importar los 8 MB de RDRAM) cuesta cientos
   // de milisegundos, y si se hace de forma perezosa dentro del primer job ese coste
@@ -1376,7 +1445,12 @@ auto Memory::rdpWorkerLoop() -> void {
     RdpJob job;
     {
       std::unique_lock<std::mutex> lk(rdpMx);
+      // rdpWaiting le dice al productor si hace falta despertarnos (ver rdpSubmit).
+      // Se pone y se quita con el mutex cogido, que es el mismo con el que el
+      // productor lo lee: no hay ventana para un wakeup perdido.
+      rdpWaiting = true;
       rdpCv.wait(lk, [&]{ return rdpStop || !rdpQueue.empty(); });
+      rdpWaiting = false;
       if(rdpStop && rdpQueue.empty()) return;
       job = rdpQueue.front(); rdpQueue.pop_front();
     }
@@ -1407,7 +1481,7 @@ auto Memory::rspAwaitIdle() -> void {
   if(rcpMode != RcpMode::Threaded) return;
   auto t0 = std::chrono::steady_clock::now();
   { std::unique_lock<std::mutex> lk(rspMx);
-    rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); }); }
+    rspWaiters.fetch_add(1); rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); }); rspWaiters.fetch_sub(1); }
   cpuWaitNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
 }
@@ -1431,8 +1505,14 @@ auto Memory::rspAwaitIdle() -> void {
 // La holgura existe por la granularidad del dynarec: una cadena de bloques enlazados retira
 // hasta jit::kGuardMaxOps sin volver al bucle, asi que por debajo de eso el regulador no puede
 // mandar y solo generaria bloqueos inutiles.
+// Holgura por defecto: 512 K instrucciones de CPU. Medido en SM64 (400 campos, i7-870) con
+// todo lo demas igual: 8 K -> 22.0 fps, 128 K -> 26.1, 512 K -> 29.0, 2 M -> 26.7. Con la
+// holgura corta el freno entra tantas veces por campo que la CPU pasa mas tiempo en el
+// condvar que emulando, y el RSP se queda sin trabajo encolado por delante; con la holgura
+// larga el adelanto entre dominios crece hasta que el hilo de CPU se come el nucleo que el
+// worker necesita. El tope real lo sigue poniendo kPaceMaxWait, que corta cualquier episodio.
 static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
-                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 8192;
+                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 524288;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
 
 auto Memory::rcpPace(u64 cpuRetired) -> void {
@@ -1456,10 +1536,12 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
       // Rsp::step), asi que esto despierta con el progreso real. El timeout solo cubre
       // la notificacion perdida — no se usa como muestreo.
       std::unique_lock<std::mutex> lk(rspMx);
+      rspWaiters.fetch_add(1);
       rspCv.wait_for(lk, std::chrono::microseconds(500), [&]{
         return !rspBusy.load(std::memory_order_acquire)
             || rsp.cyclesRun.load(std::memory_order_relaxed) != rspNow;
       });
+      rspWaiters.fetch_sub(1);
     }
     u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now() - t0).count();
@@ -1505,7 +1587,9 @@ auto Memory::rspSubmitKick() -> void {
     // launch is due, so we hold the CPU for that short wind-down rather than drop
     // the task. This never blocks on a genuinely running RSP: mid-task HALT is
     // clear, so the write is a no-op and we are not called at all.
+    rspWaiters.fetch_add(1);
     rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); });
+    rspWaiters.fetch_sub(1);
     rspBusy.store(true, std::memory_order_release);
     rspKick = true;
     ev("sp.kick", rcp.sp_pc, rcp.sp_status.load());
@@ -1515,6 +1599,8 @@ auto Memory::rspSubmitKick() -> void {
 
 auto Memory::rspWorkerLoop() -> void {
   hostprof::start("rsp");   // opt-in: KESTREL_HOSTPROF_WHO=rsp
+  hostprof::gate(&rspBusy);   // no contar el sueno entre tareas: solo el coste de emular
+  rspThreadH = selfThreadHandle();
   for(;;) {
     {
       std::unique_lock<std::mutex> lk(rspMx);

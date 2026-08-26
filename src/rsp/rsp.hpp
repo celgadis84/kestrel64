@@ -28,6 +28,9 @@ namespace rspjit { struct Cache; }
 // Direccion de la entrada de COP2 ya especializada para el fn de `op` (solo aritmetica,
 // sub>=0x10). El dynarec la usa para emitir un CALL directo. Definida en rsp.cpp.
 auto rspCop2Entry(u32 op) -> void*;
+// Lo mismo para las cargas y tiendas vectoriales (LWC2 / SWC2), instanciadas por sub.
+auto rspLwc2Entry(u32 op) -> void*;
+auto rspSwc2Entry(u32 op) -> void*;
 
 // One 128-bit vector register: 8 lanes of 16 bits, lane 0 = most significant
 // (big-endian), matching the wiki's VPR<n> convention. Byte 0 = high byte of
@@ -191,6 +194,8 @@ private:
   auto execCop2Move(u32 op) -> void;
 public:
   template<u32 FN> auto execCop2T(u32 op) -> void;   // usada por la tabla de entradas del dynarec
+  template<u32 SUB> auto execLoadT (u32 op) -> void;
+  template<u32 SUB> auto execStoreT(u32 op) -> void;
 private:
   auto execCop2Scalar(u32 op, __m128i tv) -> void;
   // 8-lane SSE fast path for the parallelizable COP2 ops. Returns true if it handled

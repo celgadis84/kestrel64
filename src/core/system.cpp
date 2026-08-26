@@ -572,15 +572,28 @@ auto System::run() -> void {
       // freno. Si el freno esta puesto y aun asi la CPU va muy por delante del RSP, es que
       // se esta soltando (salvavidas) y hay que mirarlo.
       double pacePct = memory.paceBlockNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
+      // CPU de verdad gastada por cada worker frente a su ocupacion de pared. Si "cpu" es
+      // muy inferior a la ocupacion, el worker no va lento: esta esperando nucleo (SMT o
+      // planificador), y optimizar su codigo no va a mover el fps.
+      memory.sampleWorkerCpu();
+      double rspCpuPct = memory.rspCpuNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
+      double rdpCpuPct = memory.rdpCpuNs.load(std::memory_order_relaxed) / 1e9 / s * 100.0;
       std::fprintf(stderr, "[hb] %.0fM insns, %.2f Mips avg | N64 speed: CPU %.1f%%  RSP %.1f%%"
-                           " | occupancy: rdp %.0f%% rsp %.0f%% cpuWait %.0f%% | rsp %.1f Mips busy"
-                           " | pace %.0f%% ep=%llu hold=%llu\n",
+                           " | occupancy: rdp %.0f%%(cpu %.0f%%) rsp %.0f%%(cpu %.0f%%) cpuWait %.0f%%"
+                           " | rsp %.1f Mips busy | pace %.0f%% ep=%llu hold=%llu\n",
                    ri / 1e6, ri / 1e6 / s,
                    n64SpeedPct.load(std::memory_order_relaxed),
                    rspSpeedPct.load(std::memory_order_relaxed),
-                   rdpPct, rspPct, waitPct, rspMips, pacePct,
+                   rdpPct, rdpCpuPct, rspPct, rspCpuPct, waitPct, rspMips, pacePct,
                    (unsigned long long)memory.paceEpisodes.load(std::memory_order_relaxed),
                    (unsigned long long)memory.paceHolds.load(std::memory_order_relaxed));
+      // Tasa de trabajos del RCP. Cada tarea de RSP y cada trabajo de RDP cuesta un mutex
+      // + notify_all (llamada al kernel cuando hay esperador): si la tasa es de decenas de
+      // miles por segundo, ese trafico de sincronizacion deja de ser ruido y pasa a ser el
+      // coste dominante del hilo. Sin este numero no se puede distinguir de "emular cuesta".
+      std::fprintf(stderr, "[hb] jobs/s: rsp=%.0f rdp=%.0f\n",
+                   memory.rspJobsRun.load(std::memory_order_relaxed) / s,
+                   memory.rdpJobsRun.load(std::memory_order_relaxed) / s);
       hbLast = now;
     }
   }

@@ -193,6 +193,11 @@ struct Memory {
   std::condition_variable rdpCv;
   std::thread             rdpWorker;
   bool                    rdpStop = false;      // worker exit flag (guarded by rdpMx)
+  // true SOLO mientras el worker del RDP esta dormido en rdpCv. Con el mutex cogido, un
+  // productor que ve false sabe que el worker sigue en su bucle y volvera a mirar la cola:
+  // puede saltarse el notify_all, que con esperador es una llamada al kernel. SM64 emite
+  // ~38.000 DPC_END por segundo, asi que ese ahorro no es cosmetico.
+  bool                    rdpWaiting = false;   // guarded by rdpMx
   std::atomic<bool>       rdpBusy{false};        // true while a job is queued or running
 
   // RSP worker: in Threaded mode a CPU SP-release runs the whole microcode task to
@@ -202,6 +207,13 @@ struct Memory {
   // coherency between threads isn't needed — the interrupt is the release barrier.
   std::mutex              rspMx;
   std::condition_variable rspCv;
+  // Numero de hilos dormidos en rspCv. El worker publica su progreso cada 8 K instrucciones
+  // de microcodigo (Rsp::step) y notificaba SIEMPRE: con esperador eso es una llamada al
+  // kernel, y sin esperador es trabajo tirado. Se incrementa con rspMx cogido ANTES de
+  // comprobar el predicado, y el notificador publica cyclesRun ANTES de leerlo, las dos con
+  // orden secuencial: es el patron de Dekker, no hay wakeup perdido. El wait_for de 500 us
+  // del regulador sigue ahi como red de seguridad.
+  std::atomic<int>        rspWaiters{0};
   std::thread             rspWorker;
   bool                    rspStop = false;      // worker exit flag (guarded by rspMx)
   bool                    rspKick = false;      // pending run request (guarded by rspMx)
@@ -213,6 +225,15 @@ struct Memory {
   std::atomic<u64>        rdpBusyNs{0}, rspBusyNs{0};
   std::atomic<u64>        rdpJobsRun{0}, rspJobsRun{0};
   std::atomic<u64>        cpuWaitNs{0};   // CPU thread blocked on an RCP worker
+  // Tiempo de CPU REALMENTE consumido por cada worker, frente al tiempo de pared que ya
+  // miden rspBusyNs/rdpBusyNs. La diferencia entre los dos es la unica forma de separar
+  // "emulamos despacio" de "al hilo no le dan nucleo": si un worker esta 80% de la pared
+  // dentro de un trabajo pero solo ha gastado 40% de CPU, el problema es el planificador
+  // (o el hermano SMT), no el emulador. Los rellena sampleWorkerCpu() desde el heartbeat.
+  void*                   rspThreadH = nullptr;   // HANDLE duplicado del worker de RSP
+  void*                   rdpThreadH = nullptr;   // idem del RDP
+  std::atomic<u64>        rspCpuNs{0}, rdpCpuNs{0};
+  auto sampleWorkerCpu() -> void;
 
   auto startRcpThreads() -> void;   // spawn workers if rcpMode==Threaded (idempotent)
   auto stopRcpThreads()  -> void;   // join workers on shutdown

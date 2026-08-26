@@ -322,3 +322,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 - gate_prdp (systemtest lockstep + sm64 x2 + krom 371 con KESTREL_PRDP=1): **5m20s** (2026-08-23, RX 570). krom PRDP 259s @4 jobs.
 
 | 2026-08-26 | gate_prdp.sh | 299 s | gate_all.sh | 343 s | fence SYNC_FULL medido (sin cambio funcional) |
+| 2026-08-26 | gate_all.sh | 432 s | gate_prdp.sh | 326 s | COP2 especializado por fn |
+| 2026-08-26 | gate_all.sh | 357 s | gate_prdp.sh | 312 s | sync RCP: coalesce FIFO RDP + notify condicional + dmaCopy + paceSlack 512K |

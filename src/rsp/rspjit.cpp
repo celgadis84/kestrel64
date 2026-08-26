@@ -30,10 +30,10 @@ auto imemFingerprint(const u8* imem) -> u64 {
 }
 
 auto Cache::init() -> bool {
-  // 4 MB de RWX: 1024 entradas x hasta 64 instrucciones x ~24 bytes por instruccion es el
-  // peor caso teorico (~1.5 MB); el resto es holgura para no tener que vaciar la tabla en
-  // mitad de una tarea. Si aun asi se llena, clear() la recicla entera.
-  if(!buf.init(4u << 20)) return false;
+  // 8 MB de RWX: 1024 entradas x hasta 64 instrucciones x ~80 bytes por instruccion es el
+  // peor caso teorico (~5 MB, lo marca emitMem); el resto es holgura para no tener que
+  // vaciar la tabla en mitad de una tarea. Si aun asi se llena, clear() la recicla entera.
+  if(!buf.init(8u << 20)) return false;
   clear();
   ready = true;
   return true;
@@ -84,6 +84,26 @@ struct E {
   auto movsx8_m(u8 dst, u8 base, s32 d) -> void { u8_(0x0F); u8_(0xBE); mem(dst, base, d); }
   auto movzx8_m(u8 dst, u8 base, s32 d) -> void { u8_(0x0F); u8_(0xB6); mem(dst, base, d); }
   auto st8(u8 src, u8 base, s32 d) -> void { u8_(0x88); mem(src, base, d); }
+  auto ld16z(u8 dst, u8 base, s32 d) -> void { u8_(0x0F); u8_(0xB7); mem(dst, base, d); }
+  auto st16(u8 src, u8 base, s32 d) -> void { u8_(0x66); u8_(0x89); mem(src, base, d); }
+  auto rol16(u8 r, u8 n) -> void { u8_(0x66); u8_(0xC1); modrm(3, 0, r); u8_(n); }
+  auto movsx16(u8 dst, u8 src) -> void { u8_(0x0F); u8_(0xBF); modrm(3, dst, src); }
+  auto bswap(u8 r) -> void { u8_(0x0F); u8_((u8)(0xC8 + r)); }
+
+  // Saltos cortos hacia adelante con hueco a rellenar. Devuelven el origen del rel8 (la
+  // posicion siguiente al byte de desplazamiento); patch8 le escribe la distancia hasta el
+  // cursor actual. Todo lo que se salta aqui son secuencias de tamano fijo muy por debajo
+  // de 127 bytes, pero si alguna vez no cupiera patch8 avisa y el bloque se descarta en
+  // vez de emitir un salto a ninguna parte.
+  auto jcc8(u8 cc) -> usize { u8_((u8)(0x70 | (cc & 0x0f))); u8_(0); return b.used; }
+  auto jmp8() -> usize { u8_(0xEB); u8_(0); return b.used; }
+  auto patch8(usize at) -> bool {
+    if(!b.base || at == 0 || at - 1 >= b.cap || b.used > b.cap) return false;
+    long long d = (long long)b.used - (long long)at;
+    if(d < 0 || d > 127) return false;
+    b.base[at - 1] = (u8)d;
+    return true;
+  }
 
   // --- 64 bits ---
   auto mov64_rr(u8 dst, u8 src) -> void { u8_(0x48); u8_(0x89); modrm(3, src, dst); }
@@ -104,12 +124,12 @@ enum : u8 { OP_ADD = 0x03, OP_SUB = 0x2B, OP_AND = 0x23, OP_OR = 0x0B, OP_XOR = 
 enum : u8 { D_ADD = 0, D_OR = 1, D_AND = 4, D_SUB = 5, D_XOR = 6, D_CMP = 7 };
 enum : u8 { D_SHL = 4, D_SHR = 5, D_SAR = 7 };
 enum : u8 { CC_L = 0x9C, CC_B = 0x92, CC_E = 0x94, CC_NE = 0x95,
-           CC_LE = 0x9E, CC_G = 0x9F, CC_GE = 0x9D };
+           CC_LE = 0x9E, CC_G = 0x9F, CC_GE = 0x9D, CC_A = 0x97 };
 
-enum class Kind : u8 { Stop, Native, Cop2, Lwc2, Swc2, ExecMem, Branch };
+enum class Kind : u8 { Stop, Native, Cop2, Lwc2, Swc2, ExecMem, Mem, Branch };
 
 // Que hace el compilador con cada instruccion. Stop = la ejecuta el interprete y el bloque
-// termina ANTES de ella: saltos (necesitan el pestillo de delay-slot), BREAK y COP0 (pueden
+// termina ANTES de ella: saltos (necesitan el pestillo de delay-slot), BREAK y MTC0 (puede
 // parar el nucleo o lanzar un DMA que reescriba IMEM bajo nuestros pies), y todo lo que no
 // este reconocido, que asi cae en el mismo camino de siempre.
 auto classify(u32 op) -> Kind {
@@ -138,7 +158,12 @@ auto classify(u32 op) -> Kind {
   case 0x20: case 0x24: case 0x28:   // LB / LBU / SB: un byte, sin alineacion que mirar
     return Kind::Native;
   case 0x21: case 0x23: case 0x25: case 0x27: case 0x29: case 0x2b:
-    return Kind::ExecMem;            // LH/LHU/LW/LWU/SH/SW: al helper del interprete
+    return Kind::Mem;                // LH/LHU/LW/LWU/SH/SW: nativos, envoltura al helper
+  case 0x10:
+    // MFC0 solo lee un registro de SP/DPC: no puede parar el nucleo ni reescribir IMEM,
+    // asi que no hay razon para cortar el bloque -- basta llamar al mismo interprete. MTC0
+    // si puede las dos cosas, y ese se queda en Stop.
+    return (op >> 21 & 0x1f) == 0x00 ? Kind::ExecMem : Kind::Stop;
   case 0x12: return Kind::Cop2;
   case 0x32: return Kind::Lwc2;
   case 0x3a: return Kind::Swc2;
@@ -150,6 +175,7 @@ struct Ctx {
   E   e;
   s32 rOff;      // offset de Rsp::r[0] dentro de Rsp
   s32 pcOff;     // offset de Rsp::pc dentro de Rsp
+  bool ok = true;   // false = algo no se pudo emitir; el bloque se tira sin registrar
   auto RG(u32 n) const -> s32 { return rOff + (s32)(4 * n); }
 };
 
@@ -254,6 +280,52 @@ auto emitNative(Ctx& c, u32 op) -> void {
   e.st8(rCX, rAX, 0);
 }
 
+// LH / LHU / LW / LWU / SH / SW nativos.
+//
+// La clave es que el ensamblado byte a byte del interprete (rWord/rHalf) y una lectura
+// del host mas bswap dan EXACTAMENTE los mismos bytes mientras el acceso no cruce el
+// final de DMEM: rb(a)<<24|rb(a+1)<<16|rb(a+2)<<8|rb(a+3) es, por definicion, el bswap32
+// de la palabra little-endian que hay en dmp+a. No hay una segunda semantica aqui, es la
+// misma reordenada -- y por eso vale igual para direcciones desalineadas, que el RSP
+// tampoco trata como excepcion.
+//
+// El unico caso que se aparta es la envoltura de 4 KB (a > 0xffc a 32 bits, a > 0xffe a
+// 16), donde el byte de mas alto se pliega al principio de DMEM. Ese se manda al MISMO
+// helper del interprete, asi que el oraculo sigue siendo el de siempre y el camino raro
+// no tiene copia propia de las reglas. En microcodigo real no se da nunca, asi que el
+// salto sale siempre no-tomado y no cuesta prediccion.
+auto emitMem(Ctx& c, u32 op) -> void {
+  E& e = c.e;
+  const u32 maj = op >> 26, rs = op >> 21 & 31, rt = op >> 16 & 31;
+  const s32 simm = (s16)(op & 0xffff);
+  const bool wide  = (maj == 0x23 || maj == 0x27 || maj == 0x2b);   // LW / LWU / SW
+  const bool store = (maj == 0x29 || maj == 0x2b);                  // SH / SW
+  const u32  lim   = wide ? 0xffcu : 0xffeu;    // ultima direccion que no envuelve
+
+  e.ld32(rAX, rBX, c.RG(rs));
+  if(simm) e.alu_imm(D_ADD, rAX, (u32)simm);
+  e.alu_imm(D_AND, rAX, 0xfff);
+  e.alu_imm(D_CMP, rAX, lim);
+  const usize slow = e.jcc8(CC_A);
+  e.add64_rr(rAX, rDI);              // el AND de 32 bits ya dejo limpia la mitad alta
+  if(store) {
+    e.ld32(rCX, rBX, c.RG(rt));
+    if(wide) { e.bswap(rCX); e.st32(rCX, rAX, 0); }
+    else     { e.rol16(rCX, 8); e.st16(rCX, rAX, 0); }   // rol de 16 bits = bswap16
+  } else if(rt) {                    // una carga a r0 no tiene efecto observable
+    if(wide) { e.ld32(rCX, rAX, 0); e.bswap(rCX); }
+    else {
+      e.ld16z(rCX, rAX, 0); e.rol16(rCX, 8);
+      if(maj == 0x21) e.movsx16(rCX, rCX);               // LH extiende signo, LHU no
+    }
+    e.st32(rCX, rBX, c.RG(rt));
+  }
+  const usize done = e.jmp8();
+  if(!e.patch8(slow)) { c.ok = false; return; }
+  emitCall(c, (void*)&kestrel_rspjit_exec, op);
+  if(!e.patch8(done)) c.ok = false;
+}
+
 // Salto (condicional o no) con su delay-slot ABSORBIDO en el bloque. Es lo ultimo que
 // emite un bloque: escribe Rsp::pc con el PC que toca DESPUES del delay-slot y el llamante
 // no vuelve a tocarlo (Block::setsPc). El delay-slot se emite justo detras con el camino
@@ -354,7 +426,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
 
   // Holgura de buffer: si no cabe el peor caso de este bloque, se recicla la tabla entera.
   // Se puede hacer aqui sin peligro porque el llamante no esta dentro de ningun bloque.
-  const usize worst = 64 + n * 32;
+  const usize worst = 64 + n * 80;   // emitMem es la secuencia mas larga (~65 bytes)
   if(c.buf.used + worst > c.buf.cap) c.clear();
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 
@@ -368,6 +440,8 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     switch(classify(op)) {
     case Kind::Cop2: case Kind::Lwc2: case Kind::Swc2: case Kind::ExecMem:
       needsCall = true; break;
+    case Kind::Mem:                        // camino rapido en DMEM + envoltura al helper
+      needsCall = true; needsDmem = true; break;
     case Kind::Native:
       if(maj == 0x20 || maj == 0x24 || maj == 0x28) needsDmem = true;  // LB / LBU / SB
       break;
@@ -404,9 +478,10 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     // (sub<0x10) siguen por el puente generico, que es donde se decide.
     case Kind::Cop2:    emitCall(ctx, ((op >> 21 & 0x1f) < 0x10) ? (void*)&kestrel_rspjit_cop2
                                                                  : rspCop2Entry(op), op); break;
-    case Kind::Lwc2:    emitCall(ctx, (void*)&kestrel_rspjit_load,  op); break;
-    case Kind::Swc2:    emitCall(ctx, (void*)&kestrel_rspjit_store, op); break;
+    case Kind::Lwc2:    emitCall(ctx, rspLwc2Entry(op), op); break;   // ya especializadas
+    case Kind::Swc2:    emitCall(ctx, rspSwc2Entry(op), op); break;   // por sub, como COP2
     case Kind::ExecMem: emitCall(ctx, (void*)&kestrel_rspjit_exec,  op); break;
+    case Kind::Mem:     emitMem(ctx, op); break;
     case Kind::Stop:    break;                 // no puede pasar: el conteo paro antes
     }
   }
@@ -416,6 +491,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   e.pop(rBX); e.ret();
 
   if(c.buf.overflowed()) { c.clear(); return; }
+  if(!ctx.ok) return;                          // emision incompleta: no se registra
   c.buf.finalize(entry);
   c.blocks[idx] = Block{ (BlockFn)entry, (u16)n, endsBranch };
   c.state[idx]  = State::Compiled;
