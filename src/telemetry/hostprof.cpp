@@ -38,6 +38,42 @@ std::unordered_map<u64, u64> g_ext;    // AllocationBase de la region -> muestra
 std::unordered_map<u64, u64> g_extcall;  // retorno in-image mas cercano -> muestras
 auto dump() -> void;
 
+// Rango de la seccion de codigo, leido de las cabeceras PE del propio modulo. Sin el, el
+// barrido de pila acepta como "direccion de retorno" cualquier palabra que caiga dentro de
+// la imagen, y .rdata/.data estan llenos de punteros y de basura que lo son por accidente:
+// el histograma medido apuntaba el 50% a un offset que ni siquiera es codigo. Con el rango
+// exacto de .text ese ruido desaparece de golpe.
+u64 g_textLo = 0, g_textHi = 0;   // relativos a g_base
+
+auto initTextRange() -> void {
+  auto* dos = (const IMAGE_DOS_HEADER*)g_base;
+  if(dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+  auto* nt = (const IMAGE_NT_HEADERS*)(g_base + dos->e_lfanew);
+  if(nt->Signature != IMAGE_NT_SIGNATURE) return;
+  auto* sec = IMAGE_FIRST_SECTION(nt);
+  for(unsigned i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+    if(sec[i].Characteristics & IMAGE_SCN_CNT_CODE) {
+      u64 lo = sec[i].VirtualAddress, hi = lo + sec[i].Misc.VirtualSize;
+      if(!g_textHi) { g_textLo = lo; g_textHi = hi; }
+      else { if(lo < g_textLo) g_textLo = lo; if(hi > g_textHi) g_textHi = hi; }
+    }
+  }
+}
+
+// Una direccion de retorno real tiene SIEMPRE una instruccion call justo antes. Comprobarlo
+// descarta los punteros a funcion guardados en la pila (tablas de despacho, lambdas, marcos
+// muertos de llamadas anteriores) que el barrido, si no, cuenta como llamantes. Se miran las
+// dos formas que emite el compilador: E8 rel32 (5 bytes) y FF /2 con reg=2 (2 a 7 bytes).
+auto isCallSite(u64 va) -> bool {
+  if(va - 8 < g_base) return false;
+  const u8* p = (const u8*)va;
+  if(p[-5] == 0xE8) return true;
+  for(int back = 2; back <= 7; back++) {
+    if(p[-back] == 0xFF && ((p[-back + 1] >> 3) & 7) == 2) return true;
+  }
+  return false;
+}
+
 auto sampleLoop(unsigned periodMs) -> void {
   // Sampling by suspend/GetThreadContext: no symbol server, no debug info, works on
   // a plain Release build. The bucket is 16 bytes so a hot basic block lands in one
@@ -66,12 +102,13 @@ auto sampleLoop(unsigned periodMs) -> void {
           // mas cercano. No es un desenrollado exacto (puede coger un puntero a codigo guardado
           // en la pila), pero con miles de muestras el sesgo se diluye y el histograma resultante
           // se simboliza con el mismo scripts/hostprof.py que el de dentro de la imagen.
-          u64 stk[64];
+          u64 stk[128];
           SIZE_T got = 0;
           if(ReadProcessMemory(GetCurrentProcess(), (LPCVOID)ctx.Rsp, stk, sizeof stk, &got)) {
             for(usize k = 0; k < got / 8; k++) {
-              if(stk[k] >= g_base && stk[k] - g_base < (64ull << 20)) {
-                g_extcall[(stk[k] - g_base) & ~0xfull]++;
+              u64 rva = stk[k] - g_base;
+              if(stk[k] >= g_base && rva >= g_textLo && rva < g_textHi && isCallSite(stk[k])) {
+                g_extcall[rva & ~0xfull]++;
                 break;
               }
             }
@@ -142,6 +179,7 @@ auto start(const char* label) -> void {
   unsigned ms = (unsigned)std::strtoul(e, nullptr, 0);
   if(ms == 0) ms = 1;
   g_base = (u64)GetModuleHandleW(nullptr);
+  initTextRange();
   // Sample the caller — this is meant to be started from the thread that runs the CPU.
   if(!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
                       &g_target, 0, FALSE, DUPLICATE_SAME_ACCESS)) return;

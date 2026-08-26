@@ -390,7 +390,12 @@ auto Memory::isvWrite(u32 phys, u32 value, u32 nbytes) -> bool {
     u32 len = value;
     if(len > isv.size()) len = (u32)isv.size();
     if(len) { std::fwrite(isv.data(), 1, len, stdout); std::fflush(stdout);
-      if(std::getenv("KESTREL_FPDBG")) {
+      // Los interruptores de traza se leen UNA vez. getenv de la CRT recorre el bloque de
+      // entorno entero con un candado dentro, y estas pruebas viven en el camino de cada
+      // escritura MMIO y de cada trabajo de RDP: el perfilador de host las veia como ~20%
+      // del hilo del RSP dentro de ucrtbase. El entorno no cambia tras arrancar: exacto.
+      static const bool fpDbg = std::getenv("KESTREL_FPDBG") != nullptr;
+      if(fpDbg) {
         std::string_view sv((const char*)isv.data(), len);
         if(sv.find("Got unhandled") != std::string_view::npos) {
           std::fprintf(stderr, "[ISV-UNHANDLED]\n"); std::fflush(stderr); } } }
@@ -770,7 +775,8 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // via COP0). If already running, just clear the halt bit.
       if((v & (1 << 0)) && !(v & (1 << 1))) {
         clr(1u);                                     // clear HALT
-        if(std::getenv("KESTREL_RSPTRACE")) {
+        static const bool rspTrace = std::getenv("KESTREL_RSPTRACE") != nullptr;
+        if(rspTrace) {
           static u32 kicks = 0;
           kicks++;
           auto d32 = [&](u32 o){ return (u32(dmem[o])<<24)|(u32(dmem[o+1])<<16)|(u32(dmem[o+2])<<8)|dmem[o+3]; };
@@ -858,7 +864,18 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // La semantica fiel es esperar al RDP: el productor no puede instalar un buffer
         // nuevo mientras el anterior sigue en vuelo. Eso ademas mantiene DPC_CURRENT
         // honesto y acota la cola a un frame.
-        if(rcpMode == RcpMode::Threaded) rdpDrain();
+        // La recarga NO necesita vaciar la cola: viaja DENTRO del trabajo. El worker publica
+        // DPC_CURRENT = inicio del span justo al empezar cada trabajo, asi que encolar el span
+        // nuevo detras de los viejos los ejecuta en el mismo orden que el command processor y
+        // retira exactamente los mismos SYNC_FULL: ni uno de mas. Y el flow-control del FIFO
+        // sigue honesto, porque CURRENT solo avanza cuando el rasterizador avanza de verdad,
+        // que es lo que lee F3DEX2 para no reescribir comandos sin consumir.
+        // Drenar aqui serializaba RSP y RDP: medido con el perfilador de host, el hilo del RSP
+        // pasaba el 44% de su tiempo dormido en este punto mientras el RDP vaciaba el frame
+        // entero, y luego el RDP paraba mientras el RSP producia el siguiente.
+        // KESTREL_RDPDRAIN=1 recupera el comportamiento anterior para bisecar.
+        static const bool rdpDrainOnStart = std::getenv("KESTREL_RDPDRAIN") != nullptr;
+        if(rcpMode == RcpMode::Threaded && rdpDrainOnStart) rdpDrain();
         rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u;
         ev("rdpst", rcp.dpc_start, rcp.dpc_end);
         // HW recarga CURRENT desde START en el propio kick y la CPU lo ve al momento
@@ -888,7 +905,8 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // Diagnostico: KESTREL_RDPINLINE corre el RDP en el hilo CPU aun en modo threaded.
         // Sirve para bisecar que worker introduce una carrera, no para uso normal.
         static const int rdpInline = std::getenv("KESTREL_RDPINLINE") ? 1 : 0;
-        if(std::getenv("KESTREL_DPSYNCLOG")) {
+        static const bool dpSyncLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
+        if(dpSyncLog) {
           std::fprintf(stderr, "[dpkick] span=%06x..%06x xbus=%u busy=%u\n",
                        cur, rcp.dpc_end, (unsigned)xbus,
                        (unsigned)rdpBusy.load(std::memory_order_relaxed));
@@ -1370,7 +1388,8 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   softRdp.curOut = &rcp.dpc_current;
   u32 nc = softRdp.run(*this, current, end, xbus);
   rcp.dpc_current.store(end, std::memory_order_release);
-  if(std::getenv("KESTREL_RDPTRACE")) {
+  static const bool rdpTrace = std::getenv("KESTREL_RDPTRACE") != nullptr;
+  if(rdpTrace) {
     static u32 dpCalls = 0;
     if(dpCalls++ < 40)
       std::fprintf(stderr, "[rdp] job cur=%06x end=%06x cmds=%u ci=%06x sz=%u\n",

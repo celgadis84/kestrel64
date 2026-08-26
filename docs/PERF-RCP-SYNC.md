@@ -83,3 +83,70 @@ impacto medido:
 - **Asignacion de registros en el dynarec del RSP.** Hoy cada operacion es
   `mov eax,[rbx+off]` / op / `mov [rbx+off],eax`.
 - **Nucleo perdido**: 4 nucleos fisicos para hilo de CPU + RSP + RDP + presentacion.
+
+---
+
+## Segunda tanda (2026-08-26, tras el commit de8f768)
+
+Tras los cinco arreglos de sincronizacion el hilo del RSP seguia dando 40 Mips con 83% de
+ocupacion. El perfilador de host decia "ntdll 31%, ucrtbase 20%" pero atribuia el 50% de esas
+muestras a un solo llamante, `+0x6d5a0`, que resulto **no ser codigo**: `.text` acaba en
+`0x6bae0`. El barrido de pila aceptaba como direccion de retorno cualquier palabra que cayera
+dentro de la imagen, y `.rdata`/`.data` estan llenos de punteros que lo parecen.
+
+### 1. Perfilador: rango real de `.text` + validacion de sitio-de-llamada
+
+`hostprof.cpp` lee ahora las cabeceras PE del propio modulo (`initTextRange`) y exige, ademas,
+que la palabra candidata tenga una instruccion `call` justo antes (`isCallSite`: `E8 rel32`, o
+`FF /2` con reg=2 a 2..7 bytes de distancia). Eso descarta punteros a funcion guardados en la
+pila y marcos muertos. El histograma paso de un pico falso del 50% a dos picos reales del 26%
+y el 24%.
+
+Para simbolizar hace falta DWARF, que el build normal no lleva. `build-prof/` es el mismo
+`-O3 -flto=thin` con `-g -gdwarf-4`; se consulta con
+`llvm-dwarfdump --lookup=$((0x140000000 + OFFSET)) build-prof/kestrel64.exe`.
+`llvm-symbolizer` y `nm` NO valen aqui: con thin-LTO solo sobreviven 725 simbolos de texto y
+dan el simbolo anterior mas cercano, que es otra funcion (`memset +6848`).
+
+### 2. `getenv` fuera del camino caliente
+
+`mmioWrite32` llamaba a `std::getenv("KESTREL_DPSYNCLOG")` en **cada escritura de DPC_END**, y
+habia tres mas iguales (`KESTREL_RSPTRACE` por escritura de SP, `KESTREL_RDPTRACE` por trabajo
+de RDP, `KESTREL_FPDBG`). `getenv` de la CRT recorre el bloque de entorno entero con un candado
+dentro: era todo el `ucrtbase 20%` del hilo del RSP. Cacheados en `static const bool` — el
+entorno no cambia despues de arrancar, asi que es exacto, no una aproximacion.
+
+29.85 fps (desde 28.85), RSP 46.1 Mips busy.
+
+### 3. Sin drenado al instalar un buffer nuevo de FIFO
+
+Con `ucrtbase` fuera, el perfil quedo en **ntdll 44.7%, todo desde un solo sitio**:
+`rdpDrain()` en el `case DPC_END` de `mmioWrite32`. Al instalar un START nuevo, el hilo que
+escribe el registro — que es el del RSP, porque quien emite el kick es el microcodigo —
+esperaba a que la cola del RDP se vaciara **entera**. RSP y RDP se turnaban: el RSP producia el
+frame con el RDP parado, luego el RDP lo rasterizaba con el RSP parado. Dos hilos al 70% que
+nunca coincidian.
+
+El drenado no hace falta. La recarga de CURRENT ya viaja dentro del trabajo: `rdpRunJob`
+publica `DPC_CURRENT` = inicio del span al empezar cada uno, asi que encolar el span nuevo
+detras de los viejos los ejecuta en el mismo orden que el command processor del hardware y
+retira exactamente los mismos SYNC_FULL — ni uno de mas, que era el motivo original del
+drenado. Y el flow-control del FIFO circular de F3DEX2 sigue honesto, porque CURRENT solo
+avanza cuando el rasterizador avanza de verdad: si el productor se adelanta demasiado, el
+microcodigo se frena solo leyendo CURRENT, igual que en la consola.
+
+`KESTREL_RDPDRAIN=1` recupera el comportamiento anterior para bisecar.
+
+### Resultado
+
+| | antes de la 2a tanda | despues |
+|---|---|---|
+| rsp Mips busy | 40.0 | **94.1** |
+| RSP % de HW | 69% | **121%** |
+| cpuWait | 38% | **4%** |
+| ocupacion RDP | 72% | **79%** |
+| **fps SM64** | **28.85** | **32.11** |
+
+El cuello de botella se ha movido: el RSP ya emula por encima de la velocidad de la consola y
+el RDP es ahora el hilo mas ocupado. La siguiente palanca esta en el rasterizador (SoftRDP en
+esta medida) o en el reparto de nucleos, no en el RSP.
