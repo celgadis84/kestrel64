@@ -262,6 +262,12 @@ auto CodeCache::unlinkAll() -> void {
 static const Reg kRcRegs[] = { RSI, RDI, R13, R14, R15 };
 static constexpr int kRcN = (int)(sizeof(kRcRegs) / sizeof(kRcRegs[0]));
 
+// Instantanea de que ranuras del cache estan sucias en un punto del bloque. Los stubs de
+// salida se emiten al final, cuando el estado del cache ya no es el del sitio que salta:
+// hay que llevarselo capturado. Con esto el spill de una salida es EXACTO (solo lo sucio
+// en ese punto) y deja de hacer falta volcar el cache entero antes de cada llamada.
+struct RcSnap { s8 g[kRcN]; };
+
 // Cuenta ESTATICA (KESTREL_JIT_STATS): cuantos accesos a gpr del codigo emitido acaban en un
 // registro del host y cuantos siguen yendo a memoria. Dice si la residencia llega a enganchar.
 u64 g_rcReg = 0, g_rcMem = 0, g_rcSpill = 0;
@@ -314,6 +320,24 @@ struct RegCache {
   auto cmp64(Reg dst, u32 g) -> void { int k = slot(g, true); if(k < 0) e->cmp64_rm(dst, (u8)g); else e->cmp64_rr(dst, kRcRegs[k]); }
   // Deja cpu->gpr coherente sin perder residencia (las ranuras quedan limpias).
   auto writeback() -> void { for(int k = 0; k < kRcN; k++) if(dirty[k]) { e->st64(kRcRegs[k], (u8)gOf[k]); dirty[k] = false; g_rcSpill++; } }
+  // Volcado DIRIGIDO: deja cpu->gpr[g] coherente sin tocar el resto ni perder residencia.
+  // Un helper solo lee los gpr que su op nombra (base de la direccion, dato de un store),
+  // asi que volcar los cinco era pagar hasta cinco stores por cada load, store u op de FPU.
+  auto writebackOne(u32 g) -> void {
+    if(g >= 32) return;
+    int k = slotOf[g];
+    if(k >= 0 && dirty[k]) { e->st64(kRcRegs[k], (u8)g); dirty[k] = false; g_rcSpill++; }
+  }
+  // Lo que queda sucio AQUI. El stub de salida correspondiente lo escribira antes de
+  // devolver el control al driver, que lee cpu->gpr.
+  auto snap() const -> RcSnap {
+    RcSnap s{};
+    for(int k = 0; k < kRcN; k++) s.g[k] = dirty[k] ? gOf[k] : (s8)-1;
+    return s;
+  }
+  auto emitSnapSpill(const RcSnap& s) -> void {
+    for(int k = 0; k < kRcN; k++) if(s.g[k] >= 0) { e->st64(kRcRegs[k], (u8)s.g[k]); g_rcSpill++; }
+  }
   // Olvida SIN escribir: solo para lo que un helper acaba de escribir en memoria.
   auto forget(u32 g) -> void { if(g < 32 && slotOf[g] >= 0) { int k = slotOf[g]; slotOf[g] = -1; gOf[k] = -1; dirty[k] = false; } }
   auto forgetAll() -> void { for(int k = 0; k < kRcN; k++) { if(gOf[k] >= 0) slotOf[gOf[k]] = -1; gOf[k] = -1; dirty[k] = false; } }
@@ -326,25 +350,52 @@ extern "C" u8 jitMemThunk(void* cpu, u32 op) {
   return reinterpret_cast<kestrel::CPU*>(cpu)->jitMem(op);
 }
 
+// Trampolines especializados por opcode (definidos en cpu.cpp). El bloque llama al suyo con
+// la direccion y el dato YA calculados, en vez de pasar la op cruda para que el helper la
+// decodifique y relea cpu->gpr.
+extern "C" u8 kestrel_jitLB (void*, u64, u32, u64); extern "C" u8 kestrel_jitLH (void*, u64, u32, u64);
+extern "C" u8 kestrel_jitLW (void*, u64, u32, u64); extern "C" u8 kestrel_jitLBU(void*, u64, u32, u64);
+extern "C" u8 kestrel_jitLHU(void*, u64, u32, u64); extern "C" u8 kestrel_jitLWU(void*, u64, u32, u64);
+extern "C" u8 kestrel_jitLD (void*, u64, u32, u64); extern "C" u8 kestrel_jitSB (void*, u64, u32, u64);
+extern "C" u8 kestrel_jitSH (void*, u64, u32, u64); extern "C" u8 kestrel_jitSW (void*, u64, u32, u64);
+extern "C" u8 kestrel_jitSD (void*, u64, u32, u64);
+
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
 // al epílogo); *isStore = si muta memoria. Devuelve false si op no es un mem-op soportado.
-static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore) -> bool {
+static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore,
+                      RcSnap& snap) -> bool {
   u32 OP = op >> 26;
+  void* fn = nullptr;
   switch(OP) {
-    case 0x20: case 0x21: case 0x23: case 0x24: case 0x25: case 0x27: case 0x37: isStore = false; break;  // LB/LH/LW/LBU/LHU/LWU/LD
-    case 0x28: case 0x29: case 0x2b: case 0x3f: isStore = true; break;                                    // SB/SH/SW/SD
+    case 0x20: fn = (void*)&kestrel_jitLB;  isStore = false; break;
+    case 0x21: fn = (void*)&kestrel_jitLH;  isStore = false; break;
+    case 0x23: fn = (void*)&kestrel_jitLW;  isStore = false; break;
+    case 0x24: fn = (void*)&kestrel_jitLBU; isStore = false; break;
+    case 0x25: fn = (void*)&kestrel_jitLHU; isStore = false; break;
+    case 0x27: fn = (void*)&kestrel_jitLWU; isStore = false; break;
+    case 0x37: fn = (void*)&kestrel_jitLD;  isStore = false; break;
+    case 0x28: fn = (void*)&kestrel_jitSB;  isStore = true;  break;
+    case 0x29: fn = (void*)&kestrel_jitSH;  isStore = true;  break;
+    case 0x2b: fn = (void*)&kestrel_jitSW;  isStore = true;  break;
+    case 0x3f: fn = (void*)&kestrel_jitSD;  isStore = true;  break;
     default: return false;
   }
-  // El helper lee cpu->gpr[rs] (direccion) y gpr[rt] (dato de un store) por el puntero, y en
-  // un load escribe gpr[rt] ahi mismo: cpu->gpr tiene que estar coherente ANTES del CALL.
-  rc.writeback();
+  // La direccion se calcula AQUI, con gpr[rs] donde ya este (ranura del cache o memoria), y
+  // el dato del store sale igual de gpr[rt]. Como el helper ya no lee cpu->gpr, no hay que
+  // volcar nada antes del CALL: lo que quede sucio lo escribe el stub de bail.
+  u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31;
+  s32 simm = (s32)(s16)(op & 0xFFFF);
+  rc.ld64(RDX, rs);                       // arg1 = gpr[rs]
+  if(simm) e.add_r_imm32(RDX, simm);      //        + sext(imm16)  (add de 64 bits)
+  if(isStore) rc.ld64(R9, rt);            // arg3 = dato del store
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX; R12 no fiable)
-  e.mov_r_imm32(RDX, op);                 // arg1 = op (32-bit, zero-ext)
-  e.mov_r_imm64(RAX, (u64)&jitMemThunk);
+  e.mov_r_imm32(R8, rt);                  // arg2 = rt
+  e.mov_r_imm64(RAX, (u64)fn);
   e.call_reg(RAX);
   e.test_al_al();
   bailSite = e.je_rel32_placeholder();    // al==0 (faulted) → salta al stub de bail
+  snap = rc.snap();                       // lo sucio aqui lo escribe el stub de bail
   if(!isStore) rc.forget((op >> 16) & 31);   // el helper acaba de escribir gpr[rt] en memoria
   return true;
 }
@@ -370,7 +421,8 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 // Excluidos a propósito: COP0 (0x10, cambia TLB/Status → puede vectorizar), CACHE, LL/SC,
 // SYSCALL/BREAK/TRAP y todo lo que salte. Si la op falla o vectoriza, el thunk devuelve 0 y
 // el bloque sale con la bandera de control (pc/nextPc ya los dejó bien el intérprete).
-static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite) -> bool {
+static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite,
+                         RcSnap& snap) -> bool {
   u32 OP = op >> 26;
   bool ok = false;
   switch(OP) {
@@ -386,7 +438,19 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     default: break;
   }
   if(!ok) return false;
-  rc.writeback();                         // el interprete lee cpu->gpr por el puntero
+  // Volcado DIRIGIDO: solo los gpr que la op nombra. El interprete lee cpu->gpr por el
+  // puntero, pero una op de formato de FPU (ADD.S/MUL.S/CVT/C.cond) no nombra ninguno, y esas
+  // son la inmensa mayoria de las que caen aqui en SM64. Volcar el cache entero por cada una
+  // era pagar hasta cinco stores por op de FPU.
+  //   COP1 rs=4/5/6 (MTC1/DMTC1/CTC1) leen gpr[rt]
+  //   LWC1/LDC1/SWC1/SDC1 leen gpr[base];  LWL/LWR/SWL/SWR leen base y rt (mezclan con el)
+  //   DIV/DIVU/DMULT/DMULTU/DDIV/DDIVU leen gpr[rs] y gpr[rt]
+  {
+    u32 rsF = (op >> 21) & 31, rtF = (op >> 16) & 31;
+    if(OP == 0x11) { if(rsF >= 4 && rsF <= 6) rc.writebackOne(rtF); }
+    else if(OP == 0x00) { rc.writebackOne(rsF); rc.writebackOne(rtF); }
+    else { rc.writebackOne(rsF); if(OP != 0x31 && OP != 0x35) rc.writebackOne(rtF); }
+  }
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX)
   e.mov_r_imm32(RDX, op);                 // arg1 = op
   e.mov_r_imm32(R8, off);                 // arg2 = offset de la op en el bloque
@@ -394,7 +458,21 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   e.call_reg(RAX);
   e.test_al_al();
   exitSite = e.je_rel32_placeholder();    // al==0 → salida de control (la op ya tuvo efecto)
-  rc.forgetAll();                         // MFC1/LWL/LWR/... pueden escribir cualquier gpr
+  snap = rc.snap();                       // lo sucio aqui lo escribe el stub de salida
+  // Olvidar SOLO el gpr que el helper escribe, no la cache entera. Las ranuras del cache
+  // (RSI/RDI/R13/R14/R15) son callee-saved en Win64: sobreviven al CALL intactas, asi que
+  // tirarlas era regalar la residencia. Y en SM64 esto pasa cada pocas instrucciones: la op
+  // no compilable es casi siempre FPU, y una op de formato (ADD.S/MUL.S/CVT/C.cond) no toca
+  // ningun gpr. El writeback de arriba SI hace falta siempre: la op puede vectorizar a una
+  // excepcion y el manejador guarda el contexto leyendo cpu->gpr.
+  //   COP1 rs=0/1/2 (MFC1/DMFC1/CFC1) escriben gpr[rt]
+  //   COP1 rs=4/5/6 (MTC1/DMTC1/CTC1) y rs>=16 (formato) solo tocan FPR/FCR
+  //   LWL/LWR escriben gpr[rt];  SWL/SWR, LWC1/LDC1/SWC1/SDC1 no
+  //   DIV/DIVU/DMULT/DMULTU/DDIV/DDIVU solo HI/LO, que no estan en el cache
+  u32 wrGpr = 32;                                     // 32 = ninguno
+  if(OP == 0x11 && ((op >> 21) & 31) <= 2)   wrGpr = (op >> 16) & 31;
+  else if(OP == 0x22 || OP == 0x26)          wrGpr = (op >> 16) & 31;
+  if(wrGpr < 32) rc.forget(wrGpr);
   return true;
 }
 
@@ -653,8 +731,10 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
 
   std::vector<usize> bailSites;   // offset del disp32 del je de cada mem-op
   std::vector<u32>   bailIdx;     // ops retiradas antes de esa mem-op (índice)
+  std::vector<RcSnap> bailSnap;   // ranuras sucias en cada bail (spill perezoso)
   std::vector<usize> interpSites; // je de cada op interpretada (salida de control)
   std::vector<u32>   interpIdx;   // ops retiradas INCLUYENDO esa op (ya tuvo efecto)
+  std::vector<RcSnap> interpSnap; // ranuras sucias en cada salida de op interpretada
 
   // Offsets de los campos de control del CPU (para branch-in-block: el bloque
   // escribe pc/nextPc/inDelay/justBranched directamente y devuelve flag de control).
@@ -693,9 +773,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     usize dBefore = c.jitCache->buf.used;
     if(emitSafeOp(e, rc, dop)) return true;
     c.jitCache->buf.used = dBefore;
-    usize dsite; bool dStore;
-    if(emitMemOp(e, rc, dop, dsite, dStore)) {
-      bailSites.push_back(dsite); bailIdx.push_back(idx);
+    usize dsite; bool dStore; RcSnap dsnap;
+    if(emitMemOp(e, rc, dop, dsite, dStore, dsnap)) {
+      bailSites.push_back(dsite); bailIdx.push_back(idx); bailSnap.push_back(dsnap);
       b.hasMem = true; if(dStore) b.hasStore = true;
       return true;
     }
@@ -758,16 +838,16 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     usize before = c.jitCache->buf.used;
     if(emitSafeOp(e, rc, op)) { b.src.push_back(op); b.nOps++; continue; }
     c.jitCache->buf.used = before;
-    usize site; bool isStore;
-    if(emitMemOp(e, rc, op, site, isStore)) {
-      bailSites.push_back(site); bailIdx.push_back(b.nOps);
+    usize site; bool isStore; RcSnap msnap;
+    if(emitMemOp(e, rc, op, site, isStore, msnap)) {
+      bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap);
       b.hasMem = true; if(isStore) b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
-    usize isite;
-    if(emitInterpOp(e, rc, op, 4 * i, isite)) {
-      interpSites.push_back(isite); interpIdx.push_back(b.nOps + 1);
+    usize isite; RcSnap isnap;
+    if(emitInterpOp(e, rc, op, 4 * i, isite, isnap)) {
+      interpSites.push_back(isite); interpIdx.push_back(b.nOps + 1); interpSnap.push_back(isnap);
       // Conservador: la op puede tocar memoria y estado FPU → fuera del modo jitdiff puro.
       b.hasMem = true; b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
@@ -961,6 +1041,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   std::vector<usize> toDone;
   for(usize k = 0; k < bailSites.size(); k++) {
     e.patchRel32(bailSites[k]);
+    rc.emitSnapSpill(bailSnap[k]);           // spill perezoso: lo sucio en el punto del bail
     e.mov_r_imm32(RAX, bailIdx[k]);
     toDone.push_back(e.jmp_rel32_placeholder());
   }
@@ -970,6 +1051,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // para que el driver NO recalcule pc, contando la op como retirada.
   for(usize k = 0; k < interpSites.size(); k++) {
     e.patchRel32(interpSites[k]);
+    rc.emitSnapSpill(interpSnap[k]);         // spill perezoso: lo sucio en el punto de salida
     e.mov_r_imm32(RAX, 0x80000000u | interpIdx[k]);
     toDone.push_back(e.jmp_rel32_placeholder());
   }

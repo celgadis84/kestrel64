@@ -216,3 +216,45 @@ despues 41.07 / 41.95   (137-140% de consola)
   al instante, asi que no coalesce nada. `KESTREL_RDPINLINE=1` solo vale +2.4%.
 - **RSP al 87-89% del reloj de hardware**: sera el techo en un juego con microcodigo pesado.
   Toca enlazado de bloques y asignacion de registros en el dynarec del RSP.
+
+## Cuarta tanda (2026-08-26): el hilo de CPU deja de pagar peajes
+
+El perfil de host (sampler de alta resolucion + `scripts/hostprof_sym.py`) dejaba claro que solo
+~20-25% del hilo de CPU era codigo invitado emitido por el JIT. El resto eran peajes del propio
+JIT. Cuatro cambios, todos semantica HW intacta:
+
+| Cambio | Que hacia antes | Que hace ahora |
+|---|---|---|
+| Spill perezoso (`jit.cpp`) | Cada CALL a un helper hacia `rc.writeback()` completo | Solo se vuelca lo que el helper vaya a leer; cada sitio de salida lleva su `RcSnap` y el stub escribe lo sucio |
+| Forget dirigido (`jit.cpp`) | `forgetAll()` tras el interprete tiraba el cache entero | Se olvida solo el gpr que la op puede escribir |
+| Dispatch COP1 (`cpu.cpp`) | `jitInterpOp` entraba por `execute()` (decode completo) | Las ops COP1 van directas a `cop1op()` |
+| Helpers de memoria especializados (`cpu.cpp` + `jit.cpp`) | `jitMem(op)` decodificaba la op en un switch de 11 casos y leia `gpr[rs]`/`gpr[rt]` por el puntero | `jitMemOp<OPc>` con tamano/signo/store en `constexpr`; el bloque pasa direccion y dato en registros, ya residentes en el cache |
+
+Los `kRcRegs` (`RSI/RDI/R13/R14/R15`) son todos callee-saved en la ABI Win64, asi que sobreviven
+al CALL intactos: volcarlos y olvidarlos era trabajo tirado.
+
+El helper especializado ademas quita el `writeback` de `rs`/`rt` antes del CALL: como ya no lee
+`cpu->gpr`, la unica coherencia que hace falta es en el camino de fallo, y de eso se encarga el
+`RcSnap` del stub de bail.
+
+**Medida** (SM64, `KESTREL_PRDP=1 KESTREL_MAXFLIPS=400 KESTREL_THREADS=1`, consola = 30 fps):
+
+| Punto | fps | % consola |
+|---|---|---|
+| Tercera tanda (getenv cacheado) | 41.95 | 140% |
+| + spill perezoso + forget dirigido | ~42.0 | 140% |
+| + dispatch COP1 directo | 42.0-42.5 | 141% |
+| + helpers de memoria especializados | **46.2-46.9** | **155%** |
+
+CPU N64 en el heartbeat: 153.4% -> **163.9%**. RSP 97.9%, ocupacion RDP 19%, RSP 58%.
+
+Puertas: `gate_all` regress=0, seis modos MATCH `466282775dbd0ac084946558a1c30771`;
+`gate_prdp` regress=0, ambos modos MATCH `b5521b24d8fc280fbf102df22d7d30cb`.
+
+### Palancas que quedan, por tamano medido en el hilo de CPU
+
+1. **COP1 nativo en el JIT** (~15-19%) - hoy toda la FPU pasa por el interprete.
+2. **Micro-TLB de datos** (~5.2% en `translate`) - la traduccion se repite por acceso.
+3. **Camino rapido de D-cache inline** (~6.4% entre `dcRead`/`dcWrite`/`dcFill`).
+4. **Block linking** (~7.2% en `jitTryBlock`) - cada salto vuelve al driver a buscar bloque.
+

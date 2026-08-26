@@ -37,6 +37,7 @@ u64                    g_samples = 0, g_base = 0, g_extern = 0;
 std::unordered_map<u64, u64> g_ext;    // AllocationBase de la region -> muestras
 std::unordered_map<u64, u64> g_extcall;  // retorno in-image mas cercano -> muestras
 auto dump() -> void;
+auto writeRaw(const std::vector<std::pair<u64,u64>>& v) -> void;
 
 // Rango de la seccion de codigo, leido de las cabeceras PE del propio modulo. Sin el, el
 // barrido de pila acepta como "direccion de retorno" cualquier palabra que caiga dentro de
@@ -74,7 +75,35 @@ auto isCallSite(u64 va) -> bool {
   return false;
 }
 
+// std::this_thread::sleep_for redondea al tick del planificador de Windows: pedir 1 ms
+// duerme 15.6 ms de verdad, asi que un perfil de 8 s salia con 300 muestras en vez de 8000
+// y cualquier cosa por debajo del 1% era ruido. Un temporizador de alta resolucion
+// (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, Win10 1803+) duerme el periodo pedido de verdad
+// sin tocar el tick global del sistema, que es lo que hace timeBeginPeriod y afecta al
+// resto del proceso -- justo a los hilos que estamos midiendo.
+struct HiResSleeper {
+  HANDLE h = nullptr;
+  bool ok = false;
+  HiResSleeper() {
+    h = CreateWaitableTimerExW(nullptr, nullptr,
+                               CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    ok = h != nullptr;
+  }
+  ~HiResSleeper() { if(h) CloseHandle(h); }
+  auto sleepMs(unsigned ms) -> void {
+    if(!ok) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); return; }
+    LARGE_INTEGER due;
+    due.QuadPart = -(LONGLONG)ms * 10000;   // 100 ns, negativo = relativo
+    if(!SetWaitableTimer(h, &due, 0, nullptr, nullptr, FALSE)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+      return;
+    }
+    WaitForSingleObject(h, ms + 16);
+  }
+};
+
 auto sampleLoop(unsigned periodMs) -> void {
+  HiResSleeper sleeper;
   // Sampling by suspend/GetThreadContext: no symbol server, no debug info, works on
   // a plain Release build. The bucket is 16 bytes so a hot basic block lands in one
   // entry rather than smearing across every instruction address.
@@ -118,7 +147,7 @@ auto sampleLoop(unsigned periodMs) -> void {
       }
       ResumeThread(g_target);
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(periodMs));
+    sleeper.sleepMs(periodMs);
     // Periodic dump: the process is normally stopped with taskkill, so waiting for
     // an orderly stop() would lose the whole profile.
     if((g_samples % 2000) == 0 && g_samples) dump();
@@ -166,6 +195,30 @@ auto dump() -> void {
   }
   extdump(shown);
   std::fflush(stderr);
+  writeRaw(v);
+}
+
+// El top-40 de cubos de 16 bytes reparte una funcion caliente entre veinte lineas del 1%
+// y esconde el total. Con KESTREL_HOSTPROF_OUT=<fichero> se vuelca el histograma ENTERO
+// (cubo + cuentas, mas los marcos de retorno de lo que cae fuera de la imagen) y
+// scripts/hostprof_sym.py lo agrega por funcion con llvm-symbolizer. Ahi es donde se ve
+// que "veinte lineas del 1%" son en realidad un 20% de una sola rutina.
+auto writeRaw(const std::vector<std::pair<u64,u64>>& v) -> void {
+  const char* out = std::getenv("KESTREL_HOSTPROF_OUT");
+  if(!out) return;
+  std::FILE* f = std::fopen(out, "w");
+  if(!f) return;
+  std::fprintf(f, "# samples %llu\n", (unsigned long long)g_samples);
+  for(auto& p : v)
+    std::fprintf(f, "img %llx %llu\n", (unsigned long long)p.first,
+                 (unsigned long long)p.second);
+  for(auto& p : g_extcall)
+    std::fprintf(f, "extcall %llx %llu\n", (unsigned long long)p.first,
+                 (unsigned long long)p.second);
+  for(auto& p : g_ext)
+    std::fprintf(f, "extmod %llx %llu\n", (unsigned long long)p.first,
+                 (unsigned long long)p.second);
+  std::fclose(f);
 }
 }  // namespace
 

@@ -1445,7 +1445,14 @@ auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
   memAbort     = false;
   justBranched = false;
   inDelay      = false;
-  execute(op);
+  // Despacho DIRECTO de COP1. La tabla de saltos de execute() es un indirecto de ~60
+  // destinos, y aqui cae casi siempre la misma familia: el fallback en bloque del JIT existe
+  // sobre todo para FPU. Es exactamente la rama que execute() elegiria (0x11 no esta en la
+  // mascara de ops de 64 bits, asi que no hay comprobacion previa que saltarse), solo sin
+  // pagar el indirecto. Con el anillo de depuracion armado se vuelve a execute() para no
+  // perder la traza de instrucciones.
+  if((op >> 26) == 0x11 && !pcRingOn) cop1op(op);
+  else                                execute(op);
   gpr[0] = 0;                 // r0 cableado: el bloque puede leerlo como fuente después
   inDelay = justBranched;     // misma actualización que hace step() tras execute()
   // Cualquier desviación del avance secuencial (excepción vectorizada, halt, salto) significa
@@ -1522,6 +1529,73 @@ auto CPU::jitMem(u32 op) -> u8 {
   }
   return 1;
 }
+
+// Helper de memoria del JIT especializado por opcode (ver declaracion en cpu.hpp). Todo lo
+// que el generico decidia en caliente -- switch de 11 casos sobre el opcode, tamano, signo,
+// si es store, la comprobacion de op de 64 bits -- aqui es constante de plantilla, y la
+// direccion (a) y el dato del store (rtVal) llegan en registros: el bloque ya los tiene
+// residentes en el cache de registros, asi que no hace falta ni volcarlos a cpu->gpr ni
+// releerlos. El orden y las rutas de acceso son EXACTAMENTE las del generico.
+template<u32 OPc>
+auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
+  constexpr u32 sz = (OPc == 0x20 || OPc == 0x24 || OPc == 0x28) ? 1
+                   : (OPc == 0x21 || OPc == 0x25 || OPc == 0x29) ? 2
+                   : (OPc == 0x23 || OPc == 0x27 || OPc == 0x2b) ? 4 : 8;
+  constexpr bool store = (OPc == 0x28 || OPc == 0x29 || OPc == 0x2b || OPc == 0x3f);
+  if(!mem) return 0;
+  // LWU/LD/SD: reservadas (RI) en modo no-kernel sin UX/SX. Bail para que el interprete
+  // levante la RI exacta.
+  if constexpr(OPc == 0x27 || OPc == 0x37 || OPc == 0x3f) {
+    u32 mode = cpuMode();
+    if(mode != 0) {
+      u32 st = (u32)cop0[C0_Status];
+      bool allowed = (mode == 2) ? (st & 0x20) : (st & 0x40);
+      if(!allowed) return 0;
+    }
+  }
+  if constexpr(sz > 1) { if(a & (u64)(sz - 1)) return 0; }   // misalign -> interprete vectoriza
+  u64 p;
+  { bool s = probing; probing = true;
+    p = translate(a, store ? AccWrite : AccRead); probing = s; }
+  if(p == ~0ull) return 0;                                  // TLB/ADE -> interprete vectoriza
+  u32 pe = (sz == 8) ? (u32)p : (u32)reXor(p, sz);
+  bool inRdram = cacheable(a) && pe < mem->rdram.size();
+  if constexpr(!store) {
+    u64 raw = inRdram ? dcRead(pe, sz)
+            : (sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
+             : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe));
+    if      constexpr(OPc == 0x20) set(rt, sext8 ((u8) raw));
+    else if constexpr(OPc == 0x21) set(rt, sext16((u16)raw));
+    else if constexpr(OPc == 0x23) set(rt, sext32((u32)raw));
+    else if constexpr(OPc == 0x24) set(rt, (u64)(u8) raw);
+    else if constexpr(OPc == 0x25) set(rt, (u64)(u16)raw);
+    else if constexpr(OPc == 0x27) set(rt, (u64)(u32)raw);
+    else                           set(rt, raw);            // LD
+    return 1;
+  } else {
+    u32 pm = (u32)p & 0x1fff'ffff;
+    if(storeRepeat(pm, rtVal, sz)) return 1;
+    if constexpr(sz == 1 || sz == 2) { if(storeCart(pm, rtVal, sz)) return 1; }
+    if constexpr(sz != 4)            { if(mem->wordStoreQuirk(pm, rtVal, sz)) return 1; }
+    if(inRdram) { dcWrite(pe, rtVal, sz); return 1; }
+    if      constexpr(sz == 1) mem->write8 (pe, (u8) rtVal);
+    else if constexpr(sz == 2) mem->write16(pe, (u16)rtVal);
+    else if constexpr(sz == 4) mem->write32(pe, (u32)rtVal);
+    else                       mem->write64(pe, rtVal);
+    return 1;
+  }
+}
+
+// Trampolines C, uno por opcode: el bloque emite un CALL directo al suyo. Win64 pasa
+// (cpu, direccion, rt, dato) en RCX/RDX/R8/R9.
+#define KJM(name, opc) \
+  extern "C" u8 name(void* c, u64 a, u32 rt, u64 v) { \
+    return reinterpret_cast<kestrel::CPU*>(c)->jitMemOp<opc>(a, rt, v); }
+KJM(kestrel_jitLB,  0x20) KJM(kestrel_jitLH,  0x21) KJM(kestrel_jitLW,  0x23)
+KJM(kestrel_jitLBU, 0x24) KJM(kestrel_jitLHU, 0x25) KJM(kestrel_jitLWU, 0x27)
+KJM(kestrel_jitLD,  0x37) KJM(kestrel_jitSB,  0x28) KJM(kestrel_jitSH,  0x29)
+KJM(kestrel_jitSW,  0x2b) KJM(kestrel_jitSD,  0x3f)
+#undef KJM
 
 auto CPU::special(u32 op) -> void {
   // Doubleword SPECIAL functs (DADD/DSUB/DMULT/DDIV/DSxx*) are reserved in 32-bit

@@ -324,6 +324,12 @@ public:
   // Devuelve 1 = hecho limpio; 0 = faultaría (misalign/TLB/ADE) → el bloque hace bail y
   // el intérprete re-ejecuta la op para vectorizar la excepción. Nunca vectoriza aquí.
   auto jitMem(u32 op) -> u8;
+  // Version ESPECIALIZADA por opcode del helper de memoria del JIT. El opcode es constante
+  // de plantilla (tamano, signo, store) y la direccion y el dato llegan ya calculados en
+  // registros desde el bloque, que los tiene residentes: el helper deja de decodificar la op
+  // y de leer cpu->gpr por el puntero. El camino de acceso es el MISMO (translate/dcRead/
+  // dcWrite/storeRepeat/storeCart/wordStoreQuirk), byte a byte.
+  template<u32 OPc> auto jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8;
   // Ejecuta UNA op no compilable con el intérprete desde dentro de un bloque JIT.
   // `off` = desplazamiento en bytes de la op respecto a la entrada del bloque (pc).
   // Devuelve 1 si la op terminó normal (el bloque sigue), 0 si hubo excepción/parada:
