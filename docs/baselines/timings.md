@@ -358,3 +358,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_all | 381 s | gate_prdp | 298 s | JIT: BC1F/BC1T/BC1FL/BC1TL absorbidos como salto nativo; 12/12, regress=0 en ambos |
 | 2026-08-27 | gate_all | 360 s | gate_prdp | 305 s | Producto: --play, arranque desde el Explorador, KESTREL_STATIC; 12/12, regress=0 en ambos |
 | 2026-08-27 | gate_all | 363 s | gate_prdp | 302 s | JIT: `memAbort` limpiado al entrar al bloque (ADDI absorbida por defecto) + reloj de decaimiento del latch PI con `jitPending`; 12/12, regress=0 en ambos |
+| 2026-08-27 | gate_all | 362 s | gate_prdp | 303 s | RSP JIT: invalidacion de IMEM por contenido + cobertura exacta del bloque (compilaciones 1.70M -> 1.37M en SM64/600 campos); 12/12, regress=0 en ambos |

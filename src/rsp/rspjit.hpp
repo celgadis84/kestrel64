@@ -19,9 +19,13 @@
 //
 //   * el cache de bloques es una TABLA DIRECTA de 1024 entradas indexada por pc>>2 -- no
 //     hay hash, ni colisiones, ni cache negativa que envejecer;
-//   * la invalidacion es global y O(1): cualquier escritura en IMEM tira la tabla entera.
-//     IMEM solo cambia por DMA del motor SP (carga de microcodigo o de un overlay), que es
-//     un evento raro comparado con las decenas de miles de instrucciones de una tarea;
+//   * la invalidacion se decide POR CONTENIDO contra una sombra de los 4 KB (syncImem):
+//     una ranura solo muere si su palabra fuente ha cambiado de verdad. Empezo siendo
+//     global -- cualquier escritura en IMEM tiraba la tabla entera -- y eso costaba caro:
+//     el juego alterna microcodigo de graficos y de audio, cada tarea vuelve a DMAear sus
+//     4 KB completos, y la tabla se tiraba aunque los bytes fueran los MISMOS. Medido en
+//     SM64 (600 campos): 6207 vaciados y 1.7 M compilaciones, con la compilacion comiendose
+//     ~32% del hilo del RSP. Comparar contra la sombra deja esas recargas en cero trabajo;
 //   * un bloque nunca puede fallar a medias. No hay excepciones que vectorizar, asi que la
 //     firma no necesita devolver "instrucciones retiradas antes del fallo".
 //
@@ -69,13 +73,21 @@ struct Cache {
   jit::CodeBuffer buf;
   Block  blocks[1024];      // indexado por pc>>2: IMEM son 4 KB = 1024 palabras
   State  state[1024] = {};
-  u64    imemFp = ~0ull;    // huella de IMEM con la que se compilo lo que hay en la tabla
+  // Copia de los 4 KB de IMEM tal y como estaban la ultima vez que se miro. Es lo que
+  // permite invalidar POR CONTENIDO: recargar el mismo microcodigo no cambia ni un byte,
+  // asi que no invalida nada. Ver syncImem().
+  u8     shadow[4096] = {};
   bool   ready = false;
   // estadistica (KESTREL_RSPJIT_STATS=1)
   u64 entries = 0, jitOps = 0, interpOps = 0, compiles = 0, flushes = 0;
 
   auto init() -> bool;
-  auto clear() -> void;     // tira la tabla entera (IMEM cambio / buffer lleno)
+  auto clear() -> void;     // tira la tabla entera (buffer lleno)
+  // Reconcilia la tabla con el IMEM que hay ahora: invalida SOLO las ranuras cuyas palabras
+  // fuente hayan cambiado (mas la ventana kMaxOps-1 de bloques que puedan alcanzarlas) y
+  // reanota la sombra. Cubre a cualquier escritor de IMEM -- DMA del SP, tienda de la CPU,
+  // escritura por MCP -- porque mira el resultado, no el camino.
+  auto syncImem(const u8* imem) -> void;
 };
 
 // Longitud minima de bloque. Por debajo de esto el prologo+epilogo del bloque cuesta mas
@@ -89,10 +101,6 @@ static constexpr u32 kMaxOps = 64;
 // state[pc>>2] en Compiled o NoComp, de modo que el llamante nunca reintenta en bucle.
 auto compile(Rsp& rsp, Cache& c, u32 pc) -> void;
 
-// Huella de los 4 KB de IMEM. Se recalcula al arrancar cada tarea (Rsp::start) y si no
-// coincide con la de la tabla se tira todo: cubre a CUALQUIER escritor de IMEM (DMA del
-// SP, tienda de la CPU, escritura por MCP) sin poner un gancho en sus caminos calientes.
-auto imemFingerprint(const u8* imem) -> u64;
 
 }  // namespace rspjit
 }  // namespace kestrel

@@ -194,34 +194,21 @@ auto Rsp::jitStatsDump() -> void {
 }
 
 auto Rsp::jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void {
+  (void)off; (void)bytes;
   if(!jc) return;
   // OJO: no se puede usar bindMem() aqui. El DMA que carga microcodigo suele llegar
   // ANTES de la primera escritura a SP_STATUS, que es donde Memory le asigna a este Rsp
   // su puntero mem; tocarlo antes lee de un puntero nulo. La memoria del SP la trae
   // quien llama, que ya la tiene delante.
-  // Invalidacion POR RANGO, no global. F3DEX2 carga overlays de microcodigo cada pocas
-  // decenas de miles de instrucciones, y tirar las 1024 entradas en cada carga obligaba a
-  // recompilar el microcodigo entero una y otra vez (185k compilaciones y 4156 vaciados en
-  // 200 intercambios de SM64). Un overlay toca unos cientos de bytes: basta con marcar como
-  // desconocidas las ranuras que caen dentro del tramo escrito, mas kMaxOps-1 palabras por
-  // delante, que son los bloques que pueden EMPEZAR antes y llegar hasta aqui.
-  const u32 back = 4u * (rspjit::kMaxOps - 1);
-  if(bytes + back >= 4096u) {
-    jc->clear();
-  } else {
-    u32 first = (off - back) & 0xfff;
-    for(u32 i = 0; i < bytes + back; i += 4) {
-      u32 idx = ((first + i) & 0xfff) >> 2;
-      jc->state[idx] = rspjit::State::Unknown;
-      jc->blocks[idx] = rspjit::Block{};
-    }
-  }
+  //
+  // Invalidacion POR CONTENIDO (rspjit::Cache::syncImem), no por rango escrito. El rango
+  // dice donde ESCRIBIO el DMA, no que haya cambiado algo: F3DEX2 recarga su microcodigo
+  // completo al empezar cada tarea y los 4 KB son identicos a los de la tarea anterior.
+  // Comparando contra la sombra, esa recarga no invalida ni una ranura y solo los overlays
+  // -- que si traen bytes distintos -- pagan recompilacion, y solo de lo que tocan.
+  jc->syncImem(imem);
   // El codigo emitido de los bloques muertos se queda en el buffer hasta el siguiente
   // reciclado: es un asignador de tope, no hay nada que liberar pieza a pieza.
-  //
-  // Y se reanota la huella: si no, el chequeo de Rsp::start veria IMEM cambiado en la
-  // siguiente tarea y volveria a tirar la tabla entera, que es justo lo que se evita aqui.
-  jc->imemFp = rspjit::imemFingerprint(imem);
 }
 
 // --- DMEM / IMEM access (12-bit wrapping, big-endian, unaligned OK) ----------
@@ -1464,13 +1451,11 @@ auto Rsp::benchStep(u64 iters) -> void {
 // --- run loop ---------------------------------------------------------------
 auto Rsp::start() -> void {
   bindMem();
-  // Una tarea nueva puede traer microcodigo nuevo. La huella de los 4 KB de IMEM cuesta
-  // ~1500 ciclos una vez por tarea y cubre a CUALQUIER escritor (DMA, tienda de la CPU,
-  // escritura por MCP) sin poner un gancho en ningun camino caliente.
-  if(jc) {
-    u64 fp = rspjit::imemFingerprint(imp);
-    if(fp != jc->imemFp) { jc->clear(); jc->imemFp = fp; }
-  }
+  // Una tarea nueva puede traer microcodigo nuevo. Comparar los 4 KB de IMEM contra la
+  // sombra cuesta como calcular una huella y ademas dice QUE ha cambiado, asi que una tarea
+  // que recarga su propio microcodigo no invalida nada. Cubre a CUALQUIER escritor (DMA,
+  // tienda de la CPU, escritura por MCP) sin poner un gancho en ningun camino caliente.
+  if(jc) jc->syncImem(imp);
   running = true;
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;

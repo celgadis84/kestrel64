@@ -16,17 +16,47 @@ extern "C" {
   void kestrel_rspjit_exec (Rsp* r, u32 op) { r->jitExec(op); }
 }
 
-auto imemFingerprint(const u8* imem) -> u64 {
-  // FNV-1a sobre las 512 palabras de 64 bits de IMEM. Se recalcula una vez por tarea, no
-  // por instruccion: ~1500 ciclos frente a las decenas de miles de instrucciones que dura
-  // una tarea de microcodigo.
-  u64 h = 0xcbf29ce484222325ull;
-  u64 w;
-  for(u32 i = 0; i < 4096; i += 8) {
-    std::memcpy(&w, imem + i, 8);
-    h = (h ^ w) * 0x100000001b3ull;
+auto Cache::syncImem(const u8* imem) -> void {
+  // Diferencia por palabras de 64 bits (dos ranuras cada una). Lo normal con diferencia es
+  // que no cambie NADA -- una tarea que recarga su propio microcodigo -- y ese caso sale por
+  // aqui tras 512 comparaciones, sin tocar la tabla.
+  u32 nDirty = 0;
+  bool dirty[512];
+  for(u32 i = 0; i < 512; i++) {
+    u64 a, b;
+    std::memcpy(&a, imem + 8 * i, 8);
+    std::memcpy(&b, shadow + 8 * i, 8);
+    dirty[i] = (a != b);
+    nDirty += dirty[i];
   }
-  return h;
+  if(!nDirty) return;
+  flushes++;
+  // Microcodigo entero distinto: reciclar el buffer de codigo de una vez sale mas barato
+  // (y evita que se llene) que marcar mil ranuras una a una.
+  if(nDirty >= 256) {
+    clear();
+  } else {
+    // Invalidacion EXACTA: una ranura muere solo si el bloque que hay en ella cubre de
+    // verdad una palabra cambiada. La version anterior mataba las kMaxOps-1 ranuras
+    // anteriores a cada palabra sucia "por si acaso" -- 65 ranuras por chunk de 8 bytes --
+    // y con unos pocos chunks dispersos eso barria media tabla: medidos 72 bloques
+    // recompilados por evento de invalidacion en SM64. Con la cobertura real (los bloques
+    // no envuelven IMEM, asi que ocupan [idx, idx+nOps) sin dar la vuelta) basta con una
+    // suma de prefijos sobre el mapa de palabras sucias y una pasada por las 1024 ranuras.
+    u16 pre[1025];
+    pre[0] = 0;
+    for(u32 w = 0; w < 1024; w++) pre[w + 1] = (u16)(pre[w] + (dirty[w >> 1] ? 1 : 0));
+    for(u32 idx = 0; idx < 1024; idx++) {
+      if(state[idx] == State::Unknown) continue;
+      // Un NoComp depende de todo lo que miro el escaneo, que llega hasta kMaxOps palabras.
+      u32 n = (state[idx] == State::Compiled) ? blocks[idx].nOps : kMaxOps;
+      u32 end = idx + n; if(end > 1024) end = 1024;
+      if(pre[end] == pre[idx]) continue;                    // ninguna palabra suya cambio
+      state[idx] = State::Unknown;
+      blocks[idx] = Block{};
+    }
+  }
+  std::memcpy(shadow, imem, 4096);
 }
 
 auto Cache::init() -> bool {
