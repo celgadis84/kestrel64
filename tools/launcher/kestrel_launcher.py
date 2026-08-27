@@ -23,6 +23,7 @@ API
 """
 
 import argparse
+import base64
 import io
 import json
 import mimetypes
@@ -55,6 +56,25 @@ ROM_EXT = (".z64", ".n64", ".v64", ".rom")
 # emulador que puede estar arrancando da falsos "no hay emulador".
 TELE_CLIENT = [None]
 TELE_PORT = [9128]
+
+# El nucleo manda pc, gpr y los registros COP0 como enteros de 64 bits. JSON.parse los mete
+# en un double: por encima de 2^53 el paso pierde los bits BAJOS, que en un PC son justo los
+# que importan (0xffffffff80246dd8 llegaria con la direccion cambiada, y un punto de ruptura
+# puesto sobre eso caeria en otro sitio). Aqui el entero todavia es exacto, asi que los que
+# no caben salen ya como cadena hexadecimal y el navegador no los toca nunca como numero.
+SAFE_INT = (1 << 53) - 1
+
+
+def tele_safe(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int) and abs(v) > SAFE_INT:
+        return "0x%016x" % (v & 0xFFFFFFFFFFFFFFFF)
+    if isinstance(v, dict):
+        return {k: tele_safe(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [tele_safe(x) for x in v]
+    return v
 
 # libretro-thumbnails: la coleccion de caratulas mas completa y de acceso libre que hay.
 # (Nota: NNID es un identificador de cuenta de Wii U / 3DS, no tiene nada que ver con arte
@@ -452,10 +472,16 @@ class H(BaseHTTPRequestHandler):
         snap = q.get("snapshot", ["0"])[0] not in ("0", "", "false")
         try:
             t = self._tele_client(q)
-            data = t.snapshot(cmd, **args) if snap else t.query(cmd, **args)[0]
+            data, blob = t.snapshot(cmd, **args) if snap else t.query(cmd, **args)
         except TELE.TeleError as e:
             return self._json(dict(ok=False, error=str(e)), 200)
-        return self._json(dict(ok=True, data=data))
+        out = dict(ok=True, data=tele_safe(data))
+        # mem.read devuelve los bytes crudos por el lado binario del marco, que es justo
+        # lo que lo hace barato. Al navegador van en base64: sigue siendo un tercio de lo
+        # que costaria en hexadecimal y no obliga a un segundo viaje.
+        if blob:
+            out["blob"] = base64.b64encode(blob).decode()
+        return self._json(out)
 
     def _tele_fb(self, q):
         """Framebuffer que el VI esta escaneando, en PNG. Es la ruta de captura propia del

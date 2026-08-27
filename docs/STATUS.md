@@ -2859,3 +2859,16 @@ La primera version del traductor exportaba ~60 banderas como `"0"` y habria ence
 trazado entero en cada arranque.
 
 Puertas verdes en las seis modalidades + PRDP, `regress=0`.
+
+### Depurador en la ventana de telemetria
+
+La ventana gana pestana **Depurador** sobre las ordenes que ya tenia el servidor
+(`cpu.disasm`, `cpu.step`, `cpu.run_until`, `cpu.bp.*`, `mem.read`): desensamblado con el PC
+resaltado, puntos de ruptura pulsando la linea, paso de 1/10/1000, "correr hasta" con tope de
+tiempo propio, y visor de memoria por region con lectura coherente por la cache de datos.
+
+Bug real encontrado al probarlo contra SM64: `pc` y los registros de 64 bits llegaban al
+navegador por `JSON.parse` como `double` y perdian los **bits bajos** (el PC
+`0xffffffff80246dd8` se convertia en otra direccion, y un punto de ruptura puesto ahi habria
+caido en otro sitio). Arreglado en el puente, que aun tiene el entero exacto: todo entero que
+no cabe en 2^53 sale como cadena hexadecimal. Nada de esto toca el binario del emulador.

@@ -75,7 +75,7 @@ class Tele:
         return resp.get("data", {}), blob
 
     def snapshot(self, cmd, **args):
-        """Lectura de perfilador sin morir esperando el candado del nucleo. El bucle de
+        """Igual que query (devuelve (data, blob)) pero sin morir esperando el candado. El bucle de
         marcha libre lo tiene cogido en tandas de ~un campo de video, asi que una consulta
         de solo lectura lanzada a media marcha puede esperar mucho a la ventana entre
         tandas. Pausar primero suelta el candado ya y da una foto sin desgarros; despues se
@@ -84,7 +84,7 @@ class Tele:
         if running:
             self.query("pause")
         try:
-            return self.query(cmd, **args)[0]
+            return self.query(cmd, **args)
         finally:
             if running:
                 self.query("resume")

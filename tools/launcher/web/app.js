@@ -604,14 +604,18 @@ async function tele(cmd, args, snapshot) {
   catch (e) { return {ok: false, error: String(e)}; }
 }
 
+/* El puente ya manda como cadena "0x...." todo entero que no cabe en un double, asi que
+   aqui no hay que adivinar nada: los numeros son exactos y las cadenas van tal cual. */
 const hex = (v, w) => {
-  // Los enteros de 64 bits llegan como Number: por encima de 2^53 pierden bits, asi que se
-  // marca en vez de ensenar un valor falso.
   if (typeof v !== "number") return String(v);
-  if (!Number.isSafeInteger(v)) return "~" + v.toExponential(6);
   const s = (v < 0 ? (v >>> 0) : v).toString(16);
   return "0x" + (w ? s.padStart(w, "0") : s);
 };
+
+/* Parte baja de 32 bits, venga como numero o como "0x<16 digitos>". Es lo que se usa para
+   direccionar: el bus del R4300i en modo de 32 bits solo mira ahi. */
+const lo32 = v => (typeof v === "number" ? v >>> 0
+                   : (parseInt(String(v).slice(-8), 16) || 0) >>> 0);
 
 function teleCards(pairs) {
   return '<div class="telegrid">' + pairs.map(([k, v]) =>
@@ -654,6 +658,13 @@ async function teleTick(force) {
   TELE_BUSY = true;
   const body = $("#telebody");
   try {
+    if (TELE_TAB === "dbg") {
+      // El depurador NO se refresca solo: cada repintado toma el candado del nucleo y, a
+      // marcha libre, ese candado se suelta una vez por campo de video. Refrescar en bucle
+      // convertiria la ventana en un freno. Se repinta tras cada accion y con "Releer".
+      if (force) await dbgDraw();
+      return;
+    }
     if (TELE_TAB === "imagen") {
       // La imagen se refresca sola cambiando la marca de tiempo; el resto se repinta.
       let img = $("#tele-img");
@@ -713,7 +724,7 @@ async function teleTick(force) {
         ]) : "");
     } else if (TELE_TAB === "cpu") {
       body.innerHTML =
-        teleCards([["pc", hex(d.pc, 8)], ["instruccion", d.disasm || ""],
+        teleCards([["pc", hex(lo32(d.pc), 8)], ["instruccion", d.disasm || ""],
                    ["retiradas", (d.retired || 0).toLocaleString("es")],
                    ["halted", d.halted ? (d.haltReason || "si") : "no"]]) +
         "<h4>Registros generales</h4><div class=\"regs\">" + teleRegs(d.gpr || {}) + "</div>" +
@@ -755,6 +766,162 @@ async function teleTick(force) {
 setInterval(() => {
   if ($("#tele-live") && $("#tele-live").checked) teleTick(false);
 }, 900);
+
+/* ==================================================================== depurador
+   Encima de las mismas ordenes que ya usa el MCP: cpu.disasm / cpu.step /
+   cpu.run_until / cpu.bp.* / mem.read. Todo lo que hace falta para depurar ya estaba en
+   el servidor; lo unico que faltaba era ensenarlo. */
+let DBG_PC = 0, DBG_BPS = [], DBG_FOLLOW = true;
+
+const parseAddr = t => {
+  const v = parseInt(String(t).trim().replace(/^0x/i, ""), 16);
+  return Number.isFinite(v) ? (v >>> 0) : null;
+};
+
+/* Pausar antes de tocar nada: paso e inspeccion sobre un nucleo en marcha no significan
+   nada, y ademas el candado se soltaria solo una vez por campo. */
+async function dbgPause() {
+  const st = await tele("status");
+  if (st.ok && st.data && !st.data.paused) await tele("pause");
+}
+
+async function dbgAct(fn) {
+  const body = $("#telebody");
+  try { await fn(); } catch (e) { toast(String(e), true); }
+  if (body) await dbgDraw();
+}
+
+async function dbgDraw() {
+  const body = $("#telebody");
+  const st = await tele("status");
+  if (!st.ok) { body.innerHTML = `<div class="teleerr">${st.error}</div>`; return; }
+  const paused = !!st.data.paused;
+
+  const r = await tele("cpu.regs");
+  if (r.ok) DBG_PC = lo32(r.data.pc);
+  const bl = await tele("cpu.bp.list");
+  if (bl.ok) DBG_BPS = (bl.data.breakpoints || []).map(lo32);
+
+  const back = 0x20;                       // 8 instrucciones de contexto por arriba
+  const base = (DBG_FOLLOW ? ((DBG_PC - back) >>> 0) : (parseAddr($("#dbg-at") ? $("#dbg-at").value : "") ?? 0)) & ~3;
+  const dis = await tele("cpu.disasm", {addr: base, count: 40});
+
+  const rows = dis.ok ? (dis.data.insns || []).map(i => {
+    const a = lo32(i.addr);
+    const cls = (a === DBG_PC ? " pc" : "") + (DBG_BPS.includes(a) ? " bp" : "");
+    return `<div class="${cls.trim()}" data-a="${a}"><span class="a">${hex(a, 8)}</span>` +
+           `<span class="o">${hex(i.op, 8)}</span><span>${i.text}</span></div>`;
+  }).join("") : `<div class="teleerr">${dis.error || "sin desensamblado"}</div>`;
+
+  body.innerHTML =
+    '<div class="dbgbar">' +
+    `<button class="btn tiny" data-d="step" data-n="1"${paused ? "" : " disabled"}>Paso</button>` +
+    `<button class="btn tiny" data-d="step" data-n="10"${paused ? "" : " disabled"}>x10</button>` +
+    `<button class="btn tiny" data-d="step" data-n="1000"${paused ? "" : " disabled"}>x1000</button>` +
+    '<button class="btn tiny ghost" data-d="go">Correr hasta</button>' +
+    '<input class="addr" id="dbg-until" placeholder="80000180" value="">' +
+    '<button class="btn tiny ghost" data-d="bpadd">Punto de ruptura</button>' +
+    '<input class="addr" id="dbg-bp" placeholder="80000180">' +
+    '<span style="margin-left:auto"></span>' +
+    `<label class="switch tiny"><input type="checkbox" id="dbg-follow"${DBG_FOLLOW ? " checked" : ""}>` +
+    '<span></span> Seguir al PC</label>' +
+    `<input class="addr" id="dbg-at" placeholder="direccion" value="${DBG_FOLLOW ? "" : hex(base, 8)}"${DBG_FOLLOW ? " disabled" : ""}>` +
+    '<button class="btn tiny ghost" data-d="redraw">Releer</button>' +
+    '</div>' +
+    `<p class="hint">${paused ? "Nucleo PAUSADO." : "Nucleo CORRIENDO: el paso esta " +
+      "desactivado y lo que se ve es una foto. Pausa arriba."} ` +
+    'Pulsa una linea para poner o quitar un punto de ruptura.</p>' +
+    '<div class="dbgcols"><div>' +
+    `<div class="dis">${rows}</div>` +
+    (DBG_BPS.length
+      ? '<div class="bplist">' + DBG_BPS.map(b =>
+          `<span data-del="${b}" title="quitar">${hex(b, 8)} &times;</span>`).join("") +
+        '<span data-del="all" title="quitar todos">quitar todos</span></div>'
+      : '<p class="hint">Sin puntos de ruptura.</p>') +
+    '</div><div>' +
+    '<div class="dbgbar" style="margin-bottom:6px">' +
+    '<select id="dbg-reg">' +
+    ["RDRAM", "DMEM", "IMEM", "PIF_RAM", "CART_ROM", "SAVE", "EEPROM"].map(x =>
+      `<option>${x}</option>`).join("") + "</select>" +
+    '<input class="addr" id="dbg-ma" placeholder="0" value="0">' +
+    '<input class="addr" id="dbg-ml" style="width:70px" value="100">' +
+    '<label class="switch tiny"><input type="checkbox" id="dbg-coh" checked><span></span>' +
+    ' Coherente</label>' +
+    '<button class="btn tiny ghost" data-d="mem">Leer</button></div>' +
+    '<div class="hexd" id="dbg-hex"><span class="a">Region, direccion y longitud en ' +
+    'hexadecimal. "Coherente" lee la RDRAM a traves de la cache de datos de la CPU: sin ' +
+    'eso, lo que el nucleo escribio y aun no ha volcado no se ve.</span></div>' +
+    '</div></div>';
+
+  const pcRow = $("#telebody .dis .pc");
+  if (pcRow) pcRow.scrollIntoView({block: "center"});
+  $("#telestate").textContent = paused ? "nucleo pausado" : "nucleo corriendo";
+  dbgWire();
+}
+
+function dbgWire() {
+  $("#dbg-follow").onchange = e => { DBG_FOLLOW = e.target.checked; dbgDraw(); };
+  $$("#telebody .dis div[data-a]").forEach(el => el.onclick = () => {
+    const a = +el.dataset.a;
+    dbgAct(() => tele(DBG_BPS.includes(a) ? "cpu.bp.del" : "cpu.bp.add", {addr: a}));
+  });
+  $$("#telebody .bplist [data-del]").forEach(el => el.onclick = () => {
+    const d = el.dataset.del;
+    dbgAct(() => tele("cpu.bp.del", d === "all" ? {} : {addr: +d}));
+  });
+  $$("#telebody [data-d]").forEach(b => b.onclick = () => {
+    const k = b.dataset.d;
+    if (k === "redraw") return dbgDraw();
+    if (k === "step") return dbgAct(async () => {
+      await dbgPause();
+      const r = await tele("cpu.step", {count: +b.dataset.n});
+      if (!r.ok) toast(r.error, true);
+      else if (r.data.halted) toast("CPU detenida: " + (r.data.haltReason || "?"), true);
+    });
+    if (k === "bpadd") {
+      const a = parseAddr($("#dbg-bp").value);
+      if (a === null) return toast("Direccion no valida", true);
+      return dbgAct(() => tele("cpu.bp.add", {addr: a}));
+    }
+    if (k === "go") {
+      const a = parseAddr($("#dbg-until").value);
+      if (a === null) return toast("Direccion no valida", true);
+      return dbgAct(async () => {
+        // run_until reanuda, espera y vuelve a pausar; el tope de tiempo es suyo, asi que
+        // una direccion que no se alcanza no cuelga la ventana.
+        const r = await tele("cpu.run_until", {addr: a, timeout_ms: 5000});
+        if (!r.ok) return toast(r.error, true);
+        toast(r.data.hit ? "Alcanzado " + hex(a, 8)
+              : r.data.timedOut ? "Sin llegar en 5 s" : "Parado antes de llegar",
+              !r.data.hit);
+      });
+    }
+    if (k === "mem") return dbgMem();
+  });
+}
+
+async function dbgMem() {
+  const box = $("#dbg-hex");
+  const addr = parseAddr($("#dbg-ma").value), len = parseAddr($("#dbg-ml").value);
+  if (addr === null || len === null) { box.textContent = "Direccion o longitud no valida"; return; }
+  const r = await tele("mem.read", {region: $("#dbg-reg").value, addr, len: Math.min(len, 0x1000),
+                                    coherent: $("#dbg-coh").checked ? 1 : 0});
+  if (!r.ok) { box.innerHTML = `<span class="t">${r.error}</span>`; return; }
+  const raw = atob(r.blob || "");
+  let out = "";
+  for (let i = 0; i < raw.length; i += 16) {
+    let hx = "", tx = "";
+    for (let j = 0; j < 16; j++) {
+      if (i + j >= raw.length) { hx += "   "; continue; }
+      const c = raw.charCodeAt(i + j);
+      hx += c.toString(16).padStart(2, "0") + (j === 7 ? "  " : " ");
+      tx += (c >= 32 && c < 127) ? raw[i + j] : ".";
+    }
+    out += `<span class="a">${hex(lo32(r.data.addr) + i, 8)}</span>  ${hx} <span class="t">${
+      tx.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</span>\n`;
+  }
+  box.innerHTML = out || '<span class="a">sin datos</span>';
+}
 
 /* ==================================================================== modales */
 function openModal(sel) { $(sel).classList.add("on"); }

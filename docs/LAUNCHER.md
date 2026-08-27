@@ -192,12 +192,41 @@ Pestanas: **Estado** (velocidad por dominio en % de N64 real, campos/s, ocupacio
 hilos, overclock aplicado, cabecera del cartucho), **Imagen** (el framebuffer que el VI esta
 escaneando, decodificado desde la RDRAM — no es una lectura de vuelta de la GPU), **CPU**
 (pc, instruccion desensamblada, los 32 registros, COP0), **RCP** (el fichero de registros MMIO
-entero: MI, SP, DPC, VI, AI, PI, SI), **RSP** y **Perfilador** (top de rutas calientes por
-bucket de 16 bytes).
+entero: MI, SP, DPC, VI, AI, PI, SI), **RSP**, **Perfilador** (top de rutas calientes por
+bucket de 16 bytes, con arranque/parada/vaciado desde la propia pestana) y **Depurador**.
 
 La ocupacion es la cifra que hace falta mirar en modo multihilo: el porcentaje de CPU sube
 cuando la CPU **gira esperando** al RCP, asi que sin `cpuWaitPct` / `rdpBusyPct` / `rspBusyPct`
 el estado engañaria sobre quien es el palo largo.
+
+### Depurador
+
+Encima de las ordenes que ya existian en el servidor y que el MCP usa desde siempre:
+`cpu.disasm`, `cpu.step`, `cpu.run_until`, `cpu.bp.add/del/list` y `mem.read`. No hubo que
+tocar el nucleo para tenerlo; solo faltaba ensenarlo.
+
+- Desensamblado con el PC resaltado y los puntos de ruptura marcados al margen. Pulsar una
+  linea pone o quita el punto. "Seguir al PC" se puede apagar para mirar otra direccion.
+- Paso de 1, 10 y 1000 instrucciones; "Correr hasta" usa `cpu.run_until`, que lleva su propio
+  tope de tiempo (5 s), de modo que una direccion que no se alcanza no cuelga la ventana:
+  vuelve diciendo que no llego.
+- Visor de memoria por region (RDRAM, DMEM, IMEM, PIF_RAM, CART_ROM, SAVE, EEPROM) con
+  interruptor **Coherente**: la lectura pasa por la cache de datos de la CPU, asi que lo que
+  el nucleo escribio y todavia no ha volcado a RDRAM se ve. Sin eso, las estructuras del
+  kernel de libultra salen rancias.
+- El depurador **no** se refresca solo. Cada repintado toma el candado del nucleo y, a marcha
+  libre, ese candado se suelta una vez por campo de video: refrescar en bucle convertiria la
+  ventana en un freno. Se repinta tras cada accion y con "Releer".
+- El paso a paso pausa el nucleo antes de nada. Pasar instrucciones sobre un nucleo en marcha
+  no significa nada.
+
+**Enteros de 64 bits.** El nucleo manda `pc`, los registros generales y COP0 como u64.
+`JSON.parse` los mete en un `double` y por encima de 2^53 se pierden los bits **bajos**, que
+en una direccion son justo los que importan: `0xffffffff80246dd8` llegaria al navegador con
+la direccion cambiada y un punto de ruptura puesto sobre ella caeria en otro sitio. El puente
+Python todavia tiene el entero exacto, asi que lo que no cabe sale ya como cadena
+`"0x...."` y el navegador nunca lo trata como numero. Los bytes crudos (`mem.read`) van en
+base64: un tercio de lo que costaria en hexadecimal y sin un segundo viaje.
 
 El cliente de telemetria (`tele.py`) es una copia suelta del protocolo, no una dependencia del
 puente MCP: marcos con la longitud por delante, JSON y detras los bytes crudos. Las lecturas
@@ -206,8 +235,6 @@ marcha libre tiene cogido el candado del nucleo en tandas de ~un campo de video.
 
 ## Que falta
 
-- Depurador de verdad dentro de la ventana: hay puntos de ruptura, paso a paso y
-  `run_until` en el servidor, pero la interfaz todavia no los ensena (solo pausa / reanuda /
-  reinicia).
+- Vigilar escrituras (`KESTREL_WATCHP`) desde el depurador, y puntos de ruptura sobre el RSP.
 - Segundo, tercer y cuarto mando (hoy solo `KESTREL_PAD1`).
 - Cambiar opciones en caliente sin reiniciar el emulador.
