@@ -363,6 +363,9 @@ extern "C" u8 kestrel_jitLWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitLD
 extern "C" u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitSDC1(void*, u64, u32, u64);
 extern "C" u8 kestrel_jitMFC1 (void*, u32, u32); extern "C" u8 kestrel_jitDMFC1(void*, u32, u32);
 extern "C" u8 kestrel_jitCTC1(void*, u32, u32);
+extern "C" u8 kestrel_jitCVTWS(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWS(void*, u32, u32);
+extern "C" u8 kestrel_jitCVTWD(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWD(void*, u32, u32);
+extern "C" u8 kestrel_jitCVTDS(void*, u32, u32);   extern "C" u8 kestrel_jitCVTSD(void*, u32, u32);
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
@@ -484,12 +487,19 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
       case 0x00: fn = (void*)&kestrel_jitADDS; break;
       case 0x01: fn = (void*)&kestrel_jitSUBS; break;
       case 0x02: fn = (void*)&kestrel_jitMULS; break;
+      // Conversiones: lo que mas cede el bloque despues de CTC1 (ver jitCop1Cvt).
+      case 0x0d: fn = (void*)&kestrel_jitTRUNCWS; break;
+      case 0x21: fn = (void*)&kestrel_jitCVTDS;   break;
+      case 0x24: fn = (void*)&kestrel_jitCVTWS;   break;
       default: break;
     } break;
     case 0x11: switch(op & 63) {
       case 0x00: fn = (void*)&kestrel_jitADDD; break;
       case 0x01: fn = (void*)&kestrel_jitSUBD; break;
       case 0x02: fn = (void*)&kestrel_jitMULD; break;
+      case 0x0d: fn = (void*)&kestrel_jitTRUNCWD; break;
+      case 0x20: fn = (void*)&kestrel_jitCVTSD;   break;
+      case 0x24: fn = (void*)&kestrel_jitCVTWD;   break;
       default: break;
     } break;
     default: break;

@@ -1506,6 +1506,114 @@ auto CPU::jitCTC1w(u32 op, u32 off) -> u8 {
 extern "C" u8 kestrel_jitCTC1(void* c, u32 op, u32 off) {
   return reinterpret_cast<kestrel::CPU*>(c)->jitCTC1w(op, off); }
 
+// Conversiones COP1 emitidas por el JIT como CALL directo. Tras CTC1 son lo siguiente en la
+// cuenta de cesiones al interprete en SM64: el compilador de SGI convierte a entero cada vez
+// que un float se usa como indice, coordenada o contador (CVT.W.S ~16% de las cesiones,
+// TRUNC.W.S ~14%), y cambia de precision al pasar por rutinas de doble (CVT.D.S ~9%,
+// CVT.S.D ~5%). Aqui se resuelve SOLO la conversion normal: operando normal-o-cero,
+// resultado dentro de rango y ninguna trampa armada. Todo lo demas -- CU1=0, NaN, infinito,
+// subnormal, magnitud fuera del entero de destino (que en el VR4300 es Unimplemented, no un
+// saturado) y el Inexact con su Enable puesto -- delega en jitInterpOp, que ejecuta la op
+// entera por el interprete con el contexto que la excepcion necesita. Delegar es seguro en
+// cualquier punto: lo unico tocado hasta entonces es el MXCSR del anfitrion, que el
+// interprete vuelve a fijar en su propio mx::prep.
+// KIND: 0=CVT.W.S 1=TRUNC.W.S 2=CVT.W.D 3=TRUNC.W.D 4=CVT.D.S 5=CVT.S.D
+template<u32 KIND>
+auto CPU::jitCop1Cvt(u32 op, u32 off) -> u8 {
+  if(__builtin_expect(!((u32)cop0[C0_Status] & 0x2000'0000u), 0)) return jitInterpOp(op, off);
+  u32 fs = (op >> 11) & 31, fd = (op >> 6) & 31;
+  // Mismo emparejamiento que el interprete: con FR=0 solo el campo FUENTE se alinea a par.
+  if(!((u32)cop0[C0_Status] & (1u << 26))) fs &= ~1u;
+  // "Plain" = normal o cero: ni subnormal ni infinito ni NaN. El VR4300 no implementa
+  // subnormales y manda NaN/inf de una conversion por el camino de excepcion.
+  auto plain32 = [](u32 x) { u32 e = x & 0x7f80'0000u;
+                             return (e != 0 || (x & 0x007f'ffffu) == 0) && e != 0x7f80'0000u; };
+  auto plain64 = [](u64 x) { u64 e = x & 0x7ff0'0000'0000'0000ull;
+                             return (e != 0 || (x & 0x000f'ffff'ffff'ffffull) == 0)
+                                    && e != 0x7ff0'0000'0000'0000ull; };
+  constexpr bool srcD = (KIND == 2 || KIND == 3 || KIND == 5);
+  double src;
+  if constexpr(srcD) {
+    u64 a = fpr[fs];
+    if(__builtin_expect(!plain64(a), 0)) return jitInterpOp(op, off);
+    src = std::bit_cast<double>(a);
+  } else {
+    u32 a = (u32)fpr[fs];
+    if(__builtin_expect(!plain32(a), 0)) return jitInterpOp(op, off);
+    src = (double)std::bit_cast<float>(a);
+  }
+  u32 rm = fcr31 & 3;
+  u32 rc = (rm == 1) ? mx::RZ : (rm == 2) ? mx::RP : (rm == 3) ? mx::RM : mx::RN;
+  if constexpr(KIND == 4) {                            // CVT.D.S: ensanchar es siempre exacto
+    fcr31 &= ~0x0003'F000u;
+    fpr[fd] = std::bit_cast<u64>(src);
+    return 1;
+  } else if constexpr(KIND == 5) {                     // CVT.S.D: puede redondear
+    mx::prep(rc);
+    float r = (float)src;
+    u32 rb = std::bit_cast<u32>(r);
+    u32 ex = mx::flags();
+    // Un resultado no-plain es overflow (inf) o underflow (subnormal/cero): camino lento.
+    if(__builtin_expect(!plain32(rb) || (ex & ~mx::INEXACT), 0)) return jitInterpOp(op, off);
+    u32 cause = (ex & mx::INEXACT) ? (1u << 12) : 0;
+    if(__builtin_expect(cause != 0 && ((fcr31 >> 7) & 1) != 0, 0)) return jitInterpOp(op, off);
+    fcr31 = (fcr31 & ~0x0003'F000u) | cause | (cause >> 10);   // Cause I + Flag I pegajosa
+    fpr[fd] = (u64)rb;
+    return 1;
+  } else {                                             // .W: redondeo a entero de 32 bits
+    constexpr bool trunc = (KIND == 1 || KIND == 3);
+    mx::prep(trunc ? mx::RZ : rc);
+    double r = std::rint(src);
+    u32 ex = mx::flags();
+    // Fuera del rango de un entero con signo de 32 bits el VR4300 levanta Unimplemented:
+    // no satura. Eso es excepcion, asi que va por el interprete.
+    if(__builtin_expect(!(r >= -2147483648.0 && r < 2147483648.0), 0))
+      return jitInterpOp(op, off);
+    u32 cause = (ex & mx::INEXACT) ? (1u << 12) : 0;
+    if(__builtin_expect(cause != 0 && ((fcr31 >> 7) & 1) != 0, 0)) return jitInterpOp(op, off);
+    fcr31 = (fcr31 & ~0x0003'F000u) | cause | (cause >> 10);
+    fpr[fd] = (u64)(u32)(s32)r;                        // resultado de 32 bits: limpia el alto
+    return 1;
+  }
+}
+// Oraculo temporal (KESTREL_FPORACLE): el camino rapido calcula, se restaura el estado y el
+// interprete ejecuta la MISMA op; destino y fcr31 tienen que salir identicos. Es el patron con
+// que se validaron ADD/SUB/MUL de COP1 (ver docs/PERF-RCP-SYNC.md). Sin la variable de entorno
+// no cuesta nada: una lectura de bool estatico. Las conversiones son idempotentes -- el
+// resultado solo depende de fs y del modo de redondeo -- asi que repetirlas no altera nada mas.
+template<u32 KIND>
+auto CPU::jitCop1CvtChk(u32 op, u32 off) -> u8 {
+  static const bool on = std::getenv("KESTREL_FPORACLE") != nullptr;
+  if(__builtin_expect(!on, 1)) return jitCop1Cvt<KIND>(op, off);
+  u32 fd = (op >> 6) & 31;
+  u64 fdPre = fpr[fd]; u32 fcrPre = fcr31;
+  static u64 seen = 0;
+  if((++seen & 0xFFFFF) == 0)
+    std::fprintf(stderr, "[fporacle] comprobadas %llu conversiones sin discrepancia\n", (unsigned long long)seen);
+
+  u8 fast = jitCop1Cvt<KIND>(op, off);
+  u64 fdFast = fpr[fd]; u32 fcrFast = fcr31;
+  fpr[fd] = fdPre; fcr31 = fcrPre;                    // rebobinar y repetir por el interprete
+  u8 slow = jitInterpOp(op, off);
+  if(fast != slow || fpr[fd] != fdFast || fcr31 != fcrFast) {
+    static u32 n = 0;
+    if(n++ < 40)
+      std::fprintf(stderr, "[fporacle] kind=%u op=%08x  fast fd=%016llx fcr=%08x r=%u"
+                           " | interp fd=%016llx fcr=%08x r=%u\n",
+                   KIND, op, (unsigned long long)fdFast, fcrFast, fast,
+                   (unsigned long long)fpr[fd], fcr31, slow);
+  }
+  return slow;
+}
+
+#define KC1C(name, kind) \
+  extern "C" u8 name(void* c, u32 op, u32 off) { \
+    return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CvtChk<kind>(op, off); }
+KC1C(kestrel_jitCVTWS, 0) KC1C(kestrel_jitTRUNCWS, 1)
+KC1C(kestrel_jitCVTWD, 2) KC1C(kestrel_jitTRUNCWD, 3)
+KC1C(kestrel_jitCVTDS, 4) KC1C(kestrel_jitCVTSD, 5)
+#undef KC1C
+
 #define KC1A(name, fn, fmt) \
   extern "C" u8 name(void* c, u32 op, u32 off) { \
     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Alu<fn, fmt>(op, off); }

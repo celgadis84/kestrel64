@@ -418,3 +418,24 @@ Detalles que importan:
 
 Medido (SM64, PRDP, threaded, 200 flips): `N64 speed: CPU 95.4-98.0%` con el limitador armado,
 frente a 157-250% sin el. El 2-4% que falta es el coste de despertar y no se oye.
+
+### 3. Conversiones de COP1 con camino rapido
+
+Siguiente escalon del histograma tras CTC1: CVT.W.S (~16% de lo que el bloque cede al
+interprete), TRUNC.W.S (~14%), CVT.D.S (~9%) y CVT.S.D (~5%). El compilador de SGI convierte a
+entero cada vez que un float se usa como indice/coordenada/contador, y cambia de precision al
+entrar y salir de rutinas de doble. `jitCop1Cvt<KIND>` resuelve el caso limpio -- operando
+normal o cero, resultado dentro del entero de destino, ninguna trampa armada, como mucho
+Inexact -- y delega en el interprete todo lo demas: CU1=0, NaN, infinito, subnormal, magnitud
+fuera de rango (que en el VR4300 es Unimplemented, NO un saturado) e Inexact con su Enable.
+Se anadieron tambien las variantes con fuente doble (CVT.W.D / TRUNC.W.D), gratis en la misma
+plantilla.
+
+Validado con el mismo oraculo del apartado anterior, ahora permanente y gateado
+(`KESTREL_FPORACLE`, `jitCop1CvtChk`): el camino rapido calcula, se rebobina el destino y
+`fcr31`, y el interprete ejecuta la MISMA op; los tres resultados tienen que coincidir. **1.4 M
+conversiones de SM64 sin una sola discrepancia** (3000 M instrucciones). Las conversiones son
+idempotentes, asi que repetirlas no altera nada mas y el oraculo puede quedarse en el arbol.
+
+Medido: A/B intercalado de dos binarios, tres rondas de 3000 M instrucciones cada una.
+old 19463/18992/19207 ms, new 18536/18485/18640 ms -> **+3.5% de velocidad**.
