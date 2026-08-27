@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kestrel64</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" class="mark" aria-hidden="true">
+      <path d="M4 26 L14 6 L18 14 L24 6 L28 26 L20 22 L16 28 L12 22 Z"/>
+    </svg>
+    <div>
+      <b>kestrel64</b>
+      <small id="buildinfo">buscando compilaciones...</small>
+    </div>
+  </div>
+
+  <nav class="tabs">
+    <button class="tab on" data-view="library">Biblioteca</button>
+    <button class="tab" data-view="config">Ajustes</button>
+  </nav>
+
+  <div class="topright">
+    <button class="chip" id="btn-input">Mando</button>
+    <button class="chip" id="btn-video">Video</button>
+    <button class="chip" id="btn-oc">Overclock</button>
+    <button class="chip" id="btn-tele">Telemetria</button>
+    <button class="chip warn" id="btn-console">Consola</button>
+  </div>
+</header>
+
+<!-- ===================================================== BIBLIOTECA -->
+<main id="view-library" class="view on">
+  <div class="libbar">
+    <button class="btn" id="pick-folder">Carpeta de ROMs</button>
+    <span class="path" id="rom-dir">sin carpeta</span>
+    <input class="search" id="search" placeholder="filtrar...">
+    <div class="modes" id="modes">
+      <button data-mode="cover" class="on" title="Coverflow 3D">Coverflow</button>
+      <button data-mode="rows" title="Filas estilo Netflix">Filas</button>
+      <button data-mode="grid" title="Rejilla de caratulas">Rejilla</button>
+      <button data-mode="wheel" title="Rueda estilo Hyperspin">Rueda</button>
+      <button data-mode="list" title="Tabla con detalles">Tabla</button>
+    </div>
+  </div>
+
+  <section id="stage"></section>
+
+  <footer id="dock">
+    <div class="dockart"><img id="dock-img" alt=""><div class="dockart-none">?</div></div>
+    <div class="dockinfo">
+      <h2 id="dock-title">Elige una carpeta de ROMs</h2>
+      <p id="dock-sub">El lanzador lee la cabecera de cada cartucho: nombre interno, ID, region y CRC.</p>
+      <div class="badges" id="dock-badges"></div>
+    </div>
+    <div class="dockrun">
+      <div class="ocmini" id="ocmini" title="Overclock activo">1.00x</div>
+      <button class="btn big" id="launch" disabled>Jugar</button>
+      <button class="btn ghost" id="stop" hidden>Parar</button>
+    </div>
+  </footer>
+</main>
+
+<!-- ===================================================== AJUSTES -->
+<main id="view-config" class="view">
+  <aside id="catlist"></aside>
+  <div id="catpanes"></div>
+</main>
+
+<!-- ===================================================== MODALES -->
+<div class="modal" id="m-folder"><div class="box">
+  <h3>Elegir carpeta<button class="x">&times;</button></h3>
+  <div class="browser">
+    <div class="crumb" id="fb-cwd"></div>
+    <ul id="fb-list"></ul>
+  </div>
+  <div class="foot">
+    <span id="fb-count"></span>
+    <button class="btn ghost x2">Cancelar</button>
+    <button class="btn" id="fb-ok">Usar esta carpeta</button>
+  </div>
+</div></div>
+
+<div class="modal" id="m-oc"><div class="box wide">
+  <h3>Overclock<button class="x">&times;</button></h3>
+  <p class="lead">Multiplicadores por dominio de reloj. <b>1.00x = consola real.</b>
+     El ancla del ritmo es el campo de video, no el reloj de CPU: con overclock el juego
+     hace mas trabajo por campo, pero los campos siguen saliendo a 59.94 Hz. Subirlo quita
+     ralentizacion; tambien puede romper un juego que ate su logica al reloj.</p>
+  <label class="switch"><input type="checkbox" id="oc-link" checked><span></span>
+    Ligar los tres dominios a un solo mando</label>
+  <div id="oc-dials"></div>
+  <div class="row">
+    <label class="lbl">Limitador de velocidad</label>
+    <select id="oc-throttle">
+      <option value="auto">Automatico &mdash; limita si hay ventana</option>
+      <option value="1">Siempre limitado a 59.94 campos/s</option>
+      <option value="0">Sin limite &mdash; a tope</option>
+    </select>
+  </div>
+  <p class="note">"Sin limite" no es un overclock: corre tan rapido como pueda el anfitrion
+     y el juego va acelerado. El overclock por dominio si mantiene el ritmo de video.</p>
+  <div class="foot"><button class="btn x2">Listo</button></div>
+</div></div>
+
+<div class="modal" id="m-video"><div class="box wide">
+  <h3>Video y rasterizador<button class="x">&times;</button></h3>
+  <div id="plugin-cards"></div>
+  <div id="video-opts"></div>
+  <div class="foot"><button class="btn x2">Listo</button></div>
+</div></div>
+
+<div class="modal" id="m-input"><div class="box widest">
+  <h3>Mando<button class="x">&times;</button></h3>
+  <p class="lead">Pulsa un boton del mando de la pantalla para abrir su cajon y reasignarlo.
+     Cada control admite una tecla y un boton de gamepad.</p>
+  <div class="padwrap">
+    <div class="pad3d" id="pad3d">
+      <div class="padbody">
+        <div class="wing left"></div><div class="wing right"></div>
+        <div class="grip"></div>
+        <b class="pb dpad" data-multi="DU,DD,DL,DR">
+          <i data-id="DU"></i><i data-id="DD"></i><i data-id="DL"></i><i data-id="DR"></i>
+        </b>
+        <b class="pb stick" data-id="STICK">Stick</b>
+        <b class="pb cpad">
+          <i data-id="CU"></i><i data-id="CD"></i><i data-id="CL"></i><i data-id="CR"></i>
+        </b>
+        <b class="pb a" data-id="A">A</b>
+        <b class="pb bb" data-id="B">B</b>
+        <b class="pb start" data-id="START">S</b>
+        <b class="pb l" data-id="L">L</b>
+        <b class="pb r" data-id="R">R</b>
+        <b class="pb z" data-id="Z">Z</b>
+      </div>
+    </div>
+    <div class="drawer" id="pad-drawer">
+      <p class="hint">Ningun control seleccionado.</p>
+    </div>
+  </div>
+  <div class="foot">
+    <button class="btn ghost" id="pad-reset">Valores de fabrica</button>
+    <button class="btn x2">Listo</button>
+  </div>
+</div></div>
+
+<div class="modal" id="m-console"><div class="box widest">
+  <h3>Consola del emulador<button class="x">&times;</button></h3>
+  <div class="cmdline" id="cmdline"></div>
+  <pre id="conlog"></pre>
+  <div class="foot">
+    <span id="constate"></span>
+    <button class="btn ghost" id="con-stop">Parar emulador</button>
+    <button class="btn x2">Cerrar</button>
+  </div>
+</div></div>
+
+<div class="modal" id="m-tele"><div class="box widest">
+  <h3>Telemetria en vivo<button class="x">&times;</button></h3>
+  <p class="lead">El emulador trae el servidor de telemetria dentro. Esto habla con
+     <b>el mismo puerto que el MCP</b> y no reinterpreta nada: pasa la orden y ensena lo que
+     conteste. Necesita el emulador corriendo con el servidor activo.</p>
+  <div class="telebar">
+    <div class="teletabs" id="teletabs">
+      <button data-t="estado" class="on">Estado</button>
+      <button data-t="imagen">Imagen</button>
+      <button data-t="cpu">CPU</button>
+      <button data-t="rcp">RCP</button>
+      <button data-t="rsp">RSP</button>
+      <button data-t="prof">Perfilador</button>
+    </div>
+    <div class="telectl">
+      <button class="btn tiny" data-run="pause">Pausar</button>
+      <button class="btn tiny" data-run="resume">Reanudar</button>
+      <button class="btn tiny ghost" data-run="reset">Reiniciar</button>
+      <label class="switch tiny"><input type="checkbox" id="tele-live" checked><span></span>
+        En vivo</label>
+    </div>
+  </div>
+  <div id="telebody"><p class="hint">Conectando...</p></div>
+  <div class="foot">
+    <span id="telestate"></span>
+    <button class="btn x2">Cerrar</button>
+  </div>
+</div></div>
+
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

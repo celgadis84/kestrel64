@@ -31,3 +31,8 @@ desktop.ini
 !requirements*.txt
 build-prof/
 build-prof-prdp/
+
+# lanzador: estado local del usuario, no del repo
+tools/launcher/cache/
+tools/launcher/profile.json
+tools/launcher/pad1.cfg

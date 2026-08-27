@@ -141,6 +141,12 @@ the RCP event ring intact) · `KESTREL_WATCHP=<phys>` (store watchpoint hooked i
 bus-level `KESTREL_WATCH` misses cacheable CPU stores) · `KESTREL_EVDUMP=<n>` ·
 `KESTREL_DPSYNCLOG=1` (address of every retired SYNC_FULL).
 
+Producto (ver `docs/LAUNCHER.md`): `KESTREL_OC` / `KESTREL_OC_CPU` / `KESTREL_OC_RSP` /
+`KESTREL_OC_RDRAM` (multiplicadores de reloj por dominio) · `KESTREL_WINSCALE=N` /
+`KESTREL_WINSIZE=WxH` / `KESTREL_FULLSCREEN=1` (presentacion; el guest sigue en 320x240) ·
+`KESTREL_PAD1=<fichero>` (mapa de mando; sin fichero, teclado de siempre). Todo esto lo
+escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
+
 ## Hard rules (NON-NEGOTIABLE)
 
 - **Every change = genuine, generalizable VR4300/RCP HW semantics. NEVER hardcode to pass

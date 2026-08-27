@@ -2827,3 +2827,35 @@ SoftRDP y no depende de que haya GPU.
 **Siguiente en el RDP**: dejar de bloquear en SYNC_FULL (retirar la interrupción DP ya y
 sincronizar sólo cuando alguien lea esos píxeles) — mejora de latencia real, y de paso se
 lleva por delante la divergencia (2).
+
+## 2026-08-27 — Lanzador grafico, overclock, ventana y mando configurable
+
+Primera capa de producto por encima del nucleo. Detalle completo en `docs/LAUNCHER.md`.
+
+- **Lanzador** (`tools/launcher/`): servidor HTTP de biblioteca estandar de Python + interfaz
+  web servida en ventana `--app` de Edge/Chrome. Cero dependencias nuevas en el build de C++.
+  `options.py` es el esquema unico: **101 opciones en 9 categorias** que cubren ~110 banderas
+  `KESTREL_*`; anadir una bandera al emulador = anadir una fila.
+- **Biblioteca de ROMs** con cinco vistas (coverflow 3D, filas estilo Netflix, rejilla, rueda
+  estilo Hyperspin, tabla), cabecera de cartucho leida de verdad (z64/v64/n64 normalizados) y
+  caratulas de libretro-thumbnails con cache local. (NNID resulto ser un identificador de
+  cuenta de Wii U / 3DS, no tiene arte de N64.)
+- **Overclock** (`src/core/system.cpp`): `KESTREL_OC` global y `KESTREL_OC_CPU/_RSP/_RDRAM`
+  por dominio. `System::Clocks` ya tenia los multiplicadores; nadie los escribia. Ancla = el
+  campo de video, asi que overclock = mas trabajo de guest por campo con los campos saliendo
+  a 59.94 Hz.
+- **Ventana** (`src/video/present.cpp`): `KESTREL_WINSCALE=N`, `KESTREL_WINSIZE=WxH`,
+  `KESTREL_FULLSCREEN=1`. El framebuffer del guest sigue siendo 320x240; esto solo decide la
+  resolucion de presentacion. Pantalla completa toma el modo del monitor, no lo cambia.
+- **Mando configurable**: `KESTREL_PAD1=<fichero>` con una linea por control
+  (`<CONTROL> <TECLA> <BOTON_GAMEPAD>`). **Sin fichero el camino es el de siempre, instruccion
+  por instruccion.** Los gatillos son ejes, no botones, y se resuelven aparte. En la interfaz
+  es un mando de N64 en CSS 3D con un cajon por boton y captura en vivo de tecla y de gamepad.
+
+Trampa evitada al cablearlo: la mayoria de las banderas `KESTREL_*` se activan por
+**presencia** (`getenv() != nullptr`), asi que exportar `X=0` las ENCENDERIA. Solo unas pocas
+leen el valor (`KESTREL_JIT`, `THREADS`, `RSPJIT`, `AUDIO`, `FULLSCREEN`, `PRDP`, `THROTTLE`).
+La primera version del traductor exportaba ~60 banderas como `"0"` y habria encendido el
+trazado entero en cada arranque.
+
+Puertas verdes en las seis modalidades + PRDP, `regress=0`.

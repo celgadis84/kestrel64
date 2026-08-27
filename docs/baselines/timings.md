@@ -349,3 +349,6 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_prdp | ~487 s | idem; regress=0. Las dos cifras suben por el krom re-corrido en paralelo |
 | 2026-08-27 | gate_all | ~339 s | validacion SMC por linea de I-cache; 12/12, regress=0 |
 | 2026-08-27 | gate_prdp | ~307 s | idem; regress=0 |
+| 2026-08-27 | gate_all | 412 s | gate_prdp | 322 s | JIT: CACHE en bloque + ranura de retardo al interprete; 12/12, regress=0 (tiempo NEUTRO, ver PERF-RCP-SYNC 9) |
+| 2026-08-27 | gate_all | 420 s | gate_prdp | 331 s | overclock (KESTREL_OC*) + tamano de ventana/pantalla completa; 12/12, regress=0 |
+| 2026-08-27 | gate_all | 422 s | gate_prdp | 315 s | mando configurable (KESTREL_PAD1); 12/12, regress=0 |
