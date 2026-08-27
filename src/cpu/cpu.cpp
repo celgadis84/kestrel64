@@ -285,6 +285,7 @@ envflags:
   if(const char* w = std::getenv("KESTREL_WATCHP")) wPhys = (u32)std::strtoul(w, nullptr, 0) & 0x1fff'ffffu;
   if(std::getenv("KESTREL_HALT_UNIMPL")) haltUnimpl = true;
   dcDbgOn = (wPhys != 0) || g_dcWriteThrough;
+  if(dcDbgOn) stGuard |= StGuardDbg; else stGuard = (u8)(stGuard & ~StGuardDbg);
   refreshDebugArmed();
 }
 
@@ -314,10 +315,19 @@ auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64
   if(pcRingOn && (u32)v==0x807ffc98 && retired>=8195000 && retired<=8225000) std::fprintf(stderr,"[STORE 0x807ffc98] <- 0x%08x pc=0x%08x ret=%llu\n",x,(u32)curPc,(unsigned long long)retired); }
 auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else mem->write64(pe, x); seenWatch(p&0x1fffffff,8); }
 
+auto CPU::connect(Memory* m) -> void {
+  mem = m;
+  // El bus arma/desarma el modo repeticion de MI_MODE; el camino rapido de store del dynarec
+  // lo mira en stGuard, asi que le damos al bus la direccion del byte en vez de que el codigo
+  // emitido tenga que perseguir mem->rcp en cada escritura.
+  if(m) m->cpuStGuard = &stGuard;
+}
+
 auto CPU::storeRepeat(u32 phys, u64 reg, u32 sz) -> bool {
   if(!mem || !mem->rcp.mi_repeat_on) return false;
   if(phys >= mem->rdram.size()) return false;   // only RDRAM is broadcast; MMIO/cart write normally
   mem->rcp.mi_repeat_on = false;                 // the arm fires exactly once
+  stGuard = (u8)(stGuard & ~StGuardRepeat);
   mem->miRepeatStore(phys, reg, sz);
   return true;
 }
@@ -339,7 +349,7 @@ auto CPU::storeCart(u32 phys, u64 reg, u32 width) -> bool {
 
 auto CPU::dcFill(u32 idx, u32 base) -> void {
   DCacheLine& l = dcache[idx];
-  l.ptag = base; l.valid = true; l.dirty = false;
+  l.tagv = base | 1u; l.dirty = 0;
   // Camino normal: la línea entera cae dentro de RDRAM → una copia de 16 B en vez de 16
   // lecturas con comprobación de rango. El borde (línea a caballo del final) mantiene la
   // semántica byte a byte con relleno a 0.
@@ -349,10 +359,11 @@ auto CPU::dcFill(u32 idx, u32 base) -> void {
 
 auto CPU::dcFlush(u32 idx) -> void {
   DCacheLine& l = dcache[idx];
-  if(!l.valid || !l.dirty) return;
-  if(l.ptag + 16 <= mem->rdram.size()) std::memcpy(&mem->rdram[l.ptag], l.data, 16);
-  else for(u32 i = 0; i < 16; i++) if(l.ptag + i < mem->rdram.size()) mem->rdram[l.ptag + i] = l.data[i];
-  l.dirty = false;
+  if(!l.valid() || !l.dirty) return;
+  u32 tag = l.ptag();
+  if(tag + 16 <= mem->rdram.size()) std::memcpy(&mem->rdram[tag], l.data, 16);
+  else for(u32 i = 0; i < 16; i++) if(tag + i < mem->rdram.size()) mem->rdram[tag + i] = l.data[i];
+  l.dirty = 0;
 }
 
 // (dcRead/dcWrite viven ahora en linea en cpu.hpp.) Cola de depuracion del store: punto de
@@ -371,7 +382,7 @@ auto CPU::peekPhysCoherent(u32 phys) -> u8 {
   u32 idx  = (phys >> 4) & 0x1ff;
   u32 base = phys & ~0xfu;
   const DCacheLine& l = dcache[idx];
-  if(l.valid && l.dirty && l.ptag == base) return l.data[phys & 0xf];   // dirty line shadows RAM
+  if(l.dirty && l.tagv == (base | 1u)) return l.data[phys & 0xf];   // dirty line shadows RAM
   return phys < mem->rdram.size() ? mem->rdram[phys] : 0;
 }
 
@@ -405,22 +416,22 @@ auto CPU::cacheOp(u32 op, u64 vaddr) -> void {
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
     switch(fn) {
-      case 0: /*Index_Writeback_Invalidate*/ dcFlush(idx); l.valid = false; l.dirty = false; break;
+      case 0: /*Index_Writeback_Invalidate*/ dcFlush(idx); l.tagv &= ~1u; l.dirty = 0; break;
       case 1: /*Index_Load_Tag*/ {
-        u32 pstate = l.valid ? 3u : 0u;
-        cop0[28] = (pstate << 6) | ((l.ptag >> 12) << 8);
+        u32 pstate = l.valid() ? 3u : 0u;
+        cop0[28] = (pstate << 6) | ((l.ptag() >> 12) << 8);
       } break;
       case 2: /*Index_Store_Tag*/ {
         u32 pstate = ((u32)cop0[28] >> 6) & 3;
-        l.valid = pstate != 0; l.dirty = false;
-        l.ptag = (((u32)cop0[28] >> 8) & 0x000f'ffff) << 12;
+        l.dirty = 0;   // el bit de valida viaja DENTRO del tag (bit0), como el PState del HW
+        l.tagv = ((((u32)cop0[28] >> 8) & 0x000f'ffff) << 12) | (pstate != 0 ? 1u : 0u);
       } break;
       case 3: /*Create_Dirty_Exclusive*/
-        if(l.valid && l.dirty && l.ptag != base) dcFlush(idx);
-        l.ptag = base; l.valid = true; l.dirty = true; break;
-      case 4: /*Hit_Invalidate*/  if(l.valid && l.ptag == base) { l.valid = false; l.dirty = false; } break;
-      case 5: /*Hit_Writeback_Invalidate*/ if(l.valid && l.ptag == base) { dcFlush(idx); l.valid = false; } break;
-      case 6: /*Hit_Writeback*/   if(l.valid && l.ptag == base) dcFlush(idx); break;
+        if(l.valid() && l.dirty && l.ptag() != base) dcFlush(idx);
+        l.tagv = base | 1u; l.dirty = 1; break;
+      case 4: /*Hit_Invalidate*/  if(l.tagv == (base | 1u)) { l.tagv &= ~1u; l.dirty = 0; } break;
+      case 5: /*Hit_Writeback_Invalidate*/ if(l.tagv == (base | 1u)) { dcFlush(idx); l.tagv &= ~1u; } break;
+      case 6: /*Hit_Writeback*/   if(l.tagv == (base | 1u)) dcFlush(idx); break;
       default: break;
     }
   } else {

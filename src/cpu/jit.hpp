@@ -143,6 +143,13 @@ public:
   auto cmp64_imm(Reg dst, u32 imm) -> void { rex(true,0,0,dst); buf.emit(0x81); modrm(3,7,dst); imm32(imm); }
   // setcc r8:  setl=0x9C setb=0x92 (into AL etc.)
   auto setcc(u8 cc, Reg r8) -> void { buf.emit(0x0F); buf.emit(cc); modrm(3,0,r8); }
+  // setcc/test sobre un registro de 8 bits CUALQUIERA (incluido r8b-r15b, que necesitan REX.B;
+  // y sin REX, rm=4..7 nombraria AH/CH/DH/BH en vez de SPL/BPL/SIL/DIL). Hace falta para dejar
+  // la condicion de un salto en un registro no-volatil en lugar de en la pila.
+  auto setcc_x(u8 cc, Reg r) -> void { if(r >= 8) buf.emit(0x41); else if(r >= 4) buf.emit(0x40);
+                                       buf.emit(0x0F); buf.emit(cc); modrm(3, 0, r); }
+  auto test_r8_self(Reg r) -> void { if(r >= 8) buf.emit(0x45); else if(r >= 4) buf.emit(0x40);
+                                     buf.emit(0x84); modrm(3, r, r); }
   // mov r32, imm32 (zero-extends to 64)
   // mov r32, imm32. Los registros extendidos (R8-R15) necesitan REX.B; sin él el opcode
   // 0xB8+reg codificaría el registro bajo homónimo (R8D se convertiría en EAX).
@@ -367,6 +374,15 @@ struct Block {
   std::vector<LinkSite> sites;  // sitios de enlace emitidos en las salidas de este bloque
   u64 linkedEpoch = ~0ull;  // época de enlace con la que este bloque fue publicado como destino;
                             // si != cache.linkEpoch hay que re-enlazarlo (tras un desenlace global)
+  // Tamano del codigo emitido y veces que el driver entro por aqui. Solo sirven para el
+  // volcado de KESTREL_JIT_DUMP: sin poder LEER el codigo que emite el compilador, cualquier
+  // idea de optimizacion del codegen es una conjetura.
+  u32 codeLen = 0;
+  u64 runs = 0;
+  // Offset dentro del codigo emitido donde empieza cada instruccion MIPS del bloque. Con esto
+  // una muestra de hostprof (RIP crudo dentro del buffer RWX) se atribuye a la op que la
+  // genero, y el perfil del codigo emitido se agrega POR CLASE DE OPCODE.
+  std::vector<u32> opOff;
   u8* linkEntry = nullptr;  // punto de entrada para un salto ENLAZADO: justo tras el prólogo de
                             // marco (push rbx/r12; mov; sub rsp), donde el predecesor ya dejó
                             // RBX/R12/RSP válidos → el sucesor reutiliza el marco del predecesor

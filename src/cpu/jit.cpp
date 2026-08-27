@@ -3,6 +3,8 @@
 #include "../core/memory.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
+#include <cstring>
 
 #if defined(_WIN32)
   #include <windows.h>
@@ -456,12 +458,9 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
     const s32 stOff = (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status);
     const s32 szOff = (s32)offsetof(CPU, jitRdramSz);
     const s32 dcOff = (s32)offsetof(CPU, dcache);
-    const s32 dbOff = (s32)offsetof(CPU, dcDbgOn);
-    const s32 mmOff = (s32)offsetof(CPU, mem);
-    const s32 rpOff = (s32)(offsetof(Memory, rcp) + offsetof(Rcp, mi_repeat_on));
-    static_assert(sizeof(CPU::DCacheLine) == 24, "el x3<<3 de abajo asume lineas de 24 bytes");
-    const s32 lnTag = (s32)offsetof(CPU::DCacheLine, ptag);
-    const s32 lnVal = (s32)offsetof(CPU::DCacheLine, valid);
+    const s32 sgOff = (s32)offsetof(CPU, stGuard);
+    static_assert(sizeof(CPU::DCacheLine) == 32, "el shl 5 de abajo asume lineas de 32 bytes");
+    const s32 lnTag = (s32)offsetof(CPU::DCacheLine, tagv);
     const s32 lnDrt = (s32)offsetof(CPU::DCacheLine, dirty);
     const s32 lnDat = (s32)offsetof(CPU::DCacheLine, data);
     const s32 fpOff = (s32)(offsetof(CPU, fpr) + 8u * rt);
@@ -491,29 +490,26 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
     e.cmp_r32_m(RAX, RBX, szOff);                     // fisica fuera de RDRAM (o sin bus): MMIO
     fastFail[nFail++] = e.jae_rel32_placeholder();
     if(st) {
-      // storeRepeat: con MI_MODE bit8 armado el siguiente store a RDRAM se difunde por la
-      // pagina entera. mem no puede ser nulo aqui: con mem nulo jitRdramSz vale 0 y la
-      // comprobacion de rango ya salio.
-      e.mov_r_m(RCX, RBX, mmOff);
-      e.cmp_m8_imm(RCX, rpOff, 0);
-      fastFail[nFail++] = e.jne_rel32_placeholder();
-      // Punto de vigilancia / write-through de diagnostico armado: al helper, que llama a
-      // dcWriteDbg. El camino rapido no puede tragarse una escritura que el depurador espera.
-      e.cmp_m8_imm(RBX, dbOff, 0);
+      // Guardia unica del store (CPU::stGuard): bit1 = modo repeticion de MI_MODE armado (el
+      // siguiente store a RDRAM se difunde por la pagina entera), bit0 = punto de vigilancia o
+      // write-through de diagnostico armado. Cualquiera de los dos manda la escritura al
+      // helper. Antes eran dos comprobaciones y una persecucion de puntero (mem->rcp) por
+      // store; el bus mantiene el bit1 al vuelo desde Memory::cpuStGuard.
+      e.cmp_m8_imm(RBX, sgOff, 0);
       fastFail[nFail++] = e.jne_rel32_placeholder();
     }
     e.mov_r_r32(RCX, RAX);
     e.shift32_imm(5, RCX, 4);                         // shr ecx,4
     e.mov_r_r32(R8, RCX);
-    e.shift32_imm(4, R8, 4);                          // shl r8d,4 = tag esperado (phys & ~0xf)
+    e.shift32_imm(4, R8, 4);                          // shl r8d,4 = phys & ~0xf
+    e.alu32_imm(1, R8, 1u);                           // or r8d,1 = tagv esperado (base + valida)
     e.alu32_imm(4, RCX, 0x1FFu);                      // indice de linea
-    e.lea_x3(RCX, RCX);
-    e.shift64_imm(4, RCX, 3);                         // idx*24
+    e.shift64_imm(4, RCX, 5);                         // idx*32 (linea potencia de dos)
     e.alu64_rr(0x03, RCX, RBX);                       // rcx = &cpu->dcache[idx] - dcOff
+    // UNA comparacion resuelve tag y validez: el bit0 del tag ES el bit de valida, asi que un
+    // fallo de tag y una linea invalida salen los dos por el mismo salto al helper.
     e.cmp_r32_m(R8, RCX, dcOff + lnTag);
     fastFail[nFail++] = e.jne_rel32_placeholder();
-    e.cmp_m8_imm(RCX, dcOff + lnVal, 0);
-    fastFail[nFail++] = e.je_rel32_placeholder();     // linea invalida: el helper la rellena
     // El sucio se marca AQUI, con rcx todavia en la base de la linea. Sumarle antes el
     // desplazamiento intra-linea escribiria la bandera dentro de data[], que es corrupcion
     // silenciosa del dato recien escrito. Costo una tarde.
@@ -949,6 +945,7 @@ static const int g_jitDiffAny = (std::getenv("KESTREL_JIT_DIFF") || std::getenv(
 static const int g_jitTrace = (std::getenv("KESTREL_JIT_TRACE") && !g_jitDiffAny) ? 1 : 0;
 extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K);
 
+extern const char* g_jitDump;   // KESTREL_JIT_DUMP (definido mas abajo)
 static auto compileBlock(CPU& c, u32 phys) -> Block {
   // El codegen de branch-en-bloque y de mem-op direccionan el CPU vía RBX, que apunta
   // a &gpr[0]. Eso solo equivale a `cpu` si gpr es el primer miembro (offset 0).
@@ -1186,6 +1183,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     if((a & ~0xFFFu) != (phys & ~0xFFFu)) break;
     u32 op = c.jitFetchWord(a);
     usize before = c.jitCache->buf.used;
+    if(g_jitDump) b.opOff.push_back((u32)(before - (usize)(entry - c.jitCache->buf.base)));
     if(emitSafeOp(e, rc, op)) { b.src.push_back(op); b.nOps++; continue; }
     c.jitCache->buf.used = before;
     usize tsite; RcSnap tsnap;
@@ -1304,14 +1302,29 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         };
         // Fase A (antes del delay slot): capturar la condición/target/enlace que el delay
         // slot podría pisar (el delay puede escribir gpr[rs]/gpr[rt] o hacer CALL).
+        // Condicion CONSTANTE en tiempo de compilacion. `beq $0,$0,L` es como todo ensamblador
+        // MIPS escribe el salto incondicional `b L`, y `beq rX,rX` sale igual de las macros;
+        // compararlo en tiempo de ejecucion es trabajo puro de mas y ademas deja DOS destinos
+        // que enlazar donde solo hay uno. condK: -1 desconocida, 1 siempre tomada, 0 nunca.
+        int condK = -1;
+        if(isBeq && rs == rt)      condK = (LO == 0x04) ? 1 : 0;   // BEQ rX,rX / BNE rX,rX
+        else if(isBcondZ && rs == 0) {
+          if(isBlez)      condK = 1;                                // 0 <= 0
+          else if(isBgtz) condK = 0;                                // 0 > 0 falso
+          else            condK = (int)(rtF & 1);                   // BLTZ falso, BGEZ cierto
+        }
+        // La condicion vive en R15B, no en la pila. Es no-volatil en Win64 (sobrevive a los CALL
+        // de los helpers) y esta libre: rc.disable() acaba de volcar la residencia, unica duena
+        // de RSI/RDI/R13-R15. Antes era sete -> [rsp+32] -> recarga, un reenvio almacen-carga
+        // por cada bloque con salto.
         if(isBeq || isBeqL) {
-          e.ld64(RAX, rs); e.cmp64_rm(RAX, rt);
-          e.setcc((LO == 0x04 || LO == 0x14) ? 0x94 : 0x95, RAX);  // sete/setne al → [rsp+32]
-          e.st8_rsp(32);
+          if(condK < 0) { e.ld64(RAX, rs); e.cmp64_rm(RAX, rt);
+                          e.setcc_x((LO == 0x04 || LO == 0x14) ? 0x94 : 0x95, R15); }
+          else e.mov_r_imm64(R15, (u64)(u32)condK);   // constante: solo la releen las likely
         } else if(isBcondZ || isBlezL || isBgtzL || isRegimmL) {
-          e.ld64(RAX, rs); e.cmp64_imm(RAX, 0);    // rs vs 0 (signed 64b; OF=0 → setl/ge/le/g ok)
-          e.setcc(ccz, RAX);                       // condición → al → [rsp+32]
-          e.st8_rsp(32);
+          if(condK < 0) { e.ld64(RAX, rs); e.cmp64_imm(RAX, 0);     // rs vs 0 (signed 64b)
+                          e.setcc_x(ccz, R15); }
+          else e.mov_r_imm64(R15, (u64)(u32)condK);
           // BLTZAL/BGEZAL (y sus likely): enlace INCONDICIONAL de $31 tras leer rs (el
           // intérprete lee la condición ANTES de escribir $31; si rs==31 usa el pre-enlace).
           if(isRegimmAL || isRegimmALL) emitLink(idx, 31);
@@ -1326,10 +1339,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
           // COND es el bit 23 de FCR31 -> byte 2, bit 7. ZF=1 significa COND=0, asi que
           // "tomar" es setne cuando TF=1 y sete cuando TF=0.
           e.test_m8_imm(RBX, (s32)offsetof(CPU, fcr31) + 2, 0x80);
-          e.setcc(bc1Tf ? 0x95 : 0x94, RAX);
-          e.st8_rsp(32);
+          e.setcc_x(bc1Tf ? 0x95 : 0x94, R15);
         } else if(isJr) {
-          e.ld64(RAX, rs); e.st64_rsp(RAX, 32);    // target = gpr[rs] (pre-delay) → [rsp+32]
+          e.ld64(R15, rs);                         // target = gpr[rs] (pre-delay) -> r15
           if(FN == 0x09) emitLink(idx, rd ? rd : 31);   // JALR enlaza tras leer rs (rd puede==rs)
         } else if(LO == 0x03) {
           emitLink(idx, 31);                       // JAL enlaza gpr[31]
@@ -1338,7 +1350,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         // cuando no se toma queda anulado. Las dos salidas son enlazables y cuentan distinto:
         // tomada retira idx+2 ops (rectas + salto + delay), no tomada idx+1 (pc += 8 de una).
         if(isLikely) {
-          e.ld8_rsp(32); e.test_al_al();
+          e.test_r8_self(R15);
           usize toNot = e.je_rel32_placeholder();
           if(compileDelay(dop, idx)) {
             s32 Ctaken = (s32)(4 * (idx + 1)) + simm * 4;
@@ -1367,7 +1379,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             // El delay slot ya está emitido arriba (fase B) y se ejecuta en ambos caminos,
             // que es exactamente la semántica de un branch NO-likely.
             s32 Ctaken = (s32)(4 * (idx + 1)) + simm * 4;
-            e.ld8_rsp(32); e.test_al_al();
+            e.test_r8_self(R15);
             usize toFall = e.je_rel32_placeholder();   // cond==0 → no tomado → seguir compilando
             e.mov_r_m(RCX, RBX, pcOff);
             e.add_r_imm32(RCX, Ctaken);                // rcx = target tomado
@@ -1382,16 +1394,26 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
           } else if(isBeq || isBcondZ || isBc1) {
             s32 Ctaken = (s32)(4 * (idx + 1)) + simm * 4;  // VA + 4(idx+1) + SIMM*4
             s32 Cfall  = (s32)(4 * (idx + 2));             // VA + 4(idx+2)
-            e.mov_r_m(RDX, RBX, pcOff);     // rdx = entryVA
-            e.mov_r_r(RCX, RDX);
-            e.add_r_imm32(RDX, Ctaken);     // rdx = target tomado
-            e.add_r_imm32(RCX, Cfall);      // rcx = fallthrough
-            e.ld8_rsp(32); e.test_al_al();
-            e.cmovnz(RCX, RDX);             // cond!=0 → rcx = target
-            cands[nc++] = entryVA + (u64)(s64)Ctaken;   // tomado (el caliente: bucles)
-            cands[nc++] = entryVA + (u64)(s64)Cfall;    // caída
+            if(condK >= 0) {
+              // Condicion decidida en compilacion: un solo destino, sin cmov y -- lo que mas
+              // vale -- un solo candidato de enlace, asi que la guarda del bloque siguiente
+              // acierta siempre en vez de tener que elegir entre dos.
+              s32 C = condK ? Ctaken : Cfall;
+              e.mov_r_m(RCX, RBX, pcOff);
+              e.add_r_imm32(RCX, C);
+              cands[nc++] = entryVA + (u64)(s64)C;
+            } else {
+              e.mov_r_m(RDX, RBX, pcOff);     // rdx = entryVA
+              e.mov_r_r(RCX, RDX);
+              e.add_r_imm32(RDX, Ctaken);     // rdx = target tomado
+              e.add_r_imm32(RCX, Cfall);      // rcx = fallthrough
+              e.test_r8_self(R15);
+              e.cmovnz(RCX, RDX);             // cond!=0 -> rcx = target
+              cands[nc++] = entryVA + (u64)(s64)Ctaken;   // tomado (el caliente: bucles)
+              cands[nc++] = entryVA + (u64)(s64)Cfall;    // caida
+            }
           } else if(isJr) {
-            e.ld64_rsp(RCX, 32);            // rcx = target de gpr[rs] (pre-delay)
+            e.mov_r_r(RCX, R15);             // rcx = target de gpr[rs] (pre-delay)
             // JR/JALR: destino dinámico (gpr[rs]) → sin destino estático que enlazar.
           } else {  // J / JAL: target = (entryVA & 0xFFFFFFFF_F0000000) | (TARGET26<<2)
             u32 tgt = (op & 0x03FF'FFFFu) << 2;
@@ -1500,6 +1522,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   if(c.jitCache->buf.overflowed()) { b.nOps = 0; b.src.clear(); b.sites.clear(); return b; }
   c.jitCache->buf.finalize(entry);
   b.fn = reinterpret_cast<BlockFn>(entry);
+  b.codeLen = (u32)(c.jitCache->buf.cursor() - entry);
   b.phys = phys;
   return b;
 }
@@ -1516,6 +1539,71 @@ static u64 g_jitCalls = 0, g_jitBlocks = 0, g_jitOps = 0;
 // bloque de la cadena, asi que por si solo no dice si el enlace esta funcionando.
 static u64 g_chainOps = 0, g_chainLinks = 0;
 static const int g_jitStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
+// KESTREL_JIT_DUMP=<fichero>: al terminar el proceso, vuelca los bloques mas ejecutados con
+// sus opcodes MIPS y los bytes x86-64 que emitio el compilador. Sin esto, la mitad del tiempo
+// de pared del hilo de CPU (medido: 48.6% en jit/anon) es una caja negra y cualquier idea de
+// mejora del codegen es a ciegas. Se desensambla luego con:
+//   llvm-objdump -D -b binary -m x86-64 --start-address=0 <bytes.bin>
+namespace jit {
+const char* g_jitDump = std::getenv("KESTREL_JIT_DUMP");
+CodeCache*  g_dumpCache = nullptr;
+const char* g_jitDumpSel = std::getenv("KESTREL_JIT_DUMPSEL");
+static auto dumpBlocks() -> void {
+  CodeCache* cc = g_dumpCache;
+  if(!cc || !g_jitDump) return;
+  std::FILE* f = std::fopen(g_jitDump, "w");
+  if(!f) return;
+  // Ordena por ops-de-guest ejecutadas (runs*nOps): es el peso real en tiempo, no el numero
+  // de entradas -- un bloque de 40 ops que corre mil veces pesa mas que uno de 2 que corre
+  // diez mil, y lo que se quiere leer es donde se van los ciclos.
+  std::vector<u32> ord;
+  for(u32 i = 0; i < cc->blocks.size(); i++) if(cc->blocks[i].runs) ord.push_back(i);
+  std::sort(ord.begin(), ord.end(), [&](u32 a, u32 b) {
+    return cc->blocks[a].runs * cc->blocks[a].nOps > cc->blocks[b].runs * cc->blocks[b].nOps;
+  });
+  u64 totOps = 0, totRuns = 0, totCode = 0;
+  for(u32 i : ord) { totOps += cc->blocks[i].runs * cc->blocks[i].nOps; totRuns += cc->blocks[i].runs; totCode += cc->blocks[i].codeLen; }
+  std::fprintf(f, "# bloques=%zu vivos=%zu runs=%llu guestOps=%llu codeBytes=%llu\n",
+               cc->blocks.size(), ord.size(), (unsigned long long)totRuns,
+               (unsigned long long)totOps, (unsigned long long)totCode);
+  u32 n = 0;
+  for(u32 i : ord) {
+    const Block& b = cc->blocks[i];
+    // Cabecera de TODOS los bloques vivos (hace falta para atribuir muestras de hostprof a
+    // un bloque); los bytes emitidos solo de los 64 mas pesados, que es lo que se lee a mano.
+    // `runs` solo cuenta entradas DESDE EL DRIVER: un bloque al que se llega por block-linking
+    // no pasa por aqui, asi que los bloques mas calientes suelen tener runs bajo. Por eso la
+    // seleccion de que bloques volcar con bytes se puede forzar por PC fisica con
+    // KESTREL_JIT_DUMPSEL=<phys>[,<phys>...], que es lo que dice el perfil de hostprof.
+    bool full = (n++ < 64);
+    if(g_jitDumpSel) {
+      char pat[16]; std::snprintf(pat, sizeof pat, "%08x", b.phys);
+      full = std::strstr(g_jitDumpSel, pat) != nullptr;
+    }
+    double share = totOps ? 100.0 * (double)(b.runs * b.nOps) / (double)totOps : 0.0;
+    std::fprintf(f, "\n=== phys=%08x host=%p nOps=%u runs=%llu guestOps=%llu (%.2f%%) codeLen=%u"
+                    " bytes/op=%.1f ctrl=%d mem=%d store=%d\n",
+                 b.phys, (void*)b.fn, b.nOps, (unsigned long long)b.runs,
+                 (unsigned long long)(b.runs * b.nOps), share, b.codeLen,
+                 b.nOps ? (double)b.codeLen / b.nOps : 0.0,
+                 (int)b.hasBranch, (int)b.hasMem, (int)b.hasStore);
+    std::fprintf(f, "  off:");
+    for(u32 k = 0; k < b.opOff.size(); k++) std::fprintf(f, " %x", b.opOff[k]);
+    std::fprintf(f, "\n");
+    for(u32 k = 0; k < b.nOps && k < b.src.size(); k++)
+      std::fprintf(f, "  mips[%2u] +%05x %08x  %s\n", k, k < b.opOff.size() ? b.opOff[k] : 0u,
+                   b.src[k], CPU::disasm(b.src[k], b.phys + 4 * k).c_str());
+    if(!full) continue;
+    std::fprintf(f, "  x86:");
+    const u8* p = reinterpret_cast<const u8*>(b.fn);
+    for(u32 k = 0; k < b.codeLen; k++) std::fprintf(f, "%s%02x", (k % 32) ? "" : "\n   ", p[k]);
+    std::fprintf(f, "\n");
+  }
+  std::fclose(f);
+}
+struct DumpAtExit { ~DumpAtExit() { dumpBlocks(); } };
+static DumpAtExit g_dumpAtExit;
+}  // namespace jit
 extern u64 g_trampWhy[5];
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
                 extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32];
@@ -1971,8 +2059,8 @@ auto CPU::jitTryBlock() -> u32 {
       for(int q = 0; q < 512; q++)
         if(std::memcmp(&dcache[q], &dcPost[q], sizeof(DCacheLine)) != 0)
           std::fprintf(stderr, "[dcdiff] phys=%08x linea=%d interp(tag=%08x v=%d d=%d) jit(tag=%08x v=%d d=%d)\n",
-                       phys, q, dcPost[q].ptag, (int)dcPost[q].valid, (int)dcPost[q].dirty,
-                       dcache[q].ptag, (int)dcache[q].valid, (int)dcache[q].dirty);
+                       phys, q, dcPost[q].ptag(), (int)dcPost[q].valid(), (int)dcPost[q].dirty,
+                       dcache[q].ptag(), (int)dcache[q].valid(), (int)dcache[q].dirty);
       for(usize q = 0; q + 8 <= memPost.size(); q += 8)
         if(std::memcmp(&mem->rdram[q], &memPost[q], 8) != 0) {
           u64 vi = 0, vj = 0;
@@ -2012,6 +2100,7 @@ auto CPU::jitTryBlock() -> u32 {
   // pestillo aun a 1). Sin esto, translate() cortocircuita con `return 0` y cualquier op del
   // bloque que no coja el camino directo (kernel de 64 bits: KX=1) traduce a fisico 0.
   memAbort = false;
+  if(jit::g_jitDump) { blk.runs++; jit::g_dumpCache = cc; }
   u32 Rraw = blk.fn(gpr, this);
   gpr[0] = 0;
   // Bit alto = el bloque terminó en un branch absorbido: ya escribió pc/nextPc/inDelay/

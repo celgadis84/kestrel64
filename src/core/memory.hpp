@@ -251,6 +251,11 @@ struct Memory {
   bool paceGiveUp = false;           // salvavidas: freno suelto en este episodio
   u64  paceWaitedNs = 0;             // bloqueado en el episodio actual
   std::atomic<u64> paceBlockNs{0}, paceEpisodes{0}, paceHolds{0};
+  // Byte de guardia del camino rapido de store del dynarec (CPU::stGuard). El bus pone y
+  // quita aqui el bit del modo repeticion de MI_MODE para que el codigo emitido no tenga que
+  // leer mem->rcp.mi_repeat_on (una carga de puntero mas) en cada escritura. Nulo sin CPU atada.
+  u8* cpuStGuard = nullptr;
+
   auto rcpPace(u64 cpuRetired) -> void;       // frena la CPU si adelanta al RSP en vuelo
   auto paceAllowance(u64 cpuRetired) -> u32; // ops que quedan antes de la proxima frenada
   // Publico: System espera aqui antes de abrir la ventana, porque el presentador comparte el

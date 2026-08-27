@@ -89,7 +89,17 @@ struct CPU {
   // a cached store lands in the D-cache dirty (RAM stale until writeback), and an
   // uncached store to a cached line leaves the cache stale until it is invalidated.
   // D-cache: 8 KB, 16-byte lines, 512 lines. I-cache: 16 KB, 32-byte lines, 512 lines.
-  struct DCacheLine { u32 ptag = 0; bool valid = false; bool dirty = false; u8 data[16] = {}; };
+  // El tag lleva DENTRO el estado de la linea, igual que la VR4300 (PTagLo y PState comparten
+  // la palabra de tag): tagv = (phys & ~0xf) | 1 con la linea valida, bit0 a 0 sin ella. Asi
+  // "es la linea que busco Y esta valida" es UNA comparacion de 32 bits en el camino rapido
+  // del dynarec, en vez de un cmp de tag mas un cmp de bandera con dos saltos. El relleno a
+  // 32 B (potencia de dos) ademas convierte idx*24 (lea x3 + shl 3) en un solo shl 5, y deja
+  // cada linea dentro de una sola linea de cache del anfitrion en lugar de a caballo.
+  struct alignas(32) DCacheLine {
+    u32 tagv = 0; u32 dirty = 0; u8 data[16] = {}; u8 pad[8] = {};
+    auto ptag()  const -> u32  { return tagv & ~0xfu; }
+    auto valid() const -> bool { return (tagv & 1u) != 0; }
+  };
   // seq = numero de relleno. Sube en CADA icFill; con (valid && ptag igual && seq igual)
   // los 32 bytes son BIT A BIT los mismos que la ultima vez que se miraron: el unico
   // camino que cambia data[] es icFill. Deja validar un bloque JIT por linea y no por op.
@@ -105,6 +115,12 @@ struct CPU {
   // publica, porque el camino rapido de memoria del dynarec lo consulta desde el codigo
   // emitido: con la bandera puesta, un store se va al helper para que pase por dcWriteDbg.
   bool dcDbgOn = false;
+  // Guardia UNICA del camino rapido de store: bit0 = depuracion armada (punto de vigilancia o
+  // write-through), bit1 = MI_MODE con el modo repeticion armado (el siguiente store a RDRAM se
+  // difunde por la pagina). Juntarlas en un byte del propio CPU le ahorra al codigo emitido
+  // perseguir mem (una carga de puntero) y un segundo cmp/jne en CADA store.
+  u8 stGuard = 0;
+  enum : u8 { StGuardDbg = 1, StGuardRepeat = 2 };
   ICacheLine icache[512] = {};
   u32 icSeq = 0;                 // sello de relleno de I-cache (0 = nunca rellenada)
 
@@ -233,7 +249,7 @@ struct CPU {
               C0_XContext=20, C0_ErrorEPC=30 };
   enum Access { AccRead=0, AccWrite=1, AccFetch=2 };
 
-  auto connect(Memory* m) -> void { mem = m; }
+  auto connect(Memory* m) -> void;   // ata el bus y le pasa la direccion de stGuard
   auto reset() -> void;
   auto fastBoot(u32 entryPoint) -> void;  // HLE IPL3 hand-off state
 
@@ -305,7 +321,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
-    if(__builtin_expect(!l.valid || l.ptag != base, 0)) { dcFlush(idx); dcFill(idx, base); }
+    if(__builtin_expect(l.tagv != (base | 1u), 0)) { dcFlush(idx); dcFill(idx, base); }
     u32 off = phys & 0xf;
     // El valor guest es big-endian dentro de la linea; el anfitrion es little-endian. Un
     // memcpy del ancho exacto + bswap da el MISMO resultado que el bucle byte a byte.
@@ -324,7 +340,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
-    if(__builtin_expect(!l.valid || l.ptag != base, 0)) { dcFlush(idx); dcFill(idx, base); }
+    if(__builtin_expect(l.tagv != (base | 1u), 0)) { dcFlush(idx); dcFill(idx, base); }
     u32 off = phys & 0xf;
     switch(size) {
       case 1: l.data[off] = (u8)val; break;

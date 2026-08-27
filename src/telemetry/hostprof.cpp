@@ -36,6 +36,12 @@ u64                    g_samples = 0, g_base = 0, g_extern = 0;
 // resuelve en el volcado: modulo si lo hay, "jit/anon" si la region no es un modulo.
 std::unordered_map<u64, u64> g_ext;    // AllocationBase de la region -> muestras
 std::unordered_map<u64, u64> g_extcall;  // retorno in-image mas cercano -> muestras
+// Muestras dentro del buffer RWX del dynarec, con RIP CRUDO (cubo de 16 B). Agrupar el JIT
+// por AllocationBase basta para saber CUANTO cuesta el codigo emitido, pero no DONDE: todo
+// cae en un solo cubo. Con el RIP crudo, el volcado de KESTREL_JIT_DUMP (que trae host= y
+// codeLen= de cada bloque) permite atribuir cada muestra a un bloque y a un offset dentro
+// de el, y de ahi a la instruccion MIPS que lo genero.
+std::unordered_map<u64, u64> g_jitHits;
 auto dump() -> void;
 auto writeRaw(const std::vector<std::pair<u64,u64>>& v) -> void;
 
@@ -123,8 +129,12 @@ auto sampleLoop(unsigned periodMs) -> void {
         else {
           g_extern++;
           MEMORY_BASIC_INFORMATION mbi{};
-          if(VirtualQuery((LPCVOID)rip, &mbi, sizeof mbi)) g_ext[(u64)mbi.AllocationBase]++;
-          else g_ext[0]++;
+          if(VirtualQuery((LPCVOID)rip, &mbi, sizeof mbi)) {
+            g_ext[(u64)mbi.AllocationBase]++;
+            // Region privada y ejecutable = buffer del dynarec (ningun modulo mapeado lo es).
+            const DWORD kX = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+            if(mbi.Type == MEM_PRIVATE && (mbi.Protect & kX)) g_jitHits[rip & ~0xfull]++;
+          } else g_ext[0]++;
           // Saber que estamos "en ntdll" no dice nada por si solo: lo que hace falta es QUIEN
           // llamo. Con el hilo suspendido, se barre el principio de su pila buscando la primera
           // palabra que caiga dentro de la imagen: es la direccion de retorno del marco nuestro
@@ -217,6 +227,9 @@ auto writeRaw(const std::vector<std::pair<u64,u64>>& v) -> void {
                  (unsigned long long)p.second);
   for(auto& p : g_ext)
     std::fprintf(f, "extmod %llx %llu\n", (unsigned long long)p.first,
+                 (unsigned long long)p.second);
+  for(auto& p : g_jitHits)
+    std::fprintf(f, "jit %llx %llu\n", (unsigned long long)p.first,
                  (unsigned long long)p.second);
   std::fclose(f);
 }

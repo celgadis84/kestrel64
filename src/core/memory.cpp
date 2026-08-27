@@ -716,8 +716,10 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     switch(off & 0xff) {
     case 0x00:
       rcp.mi_mode = v & 0x7f;
-      if(v & (1 << 7)) rcp.mi_repeat_on = false;                              // clear init/repeat mode
-      if(v & (1 << 8)) { rcp.mi_repeat_on = true; rcp.mi_repeat_len = (v & 0x7f) + 1; }  // arm: span = length+1
+      if(v & (1 << 7)) { rcp.mi_repeat_on = false;                            // clear init/repeat mode
+                         if(cpuStGuard) *cpuStGuard &= (u8)~2u; }
+      if(v & (1 << 8)) { rcp.mi_repeat_on = true; rcp.mi_repeat_len = (v & 0x7f) + 1;  // arm: span = length+1
+                         if(cpuStGuard) *cpuStGuard |= 2u; }
       if(v & (1 << 11)) clearIntr(MI_DP);   // clear DP interrupt
       break;
     case 0x0c: {  // MI_MASK: (clear,set) pairs for the 6 interrupts
