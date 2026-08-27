@@ -15,14 +15,21 @@ cd "$(dirname "$0")/.."
 
 BUILD="${1:-}"
 if [ -z "$BUILD" ]; then
-  if [ -x build-prdp/kestrel64.exe ]; then BUILD=build-prdp; else BUILD=build; fi
+  for b in build-prdp-static build-static build-prdp build; do
+    [ -x "$b/kestrel64.exe" ] && { BUILD=$b; break; }
+  done
 fi
 OUT="${2:-dist}"
 EXE="$BUILD/kestrel64.exe"
 [ -x "$EXE" ] || { echo "no hay $EXE -- compila primero"; exit 1; }
 
+echo "empaquetando desde $BUILD/"
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$EXE" "$OUT/"
+
+# El lanzador grafico, si esta compilado/presente, viaja con el emulador: es la cara del
+# programa para quien no vive en una terminal.
+[ -d tools/launcher ] && { mkdir -p "$OUT/tools"; cp -r tools/launcher "$OUT/tools/"; }
 
 # ldd da el cierre transitivo ya resuelto. Todo lo que NO cuelgue de C:\WINDOWS es una
 # dependencia del toolchain que el usuario final no tiene: se copia. Lo que cuelga de
@@ -70,6 +77,11 @@ driver de la tarjeta grafica y NO se distribuye aqui: si Windows dice que falta,
 lo que hay que actualizar es el driver de video.
 
 Las DLL de esta carpeta son parte del programa: deben quedarse junto al .exe.
+(Si no hay ninguna, este build va enlazado estatico y el .exe se basta solo.)
+
+tools\launcher\run_launcher.cmd abre el lanzador grafico: biblioteca de ROM con
+caratulas, overclock por componente, mando, telemetria y depurador. Ese lanzador
+esta escrito en Python y necesita Python 3 instalado; el emulador en si no.
 TXT
 
 # Zip portable: es lo que se manda a otra maquina tal cual. Se usa el ZipFile de .NET y no

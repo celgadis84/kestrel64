@@ -35,6 +35,10 @@ cmake --build build -j
 - cmake binary lives in `/c/msys64/clang64/bin`.
 - `build/` = default (PRDP OFF). `build-prdp/` = configured `-DKESTREL_PRDP=ON`
   (parallel-rdp GPU backend). Default OFF so deterministic core never depends on GPU.
+- `-DKESTREL_STATIC=ON` = self-contained `.exe` (libc++/GLFW inside, no DLLs) for the
+  published package; `sh scripts/dist.sh` stages `dist/` + zip. See `docs/distribucion.md`.
+- Double-clicking the exe implies `--play` (run + window + ROM picker); launching from a
+  shell keeps the paused-for-MCP default, so gates and debugging are unaffected.
 
 ## Verification — run after EVERY change (hard rule)
 

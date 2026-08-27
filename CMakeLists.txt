@@ -18,6 +18,11 @@ if(KESTREL_PRDP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/parallel_rdp.cmake)
 endif()
 
+# Enlazado autocontenido para el paquete que se publica (ver docs/distribucion.md). OFF por
+# defecto: los builds de desarrollo enlazan bastante mas rapido en dinamico, y el .exe que
+# usan los gates no necesita moverse de esta maquina.
+option(KESTREL_STATIC "Link libc++/GLFW statically (self-contained .exe)" OFF)
+
 add_executable(kestrel64
   src/main.cpp
   src/core/system.cpp
@@ -95,9 +100,21 @@ find_package(Vulkan REQUIRED)
 target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw3)
 
 if(WIN32)
-  target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm)
-  # NOTE: no -static — GLFW/Vulkan pull system DLLs; a fully static link fights
-  # the loader. The clang/libc++ runtime is found via the clang64 bin on PATH.
+  # comdlg32: el dialogo de "elige una ROM" cuando se abre el .exe desde el Explorador.
+  target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32)
+  if(KESTREL_STATIC AND NOT MSVC)
+    # Un unico .exe sin DLL propias. Por defecto, libc++ y GLFW quedan como DLL y viven en
+    # C:/msys64/clang64/bin: dentro de la shell de MSYS2 el PATH las encuentra, pero el
+    # Explorador arranca el proceso sin ese PATH y Windows aborta con "no se encontro
+    # glfw3.dll". clang64 trae libc++.a / libunwind.a / libglfw3.a, asi que se meten dentro.
+    #
+    # vulkan-1.dll sigue siendo dinamica A PROPOSITO: es el *loader* de Vulkan y tiene que ser
+    # el del sistema para ver los ICD del driver instalado. Enlazarlo estatico no tendria
+    # sentido aunque se pudiera.
+    target_link_options(kestrel64 PRIVATE -static)
+    # GLFW estatico deja de arrastrar sus dependencias por si mismo: se nombran aqui.
+    target_link_libraries(kestrel64 PRIVATE shell32 ole32 uuid imm32 setupapi version cfgmgr32)
+  endif()
 else()
   find_package(Threads REQUIRED)
   target_link_libraries(kestrel64 PRIVATE Threads::Threads)

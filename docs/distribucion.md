@@ -46,6 +46,25 @@ el *loader* de Vulkan, tiene que ser el del sistema para ver los ICD del driver 
 Los builds de desarrollo siguen dinamicos (enlazan mas rapido); la opcion esta pensada para
 el paquete que se publica.
 
+```sh
+cmake -S . -B build-static -G Ninja -DCMAKE_BUILD_TYPE=Release -DKESTREL_STATIC=ON
+cmake --build build-static -j8
+ldd build-static/kestrel64.exe | grep -v /c/WINDOWS     # no imprime nada
+```
+
+Medido: 1.7 MB de `.exe` (748 KB dinamico + los ~1 MB de runtime que antes iban en las DLL),
+cero dependencias propias, SM64 arranca y renderiza con el `PATH` vacio.
+
+## Lo que todavia no es autocontenido: el lanzador
+
+`kestrel64.exe` ya no depende de nada que no traiga Windows o el driver de la GPU. El
+lanzador grafico (`tools/launcher/`) si: esta escrito en Python y sirve su interfaz web en
+local, asi que en una maquina sin Python 3 no arranca. El emulador se usa igual sin el.
+
+Cerrarlo es un empaquetado, no un rediseno: PyInstaller sobre `kestrel_launcher.py` produce
+un segundo `.exe` que el instalador puede colocar al lado. Queda pendiente a proposito --
+primero el nucleo, que es lo que se ejecuta.
+
 ## Instalador
 
 `installer/kestrel64.iss` (Inno Setup 6) se compila **sobre `dist/`**, no sobre el arbol de

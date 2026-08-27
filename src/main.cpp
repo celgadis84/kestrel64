@@ -53,16 +53,64 @@ static LONG WINAPI crashFilter(EXCEPTION_POINTERS* ep) {
 }
 #endif
 
+#ifdef _WIN32
+// Lanzado desde el Explorador o desde una consola?
+//
+// Sin --run el emulador arranca EN PAUSA, que es lo correcto para depurar (deja enganchar el
+// MCP antes de la primera instruccion) y lo que asumen los gates. Pero para quien hace doble
+// clic en el .exe eso es indistinguible de un cuelgue: ventana negra y nada mas.
+//
+// La distincion la da el propio Windows. Un proceso de subsistema consola lanzado desde el
+// Explorador recibe una consola RECIEN CREADA para el solo; lanzado desde una shell hereda la
+// de la shell, que sigue adjunta. GetConsoleProcessList cuenta los adjuntos: 1 = nadie mas =
+// venimos del Explorador. Desde MSYS2 o cmd el contador es mayor y el arranque en pausa queda
+// intacto, asi que ni los gates ni el flujo de depuracion se enteran de esto.
+static auto launchedFromExplorer() -> bool {
+  DWORD pids[4] = {0};
+  DWORD n = GetConsoleProcessList(pids, 4);
+  return n == 1;
+}
+
+// Sin ROM y sin consola donde leer un mensaje de error, la unica salida util es preguntar.
+static auto pickRomDialog() -> std::string {
+  wchar_t file[MAX_PATH] = {0};
+  OPENFILENAMEW ofn = {};
+  ofn.lStructSize = sizeof(ofn);
+  static const wchar_t kFilter[] =
+      L"ROM de Nintendo 64\0" L"*.z64;*.n64;*.v64\0" L"Todos los archivos\0" L"*.*\0";
+  ofn.lpstrFilter = kFilter;
+  ofn.lpstrTitle  = L"Elige una ROM de Nintendo 64";
+  ofn.lpstrFile   = file;
+  ofn.nMaxFile    = MAX_PATH;
+  ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  if(!GetOpenFileNameW(&ofn)) return {};
+  // A la pagina de codigos ANSI y no a UTF-8: la ROM se acaba abriendo con fopen(), que en
+  // Windows interpreta el nombre en ANSI. Convertir a UTF-8 rompe cualquier ruta con acentos.
+  char out[MAX_PATH * 2] = {0};
+  int n = WideCharToMultiByte(CP_ACP, 0, file, -1, out, (int)sizeof(out), nullptr, nullptr);
+  return n > 0 ? std::string(out) : std::string();
+}
+
+// Un fprintf(stderr) en una consola que se cierra sola al terminar el proceso no lo lee nadie.
+static auto guiError(const char* msg) -> void {
+  MessageBoxA(nullptr, msg, "kestrel64", MB_OK | MB_ICONERROR);
+}
+#endif
+
 int main(int argc, char** argv) {
   std::setvbuf(stderr, nullptr, _IONBF, 0);   // diagnósticos (heartbeat/jitstats) en streaming
   std::string romPath;
   kestrel::u16 port = 9128;
   bool freeRun = false;
+  bool play = false;   // modo usuario final: corriendo Y con ventana
 
   for(int i = 1; i < argc; i++) {
     std::string a = argv[i];
     if(a == "--port" && i + 1 < argc) { port = (kestrel::u16)std::atoi(argv[++i]); }
     else if(a == "--run") { freeRun = true; }  // start unpaused (default: paused for stepping)
+    // --run solo significa "sin pausa", y ademas apaga la ventana porque nacio para el lote
+    // (gates, bench, krom). --play es lo que quiere una persona: corriendo Y viendose.
+    else if(a == "--play") { play = true; }
     else if(a == "--rspfuzz") {                 // differential VU fuzz: scalar vs SSE, then exit
       unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != '-') ? std::strtoull(argv[++i], nullptr, 10) : 20000000ull;
       kestrel::Rsp rsp;
@@ -93,7 +141,10 @@ int main(int argc, char** argv) {
       return 0;
     }
     else if(a == "--help" || a == "-h") {
-      std::printf("kestrel64 %s\nusage: %s <rom> [--port N] [--run]\n", kestrel::System::kVersion, argv[0]);
+      std::printf("kestrel64 %s\nusage: %s <rom> [--port N] [--run|--play]\n"
+                  "  --run   sin pausa y sin ventana (lote: gates, bench)\n"
+                  "  --play  sin pausa y con ventana (uso normal; implicito al abrir desde el Explorador)\n",
+                  kestrel::System::kVersion, argv[0]);
       return 0;
     }
     else if(!a.empty() && a[0] != '-') { romPath = a; }
@@ -118,8 +169,19 @@ int main(int argc, char** argv) {
     else return ok ? 0 : 1;
   }
 
+#ifdef _WIN32
+  // Doble clic en el .exe: ni --play ni ROM en la linea de ordenes, y una consola que se cerrara
+  // sola. Se asume el modo de uso normal y se pregunta por la ROM.
+  if(!freeRun && launchedFromExplorer()) {
+    play = true;
+    if(romPath.empty()) romPath = pickRomDialog();
+    if(romPath.empty()) return 0;                    // el usuario cancelo: salir en silencio
+  }
+#endif
+  if(play) freeRun = true;
+
   if(romPath.empty()) {
-    std::fprintf(stderr, "error: no ROM given.\nusage: %s <rom> [--port N]\n", argv[0]);
+    std::fprintf(stderr, "error: no ROM given.\nusage: %s <rom> [--port N] [--run|--play]\n", argv[0]);
     return 1;
   }
 
@@ -134,15 +196,19 @@ int main(int argc, char** argv) {
   std::string error;
   if(!system.init(romPath, error)) {
     std::fprintf(stderr, "error: %s\n", error.c_str());
+#ifdef _WIN32
+    if(play) guiError(("No se pudo abrir la ROM:\n" + error).c_str());
+#endif
     return 1;
   }
 
   system.paused.store(!freeRun);
-  system.exitOnHalt = freeRun;    // lote headless: halt = fin de sesión, no punto de inspección
+  const bool batch = freeRun && !play;   // lote = corre sin ventana; jugar = corre CON ventana
+  system.exitOnHalt = batch;      // lote headless: halt = fin de sesión, no punto de inspección
   system.startTelemetry(port);
-  system.startVideo(freeRun);   // --run = lote: sin ventana salvo KESTREL_VIDEO
+  system.startVideo(batch);     // --run = lote: sin ventana salvo KESTREL_VIDEO
   std::printf("[system] running (M1: CPU interpreter, %s). Ctrl-C to quit.\n",
-              freeRun ? "free-run" : "paused — step over MCP");
+              !freeRun ? "paused — step over MCP" : (play ? "free-run + video" : "free-run"));
   std::fflush(stdout);
 
   system.runLoop();
