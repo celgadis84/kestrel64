@@ -90,9 +90,13 @@ struct CPU {
   // uncached store to a cached line leaves the cache stale until it is invalidated.
   // D-cache: 8 KB, 16-byte lines, 512 lines. I-cache: 16 KB, 32-byte lines, 512 lines.
   struct DCacheLine { u32 ptag = 0; bool valid = false; bool dirty = false; u8 data[16] = {}; };
-  struct ICacheLine { u32 ptag = 0; bool valid = false; u8 data[32] = {}; };
+  // seq = numero de relleno. Sube en CADA icFill; con (valid && ptag igual && seq igual)
+  // los 32 bytes son BIT A BIT los mismos que la ultima vez que se miraron: el unico
+  // camino que cambia data[] es icFill. Deja validar un bloque JIT por linea y no por op.
+  struct ICacheLine { u32 ptag = 0; bool valid = false; u32 seq = 0; u8 data[32] = {}; };
   DCacheLine dcache[512] = {};
   ICacheLine icache[512] = {};
+  u32 icSeq = 0;                 // sello de relleno de I-cache (0 = nunca rellenada)
 
   // --- interpreter fetch fast-path -------------------------------------------
   // Memoiza SOLO la traducción de la línea de I-cache (32 B) que se está ejecutando:

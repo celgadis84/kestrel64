@@ -376,7 +376,7 @@ auto CPU::peekPhysCoherent(u32 phys) -> u8 {
 
 auto CPU::icFill(u32 idx, u32 base) -> void {
   ICacheLine& l = icache[idx];
-  l.ptag = base; l.valid = true;
+  l.ptag = base; l.valid = true; l.seq = ++icSeq;
   if(base + 32 <= mem->rdram.size()) std::memcpy(l.data, &mem->rdram[base], 32);
   else for(u32 i = 0; i < 32; i++) l.data[i] = (base + i < mem->rdram.size()) ? mem->rdram[base + i] : 0;
 }

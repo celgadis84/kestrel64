@@ -1463,19 +1463,29 @@ auto CPU::jitTryBlock() -> u32 {
   // la LÍNEA I-cache (no rdram directo): en HW la CPU ejecuta código stale de I-cache si un
   // DMA reescribe rdram sin invalidar, así que validar contra rdram sobre-invalidaría.
   static const int noSmc = std::getenv("KESTREL_JIT_NOSMC") ? 1 : 0;  // DIAGNÓSTICO: mide techo del loop SMC
+  // Recorrido por LINEA, no por op: la palabra solo puede cambiar si la linea se relleno de
+  // nuevo, y eso lo dice el sello (icFill lo sube siempre). Con el sello y el tag intactos no
+  // hace falta mirar ni un byte; solo cuando el sello cambia (evicion + refill, que casi
+  // siempre trae los MISMOS bytes) se comparan las palabras del bloque en esa linea. Un bloque
+  // de 16 ops pasa de 16 extracciones big-endian a 3 comparaciones de u32.
+  u32 endPa = phys + 4 * K;
   if(!noSmc)
-  for(u32 i = 0; i < K; i++) {
-    u32 pa   = phys + 4 * i;
-    u32 idx  = (pa >> 5) & 0x1ff;
-    u32 base = pa & ~0x1fu;
+  for(u32 base = phys & ~0x1fu, li = 0; base < endPa; base += 32, li++) {
+    u32 idx = (base >> 5) & 0x1ff;
     ICacheLine& l = icache[idx];
     if(!l.valid || l.ptag != base) icFill(idx, base);
-    u32 off = pa & 0x1c;
-    u32 w = ((u32)l.data[off] << 24) | ((u32)l.data[off + 1] << 16) | ((u32)l.data[off + 2] << 8) | l.data[off + 3];
-    // Step2: solo ESTE bloque → recompila in-place (no clear global; imprescindible para
-    // block-linking). Step3: además hay que DESENLAZARLO ya — su código va a re-emitirse en
-    // otra dirección y cualquier sitio que apunte al viejo saltaría a bytes reciclados.
-    if(w != blk.src[i]) { blk.dead = true; cc->unlinkTo(phys); JDECL(DR_SMC); return 0; }
+    if(l.seq == blk.lineSeq[li]) continue;                 // linea intacta desde la ultima mirada
+    u32 lo = (base > phys) ? base : phys;                  // primer byte del bloque en esta linea
+    u32 hi = (base + 32 < endPa) ? base + 32 : endPa;
+    for(u32 pa = lo; pa < hi; pa += 4) {
+      u32 off = pa & 0x1c;
+      u32 w = ((u32)l.data[off] << 24) | ((u32)l.data[off + 1] << 16) | ((u32)l.data[off + 2] << 8) | l.data[off + 3];
+      // Step2: solo ESTE bloque -> recompila in-place (no clear global; imprescindible para
+      // block-linking). Step3: ademas hay que DESENLAZARLO ya: su codigo va a re-emitirse en
+      // otra direccion y cualquier sitio que apunte al viejo saltaria a bytes reciclados.
+      if(w != blk.src[(pa - phys) >> 2]) { blk.dead = true; cc->unlinkTo(phys); JDECL(DR_SMC); return 0; }
+    }
+    blk.lineSeq[li] = l.seq;                               // mismos bytes tras el refill: revalida
   }
 
   // Re-enlace tras un desenlace global (invalidación de I-cache): este bloque acaba de pasar la

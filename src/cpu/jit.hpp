@@ -308,6 +308,9 @@ struct Block {
   bool hasBranch = false; // termina en un branch absorbido (escribe pc/nextPc; salida de control)
   bool dead = false;      // SMC invalidó este bloque: find() lo trata como miss → recompila in-place
   std::vector<u32> src;   // opcodes originales, para validación
+  // Sello de I-cache por linea cubierta (<=9: 64 ops = 256 B desde un offset cualquiera).
+  // 0 = sin sellar todavia (icSeq empieza en 1) -> la primera validacion compara palabras.
+  u32 lineSeq[9] = {0};
   // --- block-linking (Etapa 3) ---
   u32 phys = 0;             // PC física de entrada (clave del cache; necesaria para (des)enlazar)
   std::vector<LinkSite> sites;  // sitios de enlace emitidos en las salidas de este bloque

@@ -538,3 +538,28 @@ Nota de la bateria: en la corrida de `gate_all` de este cambio, cuatro ROMs de k
 bateria sola. No es una regresion del cambio: `rc=1` solo lo devuelve `System::init`, o sea
 abrir la ROM. Para que un transitorio asi no obligue a re-correr los 371 casos, `validate.py`
 guarda ahora la cola del log del proceso en la nota de la fila NODUMP.
+
+### 8. Validacion SMC por LINEA de I-cache (sello de relleno)
+
+Perfil tras el cambio anterior: `jitTryBlock` 30.7% -- la primera con diferencia. Lo caro de
+ella no es decidir si el bloque puede correr, es re-validarlo: en CADA entrada recorria las K
+palabras del bloque, sacando cada una de la linea de I-cache en big-endian y comparandola con
+`blk.src[i]`. Con avgK ~16 eso son 16 extracciones por entrada, y hay ~10 M entradas por
+corrida.
+
+La palabra de una linea de I-cache solo puede cambiar por un `icFill`: es el unico sitio que
+escribe `data[]` (las demas operaciones de la instruccion CACHE tocan `valid`/`ptag`, o leen la
+linea hacia RDRAM). Asi que basta con sellar la linea: `ICacheLine::seq` sube en cada relleno, y
+`Block::lineSeq[]` guarda el sello con el que se valido cada linea que el bloque cubre (como
+mucho nueve: 64 ops = 256 B desde un offset cualquiera).
+
+Validar pasa a recorrer LINEAS, no ops. Con la etiqueta y el sello intactos no se mira ni un
+byte. Solo cuando el sello cambio -- evicion + relleno, que casi siempre trae los MISMOS bytes
+-- se comparan las palabras del bloque en esa linea, y si coinciden se re-sella. El veredicto es
+identico al del bucle por op, incluidos los rellenos que provoca (uno por linea, igual que
+antes: tras el primer relleno la etiqueta ya casa para el resto de la linea).
+
+Un bloque de 16 ops pasa de 16 extracciones big-endian a 3 comparaciones de `u32`.
+
+Medido, A/B intercalado de 3000 M instrucciones (SM64, JIT): antes media 17011 ms, despues
+16502 -> **+3.0%**. Ambas puertas verdes.
