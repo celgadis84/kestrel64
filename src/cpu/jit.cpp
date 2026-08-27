@@ -371,6 +371,7 @@ extern "C" u8 kestrel_jitCVTSW(void*, u32, u32);   extern "C" u8 kestrel_jitCVTD
 extern "C" u8 kestrel_jitDIVS (void*, u32, u32);   extern "C" u8 kestrel_jitDIVD (void*, u32, u32);
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
+extern "C" u8 kestrel_jitInterpDelay(void*, u32, u32); extern "C" u8 kestrel_jitCACHE(void*, u32, u32);
 extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
 extern "C" u8 kestrel_jitMULS(void*, u32, u32); extern "C" u8 kestrel_jitADDD(void*, u32, u32);
 extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(void*, u32, u32);
@@ -444,13 +445,14 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 // SYSCALL/BREAK/TRAP y todo lo que salte. Si la op falla o vectoriza, el thunk devuelve 0 y
 // el bloque sale con la bandera de control (pc/nextPc ya los dejó bien el intérprete).
 static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite,
-                         RcSnap& snap) -> bool {
+                         RcSnap& snap, bool delay = false) -> bool {
   u32 OP = op >> 26;
   bool ok = false;
   switch(OP) {
     case 0x11: ok = ((op >> 21) & 31) != 8; break;                   // COP1 salvo BC1x
     case 0x31: case 0x35: case 0x39: case 0x3d: ok = true; break;    // LWC1/LDC1/SWC1/SDC1
     case 0x22: case 0x26: case 0x2a: case 0x2e: ok = true; break;    // LWL/LWR/SWL/SWR
+    case 0x2f: ok = true; break;                                     // CACHE (ver kestrel_jitCACHE)
     case 0x00:
       switch(op & 63) {
         case 0x1a: case 0x1b: case 0x1c: case 0x1d: case 0x1e: case 0x1f: ok = true; break;
@@ -460,6 +462,13 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     default: break;
   }
   if(!ok) return false;
+  // CACHE en ranura de retardo: el trampolin de ranura no distingue I-cache de D-cache, y una
+  // de I-cache tiene que cerrar el bloque. Es un caso residual -> no se absorbe el salto.
+  if(delay && OP == 0x2f) return false;
+  // CTC1 en ranura de retardo: al disparar la FPE, Cause.CE copia el numero de coprocesador
+  // de la instruccion SIGUIENTE, y en una ranura esa es el DESTINO del salto -- que aqui aun
+  // no esta escrito en pc (la fase de control del salto va despues del delay slot). Residual.
+  if(delay && OP == 0x11 && ((op >> 21) & 31) == 6) return false;
   // Volcado DIRIGIDO: solo los gpr que la op nombra. El interprete lee cpu->gpr por el
   // puntero, pero una op de formato de FPU (ADD.S/MUL.S/CVT/C.cond) no nombra ninguno, y esas
   // son la inmensa mayoria de las que caen aqui en SM64. Volcar el cache entero por cada una
@@ -477,7 +486,9 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   // contexto de jitInterpOp en el camino normal (ver cpu.cpp). El resto de la mecanica --
   // volcado dirigido, sitio de salida, olvido -- es identica.
   void* fn = (void*)&jitInterpThunk;
-  if(OP == 0x11) switch((op >> 21) & 31) {
+  if(delay)           fn = (void*)&kestrel_jitInterpDelay;
+  else if(OP == 0x2f) fn = (void*)&kestrel_jitCACHE;
+  else if(OP == 0x11) switch((op >> 21) & 31) {
     case 0x00: fn = (void*)&kestrel_jitMFC1;  break;
     case 0x01: fn = (void*)&kestrel_jitDMFC1; break;
     case 0x02: fn = (void*)&kestrel_jitCFC1;  break;
@@ -845,6 +856,21 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       b.hasMem = true; if(dStore) b.hasStore = true;
       return true;
     }
+    c.jitCache->buf.used = dBefore;
+    // Interprete en la ranura de retardo. A diferencia del bail de una mem-op, cuando esta
+    // devuelve 0 la op YA tuvo efecto, asi que no se puede re-ejecutar el salto: se sale con
+    // la bandera de control y pc/nextPc los deja el interprete (que con inDelay puesto pone
+    // EPC en el salto y Cause.BD=1, como el VR4300). Retira idx+2 ops: rectas + salto +
+    // ranura. Sin esto un salto con LWC1/ADD.S/SWL en la ranura hacia rollback del salto
+    // entero, y si el salto era el lider el bloque no compilaba: BEQ/BEQL/JAL/BNE sumaban
+    // 1.85M de lideres fallidos medidos en SM64.
+    usize isite; RcSnap isnap;
+    if(emitInterpOp(e, rc, dop, 4 * (idx + 1), isite, isnap, true)) {
+      interpSites.push_back(isite); interpIdx.push_back(idx + 2); interpSnap.push_back(isnap);
+      b.hasMem = true; b.hasStore = true;
+      return true;
+    }
+    c.jitCache->buf.used = dBefore;
     return false;
   };
   // JAL/JALR: link = sext32((u32)nextPc) = sext32(entryVA + 4*(idx+2)) → gpr[reg]. Se emite

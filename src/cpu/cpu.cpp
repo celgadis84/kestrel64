@@ -1704,6 +1704,36 @@ KC1(kestrel_jitMFC1, 0) KC1(kestrel_jitDMFC1, 1) KC1(kestrel_jitCFC1, 2)
 KC1(kestrel_jitMTC1, 4) KC1(kestrel_jitDMTC1, 5)
 #undef KC1
 
+// Ranura de retardo. Mismo interprete, pero con inDelay puesto para que takeException
+// congele EPC = direccion del SALTO y Cause.BD = 1, como el VR4300. Sin esto un LWC1 o un
+// ADD.S en la ranura que faltara dejaria EPC en la ranura y el ERET del kernel volveria
+// SALTANDOSE el salto.
+extern "C" u8 kestrel_jitInterpDelay(void* cpu, u32 op, u32 off) {
+  auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
+  c->jitDelaySlot = true;
+  u8 r = c->jitInterpOp(op, off);
+  c->jitDelaySlot = false;
+  return r;
+}
+
+// CACHE dentro del bloque. Las de D-cache (bit0 del selector rt) no tocan el codigo: el
+// bloque sigue. Las de I-cache SI: el bloque valido sus palabras contra las lineas de
+// I-cache al entrar, y tras invalidarlas el HW volveria a buscar en RDRAM, que puede tener
+// otro codigo -- esa es justo la razon de que el software invalide. Por eso una op de
+// I-cache CIERRA el bloque y el driver revalida en la siguiente entrada. Las masivas son
+// las de D-cache: osWritebackDCache / osInvalDCache barren la cache en bucles de tres ops,
+// y con CACHE fuera del conjunto compilable esos bucles caian enteros al interprete.
+extern "C" u8 kestrel_jitCACHE(void* cpu, u32 op, u32 off) {
+  auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
+  u8 r = c->jitInterpOp(op, off);
+  if(!r) return 0;                 // vectorizo (TLB sobre la direccion): estado ya correcto
+  if((op >> 16) & 1) return 1;     // D-cache: sin efecto sobre el codigo, el bloque sigue
+  u64 va = c->pc + off;            // I-cache: jitInterpOp restauro pc a la entrada del bloque
+  c->pc = va + 4; c->nextPc = va + 8;
+  c->inDelay = false; c->justBranched = false;
+  return 0;                        // salida de control, con la op contada como retirada
+}
+
 auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
   u64 va      = pc + off;
   u64 savedPc = pc, savedNext = nextPc, savedCur = curPc;
@@ -1715,7 +1745,7 @@ auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
   nextPc = va + 8;
   memAbort     = false;
   justBranched = false;
-  inDelay      = false;
+  inDelay      = jitDelaySlot;   // ranura de retardo: EPC = el salto, Cause.BD = 1
   // Despacho DIRECTO de COP1. La tabla de saltos de execute() es un indirecto de ~60
   // destinos, y aqui cae casi siempre la misma familia: el fallback en bloque del JIT existe
   // sobre todo para FPU. Es exactamente la rama que execute() elegiria (0x11 no esta en la

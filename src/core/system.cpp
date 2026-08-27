@@ -37,6 +37,31 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
     std::printf("[watch] store watchpoint at phys 0x%08x len %u\n", memory.watchAddr, memory.watchLen);
   }
   cpu.connect(&memory);
+  // Overclock por dominio. El modelo de reloj (Clocks) ya llevaba los multiplicadores;
+  // esto solo los cablea a la linea de ordenes del lanzador. KESTREL_OC pone los tres a
+  // la vez; los tres especificos lo pisan. Un multiplicador NO cambia la semantica: sube
+  // el ritmo objetivo de retiro (insnTarget), o sea cuantas instrucciones caben en un
+  // campo de video. Subir el de CPU cambia cuanto trabajo hace el juego entre campos --
+  // que es justo lo que quita la ralentizacion, y tambien lo que puede romper un juego
+  // que ate su logica al reloj. RDRAM solo mueve el modelo de ancho de banda.
+  {
+    auto mul = [](const char* n, double& dst) {
+      if(const char* v = std::getenv(n)) {
+        double d = std::strtod(v, nullptr);
+        if(d > 0.0) dst = d;           // 0 o basura = no tocar
+      }
+    };
+    double all = 0.0;
+    if(const char* g = std::getenv("KESTREL_OC")) { double d = std::strtod(g, nullptr); if(d > 0.0) all = d; }
+    if(all > 0.0) { clocks.cpuOc = clocks.rspOc = clocks.rdramOc = all; }
+    mul("KESTREL_OC_CPU",   clocks.cpuOc);
+    mul("KESTREL_OC_RSP",   clocks.rspOc);
+    mul("KESTREL_OC_RDRAM", clocks.rdramOc);
+    if(clocks.cpuOc != 1.0 || clocks.rspOc != 1.0 || clocks.rdramOc != 1.0)
+      std::printf("[system] overclock cpu=%.2fx rsp=%.2fx rdram=%.2fx (cpu %.2f MHz, rsp %.2f MHz)\n",
+                  clocks.cpuOc, clocks.rspOc, clocks.rdramOc,
+                  clocks.cpuTarget() / 1e6, clocks.rspTarget() / 1e6);
+  }
   if(const char* t = std::getenv("KESTREL_VITICKS")) {
     u32 n = (u32)std::strtoul(t, nullptr, 0);
     if(n) clocks.viTicksPerField = n;

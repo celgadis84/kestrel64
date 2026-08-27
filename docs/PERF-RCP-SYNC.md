@@ -563,3 +563,80 @@ Un bloque de 16 ops pasa de 16 extracciones big-endian a 3 comparaciones de `u32
 
 Medido, A/B intercalado de 3000 M instrucciones (SM64, JIT): antes media 17011 ms, despues
 16502 -> **+3.0%**. Ambas puertas verdes.
+
+### 9. La ranura de retardo deja de tumbar el bloque, y CACHE entra al conjunto
+
+Dos agujeros del compilador que se veian en el mismo sitio: el contador de lideres que no
+compilan. En SM64, `BEQ`/`BNE`/`BEQL`/`JAL` sumaban **1.85 M** intentos fallidos de lider.
+Un salto no puede fallar por si mismo -- estan todos soportados -- asi que lo que fallaba
+era **su ranura de retardo**.
+
+**B2, la ranura al interprete.** El emisor de un salto compila la ranura como una op normal;
+si esa op no esta en el conjunto compilable (un `LWC1`, un `ADD.S`, un `SWL`), el salto entero
+hacia rollback. Y si el salto era la PRIMERA op del bloque, no habia bloque: cada entrada a
+esa direccion volvia al interprete para siempre.
+
+Ahora la ranura tambien puede caer al trampolin del interprete, con una diferencia de fondo
+respecto al bail de una operacion de memoria: **cuando el trampolin de una mem-op devuelve 0
+se puede re-ejecutar, porque no llego a tener efecto; el de la ranura no.** La ranura ya
+corrio, y el salto tambien. Asi que la salida no es un rollback sino una salida de control
+normal: `pc`/`nextPc` los deja el interprete y el bloque retira `idx+2` ops (las rectas, el
+salto y la ranura).
+
+Lo que hace que esto sea semantica de VR4300 y no un apano: `kestrel_jitInterpDelay` pone
+`cpu->jitDelaySlot` antes de interpretar, y `jitInterpOp` lo copia a `inDelay`. Si la op de
+la ranura falla, `takeException` congela `EPC = direccion del SALTO` y `Cause.BD = 1`. Sin
+eso el `ERET` del kernel volveria a la ranura y se **saltaria el salto**: un fallo silencioso
+que solo aparece con una TLB miss dentro de una ranura, o sea rarisimo y catastrofico.
+
+Dos casos se quedan fuera a proposito, porque su semantica depende de la op SIGUIENTE y en
+una ranura esa es el destino del salto, que en ese punto todavia no esta escrito en `pc`:
+
+- `CACHE` en ranura: el trampolin de ranura no distingue I-cache de D-cache, y la de I-cache
+  tiene que cerrar el bloque (ver abajo).
+- `CTC1` en ranura: al disparar la excepcion de FPU, `Cause.CE` copia el numero de
+  coprocesador de la instruccion siguiente.
+
+Los dos son residuales; ahi el salto simplemente no se absorbe, como antes.
+
+**B1, `CACHE` (opcode 0x2f) dentro del bloque.** Estaba fuera del conjunto compilable, y eso
+partia en trozos los bucles de `osWritebackDCache` / `osInvalDCache`, que barren la cache en
+bucles de tres operaciones y son de los mas transitados del kernel de libultra. La distincion
+que hace que se pueda absorber es del hardware:
+
+- Las de **D-cache** (bit 0 del selector `rt`) no tocan el codigo. El bloque sigue.
+- Las de **I-cache** si: el bloque valida sus palabras contra las lineas de I-cache al entrar
+  (§8), y tras invalidarlas el hardware volveria a buscar en RDRAM, que puede tener otro
+  codigo -- que es justo la razon por la que el software invalida. Por eso una op de I-cache
+  **cierra el bloque** y el driver revalida en la siguiente entrada.
+
+Cuando la op vectoriza (TLB miss sobre la direccion), `jitInterpOp` ya dejo el estado bien y
+se sale sin tocar nada.
+
+**Medido, y el resultado es honesto: NEUTRO en tiempo.** A/B intercalado con dos binarios
+(A = sin los dos cambios, B = con ellos), tres pasadas alternas cada uno:
+
+| modo | A | B |
+|---|---|---|
+| `jit` (bloqueado, ligado al RCP: el mas atado a la CPU) | 11.30 s | 11.29 s |
+| `threaded-jit` (200 intercambios) | 5.67 s | 5.69 s |
+
+Lo que si cambia es la forma de los bloques, con `KESTREL_JIT_STATS=1` sobre la misma ventana
+de SM64:
+
+| | A | B |
+|---|---|---|
+| compilaciones fallidas por `CACHE` (OP2f) | 220 486 | **0** |
+| fallidas por REGIMM (OP01) | 13 397 | **0** |
+| bloques ejecutados | 2 012 136 | 1 789 393 |
+| ops por bloque (`avgK`) | 4.42 | 4.69 |
+
+O sea: **menos bloques y mas grandes**, que es exactamente lo que se buscaba, pero en SM64 ese
+troceado no era el cuello de botella y el reloj no se mueve. Se queda por dos razones que no
+son la velocidad: (1) quita una clase entera de cortes de bloque, que es cobertura real para
+codigo que si dependa de ella -- los bucles de `osWritebackDCache` son de libultra, no de
+SM64; y (2) no es gratis en correccion: sin `jitDelaySlot` la ranura interpretada dejaria
+`EPC` en la ranura en vez de en el salto, asi que el camino nuevo TIENE que llevar la
+semantica de `Cause.BD` encima.
+
+Las dos puertas verdes en las seis modalidades, `regress=0`.

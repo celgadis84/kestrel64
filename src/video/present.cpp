@@ -178,8 +178,40 @@ auto initVulkan(Vk& v) -> bool {
   if(!glfwInit()) { std::fprintf(stderr, "[video] glfwInit failed\n"); return false; }
 
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  // Tamano de ventana y pantalla completa. El framebuffer del guest sigue siendo
+  // kSrcW x kSrcH: esto solo decide a que resolucion se PRESENTA (el blit de la cadena de
+  // intercambio escala). KESTREL_WINSIZE=WxH manda; si no, KESTREL_WINSCALE=N da Nx sobre
+  // 320x240. KESTREL_FULLSCREEN=1 usa el modo actual del monitor primario.
+  u32 winW = kSrcW * kScale, winH = kSrcH * kScale;
+  if(const char* sc = std::getenv("KESTREL_WINSCALE")) {
+    u32 n = (u32)std::strtoul(sc, nullptr, 10);
+    if(n >= 1 && n <= 16) { winW = kSrcW * n; winH = kSrcH * n; }
+  }
+  if(const char* ws = std::getenv("KESTREL_WINSIZE")) {
+    unsigned w = 0, h = 0; char x = 0;
+    if(std::sscanf(ws, "%u%c%u", &w, &x, &h) == 3 && (x == 'x' || x == 'X') && w >= 64 && h >= 64) {
+      winW = (u32)w; winH = (u32)h;
+    }
+  }
+  GLFWmonitor* mon = nullptr;
+  if(const char* fs = std::getenv("KESTREL_FULLSCREEN")) if(fs[0] != '0') {
+    mon = glfwGetPrimaryMonitor();
+    if(mon) {
+      // Sin cambiar el modo del monitor: se toma el que ya hay. Cambiarlo de verdad deja la
+      // sesion del escritorio rota si el emulador se cae, y no compra nada porque la imagen
+      // se escala igual en el blit de presentacion.
+      if(const GLFWvidmode* vm = glfwGetVideoMode(mon)) {
+        winW = (u32)vm->width; winH = (u32)vm->height;
+        glfwWindowHint(GLFW_RED_BITS, vm->redBits);
+        glfwWindowHint(GLFW_GREEN_BITS, vm->greenBits);
+        glfwWindowHint(GLFW_BLUE_BITS, vm->blueBits);
+        glfwWindowHint(GLFW_REFRESH_RATE, vm->refreshRate);
+      }
+    }
+  }
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-  v.win = glfwCreateWindow(kSrcW * kScale, kSrcH * kScale, "kestrel64", nullptr, nullptr);
+  std::fprintf(stderr, "[video] ventana %ux%u%s\n", winW, winH, mon ? " (pantalla completa)" : "");
+  v.win = glfwCreateWindow((int)winW, (int)winH, "kestrel64", mon, nullptr);
   if(!v.win) { std::fprintf(stderr, "[video] glfwCreateWindow failed\n"); return false; }
 
   if(glfwCreateWindowSurface(v.instance, v.win, nullptr, &v.surface) != VK_SUCCESS) {
@@ -449,6 +481,118 @@ auto drawHud(u32* frame, u32 w, u32 h, double cpu, double rsp, double ram) -> vo
   drawText(frame, w, h, 3, (int)y0 + 1, buf, 0xffffffffu);   // white on the bar
 }
 
+
+// ---------------------------------------------------------------- mapeo del mando
+// El lanzador escribe un fichero de asignaciones y lo pasa en KESTREL_PAD1. Cada linea es
+//   <CONTROL> <TECLA|-> <BOTON_GAMEPAD|->
+// con los nombres de GLFW sin el prefijo (X, SPACE, LEFT, KP_0, A, DPAD_UP, ...). Sin
+// fichero no se carga nada y el camino de teclado/gamepad es exactamente el de siempre:
+// esto no puede cambiar el comportamiento de una ejecucion que no lo use.
+struct PadMap {
+  // Orden fijo: los 14 botones del joybus y las 4 direcciones del stick.
+  static constexpr int kN = 18;
+  int  key[kN];
+  int  gpb[kN];
+  bool loaded = false;
+  PadMap() { for(int i = 0; i < kN; i++) { key[i] = -1; gpb[i] = -1; } }
+};
+
+struct NamedKey { const char* n; int v; };
+
+static auto lookupKey(const char* n) -> int {
+  static const NamedKey tbl[] = {
+    {"SPACE", GLFW_KEY_SPACE}, {"APOSTROPHE", GLFW_KEY_APOSTROPHE}, {"COMMA", GLFW_KEY_COMMA},
+    {"MINUS", GLFW_KEY_MINUS}, {"PERIOD", GLFW_KEY_PERIOD}, {"SLASH", GLFW_KEY_SLASH},
+    {"SEMICOLON", GLFW_KEY_SEMICOLON}, {"EQUAL", GLFW_KEY_EQUAL},
+    {"LEFT_BRACKET", GLFW_KEY_LEFT_BRACKET}, {"BACKSLASH", GLFW_KEY_BACKSLASH},
+    {"RIGHT_BRACKET", GLFW_KEY_RIGHT_BRACKET}, {"GRAVE_ACCENT", GLFW_KEY_GRAVE_ACCENT},
+    {"ESCAPE", GLFW_KEY_ESCAPE}, {"ENTER", GLFW_KEY_ENTER}, {"TAB", GLFW_KEY_TAB},
+    {"BACKSPACE", GLFW_KEY_BACKSPACE}, {"INSERT", GLFW_KEY_INSERT}, {"DELETE", GLFW_KEY_DELETE},
+    {"RIGHT", GLFW_KEY_RIGHT}, {"LEFT", GLFW_KEY_LEFT}, {"DOWN", GLFW_KEY_DOWN},
+    {"UP", GLFW_KEY_UP}, {"PAGE_UP", GLFW_KEY_PAGE_UP}, {"PAGE_DOWN", GLFW_KEY_PAGE_DOWN},
+    {"HOME", GLFW_KEY_HOME}, {"END", GLFW_KEY_END},
+    {"LEFT_SHIFT", GLFW_KEY_LEFT_SHIFT}, {"LEFT_CONTROL", GLFW_KEY_LEFT_CONTROL},
+    {"LEFT_ALT", GLFW_KEY_LEFT_ALT}, {"RIGHT_SHIFT", GLFW_KEY_RIGHT_SHIFT},
+    {"RIGHT_CONTROL", GLFW_KEY_RIGHT_CONTROL}, {"RIGHT_ALT", GLFW_KEY_RIGHT_ALT},
+    {"KP_ENTER", GLFW_KEY_KP_ENTER},
+  };
+  if(!n || !*n) return -1;
+  usize len = std::strlen(n);
+  if(len == 1) {
+    char c = n[0];
+    if(c >= 'A' && c <= 'Z') return GLFW_KEY_A + (c - 'A');
+    if(c >= 'a' && c <= 'z') return GLFW_KEY_A + (c - 'a');
+    if(c >= '0' && c <= '9') return GLFW_KEY_0 + (c - '0');
+  }
+  if(len == 4 && !std::strncmp(n, "KP_", 3) && n[3] >= '0' && n[3] <= '9')
+    return GLFW_KEY_KP_0 + (n[3] - '0');
+  if(n[0] == 'F' && len >= 2 && n[1] >= '1' && n[1] <= '9') {
+    int f = std::atoi(n + 1);
+    if(f >= 1 && f <= 25) return GLFW_KEY_F1 + (f - 1);
+  }
+  for(const auto& e : tbl) if(!std::strcmp(e.n, n)) return e.v;
+  return -1;
+}
+
+static auto lookupGamepad(const char* n) -> int {
+  static const NamedKey tbl[] = {
+    {"A", GLFW_GAMEPAD_BUTTON_A}, {"B", GLFW_GAMEPAD_BUTTON_B},
+    {"X", GLFW_GAMEPAD_BUTTON_X}, {"Y", GLFW_GAMEPAD_BUTTON_Y},
+    {"LEFT_BUMPER", GLFW_GAMEPAD_BUTTON_LEFT_BUMPER},
+    {"RIGHT_BUMPER", GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER},
+    {"BACK", GLFW_GAMEPAD_BUTTON_BACK}, {"START", GLFW_GAMEPAD_BUTTON_START},
+    {"GUIDE", GLFW_GAMEPAD_BUTTON_GUIDE},
+    {"LEFT_THUMB", GLFW_GAMEPAD_BUTTON_LEFT_THUMB},
+    {"RIGHT_THUMB", GLFW_GAMEPAD_BUTTON_RIGHT_THUMB},
+    {"DPAD_UP", GLFW_GAMEPAD_BUTTON_DPAD_UP}, {"DPAD_RIGHT", GLFW_GAMEPAD_BUTTON_DPAD_RIGHT},
+    {"DPAD_DOWN", GLFW_GAMEPAD_BUTTON_DPAD_DOWN}, {"DPAD_LEFT", GLFW_GAMEPAD_BUTTON_DPAD_LEFT},
+    // Los gatillos son ejes, no botones: se marcan con codigos negativos propios y el
+    // lector los resuelve contra gp.axes.
+    {"LEFT_TRIGGER", -2}, {"RIGHT_TRIGGER", -3},
+  };
+  if(!n || !*n) return -1;
+  for(const auto& e : tbl) if(!std::strcmp(e.n, n)) return e.v;
+  return -1;
+}
+
+// Indices del mapa. Los 14 primeros llevan su bit del joybus; los 4 ultimos son el stick.
+static const char* kPadIds[PadMap::kN] = {
+  "A", "B", "Z", "START", "DU", "DD", "DL", "DR", "L", "R", "CU", "CD", "CL", "CR",
+  "SX+", "SX-", "SY+", "SY-",
+};
+static const u32 kPadBits[14] = {
+  0x8000, 0x4000, 0x2000, 0x1000, 0x0800, 0x0400, 0x0200, 0x0100,
+  0x0020, 0x0010, 0x0008, 0x0004, 0x0002, 0x0001,
+};
+
+static auto loadPadMap() -> const PadMap& {
+  static PadMap m;
+  static bool once = false;
+  if(once) return m;
+  once = true;
+  const char* path = std::getenv("KESTREL_PAD1");
+  if(!path || !*path) return m;
+  std::FILE* f = std::fopen(path, "r");
+  if(!f) { std::fprintf(stderr, "[input] no se pudo abrir %s\n", path); return m; }
+  char line[256];
+  int n = 0;
+  while(std::fgets(line, sizeof line, f)) {
+    char id[64] = {0}, k[64] = {0}, g[64] = {0};
+    if(std::sscanf(line, "%63s %63s %63s", id, k, g) < 2) continue;
+    for(int i = 0; i < PadMap::kN; i++) {
+      if(std::strcmp(kPadIds[i], id)) continue;
+      m.key[i] = lookupKey(std::strcmp(k, "-") ? k : nullptr);
+      m.gpb[i] = lookupGamepad(std::strcmp(g, "-") ? g : nullptr);
+      n++;
+      break;
+    }
+  }
+  std::fclose(f);
+  m.loaded = n > 0;
+  std::fprintf(stderr, "[input] mapa de mando: %d controles desde %s\n", n, path);
+  return m;
+}
+
 }  // namespace
 
 // Bring up Vulkan/GLFW on the calling (main) thread. MUST run before the CPU
@@ -476,8 +620,18 @@ auto Presenter::pumpFrame() -> bool {
   // Buttons: X=A  C=B  Space=Z  Enter=Start  Q=L  E=R ; D-pad = arrows ;
   // C-buttons = I/J/K/L ; analog stick = W/A/S/D (full ±80 deflection).
   {
-    auto down = [&](int key) { return glfwGetKey(v.win, key) == GLFW_PRESS; };
+    auto down = [&](int key) { return key >= 0 && glfwGetKey(v.win, key) == GLFW_PRESS; };
+    const PadMap& pm = loadPadMap();
     u32 b = 0;
+    int sxm = 0, sym = 0;
+    if(pm.loaded) {
+      // Mapa del lanzador: sustituye por completo al teclado de fabrica. Debajo queda el
+      // camino de siempre para el caso sin fichero, identico a como estaba.
+      for(int i = 0; i < 14; i++) if(down(pm.key[i])) b |= kPadBits[i];
+      sxm = (down(pm.key[14]) ? 80 : 0) - (down(pm.key[15]) ? 80 : 0);
+      sym = (down(pm.key[16]) ? 80 : 0) - (down(pm.key[17]) ? 80 : 0);
+    }
+    if(!pm.loaded) {
     if(down(GLFW_KEY_X))     b |= 0x8000;   // A
     if(down(GLFW_KEY_C))     b |= 0x4000;   // B
     if(down(GLFW_KEY_SPACE)) b |= 0x2000;   // Z
@@ -492,8 +646,9 @@ auto Presenter::pumpFrame() -> bool {
     if(down(GLFW_KEY_K))     b |= 0x0004;   // C-Down
     if(down(GLFW_KEY_J))     b |= 0x0002;   // C-Left
     if(down(GLFW_KEY_L))     b |= 0x0001;   // C-Right
-    int sx = (down(GLFW_KEY_D) ? 80 : 0) - (down(GLFW_KEY_A) ? 80 : 0);
-    int sy = (down(GLFW_KEY_W) ? 80 : 0) - (down(GLFW_KEY_S) ? 80 : 0);
+    }
+    int sx = pm.loaded ? sxm : ((down(GLFW_KEY_D) ? 80 : 0) - (down(GLFW_KEY_A) ? 80 : 0));
+    int sy = pm.loaded ? sym : ((down(GLFW_KEY_W) ? 80 : 0) - (down(GLFW_KEY_S) ? 80 : 0));
 
     // --- optional physical gamepad (player 1), OR'd on top of the keyboard ------
     // GLFW's gamepad mapping DB gives every pad the same button/axis layout, so
@@ -502,7 +657,15 @@ auto Presenter::pumpFrame() -> bool {
     // triggers=Z/R. Keyboard stays live so either input source works.
     GLFWgamepadstate gp;
     if(glfwJoystickIsGamepad(GLFW_JOYSTICK_1) && glfwGetGamepadState(GLFW_JOYSTICK_1, &gp)) {
-      auto bt = [&](int i) { return gp.buttons[i] == GLFW_PRESS; };
+      auto bt = [&](int i) { return i >= 0 && gp.buttons[i] == GLFW_PRESS; };
+      // Un gatillo no es un boton: los codigos -2/-3 del mapa se resuelven contra los ejes.
+      auto btm = [&](int i) {
+        if(i == -2) return gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f;
+        if(i == -3) return gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f;
+        return bt(i);
+      };
+      if(pm.loaded) for(int i = 0; i < 14; i++) if(btm(pm.gpb[i])) b |= kPadBits[i];
+      if(!pm.loaded) {
       if(bt(GLFW_GAMEPAD_BUTTON_A))            b |= 0x8000;  // A
       if(bt(GLFW_GAMEPAD_BUTTON_B))            b |= 0x4000;  // B
       if(bt(GLFW_GAMEPAD_BUTTON_X))            b |= 0x2000;  // Z
@@ -524,6 +687,7 @@ auto Presenter::pumpFrame() -> bool {
       if(ry >  0.5f) b |= 0x0004;  // C-Down
       if(rx < -0.5f) b |= 0x0002;  // C-Left
       if(rx >  0.5f) b |= 0x0001;  // C-Right
+      }
       // Left stick → analog. Deadzone, then scale to the N64's ±80 range.
       float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X], ly = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
       if(lx < -0.2f || lx > 0.2f) sx = (int)(lx * 80.0f);

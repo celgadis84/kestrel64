@@ -125,6 +125,7 @@ struct CPU {
   // --- exception / interrupt state -------------------------------------------
   bool inDelay = false;      // the instruction at pc sits in a branch delay slot
   bool justBranched = false; // the instruction just executed was a branch/jump
+  bool jitDelaySlot = false; // la op interpretada del JIT ocupa una ranura de retardo
   bool timerIntr = false;    // Count==Compare latch (Cause IP7)
   u32  randomReload = 0;      // COP0 write hazard: a Wired write reloads Random=31 one
                              // instruction late (2 = armed this step, 1 = reload lands next end)
