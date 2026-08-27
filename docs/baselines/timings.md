@@ -355,3 +355,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_all | 430 s | gate_prdp | 332 s | JIT: guardia R==0, privilegio ckseg0, arnes jitdiff, ALU-con-trampa por defecto=3; 12/12, regress=0 |
 | 2026-08-27 | gate_all | 398 s | gate_prdp | 307 s | JIT: camino rapido de memoria en el bloque (LW/SW/LWC1/SWC1); 12/12, regress=0 en ambos |
 | 2026-08-27 | gate_all | 357 s | gate_prdp | 296 s | JIT: camino rapido de memoria extendido a los 15 opcodes (1/2/4/8 B, enteros y COP1); 12/12, regress=0 en ambos |
+| 2026-08-27 | gate_all | 381 s | gate_prdp | 298 s | JIT: BC1F/BC1T/BC1FL/BC1TL absorbidos como salto nativo; 12/12, regress=0 en ambos |

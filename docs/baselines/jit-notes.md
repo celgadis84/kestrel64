@@ -143,3 +143,59 @@ Lo unico con trabajo propio es el orden de bytes, que en la linea es el del gues
 LDC1/SDC1 heredan la regla de FR de sus hermanos de 32 bits: `fprGet64`/`fprSet64` con FR=0
 usan `fpr[rt & ~1]`, que para `rt` PAR es el mismo registro que con FR=1 -- solo el impar se
 declina al helper, y la paridad se conoce al compilar.
+
+## BC1F / BC1T / BC1FL / BC1TL absorbidos
+
+Tras el camino rapido de memoria, el perfil del anfitrion puso `jitTryBlock` en el 36% de las
+muestras: el coste ya no estaba en ejecutar el bloque sino en **entrar y salir** de el. Con
+33.5M despachos para 210M instrucciones, cada salida al interprete se paga entera en volcado
+de residencia + retorno + busqueda del bloque siguiente.
+
+El histograma de "el lider del bloque no compila" (`g_compFailOp`) senalaba OP11 = COP1 con
+2.1M, pero el opcode primario no basta: bajo OP11 conviven MFC1/CFC1 con toda la aritmetica de
+coma flotante, que **ya** se compila. El sub-histograma por el campo `rs` (`g_compFailCop`)
+dejo el culpable en una linea: `COP1.rs08 = 2.1M`, o sea BC1x, el **100%** del compile-fail de
+COP1.
+
+Es un salto que ya se sabia emitir. Compartir comparte casi todo con BEQ:
+
+- el destino es la misma cuenta, `pc + (SIMM << 2)` (cpu.cpp:1310 y cpu.cpp:2261 son identicas);
+- la variante *likely* sigue la regla de siempre (delay slot anulado si no se toma);
+- lo unico distinto es de donde sale la condicion: no de comparar dos GPR sino del bit **COND**
+  (23) de FCR31, contra `TF` = bit 0 de `rt`.
+
+Como `TF` se conoce al compilar, la condicion sale en dos instrucciones sin ramas:
+
+```
+test byte [rbx + fcr31 + 2], 0x80    ; COND = bit 23 -> byte 2, bit 7
+setne/sete al                        ; setne si TF=1, sete si TF=0
+```
+
+y a partir de ahi entra por el mismo camino que BEQ (condicion en `[rsp+32]`), sin tocar las
+fases B/C. **CU1** claro se declina con un bail normal: el interprete re-ejecuta el BC1 y
+levanta el Coprocessor Unusable con su `CE=1` exacto, que es la unica forma de no inventarse la
+excepcion.
+
+### Un rollback que dejaba basura
+
+La maquinaria de salto se echa atras (`buf.used = beforeBranch`) cuando el delay slot no
+compila. Hasta ahora ninguna fase A registraba sitios de bail, asi que descartar el codigo
+bastaba. BC1 si registra uno, y un rollback dejaba ese `bailSite` apuntando a una direccion
+que la siguiente op iba a reescribir: el parcheo posterior habria escrito un rel32 en mitad de
+otra instruccion. Los tres vectores (`bailSites`/`bailIdx`/`bailSnap`) se recortan ahora junto
+con el buffer, en `rollbackBranch()`.
+
+### Resultado
+
+| | despachos | cobertura | `compile` | `ctrl` | bench threaded-jit |
+|---|---|---|---|---|---|
+| antes | 33.5M | 745.4% | 6.89M | 3.61M | 461.4% |
+| BC1 | **25.2M** | **836.5%** | **4.46M** | **1.45M** | **471.1%** |
+
+`ctrl` cae a menos de la mitad sin haberlo tocado: un BC1 no compilado no solo devolvia el
+lider al interprete, tambien su delay slot y el salto entero. OP11 desaparece del compile-fail.
+
+Se bisecta con el bit **32** de `KESTREL_JIT_BRSEL` (apagarlo devuelve BC1 al interprete).
+
+El siguiente de la lista es COP0: `MFC0` 1.30M + `MTC0` 1.09M, bloqueado por otra cosa -- el
+valor de `Count` a mitad de bloque, que no esta puesto al dia hasta que el bloque sale.

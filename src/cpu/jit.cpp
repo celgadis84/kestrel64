@@ -898,6 +898,10 @@ u64 g_compFailOp[64] = {0};
 u64 g_endOp[64] = {0}, g_endSpecial[64] = {0}, g_endRegimm[32] = {0};
 u64 g_compFailSpecial[64] = {0};
 u64 g_compFailRegimm[32] = {0};
+// COP0/COP1 son las dos clases gordas del compile-fail, y el opcode primario no dice
+// nada: MFC0 y MTC0 comparten OP10, y bajo OP11 conviven MFC1/CFC1/BC1 con la aritmetica
+// que YA se compila. El sub-histograma va por el campo rs, que es quien las separa.
+u64 g_compFailCop[2][32] = {{0}};
 static const int g_compFailOn = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 
 // Block-linking Step 1 (gated KESTREL_JIT_LINK): emite un prólogo re-validable en cada bloque
@@ -1219,6 +1223,13 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     bool isRegimmBr = (LO == 0x01 && (rtF == 0x00 || rtF == 0x01 || rtF == 0x10 || rtF == 0x11));
     bool isRegimmAL = (LO == 0x01 && (rtF == 0x10 || rtF == 0x11)); // BLTZAL / BGEZAL (enlazan $31)
     bool isBcondZ = isBlez || isBgtz || isRegimmBr;
+    // BC1F/BC1T/BC1FL/BC1TL (COP1 con rs=0x08). Comparten la aritmetica de destino con BEQ
+    // (pc + SIMM*4) y la regla de las likely; lo unico distinto es de donde sale la condicion:
+    // el bit COND (23) de FCR31 comparado con TF = rt bit0. Eran 2.1M de lideres no
+    // compilables en SM64 -- el compile-fail entero de COP1.
+    bool isBc1 = (LO == 0x11 && ((op >> 21) & 31) == 0x08);
+    bool bc1Tf = (rtF & 1) != 0;                             // TF: con que valor de COND se toma
+    bool isBc1L = isBc1 && (rtF & 2) != 0;                   // ND: variante likely
     // Variantes "likely": misma condición y mismo target que las normales, pero ANULAN el
     // delay slot cuando no se toman. Son mayoría en el código que generan los compiladores
     // de SGI (BNEL solo era el 65% de los líderes no compilables medidos en SM64), así que
@@ -1228,7 +1239,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     bool isBgtzL  = (LO == 0x17 && rtF == 0);                // BGTZL
     bool isRegimmL  = (LO == 0x01 && (rtF == 0x02 || rtF == 0x03 || rtF == 0x12 || rtF == 0x13));
     bool isRegimmALL = (LO == 0x01 && (rtF == 0x12 || rtF == 0x13));  // BLTZALL/BGEZALL: enlazan $31
-    bool isLikely = isBeqL || isBlezL || isBgtzL || isRegimmL;
+    bool isLikely = isBeqL || isBlezL || isBgtzL || isRegimmL || isBc1L;
     // Biseccion por clase de salto (KESTREL_JIT_BRSEL, mascara de bits; por defecto todas):
     //   1 BEQ/BNE   2 BLEZ/BGTZ/REGIMM   4 likely   8 J/JAL   16 JR/JALR
     // Apagar una clase la deja fuera de la absorcion: el bloque termina ahi y manda el
@@ -1242,6 +1253,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       if(!(kBrSel & 4))  isLikely = false;
       if(!(kBrSel & 8))  isJmp = false;
       if(!(kBrSel & 16)) isJr = false;
+      if(!(kBrSel & 32)) { isBc1 = false; if(isBc1L) isLikely = false; }
     }
     // BLTZ(0x00)/BLTZAL(0x10) → rs<0 (setl); BGEZ(0x01)/BGEZAL(0x11) → rs>=0 (setge). bit0 decide.
     // Las likely de REGIMM (0x02/0x03/0x12/0x13) siguen la misma regla de bit0.
@@ -1251,7 +1263,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     static const int noBranch = std::getenv("KESTREL_JIT_NOBRANCH") ? 1 : 0;
     static const int noJmp = std::getenv("KESTREL_JIT_NOJMP") ? 1 : 0;  // A/B: desactiva SOLO J/JAL/JR/JALR
     if(noJmp && (isJmp || isJr)) break;
-    if(!noBranch && (isBeq || isJmp || isJr || isBcondZ || isLikely)) {
+    if(!noBranch && (isBeq || isJmp || isJr || isBcondZ || isLikely || isBc1)) {
       u32 ad = a + 4;                              // delay slot
       bool delayOk = (ad + 4 <= c.mem->rdram.size()) &&
                      ((ad & ~0xFFFu) == (phys & ~0xFFFu));
@@ -1266,6 +1278,14 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         // volcado queda FUERA del rango de rollback (antes de beforeBranch) a proposito.
         rc.disable();
         usize beforeBranch = c.jitCache->buf.used; // por si el delay no compila
+        // Un rollback deja el codigo descartado pero los sitios de bail ya registrados
+        // seguirian apuntando dentro de esa zona, que otra op reescribira despues. Se recortan
+        // con el buffer. Hoy solo BC1 registra uno en fase A; vale para el que venga.
+        usize nBailBefore = bailSites.size();
+        auto rollbackBranch = [&]() {
+          c.jitCache->buf.used = beforeBranch;
+          bailSites.resize(nBailBefore); bailIdx.resize(nBailBefore); bailSnap.resize(nBailBefore);
+        };
         // Fase A (antes del delay slot): capturar la condición/target/enlace que el delay
         // slot podría pisar (el delay puede escribir gpr[rs]/gpr[rt] o hacer CALL).
         if(isBeq || isBeqL) {
@@ -1279,6 +1299,19 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
           // BLTZAL/BGEZAL (y sus likely): enlace INCONDICIONAL de $31 tras leer rs (el
           // intérprete lee la condición ANTES de escribir $31; si rs==31 usa el pre-enlace).
           if(isRegimmAL || isRegimmALL) emitLink(idx, 31);
+        } else if(isBc1) {
+          // CU1 claro = Coprocessor Unusable (ExcCode 11, CE=1). Se bailea con las rectas ya
+          // retiradas y pc intacto: el interprete re-ejecuta el BC1 y levanta la excepcion
+          // exacta. La residencia ya esta volcada y apagada, asi que el snap va vacio.
+          const s32 stOff = (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status);
+          e.test_m8_imm(RBX, stOff + 3, 0x20);              // Status bit29 vive en el byte 3
+          bailSites.push_back(e.je_rel32_placeholder());
+          bailIdx.push_back(idx); bailSnap.push_back(rc.snap());
+          // COND es el bit 23 de FCR31 -> byte 2, bit 7. ZF=1 significa COND=0, asi que
+          // "tomar" es setne cuando TF=1 y sete cuando TF=0.
+          e.test_m8_imm(RBX, (s32)offsetof(CPU, fcr31) + 2, 0x80);
+          e.setcc(bc1Tf ? 0x95 : 0x94, RAX);
+          e.st8_rsp(32);
         } else if(isJr) {
           e.ld64(RAX, rs); e.st64_rsp(RAX, 32);    // target = gpr[rs] (pre-delay) → [rsp+32]
           if(FN == 0x09) emitLink(idx, rd ? rd : 31);   // JALR enlaza tras leer rs (rd puede==rs)
@@ -1306,14 +1339,14 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             b.hasBranch = true;
             endedInBranch = true;
           } else {
-            c.jitCache->buf.used = beforeBranch;   // el delay no compila → descartar el salto
+            rollbackBranch();                      // el delay no compila: descartar el salto
           }
         }
         // Fase B: delay slot.
         else if(compileDelay(dop, idx)) {
           // Fase C: computar target → RCX y salir por la cola de control común.
           u64 cands[2]; int nc = 0;   // destinos estáticos, para las guardas de block-linking
-          if((isBeq || isBcondZ) && g_jitTrace && simm > 0 && i + 2 < kMaxOps) {
+          if((isBeq || isBcondZ || isBc1) && g_jitTrace && simm > 0 && i + 2 < kMaxOps) {
             // Traza: salida de control SÓLO por el camino tomado; la caída continúa inline.
             // El delay slot ya está emitido arriba (fase B) y se ejecuta en ambos caminos,
             // que es exactamente la semántica de un branch NO-likely.
@@ -1330,7 +1363,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             b.hasBranch = true;
             i++;              // el for avanza otro → salto + delay slot consumidos
             traced = true;
-          } else if(isBeq || isBcondZ) {
+          } else if(isBeq || isBcondZ || isBc1) {
             s32 Ctaken = (s32)(4 * (idx + 1)) + simm * 4;  // VA + 4(idx+1) + SIMM*4
             s32 Cfall  = (s32)(4 * (idx + 2));             // VA + 4(idx+2)
             e.mov_r_m(RDX, RBX, pcOff);     // rdx = entryVA
@@ -1361,7 +1394,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
             endedInBranch = true;
           }
         } else {
-          c.jitCache->buf.used = beforeBranch;   // descartar el salto entero
+          rollbackBranch();                      // descartar el salto entero
         }
       }
     }
@@ -1381,6 +1414,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       g_compFailOp[LO]++;
       if(LO == 0) g_compFailSpecial[lop & 63]++;
       else if(LO == 1) g_compFailRegimm[(lop >> 16) & 31]++;
+      else if(LO == 0x10 || LO == 0x11) g_compFailCop[LO - 0x10][(lop >> 21) & 31]++;
     }
     c.jitCache->buf.used = (usize)(entry - c.jitCache->buf.base); return b;
   }
@@ -1467,7 +1501,8 @@ static u64 g_chainOps = 0, g_chainLinks = 0;
 static const int g_jitStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 extern u64 g_trampWhy[5];
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
-                extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32]; }
+                extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32];
+                extern u64 g_compFailCop[2][32]; }
 namespace jit { extern u64 g_rcReg, g_rcMem, g_rcSpill; }
 // Diagnóstico: razón de decline (por qué jitTryBlock devuelve 0). Solo bajo stats.
 enum { DR_RSP=0, DR_CTRL, DR_INT, DR_UNCACHED, DR_COMPILE, DR_TIMER, DR_SMC, DR_MISC, DR_N };
@@ -1642,6 +1677,9 @@ auto CPU::jitTryBlock() -> u32 {
         std::fprintf(stderr, " SP%02x=%llu", f, (unsigned long long)jit::g_compFailSpecial[f]);
       for(int r = 0; r < 32; r++) if(jit::g_compFailRegimm[r] > 10000)
         std::fprintf(stderr, " RI%02x=%llu", r, (unsigned long long)jit::g_compFailRegimm[r]);
+      std::fprintf(stderr, "\n[compfailcop]");
+      for(int k = 0; k < 2; k++) for(int r = 0; r < 32; r++) if(jit::g_compFailCop[k][r] > 10000)
+        std::fprintf(stderr, " COP%d.rs%02x=%llu", k, r, (unsigned long long)jit::g_compFailCop[k][r]);
       std::fprintf(stderr, "\n");
     }
   }
@@ -1723,7 +1761,8 @@ auto CPU::jitTryBlock() -> u32 {
     if(jitFetchWord(phys) == nc.word) {
       if(jit::g_compFailOn) { u32 LO = nc.word >> 26; jit::g_compFailOp[LO]++;
         if(LO == 0) jit::g_compFailSpecial[nc.word & 63]++;
-        else if(LO == 1) jit::g_compFailRegimm[(nc.word >> 16) & 31]++; }
+        else if(LO == 1) jit::g_compFailRegimm[(nc.word >> 16) & 31]++;
+        else if(LO == 0x10 || LO == 0x11) jit::g_compFailCop[LO - 0x10][(nc.word >> 21) & 31]++; }
       JDECL(DR_COMPILE); return 0; }
     nc.phys = ~0u;                              // el código cambió bajo el PC → reintentar
   }
