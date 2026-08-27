@@ -29,7 +29,13 @@ cp "$EXE" "$OUT/"
 
 # El lanzador grafico, si esta compilado/presente, viaja con el emulador: es la cara del
 # programa para quien no vive en una terminal.
-[ -d tools/launcher ] && { mkdir -p "$OUT/tools"; cp -r tools/launcher "$OUT/tools/"; }
+if [ -d tools/launcher ]; then
+  mkdir -p "$OUT/tools"
+  cp -r tools/launcher "$OUT/tools/"
+  # Bytecode y caratulas descargadas son estado de ESTA maquina, no del programa.
+  rm -rf "$OUT/tools/launcher/__pycache__" "$OUT/tools/launcher/cache"
+  rm -f "$OUT/tools/launcher"/*.cfg
+fi
 
 # ldd da el cierre transitivo ya resuelto. Todo lo que NO cuelgue de C:\WINDOWS es una
 # dependencia del toolchain que el usuario final no tiene: se copia. Lo que cuelga de
