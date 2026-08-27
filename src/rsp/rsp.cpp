@@ -1058,6 +1058,9 @@ auto Rsp::execCop2T(u32 op) -> void {
 #if KESTREL_VUSTAT
   if(g_vustat.on) g_vustat.cop2[fn]++;
 #endif
+  // Sin camino SSE posible: ir DIRECTO a la funcion pequena, sin tocar el respaldo gordo.
+  if constexpr(FN == 0x1d || (FN >= 0x30 && FN <= 0x36)) { execCop2Div(op, tv); return; }
+
 #if KESTREL_VUSTAT
   if(sse && vuOpT<FN>(tv, S, D)) { if(g_vustat.on) g_vustat.cop2sse[fn]++; return; }
 #else
@@ -1094,7 +1097,7 @@ auto Rsp::execCop2(u32 op) -> void {
 auto Rsp::execCop2Scalar(u32 op, __m128i tv) -> void {
   u32 fn = op & 0x3f, e = op >> 21 & 0xf;
   int vt = op >> 16 & 31, vs = op >> 11 & 31, vd = op >> 6 & 31, de = op >> 11 & 7;
-  (void)vt; (void)e;
+  (void)vt; (void)e; (void)de;
   R128& S = vpr[vs];
   R128& D = vpr[vd];
 
@@ -1139,9 +1142,7 @@ auto Rsp::execCop2Scalar(u32 op, __m128i tv) -> void {
   // VSAR se queda aqui a proposito: es copiar una de las tres mitades del acumulador
   // al destino, 16 bytes, que el compilador ya emite como un movdqa. No hay bucle por
   // carril que vectorizar, meterlo en execVuSse solo cambiaria de sitio la misma copia.
-  case 0x1d:  // VSAR
-    D = (e == 8) ? acch : (e == 9) ? accm : (e == 10) ? accl : R128{};
-    break;
+  case 0x1d: execCop2Div(op, tv); break;   // VSAR
   case 0x20: for(int n = 0; n < 8; n++) {  // VLT
     bool c = S.s(n) < vte.s(n) || (S.s(n) == vte.s(n) && vcol.get(n) && vcoh.get(n));
     accl.u(n) = vccl.set(n, c) ? S.uc(n) : vte.uc(n);
@@ -1200,6 +1201,47 @@ auto Rsp::execCop2Scalar(u32 op, __m128i tv) -> void {
   case 0x2b: for(int n = 0; n < 8; n++) accl.u(n) = ~(S.uc(n) | vte.uc(n)); D = accl; break;  // VNOR
   case 0x2c: for(int n = 0; n < 8; n++) accl.u(n) = S.uc(n) ^ vte.uc(n);    D = accl; break;  // VXOR
   case 0x2d: for(int n = 0; n < 8; n++) accl.u(n) = ~(S.uc(n) ^ vte.uc(n)); D = accl; break;  // VNXOR
+  case 0x30: case 0x31: case 0x32: case 0x33: case 0x34: case 0x35: case 0x36:
+    execCop2Div(op, tv); break;   // VRCP*/VMOV/VRSQ*: fuera del switch gordo, ver rsp.hpp
+  case 0x02: case 0x0a: {  // VRNDP (D=1) / VRNDN (D=0)
+    bool Dn = (fn == 0x02);
+    for(int n = 0; n < 8; n++) {
+      s32 product = (s16)vte.uc(n); if(vs & 1) product <<= 16;
+      s64 acc = ((s64)acch.uc(n) << 32 | (s64)accm.uc(n) << 16 | accl.uc(n));
+      acc = (acc << 16) >> 16;   // sign-extend 48-bit
+      if(!Dn && acc <  0) acc = sclip48(acc + product);
+      if(Dn  && acc >= 0) acc = sclip48(acc + product);
+      acch.u(n) = acc >> 32; accm.u(n) = acc >> 16; accl.u(n) = acc; D.u(n) = sclamp16((s32)(acc >> 16));
+    }
+  } break;
+  case 0x03: for(int n = 0; n < 8; n++) {  // VMULQ
+    s32 product = (s16)S.uc(n) * (s16)vte.uc(n); if(product < 0) product += 31;
+    acch.u(n) = product >> 16; accm.u(n) = (u16)product; accl.u(n) = 0; D.u(n) = (u16)(sclamp16(product >> 1) & ~15);
+  } break;
+  case 0x0b: for(int n = 0; n < 8; n++) {  // VMACQ
+    s32 product = acch.uc(n) << 16 | accm.uc(n);
+    if(product < 0 && !(product & (1 << 5))) product += 32;
+    else if(product >= 32 && !(product & (1 << 5))) product -= 32;
+    acch.u(n) = product >> 16; accm.u(n) = (u16)product; D.u(n) = (u16)(sclamp16(product >> 1) & ~15);
+  } break;
+  case 0x37: case 0x3f: break;  // VNOP / VNULL
+  default: for(int n = 0; n < 8; n++) { accl.u(n) = (u16)(S.s(n) + vte.s(n)); D.u(n) = 0; } break;  // VZERO-class
+  }
+}
+
+
+// VSAR y la familia del reciproco. Mismo codigo que tenia el switch escalar, en una funcion
+// propia: el dynarec y el interprete entran aqui directamente (execCop2T), sin pasar por el
+// prologo de peor caso de execCop2Scalar. Ver rsp.hpp.
+auto Rsp::execCop2Div(u32 op, __m128i tv) -> void {
+  u32 fn = op & 0x3f, e = op >> 21 & 0xf;
+  int vt = op >> 16 & 31, vd = op >> 6 & 31, de = op >> 11 & 7;
+  R128& D = vpr[vd];
+  R128 vte; _mm_store_si128(reinterpret_cast<__m128i*>(vte.el), tv);
+  switch(fn) {
+  case 0x1d:  // VSAR: copiar una de las tres mitades del acumulador
+    D = (e == 8) ? acch : (e == 9) ? accm : (e == 10) ? accl : R128{};
+    break;
   case 0x30: case 0x31: {  // VRCP / VRCPL
     bool L = (fn == 0x31);
     s32 input = (L && divdp) ? (s32)((divin << 16) | vte.uc(e & 7)) : (s32)(s16)vte.uc(e & 7);
@@ -1226,29 +1268,7 @@ auto Rsp::execCop2Scalar(u32 op, __m128i tv) -> void {
     divdp = false; divout = (u16)(result >> 16); accl = vpr[vt](e); D.u(de) = (u16)result;
   } break;
   case 0x36: accl = vpr[vt](e); divdp = true; divin = vte.uc(e & 7); D.u(de) = divout; break;  // VRSQH
-  case 0x02: case 0x0a: {  // VRNDP (D=1) / VRNDN (D=0)
-    bool Dn = (fn == 0x02);
-    for(int n = 0; n < 8; n++) {
-      s32 product = (s16)vte.uc(n); if(vs & 1) product <<= 16;
-      s64 acc = ((s64)acch.uc(n) << 32 | (s64)accm.uc(n) << 16 | accl.uc(n));
-      acc = (acc << 16) >> 16;   // sign-extend 48-bit
-      if(!Dn && acc <  0) acc = sclip48(acc + product);
-      if(Dn  && acc >= 0) acc = sclip48(acc + product);
-      acch.u(n) = acc >> 32; accm.u(n) = acc >> 16; accl.u(n) = acc; D.u(n) = sclamp16((s32)(acc >> 16));
-    }
-  } break;
-  case 0x03: for(int n = 0; n < 8; n++) {  // VMULQ
-    s32 product = (s16)S.uc(n) * (s16)vte.uc(n); if(product < 0) product += 31;
-    acch.u(n) = product >> 16; accm.u(n) = (u16)product; accl.u(n) = 0; D.u(n) = (u16)(sclamp16(product >> 1) & ~15);
-  } break;
-  case 0x0b: for(int n = 0; n < 8; n++) {  // VMACQ
-    s32 product = acch.uc(n) << 16 | accm.uc(n);
-    if(product < 0 && !(product & (1 << 5))) product += 32;
-    else if(product >= 32 && !(product & (1 << 5))) product -= 32;
-    acch.u(n) = product >> 16; accm.u(n) = (u16)product; D.u(n) = (u16)(sclamp16(product >> 1) & ~15);
-  } break;
-  case 0x37: case 0x3f: break;  // VNOP / VNULL
-  default: for(int n = 0; n < 8; n++) { accl.u(n) = (u16)(S.s(n) + vte.s(n)); D.u(n) = 0; } break;  // VZERO-class
+  default: break;
   }
 }
 

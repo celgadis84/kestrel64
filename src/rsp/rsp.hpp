@@ -223,6 +223,11 @@ public:
   template<u32 SUB> auto execStoreT(u32 op) -> void;
 private:
   auto execCop2Scalar(u32 op, __m128i tv) -> void;
+  // VSAR y la familia del reciproco (VRCP/VRCPL/VRCPH/VMOV/VRSQ*): no tienen camino SSE
+  // -- son por-elemento o una copia de medio acumulador -- pero son ~10% de las COP2 que
+  // ejecuta SM64. Sacadas del switch de 64 casos de execCop2Scalar porque alli pagaban su
+  // prologo entero (10 volcados de xmm, 264 B de pila) por una tabla y dos moves.
+  auto execCop2Div(u32 op, __m128i tv) -> void;
   // 8-lane SSE fast path for the parallelizable COP2 ops. Returns true if it handled
   // `fn` (bit-exact with the scalar switch), false to fall through to scalar.
   template<u32 FN> auto vuOpT(__m128i t, R128& S, R128& D) -> bool;
