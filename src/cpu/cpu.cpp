@@ -283,6 +283,7 @@ envflags:
   if(std::getenv("KESTREL_PCRING")) pcRingOn = true;
   if(const char* w = std::getenv("KESTREL_WATCHP")) wPhys = (u32)std::strtoul(w, nullptr, 0) & 0x1fff'ffffu;
   if(std::getenv("KESTREL_HALT_UNIMPL")) haltUnimpl = true;
+  dcDbgOn = (wPhys != 0) || g_dcWriteThrough;
   refreshDebugArmed();
 }
 
@@ -353,44 +354,15 @@ auto CPU::dcFlush(u32 idx) -> void {
   l.dirty = false;
 }
 
-auto CPU::dcRead(u32 phys, u32 size) -> u64 {
-  u32 idx  = (phys >> 4) & 0x1ff;
-  u32 base = phys & ~0xfu;
+// (dcRead/dcWrite viven ahora en linea en cpu.hpp.) Cola de depuracion del store: punto de
+// vigilancia (KESTREL_WATCHP) y write-through de diagnostico (KESTREL_DCWT). Fuera de linea
+// porque solo corre con una de las dos armadas.
+auto CPU::dcWriteDbg(u32 phys, u64 val, u32 size) -> void {
+  u32 idx = (phys >> 4) & 0x1ff, off = phys & 0xf;
   DCacheLine& l = dcache[idx];
-  if(!l.valid || l.ptag != base) { dcFlush(idx); dcFill(idx, base); }
-  u32 off = phys & 0xf;
-  // El valor guest es big-endian dentro de la línea; el host es little-endian. Un memcpy del
-  // ancho exacto + bswap da el MISMO resultado que el bucle byte a byte, pero en 2 instrucciones
-  // en vez de un bucle de cuenta variable (size no es constante en la llamada indirecta).
-  switch(size) {
-    case 1: return l.data[off];
-    case 2: { u16 v; std::memcpy(&v, &l.data[off], 2); return __builtin_bswap16(v); }
-    case 4: { u32 v; std::memcpy(&v, &l.data[off], 4); return __builtin_bswap32(v); }
-    case 8: { u64 v; std::memcpy(&v, &l.data[off], 8); return __builtin_bswap64(v); }
-    default: break;
-  }
-  u64 v = 0;
-  for(u32 i = 0; i < size; i++) v = (v << 8) | l.data[off + i];   // big-endian
-  return v;
-}
-
-auto CPU::dcWrite(u32 phys, u64 val, u32 size) -> void {
-  u32 idx  = (phys >> 4) & 0x1ff;
-  u32 base = phys & ~0xfu;
-  DCacheLine& l = dcache[idx];
-  if(!l.valid || l.ptag != base) { dcFlush(idx); dcFill(idx, base); }
-  u32 off = phys & 0xf;
-  switch(size) {
-    case 1: l.data[off] = (u8)val; break;
-    case 2: { u16 v = __builtin_bswap16((u16)val); std::memcpy(&l.data[off], &v, 2); break; }
-    case 4: { u32 v = __builtin_bswap32((u32)val); std::memcpy(&l.data[off], &v, 4); break; }
-    case 8: { u64 v = __builtin_bswap64(val);      std::memcpy(&l.data[off], &v, 8); break; }
-    default: for(u32 i = 0; i < size; i++) l.data[off + i] = (u8)(val >> (8 * (size - 1 - i))); break;
-  }
-  l.dirty = true;
-  if(__builtin_expect(wPhys != 0, 0) && (phys & ~0xfu) == (wPhys & ~0xfu))
-    wNote((u32)val);
-  if(g_dcWriteThrough) for(u32 i = 0; i < size; i++) if(phys+i < mem->rdram.size()) mem->rdram[phys+i] = l.data[off+i];
+  if(wPhys != 0 && (phys & ~0xfu) == (wPhys & ~0xfu)) wNote((u32)val);
+  if(g_dcWriteThrough)
+    for(u32 i = 0; i < size; i++) if(phys + i < mem->rdram.size()) mem->rdram[phys + i] = l.data[off + i];
 }
 
 auto CPU::peekPhysCoherent(u32 phys) -> u8 {

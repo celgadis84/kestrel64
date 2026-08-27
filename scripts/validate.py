@@ -283,7 +283,10 @@ def krom_one(job):
     dump = outdir / (re.sub(r"[^A-Za-z0-9]+", "_", name) + ".bmp")
     rc, log = run_rom(rom, dump, mode, insn, timeout, stable=stable, frames=frames)
     if not dump.exists():
-        return name, None, None, None, f"NODUMP rc={rc}"
+        # Guarda el log: un NODUMP sin motivo es indistinguible de un fallo real y obliga
+        # a re-correr la bateria entera para verlo. La ultima linea util suele decirlo todo.
+        tail = " | ".join(l.strip().replace(chr(9), " ") for l in log.splitlines() if l.strip())[-160:]
+        return name, None, None, None, f"NODUMP rc={rc} {tail}"
     try:
         ex, cl, rmse, note = compare(dump, png)
     except Exception as e:                      # noqa: BLE001 - report, don't abort the sweep

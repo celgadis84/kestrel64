@@ -345,3 +345,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_prdp | ~319 s | idem; regress=0 |
 | 2026-08-27 | gate_all | ~351 s | xlatDirect en linea + cacheable en linea; 12/12, regress=0 |
 | 2026-08-27 | gate_prdp | ~320 s | idem; regress=0 |
+| 2026-08-27 | gate_all | ~397 s | D-cache en linea; 12/12. krom: 4 NODUMP transitorios, limpio al re-correr (regress=0) |
+| 2026-08-27 | gate_prdp | ~487 s | idem; regress=0. Las dos cifras suben por el krom re-corrido en paralelo |

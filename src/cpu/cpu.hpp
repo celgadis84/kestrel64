@@ -283,8 +283,48 @@ private:
   }
   // Write-back D-cache byte-addressed access (phys already reverse-endian adjusted).
   // Aligned CPU accesses never straddle a 16-byte line, so a single line suffices.
-  auto dcRead(u32 phys, u32 size) -> u64;
-  auto dcWrite(u32 phys, u64 val, u32 size) -> void;
+  // dcRead/dcWrite son EN LINEA: el llamador del JIT conoce el tamano como constante, asi que
+  // el switch desaparece y con el la llamada. El camino de fallo (flush+fill) sigue fuera de
+  // linea, que es donde debe estar el codigo frio.
+  inline auto dcRead(u32 phys, u32 size) -> u64 {
+    u32 idx  = (phys >> 4) & 0x1ff;
+    u32 base = phys & ~0xfu;
+    DCacheLine& l = dcache[idx];
+    if(__builtin_expect(!l.valid || l.ptag != base, 0)) { dcFlush(idx); dcFill(idx, base); }
+    u32 off = phys & 0xf;
+    // El valor guest es big-endian dentro de la linea; el anfitrion es little-endian. Un
+    // memcpy del ancho exacto + bswap da el MISMO resultado que el bucle byte a byte.
+    switch(size) {
+      case 1: return l.data[off];
+      case 2: { u16 v; __builtin_memcpy(&v, &l.data[off], 2); return __builtin_bswap16(v); }
+      case 4: { u32 v; __builtin_memcpy(&v, &l.data[off], 4); return __builtin_bswap32(v); }
+      case 8: { u64 v; __builtin_memcpy(&v, &l.data[off], 8); return __builtin_bswap64(v); }
+      default: break;
+    }
+    u64 v = 0;
+    for(u32 i = 0; i < size; i++) v = (v << 8) | l.data[off + i];   // big-endian
+    return v;
+  }
+  inline auto dcWrite(u32 phys, u64 val, u32 size) -> void {
+    u32 idx  = (phys >> 4) & 0x1ff;
+    u32 base = phys & ~0xfu;
+    DCacheLine& l = dcache[idx];
+    if(__builtin_expect(!l.valid || l.ptag != base, 0)) { dcFlush(idx); dcFill(idx, base); }
+    u32 off = phys & 0xf;
+    switch(size) {
+      case 1: l.data[off] = (u8)val; break;
+      case 2: { u16 v = __builtin_bswap16((u16)val); __builtin_memcpy(&l.data[off], &v, 2); break; }
+      case 4: { u32 v = __builtin_bswap32((u32)val); __builtin_memcpy(&l.data[off], &v, 4); break; }
+      case 8: { u64 v = __builtin_bswap64(val);      __builtin_memcpy(&l.data[off], &v, 8); break; }
+      default: for(u32 i = 0; i < size; i++) l.data[off + i] = (u8)(val >> (8 * (size - 1 - i))); break;
+    }
+    l.dirty = true;
+    // Cola de depuracion (punto de vigilancia y write-through de diagnostico): una sola
+    // bandera armada de antemano, y el trabajo fuera de linea.
+    if(__builtin_expect(dcDbgOn, 0)) dcWriteDbg(phys, val, size);
+  }
+  auto dcWriteDbg(u32 phys, u64 val, u32 size) -> void;   // solo con depuracion armada
+  bool dcDbgOn = false;
   auto dcFlush(u32 idx) -> void;              // push a dirty line to RDRAM, clear dirty
   auto dcFill(u32 idx, u32 base) -> void;     // load 16 bytes RDRAM -> line
   auto icFetch(u32 phys) -> u32;              // instruction fetch through the I-cache

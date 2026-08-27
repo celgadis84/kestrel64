@@ -513,3 +513,28 @@ Medido, A/B intercalado de 3000 M instrucciones:
 - interprete (400 M instrucciones): 21637 -> 20624 ms -> **+4.9%**
 
 Ambas puertas verdes, 12/12 y krom regress=0 en las dos.
+
+### 7. D-cache en linea (`dcRead` / `dcWrite`)
+
+Perfil tras el cambio anterior: `jitTryBlock` 30.7%, `kestrel_jitLW` 20.1%, `dcWrite` 11.0%,
+`rcpPace` 9.5%, `jitLWC1` 6.8%, `dcFill` 6.1%. `dcRead`/`dcWrite` eran otra LLAMADA fuera de
+linea por acceso a memoria cacheable, y su cuerpo caliente es corto: indice = `(phys >> 4) &
+0x1ff`, comparar etiqueta, y extraer/insertar 1/2/4/8 bytes big-endian de la linea de 16.
+
+Ahora viven en `cpu.hpp`, en linea, con el fallo de linea (`dcFlush` + `dcFill`) marcado como
+improbable y fuera de linea. El acceso a la linea pasa a `memcpy` + `bswap` por tamano en vez
+del bucle byte a byte; la semantica es identica (la linea guarda bytes big-endian).
+
+La cola de depuracion del store -- punto de vigilancia `KESTREL_WATCHP` y write-through de
+diagnostico `KESTREL_DCWT` -- sale del camino caliente a `dcWriteDbg`, tras una bandera
+`dcDbgOn` que solo se arma si una de las dos esta puesta. Antes se comprobaban las dos
+condiciones en CADA store de 32 bits.
+
+Medido, A/B intercalado de 3000 M instrucciones (SM64, JIT): antes media 17528 ms, despues
+16941 -> **+3.4%**. Ambas puertas verdes.
+
+Nota de la bateria: en la corrida de `gate_all` de este cambio, cuatro ROMs de krom
+(SHIFT/DSLLV, DSRA, DSRA32, DSRAV) salieron `NODUMP rc=1` y volvieron a 100.00 al re-correr la
+bateria sola. No es una regresion del cambio: `rc=1` solo lo devuelve `System::init`, o sea
+abrir la ROM. Para que un transitorio asi no obligue a re-correr los 371 casos, `validate.py`
+guarda ahora la cola del log del proceso en la nota de la fila NODUMP.
