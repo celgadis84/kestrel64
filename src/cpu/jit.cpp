@@ -367,6 +367,8 @@ extern "C" u8 kestrel_jitCVTWS(void*, u32, u32);   extern "C" u8 kestrel_jitTRUN
 extern "C" u8 kestrel_jitCVTWD(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWD(void*, u32, u32);
 extern "C" u8 kestrel_jitCVTDS(void*, u32, u32);   extern "C" u8 kestrel_jitCVTSD(void*, u32, u32);
 extern "C" u8 kestrel_jitCMPS (void*, u32, u32);   extern "C" u8 kestrel_jitCMPD  (void*, u32, u32);
+extern "C" u8 kestrel_jitCVTSW(void*, u32, u32);   extern "C" u8 kestrel_jitCVTDW(void*, u32, u32);
+extern "C" u8 kestrel_jitDIVS (void*, u32, u32);   extern "C" u8 kestrel_jitDIVD (void*, u32, u32);
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
@@ -488,6 +490,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
       case 0x00: fn = (void*)&kestrel_jitADDS; break;
       case 0x01: fn = (void*)&kestrel_jitSUBS; break;
       case 0x02: fn = (void*)&kestrel_jitMULS; break;
+      case 0x03: fn = (void*)&kestrel_jitDIVS; break;
       // Conversiones: lo que mas cede el bloque despues de CTC1 (ver jitCop1Cvt).
       case 0x0d: fn = (void*)&kestrel_jitTRUNCWS; break;
       case 0x21: fn = (void*)&kestrel_jitCVTDS;   break;
@@ -499,10 +502,18 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
       case 0x00: fn = (void*)&kestrel_jitADDD; break;
       case 0x01: fn = (void*)&kestrel_jitSUBD; break;
       case 0x02: fn = (void*)&kestrel_jitMULD; break;
+      case 0x03: fn = (void*)&kestrel_jitDIVD; break;
       case 0x0d: fn = (void*)&kestrel_jitTRUNCWD; break;
       case 0x20: fn = (void*)&kestrel_jitCVTSD;   break;
       case 0x24: fn = (void*)&kestrel_jitCVTWD;   break;
       default: if((op & 63) >= 0x30) fn = (void*)&kestrel_jitCMPD; break;
+    } break;
+    // W (fuente entera): CVT.S.W / CVT.D.W, lo que emite el compilador al pasar un
+    // contador o un indice a coma flotante.
+    case 0x14: switch(op & 63) {
+      case 0x20: fn = (void*)&kestrel_jitCVTSW; break;
+      case 0x21: fn = (void*)&kestrel_jitCVTDW; break;
+      default: break;
     } break;
     default: break;
   }

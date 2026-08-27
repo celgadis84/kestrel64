@@ -333,6 +333,7 @@ public:
   template<u32 RSc> auto jitCop1Move(u32 op, u32 off) -> u8;
   template<u32 FN, u32 FMT> auto jitCop1Alu(u32 op, u32 off) -> u8;
   template<u32 KIND> auto jitCop1Cvt(u32 op, u32 off) -> u8;
+  template<u32 KIND> auto jitCop1CvtW(u32 op, u32 off) -> u8;
   template<u32 KIND> auto jitCop1CvtChk(u32 op, u32 off) -> u8;
   template<u32 FMT> auto jitCop1Cmp(u32 op, u32 off) -> u8;
   template<u32 FMT> auto jitCop1CmpChk(u32 op, u32 off) -> u8;

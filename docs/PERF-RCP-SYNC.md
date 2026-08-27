@@ -464,3 +464,26 @@ old media 18289 ms (min 17992), new media 18361 ms (min 18048) -> **neutro dentr
 3000 M instrucciones el ahorro teorico esta por debajo del 1%, asi que el banco no puede
 resolverlo. Se conserva porque es correcto y quita esas 1.29 M entradas al interprete; ninguna
 de las dos puertas se mueve.
+
+### 5. DIV.S/DIV.D y CVT.S.W / CVT.D.W
+
+Ultimos escalones del histograma de COP1: DIV de formato (~3.3%) y las conversiones con fuente
+ENTERA (rs=0x14, ~4.9%).
+
+DIV entra en la plantilla que ya tenian ADD/SUB/MUL (`jitCop1Alu<FN=3>`): mismo cribado de
+operandos (normal o cero) y mismo cribado del resultado, que es lo que hace segura la division.
+Un divisor cero es "normal o cero" y pasa el filtro de entrada, pero el resultado sale infinito
+o NaN y el cribado de SALIDA lo rechaza -- ademas de que DivideByZero/Invalid caen fuera de la
+mascara de Inexact --, asi que el caso lo sigue resolviendo el interprete con su Cause completa.
+
+`jitCop1CvtW<KIND>` cubre CVT.S.W y CVT.D.W. Aqui no hay casos raros de entrada: cualquier
+patron de 32 bits es un entero con signo valido. .D es exacto siempre (Cause limpia, sin
+banderas); .S puede redondear -- 24 bits de mantisa para 32 de entero -- y solo puede levantar
+Inexact, que se acumula igual que en el resto y delega si tiene su Enable armado.
+
+Validado con el oraculo gateado, ahora con las ocho variantes de conversion instanciadas: las
+OCHO llegan a dispararse en SM64 y ninguna produce discrepancia (1500 M instrucciones, umbral
+del contador bajado temporalmente a 1024 para verlas todas).
+
+Medido: A/B intercalado, cuatro rondas de 3000 M instrucciones. antes media 18351 ms, despues
+media 18195 ms -> **~0.9%**, en el limite del ruido del anfitrion. Ambas puertas verdes.

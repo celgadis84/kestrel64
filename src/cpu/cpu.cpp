@@ -1460,7 +1460,7 @@ auto CPU::jitCop1Alu(u32 op, u32 off) -> u8 {
     if(__builtin_expect(!(plain(ab) && plain(bb)), 0)) return jitInterpOp(op, off);
     mx::prep(rc);
     float a = std::bit_cast<float>(ab), b = std::bit_cast<float>(bb);
-    float r = (FN == 0) ? a + b : (FN == 1) ? a - b : a * b;
+    float r = (FN == 0) ? a + b : (FN == 1) ? a - b : (FN == 2) ? a * b : a / b;
     u32 rb = std::bit_cast<u32>(r);
     u32 ex = mx::flags();
     if(__builtin_expect(!plain(rb) || (ex & ~mx::INEXACT), 0)) return jitInterpOp(op, off);
@@ -1477,7 +1477,7 @@ auto CPU::jitCop1Alu(u32 op, u32 off) -> u8 {
     if(__builtin_expect(!(plain(ab) && plain(bb)), 0)) return jitInterpOp(op, off);
     mx::prep(rc);
     double a = std::bit_cast<double>(ab), b = std::bit_cast<double>(bb);
-    double r = (FN == 0) ? a + b : (FN == 1) ? a - b : a * b;
+    double r = (FN == 0) ? a + b : (FN == 1) ? a - b : (FN == 2) ? a * b : a / b;
     u64 rb = std::bit_cast<u64>(r);
     u32 ex = mx::flags();
     if(__builtin_expect(!plain(rb) || (ex & ~mx::INEXACT), 0)) return jitInterpOp(op, off);
@@ -1576,6 +1576,33 @@ auto CPU::jitCop1Cvt(u32 op, u32 off) -> u8 {
     return 1;
   }
 }
+// CVT.S.W / CVT.D.W: entero de 32 bits a coma flotante. Aqui la fuente no tiene casos raros --
+// cualquier patron de 32 bits es un entero con signo valido -- asi que lo unico que puede
+// levantarse es Inexact, y solo en .S (un doble representa cualquier int32 de forma exacta).
+// Con el Enable de Inexact armado delega en el interprete, igual que el resto de conversiones.
+template<u32 KIND>   // 0 = CVT.S.W, 1 = CVT.D.W
+auto CPU::jitCop1CvtW(u32 op, u32 off) -> u8 {
+  if(__builtin_expect(!((u32)cop0[C0_Status] & 0x2000'0000u), 0)) return jitInterpOp(op, off);
+  u32 fs = (op >> 11) & 31, fd = (op >> 6) & 31;
+  if(!((u32)cop0[C0_Status] & (1u << 26))) fs &= ~1u;
+  s32 v = (s32)(u32)fpr[fs];
+  if constexpr(KIND == 1) {                            // .D: exacto siempre, sin banderas
+    fcr31 &= ~0x0003'F000u;
+    fpr[fd] = std::bit_cast<u64>((double)v);
+    return 1;
+  } else {                                             // .S: 24 bits de mantisa -> puede redondear
+    u32 rm = fcr31 & 3;
+    u32 rc = (rm == 1) ? mx::RZ : (rm == 2) ? mx::RP : (rm == 3) ? mx::RM : mx::RN;
+    mx::prep(rc);
+    float r = (float)v;
+    u32 ex = mx::flags();
+    u32 cause = (ex & mx::INEXACT) ? (1u << 12) : 0;
+    if(__builtin_expect(cause != 0 && ((fcr31 >> 7) & 1) != 0, 0)) return jitInterpOp(op, off);
+    fcr31 = (fcr31 & ~0x0003'F000u) | cause | (cause >> 10);
+    fpr[fd] = (u64)std::bit_cast<u32>(r);
+    return 1;
+  }
+}
 // Oraculo temporal (KESTREL_FPORACLE): el camino rapido calcula, se restaura el estado y el
 // interprete ejecuta la MISMA op; destino y fcr31 tienen que salir identicos. Es el patron con
 // que se validaron ADD/SUB/MUL de COP1 (ver docs/PERF-RCP-SYNC.md). Sin la variable de entorno
@@ -1584,14 +1611,16 @@ auto CPU::jitCop1Cvt(u32 op, u32 off) -> u8 {
 template<u32 KIND>
 auto CPU::jitCop1CvtChk(u32 op, u32 off) -> u8 {
   static const bool on = std::getenv("KESTREL_FPORACLE") != nullptr;
-  if(__builtin_expect(!on, 1)) return jitCop1Cvt<KIND>(op, off);
+  auto fast1 = [&]() -> u8 { if constexpr(KIND >= 6) return jitCop1CvtW<KIND - 6>(op, off);
+                             else                   return jitCop1Cvt<KIND>(op, off); };
+  if(__builtin_expect(!on, 1)) return fast1();
   u32 fd = (op >> 6) & 31;
   u64 fdPre = fpr[fd]; u32 fcrPre = fcr31;
   static u64 seen = 0;
   if((++seen & 0xFFFFF) == 0)
     std::fprintf(stderr, "[fporacle] comprobadas %llu conversiones sin discrepancia\n", (unsigned long long)seen);
 
-  u8 fast = jitCop1Cvt<KIND>(op, off);
+  u8 fast = fast1();
   u64 fdFast = fpr[fd]; u32 fcrFast = fcr31;
   fpr[fd] = fdPre; fcr31 = fcrPre;                    // rebobinar y repetir por el interprete
   u8 slow = jitInterpOp(op, off);
@@ -1612,6 +1641,7 @@ auto CPU::jitCop1CvtChk(u32 op, u32 off) -> u8 {
 KC1C(kestrel_jitCVTWS, 0) KC1C(kestrel_jitTRUNCWS, 1)
 KC1C(kestrel_jitCVTWD, 2) KC1C(kestrel_jitTRUNCWD, 3)
 KC1C(kestrel_jitCVTDS, 4) KC1C(kestrel_jitCVTSD, 5)
+KC1C(kestrel_jitCVTSW, 6) KC1C(kestrel_jitCVTDW, 7)
 #undef KC1C
 
 // C.cond.fmt emitida por el JIT como CALL directo. Tras las conversiones es lo siguiente en la
@@ -1685,6 +1715,7 @@ extern "C" u8 kestrel_jitCMPD(void* c, u32 op, u32 off) {
     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Alu<fn, fmt>(op, off); }
 KC1A(kestrel_jitADDS, 0, 0x10) KC1A(kestrel_jitSUBS, 1, 0x10) KC1A(kestrel_jitMULS, 2, 0x10)
 KC1A(kestrel_jitADDD, 0, 0x11) KC1A(kestrel_jitSUBD, 1, 0x11) KC1A(kestrel_jitMULD, 2, 0x11)
+KC1A(kestrel_jitDIVS, 3, 0x10) KC1A(kestrel_jitDIVD, 3, 0x11)
 #undef KC1A
 
 // Movimientos COP1 (MFC1/DMFC1/CFC1/MTC1/DMTC1) emitidos por el JIT como CALL directo.
