@@ -366,6 +366,7 @@ extern "C" u8 kestrel_jitCTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitCVTWS(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWS(void*, u32, u32);
 extern "C" u8 kestrel_jitCVTWD(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWD(void*, u32, u32);
 extern "C" u8 kestrel_jitCVTDS(void*, u32, u32);   extern "C" u8 kestrel_jitCVTSD(void*, u32, u32);
+extern "C" u8 kestrel_jitCMPS (void*, u32, u32);   extern "C" u8 kestrel_jitCMPD  (void*, u32, u32);
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
@@ -491,7 +492,8 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
       case 0x0d: fn = (void*)&kestrel_jitTRUNCWS; break;
       case 0x21: fn = (void*)&kestrel_jitCVTDS;   break;
       case 0x24: fn = (void*)&kestrel_jitCVTWS;   break;
-      default: break;
+      // C.cond.fmt: los dieciseis predicados por un solo trampolin (fn se lee dentro).
+      default: if((op & 63) >= 0x30) fn = (void*)&kestrel_jitCMPS; break;
     } break;
     case 0x11: switch(op & 63) {
       case 0x00: fn = (void*)&kestrel_jitADDD; break;
@@ -500,7 +502,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
       case 0x0d: fn = (void*)&kestrel_jitTRUNCWD; break;
       case 0x20: fn = (void*)&kestrel_jitCVTSD;   break;
       case 0x24: fn = (void*)&kestrel_jitCVTWD;   break;
-      default: break;
+      default: if((op & 63) >= 0x30) fn = (void*)&kestrel_jitCMPD; break;
     } break;
     default: break;
   }

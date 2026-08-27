@@ -439,3 +439,28 @@ idempotentes, asi que repetirlas no altera nada mas y el oraculo puede quedarse 
 
 Medido: A/B intercalado de dos binarios, tres rondas de 3000 M instrucciones cada una.
 old 19463/18992/19207 ms, new 18536/18485/18640 ms -> **+3.5% de velocidad**.
+
+### 4. C.cond de COP1 con camino rapido
+
+Siguiente en el histograma tras las conversiones (~15% de lo que el bloque cede al interprete):
+toda comparacion en coma flotante del codigo de SGI acaba en una C.LT/C.LE/C.EQ seguida de
+BC1T/BC1F. `jitCop1Cmp<FMT>` resuelve el caso ORDENADO -- ningun operando NaN --, donde ninguno
+de los dieciseis predicados puede levantar Invalid: ni por el predicado senalizador (que solo
+dispara con operandos no-ordenados) ni por la rareza del VR4300 con el MSB de la mantisa
+invertido (que exige un NaN). Deja `Cause` limpia, no acumula Flag y escribe el bit C (23) de
+`fcr31`. Con NaN en cualquiera de los dos operandos, o CU1=0, delega en el interprete. Los
+subnormales SI se resuelven aqui: el interprete tampoco los filtra en la comparacion -- solo
+las ops computacionales lo hacen -- y el `<`/`==` del anfitrion da el mismo orden. `fn` se lee
+dentro del trampolin, asi que un unico trampolin por formato cubre los dieciseis predicados.
+
+Validado con el mismo oraculo gateado (`KESTREL_FPORACLE`, `jitCop1CmpChk`): la comparacion
+solo escribe `fcr31`, asi que rebobinandolo se repite por el interprete y se comparan los dos.
+**1.29 M comparaciones de SM64 sin una sola discrepancia** (901 k en .S + 385 k en .D, 3000 M
+instrucciones).
+
+Medido: A/B intercalado de dos binarios, OCHO rondas de 3000 M instrucciones.
+old media 18289 ms (min 17992), new media 18361 ms (min 18048) -> **neutro dentro del ruido**
+(la dispersion del anfitrion es de ~±2%, mucho mayor que el efecto). Con 1.29 M comparaciones en
+3000 M instrucciones el ahorro teorico esta por debajo del 1%, asi que el banco no puede
+resolverlo. Se conserva porque es correcto y quita esas 1.29 M entradas al interprete; ninguna
+de las dos puertas se mueve.

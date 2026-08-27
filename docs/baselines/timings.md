@@ -339,3 +339,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_prdp | ~305 s | idem; regress=0 |
 | 2026-08-27 | gate_all | ~350 s | conversiones COP1 en el JIT; 12/12, regress=0 |
 | 2026-08-27 | gate_prdp | ~305 s | idem; regress=0, improve=1 |
+| 2026-08-27 | gate_all | ~351 s | C.cond de COP1 en el JIT; 12/12, regress=0 |
+| 2026-08-27 | gate_prdp | ~319 s | idem; regress=0 |

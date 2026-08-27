@@ -1614,6 +1614,72 @@ KC1C(kestrel_jitCVTWD, 2) KC1C(kestrel_jitTRUNCWD, 3)
 KC1C(kestrel_jitCVTDS, 4) KC1C(kestrel_jitCVTSD, 5)
 #undef KC1C
 
+// C.cond.fmt emitida por el JIT como CALL directo. Tras las conversiones es lo siguiente en la
+// cuenta de cesiones (~15%): cada comparacion en coma flotante del codigo de SGI acaba en una
+// C.LT/C.LE/C.EQ seguida de BC1T/BC1F. Aqui se resuelve el caso ORDENADO: si ningun operando
+// es NaN, ninguno de los dieciseis predicados puede levantar Invalid, ni por la via del
+// predicado senalizador ni por la rareza del VR4300 con el MSB de la mantisa invertido. Con un
+// NaN en cualquiera de los dos (o CU1=0) delega en jitInterpOp. Los subnormales SI valen: el
+// interprete tampoco los filtra en la comparacion -- solo lo hacen las ops computacionales -- y
+// el `<`/`==` del anfitrion da exactamente el mismo orden. `fn` se queda dinamico: un unico
+// trampolin por formato cubre los dieciseis predicados.
+template<u32 FMT>
+auto CPU::jitCop1Cmp(u32 op, u32 off) -> u8 {
+  if(__builtin_expect(!((u32)cop0[C0_Status] & 0x2000'0000u), 0)) return jitInterpOp(op, off);
+  u32 fs = (op >> 11) & 31, ft = (op >> 16) & 31, fn = op & 63;
+  // Mismo emparejamiento que el interprete: con FR=0 solo el campo FUENTE se alinea a par.
+  if(!((u32)cop0[C0_Status] & (1u << 26))) fs &= ~1u;
+  bool less, equal;
+  if constexpr(FMT == 0x10) {
+    u32 ab = (u32)fpr[fs], bb = (u32)fpr[ft];
+    if(__builtin_expect((ab & 0x7fff'ffffu) > 0x7f80'0000u
+                     || (bb & 0x7fff'ffffu) > 0x7f80'0000u, 0)) return jitInterpOp(op, off);
+    float a = std::bit_cast<float>(ab), b = std::bit_cast<float>(bb);
+    less = a < b; equal = a == b;
+  } else {
+    u64 ab = fpr[fs], bb = fpr[ft];
+    if(__builtin_expect((ab & 0x7fff'ffff'ffff'ffffull) > 0x7ff0'0000'0000'0000ull
+                     || (bb & 0x7fff'ffff'ffff'ffffull) > 0x7ff0'0000'0000'0000ull, 0))
+      return jitInterpOp(op, off);
+    double a = std::bit_cast<double>(ab), b = std::bit_cast<double>(bb);
+    less = a < b; equal = a == b;
+  }
+  // Ordenado: Cause sale limpia y no hay Flag pegajosa que acumular. El bit `unordered` del
+  // predicado (fn & 1) nunca se cumple aqui, asi que no entra en la condicion.
+  bool c = (((fn & 0x4) != 0) && less) || (((fn & 0x2) != 0) && equal);
+  fcr31 &= ~0x0003'F000u;
+  if(c) fcr31 |= (1u << 23); else fcr31 &= ~(1u << 23);
+  return 1;
+}
+// Mismo oraculo que las conversiones (KESTREL_FPORACLE): la comparacion solo escribe fcr31 y
+// depende unicamente de fs/ft, asi que rebobinando fcr31 se puede repetir por el interprete.
+template<u32 FMT>
+auto CPU::jitCop1CmpChk(u32 op, u32 off) -> u8 {
+  static const bool on = std::getenv("KESTREL_FPORACLE") != nullptr;
+  if(__builtin_expect(!on, 1)) return jitCop1Cmp<FMT>(op, off);
+  u32 fcrPre = fcr31;
+  static u64 seen = 0;
+  if((++seen & 0xFFFFF) == 0)
+    std::fprintf(stderr, "[fporacle] comprobadas %llu comparaciones sin discrepancia\n", (unsigned long long)seen);
+
+  u8 fast = jitCop1Cmp<FMT>(op, off);
+  u32 fcrFast = fcr31;
+  fcr31 = fcrPre;                                     // rebobinar y repetir por el interprete
+  u8 slow = jitInterpOp(op, off);
+  if(fast != slow || fcr31 != fcrFast) {
+    static u32 n = 0;
+    if(n++ < 40)
+      std::fprintf(stderr, "[fporacle] cmp fmt=%02x op=%08x  fast fcr=%08x r=%u"
+                           " | interp fcr=%08x r=%u\n",
+                   FMT, op, fcrFast, fast, fcr31, slow);
+  }
+  return slow;
+}
+extern "C" u8 kestrel_jitCMPS(void* c, u32 op, u32 off) {
+  return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CmpChk<0x10>(op, off); }
+extern "C" u8 kestrel_jitCMPD(void* c, u32 op, u32 off) {
+  return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CmpChk<0x11>(op, off); }
+
 #define KC1A(name, fn, fmt) \
   extern "C" u8 name(void* c, u32 op, u32 off) { \
     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Alu<fn, fmt>(op, off); }

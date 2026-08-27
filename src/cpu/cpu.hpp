@@ -334,6 +334,8 @@ public:
   template<u32 FN, u32 FMT> auto jitCop1Alu(u32 op, u32 off) -> u8;
   template<u32 KIND> auto jitCop1Cvt(u32 op, u32 off) -> u8;
   template<u32 KIND> auto jitCop1CvtChk(u32 op, u32 off) -> u8;
+  template<u32 FMT> auto jitCop1Cmp(u32 op, u32 off) -> u8;
+  template<u32 FMT> auto jitCop1CmpChk(u32 op, u32 off) -> u8;
   // Ejecuta UNA op no compilable con el intérprete desde dentro de un bloque JIT.
   // `off` = desplazamiento en bytes de la op respecto a la entrada del bloque (pc).
   // Devuelve 1 si la op terminó normal (el bloque sigue), 0 si hubo excepción/parada:
