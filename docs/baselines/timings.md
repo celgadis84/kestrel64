@@ -343,3 +343,5 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_prdp | ~319 s | idem; regress=0 |
 | 2026-08-27 | gate_all | ~351 s | DIV y CVT.S.W/CVT.D.W en el JIT; 12/12, regress=0 |
 | 2026-08-27 | gate_prdp | ~319 s | idem; regress=0 |
+| 2026-08-27 | gate_all | ~351 s | xlatDirect en linea + cacheable en linea; 12/12, regress=0 |
+| 2026-08-27 | gate_prdp | ~320 s | idem; regress=0 |

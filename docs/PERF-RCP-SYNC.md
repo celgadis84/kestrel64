@@ -487,3 +487,29 @@ del contador bajado temporalmente a 1024 para verlas todas).
 
 Medido: A/B intercalado, cuatro rondas de 3000 M instrucciones. antes media 18351 ms, despues
 media 18195 ms -> **~0.9%**, en el limite del ruido del anfitrion. Ambas puertas verdes.
+
+### 6. Traduccion de direcciones en linea (`xlatDirect`)
+
+Perfil del anfitrion (KESTREL_HOSTPROF, 3000 M instrucciones de SM64 con JIT) despues de cerrar
+COP1: `CPU::translate` 27.3%, `jitTryBlock` 24.9%, `kestrel_jitLW` 16.5%, `dcWrite` 6.1%,
+`rcpPace` 5.8%, `jitLWC1` 5.5%. `translate` era la primera: una LLAMADA fuera de linea por cada
+acceso a memoria, aunque el 99% de esos accesos sean kseg0/kseg1 en modo kernel, donde la
+traduccion entera es un AND.
+
+`CPU::xlatDirect` (en cpu.hpp, en linea en el llamador) resuelve ese caso: modo kernel
+(EXL/ERL puestos o KSU==0) con KX claro, direccion de compatibilidad -- los 32 bits altos son
+la extension de signo del bit 31 -- y segmento kseg0/kseg1 (`va & 0xC0000000 == 0x80000000`).
+Esos dos segmentos son directos: no pasan por la TLB, no pueden fallar, no miran el ASID y no
+tocan `xlatCacheable`, exactamente como el `return va & 0x1FFF'FFFF` de `translate`. Cuando NO
+aplica devuelve false y el llamador llama a `translate`, que sigue siendo la unica implementacion
+del caso general (TLB, 64 bits, usuario/supervisor, xkphys, AdE). `cacheable()` tambien pasa a
+ser en linea: se llama una vez por acceso y es una comparacion de tres bits.
+
+Puesto en `jitMemOp` (los quince trampolines de load/store del JIT) y en los ayudantes del
+interprete (`read8..read64`, `write8..write64`, las rutas SB/SH/SW/SD/SWL/SWR/SDL/SDR y LL/LLD).
+
+Medido, A/B intercalado de 3000 M instrucciones:
+- JIT: antes 18446 ms de media, despues 17238 -> **+7.0%**
+- interprete (400 M instrucciones): 21637 -> 20624 ms -> **+4.9%**
+
+Ambas puertas verdes, 12/12 y krom regress=0 en las dos.

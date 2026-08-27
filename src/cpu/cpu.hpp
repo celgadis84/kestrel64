@@ -250,7 +250,37 @@ private:
   // Cacheability of a data/fetch access: KSEG1 (0xA0000000..0xBFFFFFFF) and the
   // uncached XKPHYS windows bypass; KSEG0 and cached-mapped regions go through the
   // primary cache. Only accesses that also land in RDRAM are actually cached here.
-  auto cacheable(u64 vaddr) -> bool;
+  inline auto cacheable(u64 vaddr) -> bool {
+    u32 seg = (u32)vaddr & 0xE000'0000u;
+    if(seg == 0x8000'0000u) return true;    // KSEG0 / ckseg0 (cached)
+    if(seg == 0xA000'0000u) return false;   // KSEG1 / ckseg1 (uncached)
+    return xlatCacheable;                   // TLB-mapped: per-entry C field
+  }
+  // Camino rapido de traduccion, en linea en el llamador. Cubre lo unico que hace un juego
+  // de N64 en la practica: direccion de compatibilidad (los 32 bits altos son la extension de
+  // signo del bit 31) dentro de kseg0/kseg1, con la CPU en modo kernel y direccionamiento de
+  // 32 bits (Status.KX=0). Esos dos segmentos son DIRECTOS -- no pasan por la TLB, no pueden
+  // fallar y no miran el ASID --, asi que la traduccion entera es un AND, exactamente el
+  // `return va & 0x1FFF'FFFF` de translate(). Tampoco tocan xlatCacheable, igual que alli:
+  // la cacheabilidad de esos segmentos la decide el segmento (ver cacheable()).
+  // Devuelve false cuando NO aplica; entonces el llamador llama a translate(), que resuelve
+  // el caso general (TLB, 64 bits, usuario/supervisor, xkphys, AdE).
+  inline auto xlatDirect(u64 v, u64& pa) const -> bool {
+    u32 st = (u32)cop0[C0_Status];
+    // kernel = EXL/ERL puestos o KSU==0; ademas KX (bit 7) claro para quedarse en 32 bits.
+    bool kernel32 = ((st & 0x6u) != 0 || (st & 0x18u) == 0) && (st & 0x80u) == 0;
+    if(__builtin_expect(!kernel32, 0)) return false;
+    if(__builtin_expect((s64)v != (s32)(u32)v, 0)) return false;
+    if(__builtin_expect(((u32)v & 0xC000'0000u) != 0x8000'0000u, 0)) return false;
+    pa = (u32)v & 0x1FFF'FFFFu;
+    return true;
+  }
+  // Envoltorio: camino directo en linea y, si no aplica, la llamada de siempre.
+  inline auto xlat(u64 v, Access acc) -> u64 {
+    u64 p;
+    if(__builtin_expect(xlatDirect(v, p), 1)) return p;
+    return translate(v, acc);
+  }
   // Write-back D-cache byte-addressed access (phys already reverse-endian adjusted).
   // Aligned CPU accesses never straddle a 16-byte line, so a single line suffices.
   auto dcRead(u32 phys, u32 size) -> u64;

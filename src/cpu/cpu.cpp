@@ -297,20 +297,20 @@ auto CPU::refreshDebugArmed() -> void {
 // --- memory (segment rules + TLB translation via translate()) ----------------
 // Cached data accesses route through the write-back D-cache; uncached (KSEG1) and
 // non-RDRAM targets go straight to the bus. `pe` is the reverse-endian-adjusted phys.
-auto CPU::read8 (u64 v) -> u8  { u64 p=translate(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()) return (u8)dcRead(pe,1); return mem->read8 (pe); }
-auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=translate(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); return mem->read16(pe); }
-auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=translate(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); return mem->read32(pe); }
-auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=translate(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); return mem->read64(pe); }
-auto CPU::write8 (u64 v, u8  x) -> void { u64 p=translate(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } mem->write8 (pe, x); }
-auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=translate(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } mem->write16(pe, x); }
+auto CPU::read8 (u64 v) -> u8  { u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()) return (u8)dcRead(pe,1); return mem->read8 (pe); }
+auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); return mem->read16(pe); }
+auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); return mem->read32(pe); }
+auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); return mem->read64(pe); }
+auto CPU::write8 (u64 v, u8  x) -> void { u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } mem->write8 (pe, x); }
+auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } mem->write16(pe, x); }
 auto CPU::seenWatch(u64 p, u32 size) -> void {
   if(!mem || !(p <= 0x1acfa4 && p + size > 0x1acfa4)) return;
   u32 cur = mem->read32(0x1acfa4);
   if(cur != g_seenPrev) { int i=g_seenIdx%kSeenRing; g_seenRet[i]=retired; g_seenOld[i]=g_seenPrev; g_seenNew[i]=cur; g_seenIdx++; g_seenPrev=cur; }
 }
-auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64 p=translate(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,4); else mem->write32(pe, x); seenWatch(p&0x1fffffff,4);
+auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,4); else mem->write32(pe, x); seenWatch(p&0x1fffffff,4);
   if(pcRingOn && (u32)v==0x807ffc98 && retired>=8195000 && retired<=8225000) std::fprintf(stderr,"[STORE 0x807ffc98] <- 0x%08x pc=0x%08x ret=%llu\n",x,(u32)curPc,(unsigned long long)retired); }
-auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=translate(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else mem->write64(pe, x); seenWatch(p&0x1fffffff,8); }
+auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else mem->write64(pe, x); seenWatch(p&0x1fffffff,8); }
 
 auto CPU::storeRepeat(u32 phys, u64 reg, u32 sz) -> bool {
   if(!mem || !mem->rcp.mi_repeat_on) return false;
@@ -333,16 +333,7 @@ auto CPU::storeCart(u32 phys, u64 reg, u32 width) -> bool {
 }
 
 // --- primary caches ----------------------------------------------------------
-auto CPU::cacheable(u64 vaddr) -> bool {
-  // Direct-mapped compatibility segments decide by segment: KSEG0 cached, KSEG1
-  // uncached. TLB-mapped segments (useg/ksseg/kseg3 and their 64-bit forms) honor
-  // the C field of the entry matched by the preceding translate(), recorded in
-  // xlatCacheable — a C=2 mapping is uncached and bypasses the D-cache.
-  u32 seg = (u32)vaddr & 0xE000'0000u;
-  if(seg == 0x8000'0000u) return true;    // KSEG0 / ckseg0 (cached)
-  if(seg == 0xA000'0000u) return false;   // KSEG1 / ckseg1 (uncached)
-  return xlatCacheable;                   // TLB-mapped: per-entry C field
-}
+// (cacheable() vive ahora en linea en cpu.hpp: se llama una vez por acceso a memoria.)
 
 auto CPU::dcFill(u32 idx, u32 base) -> void {
   DCacheLine& l = dcache[idx];
@@ -1370,36 +1361,36 @@ auto CPU::execute(u32 op) -> void {
       // full-word case). Otherwise the upper 32 bits of the register are untouched.
       set(RT, s ? ((gpr[RT] & 0xffff'ffff'0000'0000ull) | lo) : sext32(lo)); break; }
   case 0x27: /*LWU*/ set(RT, (u64)read32(gpr[RS]+SIMM)); break;
-  case 0x28: /*SB*/ { u64 a=gpr[RS]+SIMM; u64 p=translate(a,AccWrite); if(memAbort||!mem) break;
+  case 0x28: /*SB*/ { u64 a=gpr[RS]+SIMM; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 1)) break;
       if(storeCart((u32)p&0x1fff'ffff, gpr[RT], 1)) break;
       if(mem->wordStoreQuirk((u32)p&0x1fff'ffff, gpr[RT], 1)) break;
       { u32 pe=(u32)reXor(p,1); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],1); break; } mem->write8(pe,(u8)gpr[RT]); } } break;
-  case 0x29: /*SH*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,2,AccWrite)) break; u64 p=translate(a,AccWrite); if(memAbort||!mem) break;
+  case 0x29: /*SH*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,2,AccWrite)) break; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 2)) break;
       if(storeCart((u32)p&0x1fff'ffff, gpr[RT], 2)) break;
       if(mem->wordStoreQuirk((u32)p&0x1fff'ffff, gpr[RT], 2)) break;
       { u32 pe=(u32)reXor(p,2); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],2); break; } mem->write16(pe,(u16)gpr[RT]); } } break;
-  case 0x2a: /*SWL*/ { u64 a=gpr[RS]+SIMM; translate(a,AccWrite); if(memAbort) break;   // store: a TLB/addr fault here is TLBS/AdES, not the load flavor
+  case 0x2a: /*SWL*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;   // store: a TLB/addr fault here is TLBS/AdES, not the load flavor
       u32 s=(u32)(reOn()?(3-(a&3)):(a&3))*8; u32 d=read32(a&~3ull); u32 m = s? (~0u>>s):~0u; write32(a&~3ull, (d & ~(m>>0)) | ((u32)gpr[RT]>>s)); break; }
-  case 0x2b: /*SW*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,4,AccWrite)) break; u64 p=translate(a,AccWrite); if(memAbort||!mem) break;
+  case 0x2b: /*SW*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,4,AccWrite)) break; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 4)) break;
       { u32 pe=(u32)reXor(p,4); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],4); break; } mem->write32(pe, (u32)gpr[RT]); } } break;
-  case 0x2c: /*SDL*/ { u64 a=gpr[RS]+SIMM; translate(a,AccWrite); if(memAbort) break;
+  case 0x2c: /*SDL*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;
       u32 s=(u32)(reOn()?(7-(a&7)):(a&7))*8; u64 d=read64(a&~7ull); u64 m = s? (~0ull>>s):~0ull; write64(a&~7ull, (d & ~(m>>0)) | (gpr[RT]>>s)); break; }
-  case 0x2d: /*SDR*/ { u64 a=gpr[RS]+SIMM; translate(a,AccWrite); if(memAbort) break;
+  case 0x2d: /*SDR*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;
       u32 s=(u32)(reOn()?(a&7):(7-(a&7)))*8; u64 d=read64(a&~7ull); u64 m = s? (~0ull<<s):~0ull; write64(a&~7ull, (d & ~(m<<0)) | (gpr[RT]<<s)); break; }
-  case 0x2e: /*SWR*/ { u64 a=gpr[RS]+SIMM; translate(a,AccWrite); if(memAbort) break;
+  case 0x2e: /*SWR*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;
       u32 s=(u32)(reOn()?(a&3):(3-(a&3)))*8; u32 d=read32(a&~3ull); u32 m = s? (~0u<<s):~0u; write32(a&~3ull, (d & ~(m<<0)) | ((u32)gpr[RT]<<s)); break; }
   case 0x2f: /*CACHE*/
     // Privileged: kernel mode always, else requires Status.CU0 (Coprocessor Unusable, CE=0).
     if(cpuMode() != 0 && !((u32)cop0[C0_Status] & 0x1000'0000u)) { takeException(11); break; }
     { u64 a=gpr[RS]+SIMM; translate(a,AccRead); if(memAbort) break; cacheOp((op >> 16) & 0x1f, a); } break;
-  case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; u64 pa=translate(va,AccRead); if(memAbort||!mem) break;
+  case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
               u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : mem->read32(pe);
               set(RT, sext32(val)); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x31: /*LWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet32(RT, read32(gpr[RS]+SIMM)); break;
-  case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; u64 pa=translate(va,AccRead); if(memAbort||!mem) break;
+  case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
               u32 pe=(u32)pa; u64 val = (cacheable(va)&&pe<mem->rdram.size()) ? dcRead(pe,8) : mem->read64(pe);
               set(RT, val); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x35: /*LDC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet64(RT, read64(gpr[RS]+SIMM)); break;
@@ -1408,7 +1399,7 @@ auto CPU::execute(u32 op) -> void {
   case 0x39: /*SWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} write32(gpr[RS]+SIMM, fprGet32(RT)); break;
   case 0x3c: /*SCD*/ if(llbit) write64(gpr[RS]+SIMM, gpr[RT]); set(RT, llbit?1:0); break;
   case 0x3d: /*SDC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} write64(gpr[RS]+SIMM, fprGet64(RT)); break;
-  case 0x3f: /*SD*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,8,AccWrite)) break; u64 p=translate(a,AccWrite); if(memAbort||!mem) break;
+  case 0x3f: /*SD*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,8,AccWrite)) break; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 8)) break;
       if(mem->wordStoreQuirk((u32)p&0x1fff'ffff, gpr[RT], 8)) break;
       { u32 pe=(u32)p; if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],8); break; } mem->write64(pe, gpr[RT]); } } break;
@@ -1870,9 +1861,15 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
   }
   if constexpr(sz > 1) { if(a & (u64)(sz - 1)) return 0; }   // misalign -> interprete vectoriza
   u64 p;
-  { bool s = probing; probing = true;
-    p = translate(a, store ? AccWrite : AccRead); probing = s; }
-  if(p == ~0ull) return 0;                                  // TLB/ADE -> interprete vectoriza
+  // Traduccion: primero el camino directo en linea (kseg0/kseg1 en kernel de 32 bits), que es
+  // donde vive practicamente todo el trabajo de un juego. Solo si no aplica se paga la llamada
+  // a translate(), que ademas hay que hacer en modo `probing` para que un fallo de TLB no
+  // vectorice desde dentro del bloque: eso lo hace el interprete al reejecutar la op.
+  if(__builtin_expect(!xlatDirect(a, p), 0)) {
+    bool s = probing; probing = true;
+    p = translate(a, store ? AccWrite : AccRead); probing = s;
+    if(p == ~0ull) return 0;                                // TLB/ADE -> interprete vectoriza
+  }
   u32 pe = (sz == 8) ? (u32)p : (u32)reXor(p, sz);
   bool inRdram = cacheable(a) && pe < mem->rdram.size();
   if constexpr(!store) {
