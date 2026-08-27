@@ -357,3 +357,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_all | 357 s | gate_prdp | 296 s | JIT: camino rapido de memoria extendido a los 15 opcodes (1/2/4/8 B, enteros y COP1); 12/12, regress=0 en ambos |
 | 2026-08-27 | gate_all | 381 s | gate_prdp | 298 s | JIT: BC1F/BC1T/BC1FL/BC1TL absorbidos como salto nativo; 12/12, regress=0 en ambos |
 | 2026-08-27 | gate_all | 360 s | gate_prdp | 305 s | Producto: --play, arranque desde el Explorador, KESTREL_STATIC; 12/12, regress=0 en ambos |
+| 2026-08-27 | gate_all | 363 s | gate_prdp | 302 s | JIT: `memAbort` limpiado al entrar al bloque (ADDI absorbida por defecto) + reloj de decaimiento del latch PI con `jitPending`; 12/12, regress=0 en ambos |

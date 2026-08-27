@@ -1,36 +1,50 @@
 
-## ADDI absorbida: corrupcion del contexto de excepcion (ABIERTO)
+## ADDI absorbida: `memAbort` sin limpiar al entrar al bloque (RESUELTO)
 
 `emitTrapAlu` absorbe ADDI/ADD/SUB emitiendo la aritmetica nativa con un `jo` de salida
-(el OF de x86 tras un add/sub de 32 bits ES el desbordamiento con signo de MIPS). Con ADD/SUB
-solo (`KESTREL_JIT_NOTRAPALU=3`, el defecto) systemtest pasa. Absorber ADDI tambien lo rompe.
+(el OF de x86 tras un add/sub de 32 bits ES el desbordamiento con signo de MIPS). Durante un
+tiempo el defecto fue `KESTREL_JIT_NOTRAPALU=3` (solo ADD/SUB) porque absorber ADDI provocaba
+una tormenta de excepciones en systemtest. La ADDI no tenia nada que ver.
 
-Lo medido, para no repetirlo:
+**Causa real.** `memAbort` es un pestillo POR INSTRUCCION: lo pone `translate()` cuando el
+acceso falla, y `step()` lo limpia al empezar cada instruccion. El driver del JIT no lo
+limpiaba. Absorber ADDI alarga el bloque justo lo suficiente para que el prologo del handler
+de excepcion de libultra (`phys=001709a0`: `addi sp,sp,-0x158` + 32 `sd`) se compile como un
+bloque, y a ese bloque se entra **inmediatamente despues de vectorizar**, con el pestillo aun
+a 1. Dentro, con `Status=0x240000e2` (KX=1, kernel de 64 bits), `xlatDirect` declina y se cae
+a `translate()`, cuya primera linea es `if(memAbort) return 0`. Resultado: `p=0` -> `pe=0` ->
+los 32 `sd` del prologo escriben en **fisico 0**, encima del vector de excepciones. De ahi la
+tormenta.
 
-- Falla en **"Privilege: memory accesses"** -> tormenta de excepciones. Con `BRSEL=2`
-  (BLEZ/BGTZ/REGIMM) falla distinto: 4/3721 en `cart-writing: Temp value decay`.
-- **Solo con saltos absorbidos**: `KESTREL_JIT_NOBRANCH=1` pasa. Bisecado con
-  `KESTREL_JIT_BRSEL` (mascara: 1 BEQ/BNE, 2 BLEZ/BGTZ/REGIMM, 4 likely, 8 J/JAL, 16 JR/JALR):
-  fallan **2** y **8**; 1, 4 y 16 pasan.
-- **Un solo bloque basta**. `KESTREL_TRAPALU_LIM=N` corta la absorcion a las N primeras;
-  la biseccion binaria dio N=1, o sea la PRIMERA ADDI absorbida ya rompe. Es
-  `phys=001709a0` (`addi sp,sp,-344` + 30 `sd`), el preambulo de excepcion de libultra.
-- **La ADDI es correcta**: con el modo 7 el bloque queda en una sola op y el jitdiff (ya sin
-  el fallo de arnes, ver abajo) no encuentra ni un desacuerdo.
-- **La trampa es inocente**: el modo 6 (mismo conjunto, sin levantar desbordamiento) falla
-  igual, y una sonda en el driver mostro que el bail **no llega a saltar nunca**.
-- **No es enlace ni camino rapido**: `NOLINK=1` y `NOFAST=1` fallan igual. Tampoco RegCache
-  (`NOREGCACHE=1`) ni SMC (`NOSMC=1`).
-- La entrada al bloque es limpia: `pc=ffffffff801709a0 inDelay=0 justBr=0 R=1/1 ctrl=0`.
-- Firma de la corrupcion (`KESTREL_JIT_PCCHK=1`, que ahora mira el pc en CADA despacho):
-  `pc=0000008c8017551c` tomado de `$16`, y media docena de registros con **dos palabras de
-  32 bits pegadas** -- `$31=807fee54801aa7cc` = [puntero de pila | ra],
-  `$2=801a9468801a93ec` = dos direcciones consecutivas. Eso es un contexto de excepcion
-  guardado y restaurado con desfase, no una ALU mal emitida.
+Arreglo, dos lineas y ambas semantica genuina:
 
-Siguiente hilo: el bloque de 34 `sd` en `001709a4` ya existia antes; lo nuevo es que el
-bloque empiece una instruccion antes. Mirar que cambia para el que SALTA ahi cuando el
-destino pasa a tener bloque propio.
+- el driver hace `memAbort = false` antes de `blk.fn`, igual que `step()`;
+- `jitMemOp` trata `memAbort` como fallo de traduccion (`if(p == ~0ull || memAbort) return 0`),
+  o sea baila al interprete en vez de escribir en una direccion inventada.
+
+Con eso `KESTREL_JIT_NOTRAPALU=0` (ADDI + ADD/SUB, el defecto de ahora) pasa systemtest
+3721/3721 con enlace de bloques puesto. Impacto: en SM64, compilaciones fallidas a los 4.19M
+despachos **608044 -> 38591** (15x menos); ADDI era la op lider de la lista.
+
+**Como se encontro** (el metodo, que es lo reutilizable): `KESTREL_TRAPALU_LIM=N` corta la
+absorcion a las N primeras ALU-con-trampa, lo que hace la compilacion determinista y
+biseccionable -> N=66 pasa, N=67 rompe, y la 67 es el prologo del handler. A partir de ahi,
+contadores por ruta dentro de `jitMemOp` (`storeRepeat`/`storeCart`/`wordStoreQuirk`/`dcWrite`
+/MMIO) mas el `pe` que recibe `dcWrite`. La contradiccion "32 `dcWrite` y la linea de D-cache
+sigue invalida" se resolvio sola en cuanto se imprimio `pe=00000000`. Toda esa instrumentacion
+se quito despues; el andamiaje que se queda es `KESTREL_JIT_PCCHK`, `KESTREL_JIT_REGCHK` y
+`KESTREL_JIT_BRDIFF_PHYS`.
+
+## `cart-writing: Temp value decay` con enlace de bloques (RESUELTO)
+
+El latch de escritura del PI decae con un reloj de instrucciones retiradas (`CART_LATCH_TTL`
+= 200). El JIT commitea `retired` **por cadena**, no por bloque, asi que dentro de una cadena
+larga el reloj se congelaba y el latch sobrevivia las 110 iteraciones que el test espera que
+lo maten. Con `KESTREL_JIT_NOLINK=1` pasaba, que es lo que lo delato.
+
+Arreglo: `Memory::cartNow()` = `*cartClock + *cartClockPend`, donde `cartClockPend` apunta a
+`CPU::jitPending` (las ops que la cadena aun no ha commiteado). El reloj de decaimiento ve el
+tiempo real aunque el contador global vaya a saltos.
 
 ## Arreglados de camino
 

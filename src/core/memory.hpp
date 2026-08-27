@@ -308,6 +308,13 @@ public:
   bool cartLatchValid = false;
   u64  cartLatchExpiry = 0;
   const u64* cartClock = nullptr;       // CPU retired-instruction counter (decay clock)
+  // Ops ya ejecutadas por una cadena de bloques del JIT y aun sin sumar a `retired` (el
+  // commit es diferido, por cadena). Sin esto el reloj de decaimiento se congela dentro de
+  // una cadena larga y el latch del PI sobrevive mucho mas de lo que debe.
+  const u32* cartClockPend = nullptr;
+  auto cartNow() const -> u64 {
+    return (cartClock ? *cartClock : 0) + (cartClockPend ? (u64)*cartClockPend : 0);
+  }
   // Instrucciones retiradas por campo de video. La fija System desde Clocks::fieldInsns()
   // (unico reloj de tiempo del emulador) y la usa la lectura de VI_V_CURRENT, para que el
   // sondeo de medias-lineas y la interrupcion del VI midan EL MISMO tiempo. Antes habia

@@ -177,6 +177,7 @@ auto CPU::reset() -> void {
   retired = 0; lastUnimplemented = 0;
   llbit = false;
   if(mem) mem->cartClock = &retired;   // PI write-latch decay clock (retired-instr count)
+  if(mem) mem->cartClockPend = &jitPending;   // + lo que la cadena del JIT aun no ha commiteado
 }
 
 auto CPU::fastBoot(u32 entryPoint) -> void {
@@ -1878,7 +1879,7 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
   if(__builtin_expect(!xlatDirect(a, p), 0)) {
     bool s = probing; probing = true;
     p = translate(a, store ? AccWrite : AccRead); probing = s;
-    if(p == ~0ull) return 0;                                // TLB/ADE -> interprete vectoriza
+    if(p == ~0ull || memAbort) return 0;                    // TLB/ADE/abort -> interprete vectoriza
   }
   u32 pe = (sz == 8) ? (u32)p : (u32)reXor(p, sz);
   bool inRdram = cacheable(a) && pe < mem->rdram.size();

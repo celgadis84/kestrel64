@@ -458,7 +458,7 @@ auto Memory::cartRom32(u32 phys) -> u32 {
 auto Memory::cartRead(u32 phys, u32 nbytes) -> u32 {
   u32 isvVal = 0;
   if(isvRead(phys, nbytes, isvVal)) return isvVal;
-  u64 now = cartClock ? *cartClock : 0;
+  u64 now = cartNow();
   if(cartLatchValid && now < cartLatchExpiry) {
     u32 v = cartLatch;
     cartLatchValid = false;
@@ -480,7 +480,7 @@ auto Memory::cartRead(u32 phys, u32 nbytes) -> u32 {
 // their bytes in the upper bits; a 64-bit store keeps only its upper 32 bits.
 auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
   (void)phys;
-  u64 now = cartClock ? *cartClock : 0;
+  u64 now = cartNow();
   if(cartLatchValid && now >= cartLatchExpiry) cartLatchValid = false;
   if(cartLatchValid) return;                // first-write-wins
   u32 v;
