@@ -36,3 +36,8 @@ build-prof-prdp/
 tools/launcher/cache/
 tools/launcher/profile.json
 tools/launcher/pad1.cfg
+
+# Empaquetado (scripts/dist.sh): salida derivada del build, se regenera.
+dist/
+kestrel64-*-win64.zip
+kestrel64-*-setup.exe
