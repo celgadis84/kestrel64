@@ -37,6 +37,10 @@ struct SoftRdp {
   // Donde publicar el puntero de lectura del FIFO (DPC_CURRENT). Opcional: en las
   // pruebas unitarias del RDP no hay registros que actualizar.
   std::atomic<u32>* curOut = nullptr;
+  // Direccion donde se paro el consumo. Igual a `end` salvo cuando el ultimo comando del
+  // span esta partido: el command processor no ejecuta comandos a medias, se para delante
+  // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.
+  u32 stopAt = 0;
   auto colorImage() const -> u32 { return ci_addr; }
   auto colorImageSize() const -> u32 { return ci_size; }
 

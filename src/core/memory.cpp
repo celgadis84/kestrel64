@@ -1385,10 +1385,22 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   // guest RDRAM vector is allocated once and never resized, so its pointer is stable for
   // the CommandProcessor's lifetime. Stubs make this a no-op in non-PRDP builds.
   vrdpBringUp();
+  // Reanudar un comando que quedo partido por el borde del span anterior. Solo si este span
+  // continua justo donde acabo aquel: si el juego instalo un buffer nuevo (START fresco), el
+  // trozo pendiente pertenece a un FIFO que ya no existe y se descarta, como en HW.
+  if(rdpHasResume && current == rdpLastEnd) current = rdpResume;
+  rdpHasResume = false;
+  rdpLastEnd = end;
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   if(vrdp::active()) {
-    bool sync = vrdp::runFifo(rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus);
-    rcp.dpc_current.store(end, std::memory_order_release);
+    // `stop` puede quedar delante de `end` si el ultimo comando del span esta partido: el
+    // command processor no ejecuta comandos a medias. Ese trozo NO se pierde -- el siguiente
+    // kick reanuda desde ahi porque dpc_submitted retrocede al punto de parada.
+    u32 stop = end;
+    bool sync = vrdp::runFifo(rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus,
+                              &stop);
+    if(stop != end) { rdpResume = stop; rdpHasResume = true; }
+    rcp.dpc_current.store(stop, std::memory_order_release);
     if(sync) {
       rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
       rcp.dpSyncs++;                       // misma contabilidad que el camino SoftRDP
@@ -1402,7 +1414,12 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   softRdp.curOut = &rcp.dpc_current;
   u32 nc = softRdp.run(*this, current, end, xbus);
-  rcp.dpc_current.store(end, std::memory_order_release);
+  // stopAt vive en el espacio de direcciones que usa SoftRdp::run (enmascarado igual que
+  // alli), asi que la comparacion se hace contra el mismo `end` enmascarado.
+  const u32 endMasked = xbus ? (end & 0x0fff'ffffu) : (end & 0x00ff'ffffu);
+  if(softRdp.stopAt != endMasked) { rdpResume = softRdp.stopAt; rdpHasResume = true; }
+  rcp.dpc_current.store(softRdp.stopAt == endMasked ? end : softRdp.stopAt,
+                        std::memory_order_release);
   static const bool rdpTrace = std::getenv("KESTREL_RDPTRACE") != nullptr;
   if(rdpTrace) {
     static u32 dpCalls = 0;

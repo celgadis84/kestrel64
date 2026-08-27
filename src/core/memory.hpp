@@ -258,6 +258,13 @@ struct Memory {
   // asi que esto solo espera; devuelve false si expira el plazo o si el backend no esta pedido.
   auto vrdpWaitReady(u32 timeoutMs) -> bool;
 private:
+  // Puntero de lectura propio del consumidor del FIFO (el "CURRENT" del command processor).
+  // Cuando el ultimo comando de un span esta partido, el RDP se para DELANTE de el y lo
+  // reanuda con el span siguiente; esto lo recuerda. Solo lo toca rdpRunJob (un unico hilo
+  // consumidor), asi que no compite con dpc_submitted, que es del productor.
+  u32  rdpResume = 0, rdpLastEnd = 0;
+  bool rdpHasResume = false;
+
   auto rdpWorkerLoop() -> void;
   auto vrdpBringUp() -> void;      // trae parallel-rdp arriba una sola vez
   std::once_flag vrdpOnce;

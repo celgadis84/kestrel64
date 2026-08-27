@@ -1017,7 +1017,9 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   u32 executed = 0;
   u64 words[24];
   int guard = 0;
+  bool split = false;                 // ultimo comando del span partido: no se ejecuta
   sawSyncFull = false;
+  stopAt = cur;
   static bool lowCi = false; static u64 lowMark = 0;
   static const bool citrace = std::getenv("KESTREL_CITRACE") != nullptr;
   static bool ops = std::getenv("KESTREL_RDPOPS") != nullptr;
@@ -1044,6 +1046,8 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     if(op >= 0x08 && op <= 0x0f) {
       int n = 4 + ((op & 4) ? 8 : 0) + ((op & 2) ? 8 : 0) + ((op & 1) ? 2 : 0);
       if(n > 24) n = 24;
+      // Comando partido por el borde del span: parar delante de el (ver stopAt).
+      if(cur + (u32)n * 8 > end) break;
       for(int i = 0; i < n; i++) words[i] = fetch(cur + i * 8);
       drawTriangle(mem, words, n, op);
       cur += n * 8; executed++; continue;
@@ -1057,6 +1061,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       if(sfLog) { std::fprintf(stderr, "[dpsync] at=%06x span=%06x..%06x xbus=%u\n", cur, start & 0x00ffffffu, end, (unsigned)xbus); std::fflush(stderr); }
       sawSyncFull = true; break; }               // SYNC_FULL → raises DP (see caller)
     case 0x24: case 0x25: {                             // TEXTURE_RECTANGLE (+flip)
+      if(cur + 16 > end) { split = true; break; }       // partido: parar delante (ver stopAt)
       words[0] = cmd; words[1] = fetch(cur + 8);        // 2 words
       texRect(mem, words, op == 0x25);
       cur += 16; executed++; continue;
@@ -1183,8 +1188,10 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       break;
     default: break;                                     // sync/tlut/other → no-op for now
     }
+    if(split) break;                  // el switch solo pudo salir de si mismo
     cur += 8; executed++;
   }
+  stopAt = cur;
   if(ops) {
     // KESTREL_RDPOPS is the print interval in DP runs (default 512). Demos that
     // submit a single command buffer and then spin need =1, or the histogram

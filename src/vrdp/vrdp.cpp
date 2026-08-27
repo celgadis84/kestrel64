@@ -36,6 +36,11 @@ namespace kestrel::vrdp {
 namespace {
 
 // RDP command length (in 64-bit words) indexed by op = word0>>24 & 63. Same table ares uses.
+// Campo VI actual, solo para armar la traza de comandos (KESTREL_VRDPLOGFROM). El log
+// completo cuesta lo bastante como para que el juego avance a otro ritmo y la escena que se
+// busca no llegue a salir; armandolo tarde, los campos previos corren a velocidad normal.
+u64 logField = 0;
+
 constexpr u32 kCmdLen[64] = {
   1, 1, 1, 1, 1, 1, 1, 1, 4, 6,12,14,12,14,20,22,
   1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -248,8 +253,9 @@ auto shutdown() -> void {
 
 auto active() -> bool { return g && g->ok; }
 
-auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end, bool xbus)
-    -> bool {
+auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end, bool xbus,
+             u32* stop) -> bool {
+  if(stop) *stop = start;
   if(!active()) return false;
   pumpViState();                                    // apply CPU-side VI writes / frame rotate
 
@@ -265,6 +271,12 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     u32 op  = (hi >> 24) & 63;
     u32 len = kCmdLen[op];                          // in 64-bit words
     if(len > 32) len = 32;                          // clamp defensively
+    // El command processor no ejecuta comandos a medias. Si el ultimo del span no cabe
+    // entero, se para DELANTE de el y espera a que END avance; el resto del comando llega
+    // con el siguiente span. Leer mas alla de `fin` toma bytes que aun no son de este span
+    // (en un FIFO circular, restos del frame anterior): un TEXRECT asi salia con s/t/dsdx
+    // basura, que es lo que convertia los glifos de texto en barras verticales.
+    if(cur + len * 8 > fin) break;
 
     // Gather the whole command into a swapped u32 pair buffer for enqueue_command.
     static thread_local u32 words[64];
@@ -280,9 +292,17 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     }
 
     static const bool cmdLog = std::getenv("KESTREL_VRDPLOG") != nullptr;
-    if(cmdLog) {
-      std::fprintf(stderr, "[vrdp] %06x op=%02x len=%u w0=%08x w1=%08x\n",
-                   cur, op, len, words[0], words[1]);
+    // KESTREL_VRDPLOGMASK=<hex de 64 bits>: bit N = loguea el opcode N. Sin el, se loguea
+    // todo, que a millones de comandos por segundo cambia la velocidad del emulador lo
+    // bastante para que el juego avance a otro ritmo y la escena buscada no salga.
+    static const u64 logMask = []{ const char* m = std::getenv("KESTREL_VRDPLOGMASK");
+                                   return m ? std::strtoull(m, nullptr, 16) : ~0ull; }();
+    static const u64 logFrom = []{ const char* f = std::getenv("KESTREL_VRDPLOGFROM");
+                                   return f ? std::strtoull(f, nullptr, 0) : 0ull; }();
+    if(cmdLog && logField >= logFrom && (logMask >> op) & 1) {
+      std::fprintf(stderr, "[vrdp] %06x/%06x op=%02x len=%u w0=%08x w1=%08x w2=%08x w3=%08x\n",
+                   cur, fin, op, len, words[0], words[1],
+                   len > 1 ? words[2] : 0u, len > 1 ? words[3] : 0u);
     }
     if(op >= 8) g->proc->enqueue_command(len * 2, words);
 
@@ -311,6 +331,7 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     cur += len * 8;
   }
   if(g->stats) { g->nsEnq += nowNs() - tEnq - (g->nsWait + g->nsScan - subEnq); g->nEnq++; }
+  if(stop) *stop = cur;
   return sawSyncFull;
 }
 
@@ -321,6 +342,7 @@ auto viWrite(u32 index, u32 value) -> void {
 }
 
 auto frameBegin() -> void {
+  logField++;
   if(g) g->frameReq.store(true, std::memory_order_release);
 }
 

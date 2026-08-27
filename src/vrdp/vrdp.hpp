@@ -20,7 +20,7 @@ namespace kestrel::vrdp {
 inline auto init(u8*, u32) -> bool { return false; }
 inline auto shutdown() -> void {}
 inline auto active() -> bool { return false; }
-inline auto runFifo(const u8*, u32, const u8*, u32, u32, bool) -> bool { return false; }
+inline auto runFifo(const u8*, u32, const u8*, u32, u32, bool, u32* stop) -> bool { if(stop) *stop = 0; return false; }
 inline auto viWrite(u32, u32) -> void {}
 inline auto frameBegin() -> void {}
 inline auto scanout(u32& w, u32& h) -> const u8* { w = h = 0; return nullptr; }
@@ -44,8 +44,13 @@ auto active() -> bool;
 // the RDP command-length table, and enqueued. Returns true iff a SYNC_FULL was seen (the
 // caller raises MI_DP on that, exactly as with SoftRdp::sawSyncFull). `dmem` may be null
 // when xbus is false.
-auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end, bool xbus)
-    -> bool;
+// `stop` recibe la direccion donde se paro el consumo. No siempre es `end`: el command
+// processor del RDP nunca ejecuta un comando a medias, asi que si el ultimo comando del span
+// no cabe entero, se deja SIN consumir y el puntero se queda delante de el. El llamante debe
+// reanudar ahi el siguiente span (es lo que hace el HW: CURRENT se para en el comando
+// incompleto y espera a que END avance).
+auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end, bool xbus,
+             u32* stop) -> bool;
 
 // Forward a VI register write (index = VI register byte offset >> 2). Mirrors the guest's
 // VI programming so the GPU scanout matches.
