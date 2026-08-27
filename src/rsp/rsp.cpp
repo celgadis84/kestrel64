@@ -137,6 +137,8 @@ constexpr BcastMasks kBcast = makeBcastMasks();
 alignas(16) constexpr u8 kLaneSwap[16] = {1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14};
 }  // namespace
 
+auto rspBcastMask(u32 e) -> const void* { return kBcast.b[e & 15]; }
+
 auto R128::bcast(u32 e) const -> __m128i {
   return _mm_shuffle_epi8(_mm_load_si128(reinterpret_cast<const __m128i*>(el)),
                           _mm_loadu_si128(reinterpret_cast<const __m128i*>(kBcast.b[e & 15])));
@@ -1384,6 +1386,96 @@ auto Rsp::fuzzLdSt(u64 iters) -> u64 {
   }
   vecfast = true;
   std::fprintf(stderr, "[rspldfuzz] %llu comprobadas, %llu diferencias\n",
+               (unsigned long long)checked, (unsigned long long)fails);
+  return fails;
+}
+
+// --- fuzz diferencial de la VU EN LINEA del dynarec --------------------------
+// Oraculo = el interprete (execCop2, o sea vuOpT). Se monta un bloque real en IMEM con
+// cuatro operaciones vectoriales de las que el compilador emite en linea, se compila, y se
+// compara el estado vectorial completo tras ejecutar el bloque contra el de interpretar
+// las mismas cuatro instrucciones desde el mismo estado inicial. Cubre los 16 modificadores
+// de elemento y los solapes vd==vs/vt, que es donde un emisor se rompe.
+auto Rsp::fuzzVuJit(u64 iters) -> u64 {
+  if(mem == nullptr) { std::fprintf(stderr, "[rspjitfuzz] sin bus\n"); return 1; }
+  bindMem();
+  static const u32 fns[] = { 0x04, 0x10, 0x11, 0x14, 0x15, 0x1d,
+                             0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d };
+  const u32 nf = (u32)(sizeof fns / sizeof fns[0]);
+  const u32 nOps = 4;
+
+  auto* cache = new rspjit::Cache();
+  if(!cache->init(1u << 20)) { std::fprintf(stderr, "[rspjitfuzz] sin buffer\n"); delete cache; return 1; }
+
+  u32 st = 0xc0ffee11u;
+  auto rnd = [&]() -> u32 { st ^= st << 13; st ^= st >> 17; st ^= st << 5; return st; };
+
+  struct VState { R128 vpr[32], acch, accm, accl, vcoh, vcol, vcch, vccl, vce; };
+  VState in{}, outInterp{}, outJit{};
+  auto save = [&](VState& z) {
+    std::memcpy(z.vpr, vpr, sizeof vpr);
+    z.acch = acch; z.accm = accm; z.accl = accl;
+    z.vcoh = vcoh; z.vcol = vcol; z.vcch = vcch; z.vccl = vccl; z.vce = vce;
+  };
+  auto load = [&](const VState& z) {
+    std::memcpy(vpr, z.vpr, sizeof vpr);
+    acch = z.acch; accm = z.accm; accl = z.accl;
+    vcoh = z.vcoh; vcol = z.vcol; vcch = z.vcch; vccl = z.vccl; vce = z.vce;
+  };
+
+  u64 fails = 0, checked = 0;
+  for(u64 it = 0; it < iters; it++) {
+    for(int v = 0; v < 32; v++) for(int n = 0; n < 8; n++) vpr[v].el[n] = (u16)rnd();
+    for(int n = 0; n < 8; n++) { acch.el[n] = (u16)rnd(); accm.el[n] = (u16)rnd(); accl.el[n] = (u16)rnd(); }
+    for(int n = 0; n < 8; n++) {
+      vcoh.el[n] = rnd() & 1; vcol.el[n] = rnd() & 1;
+      vcch.el[n] = rnd() & 1; vccl.el[n] = rnd() & 1; vce.el[n] = rnd() & 1;
+    }
+    save(in);
+
+    u32 ops[8];
+    for(u32 i = 0; i < nOps; i++) {
+      u32 fn = fns[rnd() % nf], e = rnd() & 15;
+      u32 vt = rnd() & 7, vs = rnd() & 7, vd = rnd() & 7;   // pocos registros: fuerza solapes
+      ops[i] = (0x12u << 26) | (1u << 25) | (e << 21) | (vt << 16) | (vs << 11) | (vd << 6) | fn;
+    }
+    // El bloque se pone en una direccion distinta cada vez para no reusar compilaciones.
+    u32 pc0 = (u32)((it * 4 * (nOps + 1)) % (4096 - 4 * (nOps + 1))) & 0xffc;
+    for(u32 i = 0; i < nOps; i++) {
+      u32 w = bswap32(ops[i]); std::memcpy(imp + ((pc0 + 4 * i) & 0xffc), &w, 4);
+    }
+    u32 brk = bswap32(0x0000000du);   // BREAK: corta el bloque justo detras
+    std::memcpy(imp + ((pc0 + 4 * nOps) & 0xffc), &brk, 4);
+
+    for(u32 i = 0; i < nOps; i++) execCop2(ops[i]);
+    save(outInterp);
+
+    load(in);
+    cache->syncImem(imp);
+    cache->state[(pc0 >> 2) & 1023] = rspjit::State::Unknown;
+    rspjit::compile(*this, *cache, pc0);
+    const rspjit::Block& b = cache->blocks[(pc0 >> 2) & 1023];
+    if(cache->state[(pc0 >> 2) & 1023] != rspjit::State::Compiled || b.nOps != nOps) {
+      std::fprintf(stderr, "[rspjitfuzz] bloque no compilado en pc=0x%03x (nOps=%u)\n", pc0, b.nOps);
+      fails++; continue;
+    }
+    b.fn(this);
+    save(outJit);
+
+    checked++;
+    if(std::memcmp(&outInterp, &outJit, sizeof(VState)) != 0) {
+      if(fails < 12) {
+        std::fprintf(stderr, "[rspjitfuzz] MISMATCH pc=0x%03x ops:", pc0);
+        for(u32 i = 0; i < nOps; i++)
+          std::fprintf(stderr, " fn=0x%02x e=%u vs=%u vt=%u vd=%u |", ops[i] & 0x3f, ops[i] >> 21 & 0xf,
+                       ops[i] >> 11 & 31, ops[i] >> 16 & 31, ops[i] >> 6 & 31);
+        std::fprintf(stderr, "\n");
+      }
+      fails++;
+    }
+  }
+  delete cache;
+  std::fprintf(stderr, "[rspjitfuzz] %llu comprobadas, %llu diferencias\n",
                (unsigned long long)checked, (unsigned long long)fails);
   return fails;
 }

@@ -118,6 +118,15 @@ int main(int argc, char** argv) {
       kestrel::u64 fails = rsp.fuzzVU(iters);
       return fails == 0 ? 0 : 1;
     }
+    else if(a == "--rspjitfuzz") {              // VU en linea del dynarec vs interprete
+      unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != 0x2d) ? std::strtoull(argv[++i], nullptr, 10) : 200000ull;
+      kestrel::Memory bus;
+      bus.reset(false);
+      kestrel::Rsp rsp; rsp.mem = &bus;
+      std::fprintf(stderr, "[rspjitfuzz] %llu iteraciones...\n", iters);
+      kestrel::u64 fails = rsp.fuzzVuJit(iters);
+      return fails == 0 ? 0 : 1;
+    }
     else if(a == "--rspldfuzz") {               // fuzz de cargas/tiendas vectoriales
       unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != 0x2d) ? std::strtoull(argv[++i], nullptr, 10) : 500000ull;
       kestrel::Memory bus;

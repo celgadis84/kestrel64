@@ -130,9 +130,46 @@ Two ways already capture the graphics/audio alternation; the rest is overlay
 churn, which is real work. End to end, `bench` over 600 buffer swaps with
 parallel-rdp: **13.3 s -> 10.1 s (295 % realtime)**.
 
-## Next stage
+## Etapa 3: la VU en linea
 
-The RSP thread is still the long pole under parallel-rdp (`rsp` ~86 % busy vs
-`rdp` ~22 %). With the compiler no longer eating half the thread, the remaining
-cost is the VU itself: wider SSE4.2 coverage for the vector ops that still fall
-back to scalar.
+Con el compilador fuera del perfil, lo que queda en el hilo del RSP es la VU. Y
+buena parte de lo que cuesta una COP2 no es la operacion: es la ABI de Win64. El
+thunk especializado (`cop2Thunk<14>`, VMADN) empieza asi:
+
+    subq $0x88, %rsp
+    movdqa %xmm10, 0x70(%rsp)   ... y cuatro derrames mas (xmm9..xmm6)
+
+Diez accesos a memoria antes de tocar un dato, mas el CALL/RET y volver a
+decodificar un opcode que el compilador ya conoce. Para las operaciones cuyo
+cuerpo SSE es corto, el bloque emite ESE MISMO cuerpo en linea, con `vs`/`vt`/
+`vd` y el modificador de elemento resueltos como constantes y usando solo
+xmm0..xmm5 — volatiles en Win64, o sea cero derrames.
+
+Cubiertas hoy (`vuInline`): VAND/VNAND/VOR/VNOR/VXOR/VNXOR, VSAR, VADD, VSUB,
+VADDC, VSUBC y VMUDL. Son ~29 % de las COP2 que ejecuta SM64. El resto sigue
+saliendo por el CALL a la entrada especializada, que es exactamente el codigo de
+antes: la lista se amplia una operacion a la vez, con fuzz de por medio.
+
+El emisor reproduce los intrinsecos de `vuOpT` en el mismo orden — no hay una
+segunda semantica. Y hay dos oraculos que lo demuestran:
+
+* `--rspjitfuzz N`: monta bloques reales de cuatro operaciones vectoriales al
+  azar en IMEM (los 16 modificadores de elemento, registros solapados a
+  proposito), los compila, y compara el estado vectorial completo contra
+  interpretar las mismas cuatro instrucciones desde el mismo estado. 200 000
+  bloques, 0 diferencias.
+* el de siempre: mismo md5 de framebuffer con `KESTREL_RSPJIT=0`, y el modo
+  `rspinterp` de `gate_all`.
+
+Medido (SM64, lockstep, 300 intercambios, parallel-rdp): 31.95 s -> 31.80 s. Es
+poco, y era de esperar: en modo hilos el RSP tiene holgura (ocupacion 65-78 %,
+`cpuWait` ~25 %), asi que ahorrar CPU en ese hilo no sube los fps todavia — baja
+el consumo y deja sitio para las operaciones que faltan.
+
+## Siguiente
+
+La familia MAC (VMADN/VMADH/VMADM/VMULF/VMUDN/VMUDM) es el ~60 % de las COP2 y
+sigue pasando por el CALL. Inline ademas abre la puerta a lo que de verdad
+importa ahi: mantener el acumulador de 48 bits (`acch`/`accm`/`accl`) en
+registros xmm a lo largo de una racha de operaciones dentro del bloque, en vez
+de recargarlo y reescribirlo — seis accesos de 16 bytes por instruccion.

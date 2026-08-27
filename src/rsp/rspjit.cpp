@@ -154,6 +154,30 @@ struct E {
   auto sub_rsp(u8 n) -> void { u8_(0x48); u8_(0x83); modrm(3, 5, rSPx); u8_(n); }
   auto add_rsp(u8 n) -> void { u8_(0x48); u8_(0x83); modrm(3, 0, rSPx); u8_(n); }
   auto ret() -> void { u8_(0xC3); }
+
+  // --- SSE (128 bits) ---------------------------------------------------------
+  // Solo se usan xmm0..xmm5, que son volatiles en Win64: por eso no hay ni un solo
+  // guardado de registro en el codigo emitido, que es justo el coste que se venia
+  // pagando por instruccion vectorial en el prologo del thunk de COP2. Todos los
+  // registros caben en 3 bits, asi que ninguna forma necesita REX.
+  auto sse_m(u8 p0, u8 opc, u8 reg, u8 base, s32 d) -> void {
+    u8_(p0); u8_(0x0F); u8_(opc); mem(reg, base, d);
+  }
+  auto sse_rr(u8 opc, u8 dst, u8 src) -> void { u8_(0x66); u8_(0x0F); u8_(opc); modrm(3, dst, src); }
+  auto sse38(u8 opc, u8 dst, u8 src) -> void {
+    u8_(0x66); u8_(0x0F); u8_(0x38); u8_(opc); modrm(3, dst, src);
+  }
+  auto ldx (u8 dst, u8 base, s32 d) -> void { sse_m(0x66, 0x6F, dst, base, d); }   // movdqa x,[b+d]
+  auto stx (u8 src, u8 base, s32 d) -> void { sse_m(0x66, 0x7F, src, base, d); }   // movdqa [b+d],x
+  auto ldxu(u8 dst, u8 base, s32 d) -> void { sse_m(0xF3, 0x6F, dst, base, d); }   // movdqu x,[b+d]
+  auto movx(u8 dst, u8 src) -> void { sse_rr(0x6F, dst, src); }                    // movdqa x,x
+  auto pshufb_x(u8 dst, u8 src) -> void { sse38(0x00, dst, src); }
+  auto pmovsxwd(u8 dst, u8 src) -> void { sse38(0x23, dst, src); }
+  auto pmovzxwd(u8 dst, u8 src) -> void { sse38(0x33, dst, src); }
+  auto psrld_i (u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x72); modrm(3, 2, dst); u8_(n); }
+  auto psrldq_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x73); modrm(3, 3, dst); u8_(n); }
+  auto zerox(u8 r) -> void { sse_rr(0xEF, r, r); }            // pxor x,x
+  auto onesx(u8 r) -> void { sse_rr(0x76, r, r); }            // pcmpeqd x,x  -> todo unos
 };
 
 // opcodes de la forma "r32, r/m32" de las ALU que se usan
@@ -213,8 +237,12 @@ struct Ctx {
   E   e;
   s32 rOff;      // offset de Rsp::r[0] dentro de Rsp
   s32 pcOff;     // offset de Rsp::pc dentro de Rsp
+  s32 vOff = 0;        // offset de Rsp::vpr[0]
+  s32 aOff[3] = {};    // acch / accm / accl
+  s32 coOff[2] = {};   // vcoh / vcol
   bool ok = true;   // false = algo no se pudo emitir; el bloque se tira sin registrar
   auto RG(u32 n) const -> s32 { return rOff + (s32)(4 * n); }
+  auto VR(u32 n) const -> s32 { return vOff + (s32)(16 * n); }
 };
 
 auto emitCall(Ctx& c, void* fn, u32 op) -> void {
@@ -222,6 +250,129 @@ auto emitCall(Ctx& c, void* fn, u32 op) -> void {
   c.e.mov_imm32(rDX, op);        // arg1 = opcode
   c.e.mov_imm64(rAX, (u64)fn);
   c.e.call_r(rAX);
+}
+
+// --- unidad vectorial en linea ----------------------------------------------
+// Una COP2 aritmetica cuesta, por la ABI de Win64, mucho mas que la operacion en si: el
+// thunk especializado abre marco, derrama xmm6..xmm10 (diez accesos a memoria antes de
+// tocar un dato) y vuelve a decodificar el opcode que el compilador YA conoce. Para las
+// operaciones cuyo cuerpo SSE es corto se emite ese mismo cuerpo dentro del bloque: los
+// mismos intrinsecos de vuOpT, en el mismo orden, con vs/vt/vd y el modificador de
+// elemento resueltos como constantes. No hay una segunda semantica; si la hubiera, el
+// oraculo (KESTREL_RSPJIT=0 y el modo rspinterp) daria otro md5.
+//
+// Solo xmm0..xmm5, volatiles en Win64: cero derrames. Reparto fijo: xmm0 = S, xmm1 = T ya
+// barajado, xmm2..xmm5 temporales.
+enum : u8 { X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
+            X_PADDW = 0xFD, X_PSUBW = 0xF9, X_PADDD = 0xFE, X_PSUBD = 0xFA,
+            X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B };
+
+auto vuInline(const Rsp& rsp, u32 op) -> bool {
+#if KESTREL_VUSTAT
+  (void)rsp; (void)op;
+  return false;   // con el censo encendido todo pasa por el interprete, que es quien cuenta
+#else
+  if(!rsp.sse) return false;             // KESTREL_NORSPSSE: manda el respaldo escalar
+  if((op >> 21 & 0x1f) < 0x10) return false;   // movimientos escalar<->vector: no
+  switch(op & 0x3f) {
+  case 0x04:                                     // VMUDL
+  case 0x10: case 0x11: case 0x14: case 0x15:    // VADD / VSUB / VADDC / VSUBC
+  case 0x1d:                                     // VSAR
+  case 0x28: case 0x29: case 0x2a: case 0x2b:    // VAND / VNAND / VOR / VNOR
+  case 0x2c: case 0x2d:                          // VXOR / VNXOR
+    return true;
+  default: return false;
+  }
+#endif
+}
+
+auto emitVu(Ctx& c, u32 op) -> void {
+  E& e = c.e;
+  const u32 fn = op & 0x3f, el = op >> 21 & 0xf;
+  const u32 vt = op >> 16 & 31, vs = op >> 11 & 31, vd = op >> 6 & 31;
+
+  // VSAR no mira operandos: copia la rebanada del acumulador que nombra el elemento.
+  if(fn == 0x1d) {
+    if(el >= 8 && el <= 10) e.ldx(0, rBX, c.aOff[el - 8]);
+    else                    e.zerox(0);
+    e.stx(0, rBX, c.VR(vd));
+    return;
+  }
+
+  e.ldx(1, rBX, c.VR(vt));
+  if(el >= 2) {                     // e=0 y e=1 son la identidad en la tabla de broadcast
+    e.mov_imm64(rAX, (u64)rspBcastMask(el));
+    e.ldxu(2, rAX, 0);              // la fila de mascaras no esta alineada: movdqu
+    e.pshufb_x(1, 2);
+  }
+  e.ldx(0, rBX, c.VR(vs));
+
+  switch(fn) {
+  // logicas: accl = op; D = accl
+  case 0x28: case 0x29: case 0x2a: case 0x2b: case 0x2c: case 0x2d: {
+    e.sse_rr(fn <= 0x29 ? X_PAND : fn <= 0x2b ? X_POR : X_PXOR, 0, 1);
+    if(fn & 1) { e.onesx(2); e.sse_rr(X_PXOR, 0, 2); }   // las negadas (NAND/NOR/NXOR)
+    e.stx(0, rBX, c.aOff[2]);
+    e.stx(0, rBX, c.VR(vd));
+  } break;
+
+  // VMUDL: acc = zeroext(mulhi sin signo); D = accl
+  case 0x04: {
+    e.sse_rr(X_PMULHUW, 0, 1);
+    e.zerox(2);
+    e.stx(2, rBX, c.aOff[0]); e.stx(2, rBX, c.aOff[1]);
+    e.stx(0, rBX, c.aOff[2]); e.stx(0, rBX, c.VR(vd));
+  } break;
+
+  // VADD / VSUB: envuelve a 16 bits en accl, satura con signo en D, borra VCO
+  case 0x10: case 0x11: {
+    const u8 w = (fn == 0x11) ? X_PSUBW : X_PADDW;
+    const u8 d = (fn == 0x11) ? X_PSUBD : X_PADDD;
+    e.ldx(2, rBX, c.coOff[1]);                       // acarreo/prestamo de entrada (0/1)
+    e.movx(3, 0); e.sse_rr(w, 3, 1); e.sse_rr(w, 3, 2);
+    e.stx(3, rBX, c.aOff[2]);
+    // la misma cuenta exacta en 32 bits: al reempaquetar con signo sale sclamp16
+    e.pmovsxwd(3, 0); e.pmovsxwd(4, 1); e.sse_rr(d, 3, 4);
+    e.pmovsxwd(4, 2); e.sse_rr(d, 3, 4);
+    e.movx(4, 0); e.psrldq_i(4, 8); e.pmovsxwd(4, 4);
+    e.movx(5, 1); e.psrldq_i(5, 8); e.pmovsxwd(5, 5); e.sse_rr(d, 4, 5);
+    e.movx(5, 2); e.psrldq_i(5, 8); e.pmovsxwd(5, 5); e.sse_rr(d, 4, 5);
+    e.sse_rr(X_PACKSSDW, 3, 4);
+    e.stx(3, rBX, c.VR(vd));
+    e.zerox(0); e.stx(0, rBX, c.coOff[0]); e.stx(0, rBX, c.coOff[1]);
+  } break;
+
+  // VADDC: suma sin signo, acarreo de salida a VCO.low, VCO.high a cero
+  case 0x14: {
+    e.movx(3, 0); e.sse_rr(X_PADDW, 3, 1);
+    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    e.pmovzxwd(3, 0); e.pmovzxwd(4, 1); e.sse_rr(X_PADDD, 3, 4); e.psrld_i(3, 16);
+    e.movx(4, 0); e.psrldq_i(4, 8); e.pmovzxwd(4, 4);
+    e.movx(5, 1); e.psrldq_i(5, 8); e.pmovzxwd(5, 5); e.sse_rr(X_PADDD, 4, 5); e.psrld_i(4, 16);
+    e.sse_rr(X_PACKSSDW, 3, 4);
+    e.stx(3, rBX, c.coOff[1]);
+    e.zerox(3); e.stx(3, rBX, c.coOff[0]);
+  } break;
+
+  // VSUBC: resta sin signo; prestamo a VCO.low, "distinto de cero" a VCO.high
+  case 0x15: {
+    e.movx(3, 0); e.sse_rr(X_PSUBW, 3, 1);
+    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    e.pmovzxwd(3, 0); e.pmovzxwd(4, 1); e.sse_rr(X_PSUBD, 3, 4);            // dlo
+    e.movx(4, 0); e.psrldq_i(4, 8); e.pmovzxwd(4, 4);
+    e.movx(5, 1); e.psrldq_i(5, 8); e.pmovzxwd(5, 5); e.sse_rr(X_PSUBD, 4, 5);   // dhi
+    e.onesx(2); e.psrld_i(2, 31);                                           // 1 por banda
+    e.movx(0, 3); e.psrld_i(0, 16); e.sse_rr(X_PAND, 0, 2);
+    e.movx(1, 4); e.psrld_i(1, 16); e.sse_rr(X_PAND, 1, 2);
+    e.sse_rr(X_PACKSSDW, 0, 1); e.stx(0, rBX, c.coOff[1]);
+    e.zerox(0);
+    e.sse_rr(X_PCMPEQD, 3, 0); e.sse_rr(X_PANDN, 3, 2);   // (~(d==0)) & 1
+    e.sse_rr(X_PCMPEQD, 4, 0); e.sse_rr(X_PANDN, 4, 2);
+    e.sse_rr(X_PACKSSDW, 3, 4); e.stx(3, rBX, c.coOff[0]);
+  } break;
+
+  default: c.ok = false; break;     // no puede pasar: vuInline decide lo mismo
+  }
 }
 
 auto emitNative(Ctx& c, u32 op) -> void {
@@ -464,7 +615,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
 
   // Holgura de buffer: si no cabe el peor caso de este bloque, se recicla la tabla entera.
   // Se puede hacer aqui sin peligro porque el llamante no esta dentro de ningun bloque.
-  const usize worst = 64 + n * 80;   // emitMem es la secuencia mas larga (~65 bytes)
+  const usize worst = 64 + n * 200;  // la VU en linea es la secuencia mas larga (~170 bytes)
   if(c.buf.used + worst > c.buf.cap) c.clear();
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 
@@ -476,7 +627,9 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   for(u32 i = 0; i < n; i++) {
     u32 op = at((pc0 + 4 * i) & 0xffc), maj = op >> 26;
     switch(classify(op)) {
-    case Kind::Cop2: case Kind::Lwc2: case Kind::Swc2: case Kind::ExecMem:
+    case Kind::Cop2:
+      if(!vuInline(rsp, op)) needsCall = true; break;   // la VU en linea no llama a nadie
+    case Kind::Lwc2: case Kind::Swc2: case Kind::ExecMem:
       needsCall = true; break;
     case Kind::Mem:                        // camino rapido en DMEM + envoltura al helper
       needsCall = true; needsDmem = true; break;
@@ -490,6 +643,12 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   u8* entry = c.buf.cursor();
   Ctx ctx{ E(c.buf), (s32)((const u8*)&rsp.r[0] - (const u8*)&rsp),
                      (s32)((const u8*)&rsp.pc   - (const u8*)&rsp) };
+  ctx.vOff     = (s32)((const u8*)&rsp.vpr[0] - (const u8*)&rsp);
+  ctx.aOff[0]  = (s32)((const u8*)&rsp.acch   - (const u8*)&rsp);
+  ctx.aOff[1]  = (s32)((const u8*)&rsp.accm   - (const u8*)&rsp);
+  ctx.aOff[2]  = (s32)((const u8*)&rsp.accl   - (const u8*)&rsp);
+  ctx.coOff[0] = (s32)((const u8*)&rsp.vcoh   - (const u8*)&rsp);
+  ctx.coOff[1] = (s32)((const u8*)&rsp.vcol   - (const u8*)&rsp);
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
   E& e = ctx.e;
 
@@ -514,8 +673,10 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     // el destino es constante en tiempo de compilacion del bloque, asi que sale un CALL
     // directo y dentro no queda ningun switch que predecir. Los movimientos escalar<->vector
     // (sub<0x10) siguen por el puente generico, que es donde se decide.
-    case Kind::Cop2:    emitCall(ctx, ((op >> 21 & 0x1f) < 0x10) ? (void*)&kestrel_rspjit_cop2
-                                                                 : rspCop2Entry(op), op); break;
+    case Kind::Cop2:
+      if(vuInline(rsp, op)) { emitVu(ctx, op); break; }
+      emitCall(ctx, ((op >> 21 & 0x1f) < 0x10) ? (void*)&kestrel_rspjit_cop2
+                                               : rspCop2Entry(op), op); break;
     case Kind::Lwc2:    emitCall(ctx, rspLwc2Entry(op), op); break;   // ya especializadas
     case Kind::Swc2:    emitCall(ctx, rspSwc2Entry(op), op); break;   // por sub, como COP2
     case Kind::ExecMem: emitCall(ctx, (void*)&kestrel_rspjit_exec,  op); break;

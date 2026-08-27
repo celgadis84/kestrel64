@@ -45,11 +45,12 @@ def main():
         return 1
     raw, exe = sys.argv[1], sys.argv[2]
     img, extcall, extmod, samples = {}, {}, {}, 0
+    jit = {}   # codigo emitido por el dynarec: fuera de la imagen, sin simbolo posible
     for line in open(raw):
         if line.startswith("# samples"):
             samples = int(line.split()[2]); continue
         k, a, c = line.split()
-        {"img": img, "extcall": extcall, "extmod": extmod}[k][int(a, 16)] = int(c)
+        {"img": img, "extcall": extcall, "extmod": extmod, "jit": jit}[k][int(a, 16)] = int(c)
     n = max(samples, 1)
 
     syms = symbolize(exe, list(img.keys()) + list(extcall.keys()))
@@ -59,9 +60,10 @@ def main():
         agg[fn] += c
         aggloc.setdefault(fn, loc)
     ext_total = sum(extmod.values())
+    jit_total = sum(jit.values())
 
-    print("muestras: %d   dentro de imagen: %.1f%%   fuera: %.1f%%"
-          % (n, 100.0 * sum(img.values()) / n, 100.0 * ext_total / n))
+    print("muestras: %d   dentro de imagen: %.1f%%   fuera: %.1f%%   (de la cual, codigo JIT: %.1f%%)"
+          % (n, 100.0 * sum(img.values()) / n, 100.0 * ext_total / n, 100.0 * jit_total / n))
     print("\n-- por funcion (dentro de la imagen) --")
     for fn, c in agg.most_common(30):
         print("%6.2f%%  %-55s %s" % (100.0 * c / n, fn[:55], aggloc.get(fn, "")))

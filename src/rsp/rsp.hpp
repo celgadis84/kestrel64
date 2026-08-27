@@ -32,6 +32,10 @@ auto rspCop2Entry(u32 op) -> void*;
 // Lo mismo para las cargas y tiendas vectoriales (LWC2 / SWC2), instanciadas por sub.
 auto rspLwc2Entry(u32 op) -> void*;
 auto rspSwc2Entry(u32 op) -> void*;
+// Fila de 16 bytes de la mascara pshufb del modificador de elemento `e`. El dynarec
+// emite el barajado del operando T en linea y necesita la MISMA tabla que el interprete
+// (kBcast, en rsp.cpp): asi no puede haber dos broadcasts distintos. No esta alineada.
+auto rspBcastMask(u32 e) -> const void*;
 
 // One 128-bit vector register: 8 lanes of 16 bits, lane 0 = most significant
 // (big-endian), matching the wiki's VPR<n> convention. Byte 0 = high byte of
@@ -173,6 +177,7 @@ struct Rsp {
   // over `iters` random states, return the number of mismatches (0 = bit-exact).
   auto fuzzVU(u64 iters) -> u64;
   auto fuzzLdSt(u64 iters) -> u64;
+  auto fuzzVuJit(u64 iters) -> u64;   // VU en linea del dynarec contra el interprete
 
   // Throughput A/B of the VU fast path: time `iters` COP2 ops with the scalar loop vs
   // the 8-lane SSE path over a fixed op mix. Prints ns/op and speedup.

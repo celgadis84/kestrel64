@@ -140,7 +140,8 @@ block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` 
 `KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_SAVETYPE` ·
 `KESTREL_RSPJIT` (RSP dynarec, **default ON**, oracle=RSP interp; `=0` off) /
 `KESTREL_RSPJIT_STATS=1` (coverage, ver `docs/RSP-JIT.md`) / `KESTREL_RSPJIT_WAYS=<n>`
-(imagenes de microcodigo cacheadas, por defecto 4) · `KESTREL_NORSPSSE=1` (VU escalar en vez de SSE4.1) ·
+(imagenes de microcodigo cacheadas, por defecto 4) · fuzz diferencial de la VU:
+`--rspfuzz N` (escalar vs SSE) y `--rspjitfuzz N` (VU en linea del dynarec vs interprete) · `KESTREL_NORSPSSE=1` (VU escalar en vez de SSE4.1) ·
 `KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST` · `KESTREL_FAULTSTOP=1` (halt on a guest fault with
 the RCP event ring intact) · `KESTREL_WATCHP=<phys>` (store watchpoint hooked in the D-cache;
 bus-level `KESTREL_WATCH` misses cacheable CPU stores) · `KESTREL_EVDUMP=<n>` ·
