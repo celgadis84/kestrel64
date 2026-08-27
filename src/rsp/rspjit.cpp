@@ -31,11 +31,7 @@ auto Cache::syncImem(const u8* imem) -> void {
   }
   if(!nDirty) return;
   flushes++;
-  // Microcodigo entero distinto: reciclar el buffer de codigo de una vez sale mas barato
-  // (y evita que se llene) que marcar mil ranuras una a una.
-  if(nDirty >= 256) {
-    clear();
-  } else {
+  {
     // Invalidacion EXACTA: una ranura muere solo si el bloque que hay en ella cubre de
     // verdad una palabra cambiada. La version anterior mataba las kMaxOps-1 ranuras
     // anteriores a cada palabra sucia "por si acaso" -- 65 ranuras por chunk de 8 bytes --
@@ -59,11 +55,23 @@ auto Cache::syncImem(const u8* imem) -> void {
   std::memcpy(shadow, imem, 4096);
 }
 
-auto Cache::init() -> bool {
-  // 8 MB de RWX: 1024 entradas x hasta 64 instrucciones x ~80 bytes por instruccion es el
-  // peor caso teorico (~5 MB, lo marca emitMem); el resto es holgura para no tener que
-  // vaciar la tabla en mitad de una tarea. Si aun asi se llena, clear() la recicla entera.
-  if(!buf.init(8u << 20)) return false;
+auto Cache::diffChunks(const u8* imem) const -> u32 {
+  u32 n = 0;
+  for(u32 i = 0; i < 512; i++) {
+    u64 a, b;
+    std::memcpy(&a, imem + 8 * i, 8);
+    std::memcpy(&b, shadow + 8 * i, 8);
+    n += (a != b);
+  }
+  return n;
+}
+
+auto Cache::init(u32 bytes) -> bool {
+  // RWX del tamano que pida el llamante: 1024 entradas x hasta 64 instrucciones x ~80 bytes
+  // por instruccion es el peor caso teorico (~5 MB, lo marca emitMem), pero el microcodigo
+  // real ocupa una fraccion y ahora hay VARIAS tablas vivas (una por imagen de IMEM). Si una
+  // se llena, clear() la recicla entera.
+  if(!buf.init(bytes)) return false;
   clear();
   ready = true;
   return true;

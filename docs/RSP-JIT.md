@@ -42,21 +42,60 @@ sub  rsp, 40             ; shadow space + 16-byte alignment
 
 Code lands in a 4 MB RWX slab; when it fills, the cache is cleared wholesale.
 
-## Invalidation — two layers
+## Invalidation — content, not range
 
 IMEM is not read-only: the CPU DMAs new microcode into it constantly, and a
-task boundary can reuse the same addresses for different code. Two independent
-mechanisms cover that:
+task boundary can reuse the same addresses for different code. Everything hangs
+off one idea: **what invalidates a block is the bytes changing, not the DMA
+touching them**. Each `rspjit::Cache` keeps a 4 KB `shadow` of the IMEM it was
+compiled from, and `Cache::syncImem()` diffs the live IMEM against it in 8-byte
+chunks. F3DEX2 reloads its whole microcode at the start of every task, byte for
+byte identical to the previous one: against the shadow that reload costs 512
+comparisons and invalidates nothing. Only the overlays, which really do bring
+different bytes, pay recompilation — and only for the slots they cover.
 
-1. **Range invalidation from the DMA.** `Memory::spDma` calls
-   `Rsp::jitInvalidate(off, bytes, sp.data())` for any transfer into IMEM. It
-   clears the slots the DMA overwrote **plus `kMaxOps - 1` slots before them**,
-   because a block that *starts* earlier can still *contain* an overwritten
-   instruction.
-2. **Whole-IMEM fingerprint.** `Rsp::start()` compares an FNV-1a hash of all
-   4 KB against the one stored at compile time; a mismatch clears everything.
-   This catches writes that never went through `spDma` (CPU stores straight
-   into IMEM through the bus).
+Invalidation inside a table is exact: a prefix sum over the dirty-chunk map
+kills a slot only if the block living there actually spans a changed word
+(blocks never wrap IMEM, so a block occupies `[idx, idx+nOps)`). The earlier
+"kill the `kMaxOps-1` slots before each dirty chunk, just in case" version
+swept half the table for a handful of scattered chunks: 72 blocks recompiled
+per invalidation event in SM64.
+
+### Microcode image cache (N ways)
+
+The host has no reason to inherit the N64's single 4 KB IMEM. A game that
+alternates graphics and audio microcode overwrites all of IMEM twice per frame,
+and with one table that means recompiling everything twice per frame — measured
+in SM64: 21282 whole-table flushes and 1.28 M blocks compiled per 600 buffer
+swaps, with **~52 % of the RSP thread sitting inside the compiler** rather than
+executing.
+
+So the RSP keeps `kJitWays` complete tables (`Rsp::jcWay[]`, one 2 MB code
+buffer plus its own shadow each, `KESTREL_RSPJIT_WAYS`, default 4), and
+`Rsp::jitSelectImage()` picks one when IMEM changes:
+
+- **By similarity, not equality.** Measured in SM64: 2000 IMEM loads produce
+  ~1400 *distinct* 4 KB images, because each microcode leaves behind a
+  different tail of the previous one (the audio microcode is shorter than the
+  graphics one) and because a task boot DMAs in pieces, so intermediate states
+  are visible too. Demanding an exact match makes the cache a mill — almost
+  everything misses. Picking the table that differs in the fewest 8-byte chunks
+  and patching it means returning to a known microcode only recompiles what
+  actually changed.
+- An exact match (zero differing chunks) is just a pointer swap.
+- A large difference (`kJitNewWay`, 64 chunks) claims a free way if there is
+  one; with every way in use, the closest one is patched. A whole table is
+  never thrown away on a task switch — `clear()` only recycles a code buffer
+  that filled up.
+
+Where the switch happens matters: the task's boot stub DMAs its own microcode
+**while the core is running, from the RSP thread**, and that DMA is requested
+through COP0, which never runs inside a compiled block. So switching the active
+table there is as safe as in `start()`, and it is where the task change really
+happens; invalidating blindly would throw away the previous task's table right
+before it could be recognised. A DMA arriving from any other thread falls back
+to `jc->syncImem()`, and one arriving with the core halted is left for
+`start()`.
 
 Two traps worth remembering, both of which cost a debugging session:
 
@@ -72,22 +111,28 @@ Two traps worth remembering, both of which cost a debugging session:
 
 ## Measured
 
-SM64, `bench` over 200 buffer swaps, threaded-jit:
+SM64, threaded-jit, `KESTREL_RSPJIT_STATS=1`. Coverage is **98.4 %** of
+executed RSP instructions running from compiled blocks (Stage 2 absorbed
+branches and delay slots; what is left is the handful of ops the compiler
+refuses).
 
-| | realtime | RSP busy |
-|---|---|---|
-| `KESTREL_RSPJIT=0` | 110.2 % | 28.5 Mips |
-| `KESTREL_RSPJIT=1` | 113.9 % | 30.7 Mips |
+Compiled blocks per 60 buffer swaps, as a function of how many microcode images
+the cache can hold:
 
-`KESTREL_RSPJIT_STATS=1` prints coverage: **76.6 %** of executed RSP
-instructions run from compiled blocks. The missing quarter is branches and
-their delay slots, which is exactly what Stage 2 is for.
+| ways | blocks compiled |
+|---|---|
+| 1 (single table) | 55200 |
+| 2 | 12027 |
+| 4 (default) | 11514 |
+| 8 / 16 | 11514 (only 4 ways ever get claimed) |
 
-With correct range invalidation (as opposed to the first, global version):
-flushes 4156 -> 896, compiles 185088 -> 158227, coverage unchanged.
+Two ways already capture the graphics/audio alternation; the rest is overlay
+churn, which is real work. End to end, `bench` over 600 buffer swaps with
+parallel-rdp: **13.3 s -> 10.1 s (295 % realtime)**.
 
 ## Next stage
 
-Absorb branches and delay slots into blocks so that a loop body compiles as one
-unit. That is where coverage goes past 76.6 % and where the RSP dynarec starts
-paying like the CPU one does.
+The RSP thread is still the long pole under parallel-rdp (`rsp` ~86 % busy vs
+`rdp` ~22 %). With the compiler no longer eating half the thread, the remaining
+cost is the VU itself: wider SSE4.2 coverage for the vector ops that still fall
+back to scalar.

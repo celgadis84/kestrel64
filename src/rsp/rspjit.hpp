@@ -81,7 +81,11 @@ struct Cache {
   // estadistica (KESTREL_RSPJIT_STATS=1)
   u64 entries = 0, jitOps = 0, interpOps = 0, compiles = 0, flushes = 0;
 
-  auto init() -> bool;
+  auto init(u32 bytes) -> bool;
+  // Numero de trozos de 8 B en que el IMEM de ahora difiere de la sombra de esta tabla.
+  // Sirve para distinguir un OVERLAY (unas pocas palabras parcheadas sobre el microcodigo
+  // vivo) de un CAMBIO DE IMAGEN (otra tarea, otros 4 KB enteros).
+  auto diffChunks(const u8* imem) const -> u32;
   auto clear() -> void;     // tira la tabla entera (buffer lleno)
   // Reconcilia la tabla con el IMEM que hay ahora: invalida SOLO las ranuras cuyas palabras
   // fuente hayan cambiado (mas la ventana kMaxOps-1 de bloques que puedan alcanzarlas) y

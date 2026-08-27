@@ -153,10 +153,17 @@ Rsp::Rsp() {
   {
     const char* v = std::getenv("KESTREL_RSPJIT");
     jitOn = !(v && v[0] == '0');
+    if(const char* w = std::getenv("KESTREL_RSPJIT_WAYS")) {
+      u32 n = (u32)std::strtoul(w, nullptr, 0);
+      kJitWays = n < 1 ? 1 : (n > kJitWaysMax ? kJitWaysMax : n);
+    }
     statsOn = std::getenv("KESTREL_RSPJIT_STATS") != nullptr;
     if(jitOn) {
+      // Solo la primera imagen al arrancar; las demas ranuras se crean cuando aparece un
+      // microcodigo distinto, que en un juego que no cambie de tarea no pasa nunca.
       jc = new rspjit::Cache();
-      if(!jc->init()) { std::fprintf(stderr, "[rspjit] RWX alloc fallo: dynarec apagado\n"); delete jc; jc = nullptr; jitOn = false; }
+      if(!jc->init(kJitWayBytes)) { std::fprintf(stderr, "[rspjit] RWX alloc fallo: dynarec apagado\n"); delete jc; jc = nullptr; jitOn = false; }
+      else { jcWay[0] = jc; jcCur = 0; jcUse[0] = ++jcTick; }
     }
   }
   sse = !std::getenv("KESTREL_NORSPSSE");   // A/B toggle; default ON (proven by --rspfuzz)
@@ -176,7 +183,53 @@ Rsp::Rsp() {
   }
 }
 
-Rsp::~Rsp() { if(statsOn) jitStatsDump(); delete jc; }
+Rsp::~Rsp() { if(statsOn) jitStatsDump(); for(auto*& w : jcWay) { delete w; w = nullptr; } jc = nullptr; }
+
+// Elige la tabla de bloques que corresponde al microcodigo que hay AHORA en IMEM.
+//
+//   1. La imagen activa no ha cambiado -> no hay nada que hacer (caso normal: F3DEX2 vuelve
+//      a DMAear sus mismos 4 KB al empezar cada tarea).
+//   2. Otra ranura tiene exactamente esta imagen -> cambiar de puntero. Cero invalidaciones y
+//      cero recompilaciones: el codigo de esa tarea sigue vivo donde lo dejamos.
+//   3. Imagen nueva. Si difiere POCO de la activa es un overlay parcheado sobre el
+//      microcodigo vivo: se parchea la misma ranura y se conserva lo que no cambio. Si
+//      difiere mucho es otro microcodigo: se ocupa la ranura menos usada y la activa queda
+//      intacta para cuando su tarea vuelva.
+auto Rsp::jitSelectImage(const u8* imem) -> void {
+  if(!jitOn || !jc) return;
+  // Se elige la tabla POR PARECIDO, no por igualdad. Medido en SM64: de 2000 cargas de
+  // IMEM salen ~1400 imagenes distintas de 4 KB, porque cada microcodigo deja detras un
+  // resto distinto del anterior (el de audio es mas corto que el de graficos) y porque el
+  // arranque de tarea DMAea por trozos, asi que se ven estados intermedios. Exigir
+  // igualdad exacta convierte la cache en un molino: casi todo es fallo. Comparando por
+  // trozos de 8 B y quedandose con la tabla que menos difiere, volver a un microcodigo ya
+  // visto solo recompila lo que de verdad cambio (el overlay), y nunca se tira la tabla
+  // entera.
+  u32 best = jcCur, bestDiff = jc->diffChunks(imem);
+  for(u32 i = 0; i < kJitWays && bestDiff; i++) {
+    if(!jcWay[i] || i == jcCur) continue;
+    u32 d = jcWay[i]->diffChunks(imem);
+    if(d < bestDiff) { bestDiff = d; best = i; }
+  }
+  if(!bestDiff) {   // imagen identica: solo cambiar de puntero
+    jc = jcWay[best]; jcCur = best; jcUse[best] = ++jcTick; jcHits++;
+    return;
+  }
+  jcMiss++;
+  // Diferencia grande y ranura libre: estrenarla en vez de machacar una tabla util. Con
+  // todas ocupadas se parchea la mas parecida, que es lo mas barato que hay.
+  if(bestDiff >= kJitNewWay) {
+    for(u32 i = 0; i < kJitWays; i++) {
+      if(jcWay[i]) continue;
+      auto* c = new rspjit::Cache();
+      if(!c->init(kJitWayBytes)) { delete c; break; }
+      jcWay[i] = c; best = i;
+      break;
+    }
+  }
+  jc = jcWay[best]; jcCur = best; jcUse[best] = ++jcTick;
+  jc->syncImem(imem);   // invalida lo que difiera de SU sombra y la reanota
+}
 
 // La escritura de IMEM por DMA es la unica forma de que el microcodigo cambie mientras la
 // tarea corre (carga de overlay), y ahi la huella que se comprueba en start() ya no vale:
@@ -187,10 +240,15 @@ Rsp::~Rsp() { if(statsOn) jitStatsDump(); delete jc; }
 auto Rsp::jitStatsDump() -> void {
   if(!jc) return;
   u64 tot = jc->jitOps + jc->interpOps;
-  std::fprintf(stderr, "[rspjit] ops jit=%llu (%.1f%%) interp=%llu | entradas=%llu bloques=%llu vaciados=%llu\n",
-               (unsigned long long)jc->jitOps, tot ? 100.0 * (double)jc->jitOps / (double)tot : 0.0,
-               (unsigned long long)jc->interpOps, (unsigned long long)jc->entries,
-               (unsigned long long)jc->compiles, (unsigned long long)jc->flushes);
+  u64 comp = 0, flu = 0, ent = 0, jops = 0, iops = 0; u32 ways = 0;
+  for(auto* w : jcWay) if(w) { ways++; comp += w->compiles; flu += w->flushes;
+                               ent += w->entries; jops += w->jitOps; iops += w->interpOps; }
+  tot = jops + iops;
+  std::fprintf(stderr, "[rspjit] ops jit=%llu (%.1f%%) interp=%llu | entradas=%llu bloques=%llu vaciados=%llu | imagenes: ranuras=%u aciertos=%llu fallos=%llu\n",
+               (unsigned long long)jops, tot ? 100.0 * (double)jops / (double)tot : 0.0,
+               (unsigned long long)iops, (unsigned long long)ent,
+               (unsigned long long)comp, (unsigned long long)flu,
+               ways, (unsigned long long)jcHits, (unsigned long long)jcMiss);
 }
 
 auto Rsp::jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void {
@@ -206,6 +264,18 @@ auto Rsp::jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void {
   // completo al empezar cada tarea y los 4 KB son identicos a los de la tarea anterior.
   // Comparando contra la sombra, esa recarga no invalida ni una ranura y solo los overlays
   // -- que si traen bytes distintos -- pagan recompilacion, y solo de lo que tocan.
+  // Con el nucleo PARADO este DMA es la carga de microcodigo de la proxima tarea: no se toca
+  // nada, que start() elegira imagen y una imagen ya vista no cuesta ni una recompilacion.
+  // Invalidar aqui destruiria la tabla de la tarea anterior justo antes de poder
+  // reconocerla. Con el nucleo corriendo es un overlay sobre la imagen viva y hay que
+  // invalidar en el acto, antes de volver a entrar en ningun bloque.
+  if(!running) return;
+  // Corriendo y desde el hilo del nucleo: es el propio microcodigo cargandose (el stub de
+  // arranque DMAea el ucode de la tarea) o un overlay. Estamos entre instrucciones
+  // interpretadas -- el DMA se pide por COP0, que nunca entra en un bloque -- asi que cambiar
+  // de imagen aqui es tan seguro como en start(), y es DONDE de verdad pasa el cambio de
+  // tarea: si se invalida a ciegas se tira la tabla de la tarea anterior cada vez.
+  if(std::this_thread::get_id() == rspThread) { jitSelectImage(imem); return; }
   jc->syncImem(imem);
   // El codigo emitido de los bloques muertos se queda en el buffer hasta el siguiente
   // reciclado: es un asignador de tope, no hay nada que liberar pieza a pieza.
@@ -1455,7 +1525,7 @@ auto Rsp::start() -> void {
   // sombra cuesta como calcular una huella y ademas dice QUE ha cambiado, asi que una tarea
   // que recarga su propio microcodigo no invalida nada. Cubre a CUALQUIER escritor (DMA,
   // tienda de la CPU, escritura por MCP) sin poner un gancho en ningun camino caliente.
-  if(jc) jc->syncImem(imp);
+  jitSelectImage(imp);
   running = true;
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;
@@ -1468,6 +1538,7 @@ __attribute__((flatten))
 auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
   bindMem();
+  rspThread = std::this_thread::get_id();
   u64 ran = 0, pub = 0;
   // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo CPU
   // (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final. Publicar cada

@@ -18,6 +18,7 @@
 // The vector math IS the hardware behaviour, transcribed rather than reinvented.
 
 #include "../core/types.hpp"
+#include <thread>
 
 namespace kestrel {
 
@@ -127,6 +128,30 @@ struct Rsp {
   // que rsp.hpp no tenga que arrastrar el emisor x86 a todo el que incluya el RSP.
   bool jitOn = false;
   rspjit::Cache* jc = nullptr;
+  // Cache de IMAGENES de microcodigo. El juego alterna tareas (graficos, audio, overlays) y
+  // cada cambio de tarea reemplaza los 4 KB de IMEM enteros: con una sola tabla eso es un
+  // vaciado total y una recompilacion completa CADA VEZ. Medido en SM64/600 campos: 21282
+  // vaciados, 1.28 M bloques compilados y ~50% del hilo del RSP dentro del compilador
+  // (emitCall+compile+classify en el perfilador de host). Guardando N tablas, cada una con
+  // su sombra de los 4 KB, volver a una imagen ya vista cuesta un memcmp y un puntero.
+  static constexpr u32 kJitWaysMax = 16;
+  static constexpr u32 kJitWayBytes = 2u << 20;
+  static constexpr u32 kJitNewWay = 64;   // trozos de 8 B que justifican estrenar ranura
+  u32 kJitWays = 4;                // KESTREL_RSPJIT_WAYS, <= kJitWaysMax
+  rspjit::Cache* jcWay[kJitWaysMax] = {};
+  u64 jcUse[kJitWaysMax] = {};        // sello de uso (LRU)
+  u32 jcCur = 0;                   // ranura activa (jc == jcWay[jcCur])
+  u64 jcTick = 0, jcHits = 0, jcMiss = 0;
+  // Elige la tabla que corresponde al IMEM que hay ahora, creandola si hace falta. Solo se
+  // llama desde start() -- hilo del RSP, con el nucleo parado -- porque cambiar la tabla
+  // activa bajo un bloque en ejecucion seria ejecutar codigo de OTRO microcodigo.
+  auto jitSelectImage(const u8* imem) -> void;
+  // Hilo que esta ejecutando el nucleo. Lo escribe step() en cada tanda. Sirve para saber si
+  // un DMA a IMEM viene del PROPIO microcodigo (el stub de arranque de la tarea carga su
+  // ucode con el DMA del SP, y eso pasa con el nucleo corriendo pero DESDE este hilo, entre
+  // instrucciones interpretadas) o de fuera: en el primer caso se puede cambiar de imagen sin
+  // riesgo, en el segundo hay que limitarse a invalidar la tabla viva.
+  std::thread::id rspThread{};
   // Tira la tabla de bloques. La llama el motor de DMA del SP cuando escribe en IMEM: es
   // la unica via por la que el microcodigo puede cambiar bajo un bloque ya compilado
   // mientras la tarea corre (carga de overlay). Al arrancar cada tarea se comprueba ademas
