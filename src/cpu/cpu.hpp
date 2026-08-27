@@ -95,6 +95,16 @@ struct CPU {
   // camino que cambia data[] es icFill. Deja validar un bloque JIT por linea y no por op.
   struct ICacheLine { u32 ptag = 0; bool valid = false; u32 seq = 0; u8 data[32] = {}; };
   DCacheLine dcache[512] = {};
+  // Tamano de RDRAM copiado aqui para que el camino rapido de memoria del dynarec lo compruebe
+  // con un cmp contra un campo del propio CPU, en vez de perseguir mem->rdram.size() (puntero
+  // + vector). Vale 0 mientras no haya bus atado, y ese 0 hace fallar la comprobacion de rango,
+  // que es justo el "if(!mem) return 0" del helper. Lo refresca la ruta de compilacion de
+  // bloques; Memory::reset() solo corre en el arranque, antes de compilar nada.
+  u32 jitRdramSz = 0;
+  // Punto de vigilancia o write-through de diagnostico armado. Vive aqui arriba, en la parte
+  // publica, porque el camino rapido de memoria del dynarec lo consulta desde el codigo
+  // emitido: con la bandera puesta, un store se va al helper para que pase por dcWriteDbg.
+  bool dcDbgOn = false;
   ICacheLine icache[512] = {};
   u32 icSeq = 0;                 // sello de relleno de I-cache (0 = nunca rellenada)
 
@@ -329,7 +339,6 @@ private:
     if(__builtin_expect(dcDbgOn, 0)) dcWriteDbg(phys, val, size);
   }
   auto dcWriteDbg(u32 phys, u64 val, u32 size) -> void;   // solo con depuracion armada
-  bool dcDbgOn = false;
   auto dcFlush(u32 idx) -> void;              // push a dirty line to RDRAM, clear dirty
   auto dcFill(u32 idx, u32 base) -> void;     // load 16 bytes RDRAM -> line
   auto icFetch(u32 phys) -> u32;              // instruction fetch through the I-cache

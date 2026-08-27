@@ -412,6 +412,160 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   rc.ld64(RDX, rs);                       // arg1 = gpr[rs]
   if(simm) e.add_r_imm32(RDX, simm);      //        + sext(imm16)  (add de 64 bits)
   if(isStore && !isFp) rc.ld64(R9, rt);   // arg3 = dato del store (COP1 lo saca de fpr)
+
+  // ------------------------------------------------- camino rapido de memoria dentro del bloque
+  // Los helpers de memoria eran casi la mitad del perfil del anfitrion en SM64, y en el caso
+  // comun hacen siempre lo mismo: ckseg0, alineada, kernel, dentro de RDRAM, linea de D-cache
+  // presente. Ese caso se emite aqui. Las comprobaciones son SUFICIENTES, no necesarias: la
+  // que no pase cae al helper, que sigue teniendo la semantica exacta y es el oraculo.
+  //
+  //   rax = a + 0x80000000; si cabe sin signo en 0x20000000 entonces a era exactamente ckseg0
+  //   canonico de 64 bits Y rax ES ya la fisica (a & 0x1FFFFFFF). ckseg0 implica cacheable, y
+  //   en kernel reXor() es la identidad, asi que la fisica no lleva swizzle de endianness.
+  //
+  // Dentro de RDRAM ni storeCart (exige isCart) ni wordStoreQuirk (exige DMEM/SP o PIF_RAM)
+  // pueden disparar, asi que los stores de 1/2/8 tampoco necesitan preguntar por ellos. Y la
+  // reserva RI de LWU/LD/SD solo muerde fuera de kernel, que la guardia de abajo ya excluye.
+  //
+  // Mascara de lo que se APAGA (KESTREL_JIT_NOFASTMEM): 1=LW 2=SW 8=LWC1 16=SWC1 32=resto de
+  // cargas enteras 64=resto de stores enteros 128=LDC1/SDC1, y 4 = los stores hacen todas las
+  // comprobaciones pero se van igual al helper sin escribir (separa "una comprobacion deja
+  // pasar algo" de "la escritura esta mal"). =255 lo apaga entero.
+  static const int g_noFastMem = std::getenv("KESTREL_JIT_NOFASTMEM")
+                               ? (int)std::strtol(std::getenv("KESTREL_JIT_NOFASTMEM"), nullptr, 0) : 0;
+  usize fastDone = 0; bool hasFast = false;
+  usize fastFail[12]; int nFail = 0;
+  const u32 fsz = (OP == 0x20 || OP == 0x24 || OP == 0x28) ? 1
+                : (OP == 0x21 || OP == 0x25 || OP == 0x29) ? 2
+                : (OP == 0x23 || OP == 0x27 || OP == 0x2b || OP == 0x31 || OP == 0x39) ? 4 : 8;
+  bool fmOk;
+  switch(OP) {
+    case 0x23: fmOk = !(g_noFastMem &   1); break;                       // LW
+    case 0x2b: fmOk = !(g_noFastMem &   2); break;                       // SW
+    case 0x31: fmOk = !(g_noFastMem &   8); break;                       // LWC1
+    case 0x39: fmOk = !(g_noFastMem &  16); break;                       // SWC1
+    case 0x20: case 0x24: case 0x21: case 0x25: case 0x27: case 0x37:
+               fmOk = !(g_noFastMem &  32); break;                       // LB/LBU/LH/LHU/LWU/LD
+    case 0x28: case 0x29: case 0x3f:
+               fmOk = !(g_noFastMem &  64); break;                       // SB/SH/SD
+    case 0x35: case 0x3d: fmOk = !(g_noFastMem & 128); break;            // LDC1/SDC1
+    default:   fmOk = false; break;
+  }
+  if(fmOk) {
+    const bool st = isStore;
+    const s32 stOff = (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status);
+    const s32 szOff = (s32)offsetof(CPU, jitRdramSz);
+    const s32 dcOff = (s32)offsetof(CPU, dcache);
+    const s32 dbOff = (s32)offsetof(CPU, dcDbgOn);
+    const s32 mmOff = (s32)offsetof(CPU, mem);
+    const s32 rpOff = (s32)(offsetof(Memory, rcp) + offsetof(Rcp, mi_repeat_on));
+    static_assert(sizeof(CPU::DCacheLine) == 24, "el x3<<3 de abajo asume lineas de 24 bytes");
+    const s32 lnTag = (s32)offsetof(CPU::DCacheLine, ptag);
+    const s32 lnVal = (s32)offsetof(CPU::DCacheLine, valid);
+    const s32 lnDrt = (s32)offsetof(CPU::DCacheLine, dirty);
+    const s32 lnDat = (s32)offsetof(CPU::DCacheLine, data);
+    const s32 fpOff = (s32)(offsetof(CPU, fpr) + 8u * rt);
+    if(isFp) {
+      // CU1 claro = Coprocessor Unusable; la levanta el interprete con su CE exacto.
+      e.test_m8_imm(RBX, stOff + 3, 0x20);            // Status bit29 vive en el byte 3
+      fastFail[nFail++] = e.je_rel32_placeholder();
+      // FR=1: los 32 registros son independientes y el acceso cae en fpr[rt]. FR=0: los pares
+      // se juntan, y para rt PAR el destino sigue siendo fpr[rt] -- solo el IMPAR cambia (la
+      // mitad alta del companero en 32 bits, el par entero en 64). Como la paridad se sabe al
+      // compilar, la comprobacion de FR solo se emite para registros impares.
+      if(rt & 1) {
+        e.test_m8_imm(RBX, stOff + 3, 0x04);          // Status bit26 (FR)
+        fastFail[nFail++] = e.je_rel32_placeholder();
+      }
+    }
+    e.mov_r_r(RAX, RDX);
+    e.alu64_imm(5, RAX, 0x80000000u);                 // sub rax, sext(imm) == rax += 0x80000000
+    e.cmp64_imm(RAX, 0x20000000u);
+    fastFail[nFail++] = e.jae_rel32_placeholder();    // fuera de ckseg0 (o no canonica)
+    if(fsz > 1) {
+      e.test_al_imm8((u8)(fsz - 1));                  // desalineada: el interprete vectoriza
+      fastFail[nFail++] = e.jne_rel32_placeholder();
+    }
+    e.test_m8_imm(RBX, stOff, 0x98);                  // KSU!=0 o KX: traduccion general
+    fastFail[nFail++] = e.jne_rel32_placeholder();
+    e.cmp_r32_m(RAX, RBX, szOff);                     // fisica fuera de RDRAM (o sin bus): MMIO
+    fastFail[nFail++] = e.jae_rel32_placeholder();
+    if(st) {
+      // storeRepeat: con MI_MODE bit8 armado el siguiente store a RDRAM se difunde por la
+      // pagina entera. mem no puede ser nulo aqui: con mem nulo jitRdramSz vale 0 y la
+      // comprobacion de rango ya salio.
+      e.mov_r_m(RCX, RBX, mmOff);
+      e.cmp_m8_imm(RCX, rpOff, 0);
+      fastFail[nFail++] = e.jne_rel32_placeholder();
+      // Punto de vigilancia / write-through de diagnostico armado: al helper, que llama a
+      // dcWriteDbg. El camino rapido no puede tragarse una escritura que el depurador espera.
+      e.cmp_m8_imm(RBX, dbOff, 0);
+      fastFail[nFail++] = e.jne_rel32_placeholder();
+    }
+    e.mov_r_r32(RCX, RAX);
+    e.shift32_imm(5, RCX, 4);                         // shr ecx,4
+    e.mov_r_r32(R8, RCX);
+    e.shift32_imm(4, R8, 4);                          // shl r8d,4 = tag esperado (phys & ~0xf)
+    e.alu32_imm(4, RCX, 0x1FFu);                      // indice de linea
+    e.lea_x3(RCX, RCX);
+    e.shift64_imm(4, RCX, 3);                         // idx*24
+    e.alu64_rr(0x03, RCX, RBX);                       // rcx = &cpu->dcache[idx] - dcOff
+    e.cmp_r32_m(R8, RCX, dcOff + lnTag);
+    fastFail[nFail++] = e.jne_rel32_placeholder();
+    e.cmp_m8_imm(RCX, dcOff + lnVal, 0);
+    fastFail[nFail++] = e.je_rel32_placeholder();     // linea invalida: el helper la rellena
+    // El sucio se marca AQUI, con rcx todavia en la base de la linea. Sumarle antes el
+    // desplazamiento intra-linea escribiria la bandera dentro de data[], que es corrupcion
+    // silenciosa del dato recien escrito. Costo una tarde.
+    if(st && !(g_noFastMem & 4)) e.mov_m8_imm(RCX, dcOff + lnDrt, 1);
+    e.alu32_imm(4, RAX, 0xFu);                        // desplazamiento dentro de la linea
+    e.alu64_rr(0x03, RCX, RAX);
+    const s32 D = dcOff + lnDat;
+    if(!st) {
+      // El guest guarda big-endian dentro de la linea, de ahi los bswap. El destino se escribe
+      // en MEMORIA, igual que hace el helper, para que los dos caminos converjan con el cache
+      // de registros en el mismo estado (el forget de abajo vale para los dos).
+      switch(fsz) {
+        case 1:
+          e.movzx8_r_m(RAX, RCX, D);                  // un byte no tiene orden que arreglar
+          if(OP == 0x20) e.movsx64_8(RAX, RAX);       // LB extiende en signo; LBU ya viene en cero
+          break;
+        case 2:
+          e.movzx16_r_m(RAX, RCX, D);
+          e.bswap32(RAX); e.shift32_imm(5, RAX, 16);  // los dos bytes, ya en orden, abajo
+          if(OP == 0x21) e.movsx64_16(RAX, RAX);      // LH sext; LHU se queda en cero
+          break;
+        case 4:
+          e.mov_r32_m(RAX, RCX, D); e.bswap32(RAX);
+          if(OP == 0x23) e.movsxd(RAX, RAX);          // LW sext; LWU se queda en cero
+          break;
+        default:
+          e.mov_r_m(RAX, RCX, D); e.bswap64(RAX);
+          break;
+      }
+      if(isFp) { if(fsz == 4) e.mov_m_r32(RBX, fpOff, RAX); else e.mov_m_r(RBX, fpOff, RAX); }
+      else if(rt) e.st64(RAX, (u8)rt);
+    } else {
+      // Bit 4: hace TODAS las comprobaciones y se va igualmente al helper sin escribir. Separa
+      // "las comprobaciones dejan pasar algo que no deberian" de "la escritura esta mal".
+      if(g_noFastMem & 4) { fastFail[nFail++] = e.jmp_rel32_placeholder(); }
+      else {
+        if(isFp) { if(fsz == 8) e.mov_r_m(R8, RBX, fpOff); else e.mov_r32_m(R8, RBX, fpOff); }
+        else if(fsz == 8) e.mov_r_r(R8, R9);
+        else              e.mov_r_r32(R8, R9);        // dato del store (32 bits bajos)
+        switch(fsz) {
+          case 1: e.mov_m8_r(RCX, D, R8); break;      // un byte va tal cual
+          case 2:
+            e.shift32_imm(4, R8, 16); e.bswap32(R8);  // deja el par de bytes ya en orden abajo
+            e.mov_m16_r(RCX, D, R8); break;
+          case 4: e.bswap32(R8); e.mov_m_r32(RCX, D, R8); break;
+          default: e.bswap64(R8); e.mov_m_r(RCX, D, R8); break;
+        }
+      }
+    }
+    fastDone = e.jmp_rel32_placeholder(); hasFast = true;
+  }
+  for(int i = 0; i < nFail; i++) e.patchRel32(fastFail[i]);   // todos aterrizan en el CALL
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX; R12 no fiable)
   e.mov_r_imm32(R8, rt);                  // arg2 = rt
   e.mov_r_imm64(RAX, (u64)fn);
@@ -419,6 +573,7 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   e.test_al_al();
   bailSite = e.je_rel32_placeholder();    // al==0 (faulted) → salta al stub de bail
   snap = rc.snap();                       // lo sucio aqui lo escribe el stub de bail
+  if(hasFast) e.patchRel32(fastDone);     // el camino rapido se reune aqui
   if(!isStore && !isFp) rc.forget(rt);    // el helper acaba de escribir gpr[rt] en memoria
   return true;
 }
@@ -783,6 +938,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   static_assert(offsetof(CPU, gpr) == 0, "gpr debe ser el primer miembro de CPU (RBX==cpu)");
   Block b;
   const u32 kMaxOps = 64;
+  // El camino rapido de memoria compara la fisica contra este campo en vez de perseguir
+  // mem->rdram.size(). Se refresca aqui, no en cada despacho: Memory::reset() dimensiona la
+  // RDRAM en el arranque, mucho antes de que se compile el primer bloque, y el valor lo lee
+  // el codigo emitido en tiempo de ejecucion -- no se hornea en el.
+  c.jitRdramSz = c.mem ? (u32)c.mem->rdram.size() : 0;
   Emitter e(c.jitCache->buf);
   u8* entry = c.jitCache->buf.cursor();
 

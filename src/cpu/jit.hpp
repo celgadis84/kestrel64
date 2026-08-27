@@ -124,11 +124,11 @@ public:
   // 64-bit ALU: op r64, [rbx+off]
   auto alu64_rm(u8 opc, Reg dst, u8 gi) -> void { rex(true,dst,0,RBX); buf.emit(opc); memOperand(dst, RBX, goff(gi)); }
   // 32-bit ALU imm: op r32, imm32.  /digit: ADD=0 OR=1 AND=4 SUB=5 XOR=6
-  auto alu32_imm(u8 digit, Reg dst, u32 imm) -> void { buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
+  auto alu32_imm(u8 digit, Reg dst, u32 imm) -> void { if(dst & 8) rex(false,0,0,dst); buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
   // 64-bit ALU imm: op r64, imm32 (sign-extended to 64)
   auto alu64_imm(u8 digit, Reg dst, u32 imm) -> void { rex(true,0,0,dst); buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
   // 32-bit shift by imm8:  /digit SHL=4 SHR=5 SAR=7
-  auto shift32_imm(u8 digit, Reg dst, u8 sa) -> void { buf.emit(0xC1); modrm(3,digit,dst); buf.emit(sa); }
+  auto shift32_imm(u8 digit, Reg dst, u8 sa) -> void { if(dst & 8) rex(false,0,0,dst); buf.emit(0xC1); modrm(3,digit,dst); buf.emit(sa); }
   // 32-bit shift by CL
   auto shift32_cl(u8 digit, Reg dst) -> void { buf.emit(0xD3); modrm(3,digit,dst); }
   // 64-bit shift by imm8:  REX.W /digit SHL=4 SHR=5 SAR=7  (SRA/SRAV usan la variante 64b)
@@ -245,6 +245,53 @@ public:
   // jo rel32: 0F 80. El flag OF de x86 tras un add/sub de 32 bits ES el desbordamiento con
   // signo de 32 bits que define MIPS para ADDI/ADD/SUB, asi que la trampa no se calcula.
   auto jo_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x80); usize at = buf.used; imm32(0); return at; }
+  auto jae_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x83); usize at = buf.used; imm32(0); return at; }
+  // test al, imm8 -- una sola comprobacion de bits bajos sin tocar ningun registro.
+  auto test_al_imm8(u8 imm) -> void { buf.emit(0xA8); buf.emit(imm); }
+  // test byte [base+disp], imm8
+  auto test_m8_imm(Reg base, s32 disp, u8 imm) -> void {
+    buf.emit(0xF6); memOperand(0, base, disp); buf.emit(imm);
+  }
+  // cmp r32, [base+disp]
+  auto cmp_r32_m(Reg dst, Reg base, s32 disp) -> void {
+    if((dst & 8) || (base & 8)) rex(false, dst, 0, base);
+    buf.emit(0x3B); memOperand(dst, base, disp);
+  }
+  // bswap r32 -- el dato del guest vive big-endian dentro de la linea de cache.
+  auto bswap32(Reg r) -> void { if(r & 8) rex(false,0,0,r); buf.emit(0x0F); buf.emit((u8)(0xC8 + (r & 7))); }
+  // lea dst, [src+src*2]  (dst = src*3). src no puede ser RBP/R13: con mod=00 ese codigo de
+  // base significa disp32, no el registro.
+  auto lea_x3(Reg dst, Reg src) -> void {
+    rex(true, dst, src, src);
+    buf.emit(0x8D); modrm(0, dst, 4); buf.emit((u8)((1 << 6) | ((src & 7) << 3) | (src & 7)));
+  }
+  // bswap r64 -- doubleword del guest, big-endian dentro de la linea.
+  auto bswap64(Reg r) -> void { rex(true,0,0,r); buf.emit(0x0F); buf.emit((u8)(0xC8 + (r & 7))); }
+  // mov byte [base+disp], src8. Sin REX solo hay 4 registros de 8 bits sanos (AL/CL/DL/BL);
+  // con cualquier REX presente el codigo 4-7 pasa a ser SPL/BPL/SIL/DIL, que es lo que
+  // queremos, asi que se fuerza el prefijo para todo lo que no sea A/C/D/B.
+  auto mov_m8_r(Reg base, s32 disp, Reg src) -> void {
+    if((src & 8) || (base & 8) || (src & 7) >= 4) rex(false, src, 0, base);
+    buf.emit(0x88); memOperand(src, base, disp);
+  }
+  // mov word [base+disp], src16
+  auto mov_m16_r(Reg base, s32 disp, Reg src) -> void {
+    buf.emit(0x66);
+    if((src & 8) || (base & 8)) rex(false, src, 0, base);
+    buf.emit(0x89); memOperand(src, base, disp);
+  }
+  // movzx r32, byte [base+disp]  /  movzx r32, word [base+disp]
+  auto movzx8_r_m(Reg dst, Reg base, s32 disp) -> void {
+    if((dst & 8) || (base & 8)) rex(false, dst, 0, base);
+    buf.emit(0x0F); buf.emit(0xB6); memOperand(dst, base, disp);
+  }
+  auto movzx16_r_m(Reg dst, Reg base, s32 disp) -> void {
+    if((dst & 8) || (base & 8)) rex(false, dst, 0, base);
+    buf.emit(0x0F); buf.emit(0xB7); memOperand(dst, base, disp);
+  }
+  // movsx r64, r8 / movsx r64, r16 -- LB y LH extienden en signo a los 64 bits del gpr.
+  auto movsx64_8(Reg dst, Reg src)  -> void { rex(true,dst,0,src); buf.emit(0x0F); buf.emit(0xBE); modrm(3,dst,src); }
+  auto movsx64_16(Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(0x0F); buf.emit(0xBF); modrm(3,dst,src); }
   // Reserva 8 bytes alineados para una ranura de enlace; devuelve su offset en el buffer.
   auto reserveSlot() -> usize {
     while(buf.used & 7) buf.emit(0x90);

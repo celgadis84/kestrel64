@@ -47,3 +47,99 @@ destino pasa a tener bloque propio.
   `0xFFFFFFFF8xxxxxxx` sin mirar el modo: en usuario o supervisor esa direccion no esta
   traducida y el VR4300 levanta AdEL en el fetch. Ahora se declina al interprete salvo en modo
   kernel (KSU==0, o EXL, o ERL), que es quien vectoriza la excepcion.
+
+## Camino rapido de memoria dentro del bloque (LW / SW / LWC1 / SWC1)
+
+El perfil del anfitrion en SM64 con `threaded-jit` decia esto, y no era una sospecha:
+
+```
+kestrel_jitLW  30.65%   jitTryBlock 19.89%   jitProceedTramp 8.60%
+kestrel_jitSW   5.91%   jitLWC1      4.84%   jitSWC1         4.30%
+```
+
+Es decir: casi la mitad de las muestras se van en cuatro helpers que, en el caso comun,
+hacen siempre lo mismo -- direccion en ckseg0, alineada, modo kernel, dentro de RDRAM, linea
+de D-cache presente. Ese caso comun ahora se emite **dentro del bloque**; lo que no lo cumpla
+cae al helper de siempre, que sigue siendo la semantica exacta y el oraculo.
+
+Las comprobaciones emitidas son **suficientes, no necesarias**. Ninguna intenta reproducir la
+traduccion general: cada una es un `jcc` que, si duda, se va al helper.
+
+- `rax = a + 0x80000000; cmp rax, 0x20000000; jae helper`. Una sola comparacion sin signo
+  resuelve tres cosas a la vez: que el segmento es ckseg0, que la direccion de 64 bits estaba
+  **canonicamente** extendida en signo, y -- de propina -- `rax` ya ES la fisica
+  (`a & 0x1FFFFFFF`). ckseg0 implica cacheable, y en modo kernel `reXor()` es la identidad.
+- `test al,3` -- desalineada al helper (el interprete levanta AdEL con su BadVAddr).
+- `test byte [status], 0x98` -- exige KSU==0 y KX==0. Es la condicion suficiente de
+  "kernel de 32 bits"; cualquier otra cosa va a la traduccion general.
+- `cmp eax, [cpu->jitRdramSz]; jae helper` -- fuera de RDRAM es MMIO. El campo se copia al
+  CPU en la compilacion de bloque para no perseguir `mem->rdram.size()` (puntero + vector) en
+  tiempo de ejecucion. Vale 0 sin bus atado, y ese 0 hace fallar el rango: es el
+  `if(!mem) return 0` del helper, gratis.
+- Solo stores: `mi_repeat_on` armado (difusion de escritura de MI) y `dcDbgOn` armado
+  (punto de vigilancia / write-through de diagnostico) mandan al helper. El camino rapido no
+  puede tragarse una escritura que el depurador espera ver.
+- Solo COP1: `Status` bit29 (CU1) claro va al helper, que levanta Coprocessor Unusable con su
+  CE. Y **bit26 (FR)**: con FR=1 un acceso de 32 bits es la mitad baja de `fpr[rt]`, igual que
+  con FR=0 si `rt` es PAR. El unico caso distinto es impar en modo mitad, que va a la mitad
+  ALTA del companero par -- ese se declina, y como la paridad de `rt` se sabe al compilar, la
+  comprobacion de FR **solo se emite para registros impares**.
+
+Luego la linea de D-cache a mano: indice `(phys>>4)&0x1ff`, `idx*24` como
+`lea rcx,[rcx+rcx*2]` + `shl rcx,3`, comparar `ptag`, mirar `valid`. Fallo o linea invalida =
+helper, que es quien sabe rellenarla. El dato vive big-endian dentro de la linea, de ahi el
+`bswap`.
+
+### El bug que costo el rato
+
+El primer SW emitido pasaba systemtest en LW pero lo rompia entero con
+`Got unhandled exception` desde `StartupTest`. Bisecado con la mascara
+`KESTREL_JIT_NOFASTMEM` (1=LW 2=SW 8=LWC1 16=SWC1, y **4 = hacer todas las comprobaciones y
+irse igual al helper sin escribir**): solo-LW PASS, solo-SW FAIL, SW-solo-comprobaciones
+PASS. O sea, las guardias estaban bien y el fallo estaba en la escritura.
+
+Era el orden: la marca de `dirty` se emitia con `rcx` ya desplazado por el offset intra-linea,
+asi que el `1` aterrizaba **dentro de `data[]`** y corrompia en silencio la palabra recien
+escrita. Ahora se marca con `rcx` todavia en la base de la linea, antes de sumar el offset.
+Ese bit 4 de la mascara se queda: separar "una guardia deja pasar algo" de "la escritura esta
+mal" es lo que convirtio el fallo en una tarde y no en una semana.
+
+### Lo que dio
+
+Modesto, y era de esperar: el cuello de este emulador es el RCP, no la CPU.
+
+| | antes | LW/SW/COP1-32 | los 15 opcodes |
+|---|---|---|---|
+| `jit` lockstep (SM64, 200 flips) | 64.1% de tiempo real | 65.0% | - |
+| `threaded-jit` | 450.3% | 456.8% | **461.4%** |
+| systemtest[jit] | 40 s | 27 s | 24 s |
+
+`kestrel_jitLW` desaparece del top del perfil, pero no porque el trabajo se evapore: se
+mudo al codigo emitido, que `hostprof.py` no sabe simbolizar. Se queda por la regla de
+que todo suma.
+
+### Extension al resto de anchos (LB/LBU/LH/LHU/LWU/LD/SB/SH/SD/LDC1/SDC1)
+
+Una vez verde el de 32 bits, el mismo esqueleto cubre los quince opcodes de memoria sin
+guardias nuevas, porque dentro de RDRAM las rutas que faltaban no pueden dispararse:
+
+- `storeCart` exige `isCart(phys)` y `wordStoreQuirk` exige DMEM/SP o PIF_RAM. Ninguna de las
+  dos regiones solapa RDRAM, asi que SB/SH/SD las saltan por construccion.
+- La reserva **RI** de LWU/LD/SD (no-kernel sin UX/SX) solo muerde fuera de kernel, y la
+  guardia `Status & 0x98` ya exige KSU==0.
+- `reXor()` -- el swizzle de endianness inverso -- devuelve la direccion tal cual salvo en
+  modo **Usuario** con RE puesto. Misma guardia, misma conclusion: `pe == phys` para todo ancho.
+- Un acceso de 8 bytes esta alineado a 8, asi que cae entero dentro de su linea de 16.
+
+Lo unico con trabajo propio es el orden de bytes, que en la linea es el del guest:
+
+| ancho | carga | store |
+|---|---|---|
+| 1 | `movzx` (y `movsx` para LB) | `mov byte` tal cual |
+| 2 | `movzx16` + `bswap32` + `shr 16` (+`movsx` para LH) | `shl 16` + `bswap32` + `mov word` |
+| 4 | `mov r32` + `bswap32` (+`movsxd` para LW) | `bswap32` + `mov dword` |
+| 8 | `mov r64` + `bswap64` | `bswap64` + `mov qword` |
+
+LDC1/SDC1 heredan la regla de FR de sus hermanos de 32 bits: `fprGet64`/`fprSet64` con FR=0
+usan `fpr[rt & ~1]`, que para `rt` PAR es el mismo registro que con FR=1 -- solo el impar se
+declina al helper, y la paridad se conoce al compilar.
