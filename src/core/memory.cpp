@@ -1574,6 +1574,9 @@ auto Memory::rspAwaitIdle() -> void {
 static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
                             ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 262144;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
+// Grano del permiso del regulador (ver paceAllowance). Calibrable como la holgura.
+static const u64 kPaceGrain = std::getenv("KESTREL_PACEGRAIN")
+                            ? std::strtoull(std::getenv("KESTREL_PACEGRAIN"), nullptr, 0) : 1024;
 
 auto Memory::rcpPace(u64 cpuRetired) -> void {
   if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return; }
@@ -1634,8 +1637,15 @@ auto Memory::paceAllowance(u64 cpuRetired) -> u32 {
   u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
   u64 allow  = ((rspNow - paceRsp0) * paceCpuNum) / paceCpuDen + kPaceSlack;
   u64 ahead  = cpuRetired - paceCpu0;
-  if(ahead >= allow) return 1;
-  u64 left = allow - ahead;
+  u64 left   = (ahead >= allow) ? 0 : (allow - ahead);
+  // Granularidad. Sin ella el permiso se encoge solo al acercarse al limite (100, 50, 20,
+  // 9, 1 ...) y la cadena enlazada vuelve al trampolin cada pocas ops; cada vuelta paga dos
+  // lecturas atomicas de lineas que el worker del RSP esta reescribiendo, que es un fallo de
+  // cache compartida, no una lectura local. Redondear hacia arriba adelanta el freno como
+  // mucho `grain` ops sobre una holgura de 256 K -- por debajo del ruido -- y convierte esa
+  // cola en un solo paso. No cambia el estado del guest: el regulador solo decide CUANDO
+  // duerme el hilo de CPU, y quien frena de verdad es rcpPace, que se llama igual.
+  if(left < kPaceGrain) left = kPaceGrain;
   return left > 0xFFFF'FFFFull ? 0xFFFF'FFFFu : (u32)left;
 }
 

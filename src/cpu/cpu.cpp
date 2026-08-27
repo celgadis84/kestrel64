@@ -929,9 +929,17 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
   bool exl = status & 0x2;
   u64 epc = bd ? (curPc - 4) : curPc;   // branch instruction if we're in its delay slot
   if(!exl) cop0[C0_EPC] = sext32((u32)epc);   // EPC frozen while EXL already set (nested)
-  if(excTrace && exceptions < 80) {
-    std::fprintf(stderr, "[exc] #%llu code=%u epc=0x%08x status=0x%08x cause=0x%08x mi_intr=0x%02x mi_mask=0x%02x retired=%llu\n",
-                 (unsigned long long)exceptions, excCode, (u32)epc, status, (u32)cop0[C0_Cause],
+  // Tope de la traza. 80 basta para un arranque, pero para bisecar una divergencia tardia
+  // (systemtest lleva miles de excepciones a proposito antes de llegar al test que falla)
+  // hace falta el rastro entero: KESTREL_EXCTRACE=<n> lo sube.
+  static const u64 kExcTraceMax = []{
+    const char* v = std::getenv("KESTREL_EXCTRACE");
+    u64 n = v ? std::strtoull(v, nullptr, 0) : 0;
+    return n > 1 ? n : 80ull;
+  }();
+  if(excTrace && exceptions < kExcTraceMax) {
+    std::fprintf(stderr, "[exc] #%llu code=%u epc=0x%016llx badv=0x%016llx status=0x%08x cause=0x%08x mi_intr=0x%02x mi_mask=0x%02x retired=%llu\n",
+                 (unsigned long long)exceptions, excCode, (unsigned long long)epc, (unsigned long long)cop0[C0_BadVAddr], status, (u32)cop0[C0_Cause],
                  mem ? mem->rcp.mi_intr.load() : 0u, mem ? mem->rcp.mi_mask : 0,
                  (unsigned long long)retired);
     std::fflush(stderr);

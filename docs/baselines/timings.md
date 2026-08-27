@@ -352,3 +352,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-08-27 | gate_all | 412 s | gate_prdp | 322 s | JIT: CACHE en bloque + ranura de retardo al interprete; 12/12, regress=0 (tiempo NEUTRO, ver PERF-RCP-SYNC 9) |
 | 2026-08-27 | gate_all | 420 s | gate_prdp | 331 s | overclock (KESTREL_OC*) + tamano de ventana/pantalla completa; 12/12, regress=0 |
 | 2026-08-27 | gate_all | 422 s | gate_prdp | 315 s | mando configurable (KESTREL_PAD1); 12/12, regress=0 |
+| 2026-08-27 | gate_all | 430 s | gate_prdp | 332 s | JIT: guardia R==0, privilegio ckseg0, arnes jitdiff, ALU-con-trampa por defecto=3; 12/12, regress=0 |

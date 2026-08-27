@@ -423,6 +423,87 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   return true;
 }
 
+// ALU con trampa de desbordamiento: ADDI (OP 0x08) y ADD/SUB (SPECIAL 0x20/0x22). Son las
+// mismas sumas que ADDIU/ADDU/SUBU salvo que el VR4300 levanta IntegerOverflow cuando la suma
+// con signo de 32 bits desborda, y esa excepcion tiene que vectorizarse con el pc exacto de la
+// op — por eso estaban fuera del JIT. Pero eso es justo lo que ya sabe hacer el stub de bail
+// de las mem-ops: se emite la aritmetica nativa y, si el host marca desbordamiento, se sale
+// por el MISMO stub SIN haber escrito el destino, con eax = ops retiradas antes de esta; el
+// interprete re-ejecuta la op y levanta la excepcion con su semantica exacta. El flag OF de
+// x86 tras un add/sub de 32 bits ES el desbordamiento con signo de MIPS, asi que no hay que
+// calcularlo aparte.
+//
+// Las variantes de 64 bits (DADDI/DADD/DSUB) NO entran, por la misma razon que DADDIU (ver
+// nota en emitSafeOp): trapean RI con el modo de 64 bits apagado, y eso es estado de runtime.
+// Biseccion: 0 = todo (por defecto), 1 = ninguna, 2 = solo ADDI, 3 = solo ADD/SUB.
+// El diff corre el bloque sobre una COPIA de los registros y deja mandar al interprete, asi
+// que un desacuerdo no contamina el estado del invitado: parar es solo comodidad. Con esto
+// puesto el barrido sigue y saca TODOS los bloques malos de una pasada en vez de uno por run.
+static const bool g_diffGo = std::getenv("KESTREL_JIT_DIFFGO") != nullptr;
+static const bool g_pcChk = std::getenv("KESTREL_JIT_PCCHK") != nullptr;
+static u32 g_diffBad = 0;
+
+// Que ALU-con-trampa absorbe el bloque (KESTREL_JIT_NOTRAPALU):
+//   0 ADDI+ADD/SUB   1 ninguna   2 solo ADDI   3 solo ADD/SUB (DEFECTO)
+//   4 ADDI+ADD/SUB sin trampa    6 solo ADDI sin trampa    7 solo ADDI y corta el bloque
+// Los modos 4/6/7 son de diagnostico: emiten la aritmetica sin levantar el desbordamiento
+// (semanticamente INCORRECTOS) para separar "la trampa esta mal" de "el bloque mas largo
+// destapa otra cosa". El 7 ademas deja un bloque de una sola op, que es lo unico que el
+// jitdiff sabe comparar contra el interprete.
+//
+// El defecto es 3 y no 0 a proposito: absorber ADDI destapa una corrupcion del contexto de
+// excepcion en systemtest ("Privilege: memory accesses" -> tormenta) que solo aparece con
+// J/JAL tambien absorbidos (KESTREL_JIT_BRSEL=8). Medido: la ADDI en si es correcta (el
+// jitdiff sobre un bloque de una sola op no la pilla), la trampa es inocente (modo 6 falla
+// igual) y el bail no llega a saltar nunca. El registro corrupto sale con dos palabras de 32
+// bits pegadas ([sp|ra], [dir|dir]), que es la firma de un contexto guardado y restaurado con
+// desfase. Sin resolver; ADD/SUB si esta verificado verde. Ver docs/baselines/jit-notes.md.
+static const int g_trapAlu = std::getenv("KESTREL_JIT_NOTRAPALU")
+                           ? (int)std::strtol(std::getenv("KESTREL_JIT_NOTRAPALU"), nullptr, 0) : 3;
+
+// Biseccion por conteo (KESTREL_TRAPALU_LIM=N): solo las N primeras ALU-con-trampa que
+// aparecen se absorben; a partir de ahi el bloque termina ahi como antes. La compilacion es
+// determinista, asi que buscar N por biseccion senala exactamente cual rompe.
+static const long g_trapAluLim = std::getenv("KESTREL_TRAPALU_LIM")
+                               ? std::strtol(std::getenv("KESTREL_TRAPALU_LIM"), nullptr, 0) : -1;
+static long g_trapAluN = 0;
+
+static auto emitTrapAlu(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& snap) -> bool {
+  if(g_trapAlu == 1) return false;
+  if(g_trapAluLim >= 0 && g_trapAluN >= g_trapAluLim) return false;
+  u32 OP = op >> 26, funct = op & 63;
+  u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
+  s32 simm = (s32)(s16)(op & 0xFFFF);
+  u32 dst;
+  if(OP == 0x08 && g_trapAlu != 3) {                           // ADDI rt, rs, imm
+    rc.ld32(RAX, rs);
+    e.alu32_imm(0, RAX, (u32)simm);
+    dst = rt;
+  } else if(OP == 0x00 && (funct == 0x20 || funct == 0x22) && g_trapAlu != 2 && g_trapAlu != 6 && g_trapAlu != 7) {   // ADD / SUB
+    rc.ld32(RAX, rs);
+    rc.alu32(funct == 0x20 ? 0x03 : 0x2B, RAX, rt);   // ADD / SUB r32, r/m32
+    dst = rd;
+  } else {
+    return false;
+  }
+  // g_trapAlu==4: DIAGNOSTICO. Emite la aritmetica sin la trampa (o sea, como si fuera la
+  // variante U). Semanticamente INCORRECTO; solo sirve para separar "el bail esta mal" de
+  // "el bloque mas largo destapa otra cosa".
+  // modo 5: DIAGNOSTICO de tamano. Mismo jo real que el modo 2, pero con 3 bytes de relleno
+  // delante para que el bloque mida exactamente lo mismo que en modo 4. Si el modo 5 pasa,
+  // lo que separa 2 de 4 no es la trampa sino donde cae el codigo.
+  // modo 6: MISMO conjunto que el 2 (solo ADDI) pero SIN trampa -> aisla si lo que rompe
+  // es la trampa o el simple hecho de que el bloque empiece una instruccion antes.
+  if(g_trapAlu == 4 || g_trapAlu == 6) { e.cmp_r_r(RAX, RAX); bailSite = e.jne_rel32_placeholder(); }  // nunca salta
+  else                bailSite = e.jo_rel32_placeholder();   // desbordo → salir sin tocar destino
+  snap = rc.snap();                      // lo sucio aqui lo escribe el stub de bail
+  // El destino gpr[0] descarta el resultado, pero la trampa se levanta igual (el HW la mira
+  // antes que el destino), asi que lo unico condicional es el store.
+  if(dst) { e.movsxd(RAX, RAX); rc.st64(RAX, dst); }
+  g_trapAluN++;
+  return true;
+}
+
 // Trampolín C para ops NO compilables ejecutadas por el intérprete dentro del bloque.
 // `off` = desplazamiento en bytes de la op respecto a la entrada del bloque.
 extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
@@ -930,6 +1011,17 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     usize before = c.jitCache->buf.used;
     if(emitSafeOp(e, rc, op)) { b.src.push_back(op); b.nOps++; continue; }
     c.jitCache->buf.used = before;
+    usize tsite; RcSnap tsnap;
+    if(emitTrapAlu(e, rc, op, tsite, tsnap)) {
+      bailSites.push_back(tsite); bailIdx.push_back(b.nOps); bailSnap.push_back(tsnap);
+      if(g_trapAlu != 4 && g_trapAlu != 6 && g_trapAlu != 7) b.hasTrap = true;   // modo 4 no trapea -> comparable con el diff
+      b.src.push_back(op); b.nOps++;
+      // modo 7: cortar el bloque justo tras la ALU absorbida. Deja un bloque de nOps cortas
+      // sin memoria ni salto, que es lo unico que el jitdiff sabe comparar contra el interprete.
+      if(g_trapAlu == 7) break;
+      continue;
+    }
+    c.jitCache->buf.used = before;
     usize site; bool isStore; RcSnap msnap;
     if(emitMemOp(e, rc, op, site, isStore, msnap)) {
       bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap);
@@ -977,6 +1069,20 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     bool isRegimmL  = (LO == 0x01 && (rtF == 0x02 || rtF == 0x03 || rtF == 0x12 || rtF == 0x13));
     bool isRegimmALL = (LO == 0x01 && (rtF == 0x12 || rtF == 0x13));  // BLTZALL/BGEZALL: enlazan $31
     bool isLikely = isBeqL || isBlezL || isBgtzL || isRegimmL;
+    // Biseccion por clase de salto (KESTREL_JIT_BRSEL, mascara de bits; por defecto todas):
+    //   1 BEQ/BNE   2 BLEZ/BGTZ/REGIMM   4 likely   8 J/JAL   16 JR/JALR
+    // Apagar una clase la deja fuera de la absorcion: el bloque termina ahi y manda el
+    // interprete, que es el oraculo. Sirve para aislar cual de las cinco falla.
+    {
+      static const u32 kBrSel = std::getenv("KESTREL_JIT_BRSEL")
+                              ? (u32)std::strtoul(std::getenv("KESTREL_JIT_BRSEL"), nullptr, 0)
+                              : 0xFFFF'FFFFu;
+      if(!(kBrSel & 1))  isBeq = false;
+      if(!(kBrSel & 2))  isBcondZ = false;
+      if(!(kBrSel & 4))  isLikely = false;
+      if(!(kBrSel & 8))  isJmp = false;
+      if(!(kBrSel & 16)) isJr = false;
+    }
     // BLTZ(0x00)/BLTZAL(0x10) → rs<0 (setl); BGEZ(0x01)/BGEZAL(0x11) → rs>=0 (setge). bit0 decide.
     // Las likely de REGIMM (0x02/0x03/0x12/0x13) siguen la misma regla de bit0.
     u8 ccz = (isBlez || isBlezL) ? 0x9E /*setle*/ : (isBgtz || isBgtzL) ? 0x9F /*setg*/
@@ -1195,6 +1301,9 @@ namespace kestrel {
 // Estadística opcional (KESTREL_JIT_STATS): mide cobertura y longitud media de bloque
 // para decidir si la Etapa 2b (memoria/branches en bloque) merece la pena.
 static u64 g_jitCalls = 0, g_jitBlocks = 0, g_jitOps = 0;
+// Cadena: eslabones enlazados y ops que se comieron por su cuenta. avgK solo mide el ULTIMO
+// bloque de la cadena, asi que por si solo no dice si el enlace esta funcionando.
+static u64 g_chainOps = 0, g_chainLinks = 0;
 static const int g_jitStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 extern u64 g_trampWhy[5];
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
@@ -1317,9 +1426,22 @@ extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
 }
 
 auto CPU::jitTryBlock() -> u32 {
+  // DIAGNOSTICO (KESTREL_JIT_PCCHK): en modo de 32 bits toda direccion virtual valida es la
+  // extension de signo de sus 32 bits bajos. Mirarlo en CADA despacho caza el primer momento
+  // en que el pc se descarrila, venga de donde venga (salida de control, JR con registro
+  // corrupto o el propio interprete), y no muchas excepciones despues.
+  if(jit::g_pcChk && (u64)(s64)(s32)pc != pc) {
+    std::fprintf(stderr, "[pcchk] despacho con pc=%016llx nextPc=%016llx inDelay=%d justBr=%d retired=%llu\n",
+                 (unsigned long long)pc, (unsigned long long)nextPc, (int)inDelay, (int)justBranched,
+                 (unsigned long long)retired);
+    for(int r = 1; r < 32; r++) if((u64)(s64)(s32)gpr[r] != gpr[r])
+      std::fprintf(stderr, "   $%d=%016llx\n", r, (unsigned long long)gpr[r]);
+    std::fflush(stderr);
+    halt("pcchk");
+  }
   if(g_jitStats) {
     g_jitCalls++;
-    if((g_jitCalls & 0xFFFFFF) == 0) {
+    if((g_jitCalls & 0x3FFFFF) == 0) {
       std::fprintf(stderr, "[jitstats] calls=%llu blocksRun=%llu opsJIT=%llu cover=%.1f%% avgK=%.2f\n",
                    (unsigned long long)g_jitCalls, (unsigned long long)g_jitBlocks,
                    (unsigned long long)g_jitOps,
@@ -1338,6 +1460,12 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)(g_trampWhy[0]/1000000), (unsigned long long)(g_trampWhy[1]/1000000),
                    (unsigned long long)(g_trampWhy[2]/1000000), (unsigned long long)(g_trampWhy[3]/1000000),
                    (unsigned long long)(g_trampWhy[4]/1000000));
+      if(jitCache) std::fprintf(stderr,
+                   "[link] sitios=%zu armados=%llu desarmados=%llu | eslabones/entrada=%.2f ops/entrada=%.2f\n",
+                   jitCache->links.size(), (unsigned long long)jitCache->nLinked,
+                   (unsigned long long)jitCache->nUnlinked,
+                   (double)g_chainLinks / (double)g_jitCalls,
+                   (double)(g_jitOps + g_chainOps) / (double)g_jitCalls);
       // Top opcodes que causan compile-fail (leader no compilable).
       std::fprintf(stderr, "[compfail]");
       for(int o = 0; o < 64; o++) if(jit::g_compFailOp[o] > 10000)
@@ -1390,6 +1518,12 @@ auto CPU::jitTryBlock() -> u32 {
   //    ckseg1) no lo pone → declinamos; los segmentos mapeados/xkphys sí lo fijan.
   u32 phys;
   if((pc & 0xFFFF'FFFF'E000'0000ull) == 0xFFFF'FFFF'8000'0000ull) {
+    // ckseg0 solo existe en modo kernel. En usuario o supervisor esa direccion no esta
+    // traducida: el VR4300 levanta AdEL en el propio fetch. Atajar aqui a phys = pc & 0x1FFFFFFF
+    // se saltaba esa comprobacion y el bloque se ejecutaba igual, asi que el kernel nunca veia
+    // la excepcion que el programa esperaba. Modo kernel = KSU==0 (Status[4:3]) o EXL o ERL.
+    u32 st = (u32)cop0[C0_Status];
+    if(((st >> 3) & 3) != 0 && !(st & 0x6)) { JDECL(DR_MISC); return 0; }  // interprete vectoriza el AdEL
     phys = (u32)pc & 0x1FFF'FFFF;
   } else {
     // softTLB: la traducción TLB de la PC es cara (scan lineal de 32 entradas). Cachea la
@@ -1525,10 +1659,28 @@ auto CPU::jitTryBlock() -> u32 {
   // real K pasos; compara. Los bloques con loads/stores se validan con el oráculo systemtest
   // (correr un load 2 veces duplicaría efectos MMIO/store; el intérprete es la verdad ahí).
   static const int diff = std::getenv("KESTREL_JIT_DIFF") ? 1 : 0;
-  if(diff && !blk.hasMem && !blk.hasBranch) {
+  if(diff && !blk.hasMem && !blk.hasBranch && !blk.hasTrap) {
+    // El bloque se ejecuta sobre los registros REALES, no sobre una copia: el codigo emitido
+    // recibe en rbx la direccion que se le pasa y direcciona HI/LO/pc como campos del propio
+    // CPU a partir de ahi. Con un u64[32] local, un MFLO leia 280 bytes mas alla del array,
+    // o sea pila del anfitrion -- de ahi el "jit=ffffffff807ffc58" constante que acusaba al
+    // JIT de un fallo del arnes. Se guarda el estado, se corre el bloque, se restaura, y solo
+    // entonces manda el interprete.
     u64 pre[32]; for(int r = 0; r < 32; r++) pre[r] = gpr[r];
+    u64 sHi = hi, sLo = lo, sPc = pc, sNext = nextPc;
+    bool sIn = inDelay, sJb = justBranched;
+    u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random];
+    u32 Rd = blk.fn(gpr, this) & 0x7FFF'FFFFu; gpr[0] = 0;
     u64 tmp[32]; for(int r = 0; r < 32; r++) tmp[r] = gpr[r];
-    blk.fn(tmp, this); tmp[0] = 0;
+    // restaurar: a partir de aqui el estado del invitado es como si el bloque no hubiera corrido
+    for(int r = 0; r < 32; r++) gpr[r] = pre[r];
+    hi = sHi; lo = sLo; pc = sPc; nextPc = sNext; inDelay = sIn; justBranched = sJb;
+    cop0[C0_Count] = sCnt; cop0[C0_Random] = sRnd;
+    // El bloque lleva su propia guardia (presupuesto, MI, temporizador): cuando no pasa
+    // vuelve con 0 ops SIN haber ejecutado nada. Compararlo entonces contra K pasos del
+    // interprete acusa al JIT de un fallo que no ha cometido -- es el harness el que no ha
+    // corrido nada. Se deja pasar al interprete y ya se comparara en la siguiente vuelta.
+    if(Rd != K) { for(u32 s = 0; s < K; s++) step(); return K; }
     for(u32 s = 0; s < K; s++) step();
     for(int r = 1; r < 32; r++) {
       if(gpr[r] != tmp[r]) {
@@ -1540,7 +1692,7 @@ auto CPU::jitTryBlock() -> u32 {
           std::fprintf(stderr, "   op[%u] = %08x  pre $rs%u=%016llx $rt%u=%016llx\n", i, o,
                        rs, (unsigned long long)pre[rs], rt, (unsigned long long)pre[rt]);
         }
-        halt("jitdiff mismatch");
+        if(!jit::g_diffGo || ++jit::g_diffBad > 40) halt("jitdiff mismatch");
         break;
       }
     }
@@ -1552,7 +1704,7 @@ auto CPU::jitTryBlock() -> u32 {
   // Solo bloques sin memoria: correr un load 2 veces tras el store del intérprete (que aliasa
   // la misma dirección) daría un falso positivo — esos se validan con el oráculo systemtest.
   static const int brdiff = std::getenv("KESTREL_JIT_BRDIFF") ? 1 : 0;
-  if(brdiff && blk.hasBranch && !blk.hasMem) {
+  if(brdiff && blk.hasBranch && !blk.hasMem && !blk.hasTrap) {
     u64 sg[32]; for(int r = 0; r < 32; r++) sg[r] = gpr[r];
     u64 sPc = pc, sNext = nextPc; bool sIn = inDelay, sJb = justBranched;
     u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random];
@@ -1560,6 +1712,8 @@ auto CPU::jitTryBlock() -> u32 {
     for(u32 s = 0; s < K; s++) step();
     u64 iG[32]; for(int r = 0; r < 32; r++) iG[r] = gpr[r];
     u64 iPc = pc, iNext = nextPc;
+    bool iIn = inDelay, iJb = justBranched;
+    u32 iCnt = (u32)cop0[C0_Count], iRnd = (u32)cop0[C0_Random];
     // restaura y corre el bloque
     for(int r = 0; r < 32; r++) gpr[r] = sg[r];
     pc = sPc; nextPc = sNext; inDelay = sIn; justBranched = sJb;
@@ -1567,6 +1721,13 @@ auto CPU::jitTryBlock() -> u32 {
     u32 Rr = blk.fn(gpr, this); gpr[0] = 0;
     u32 Rops = Rr & 0x7FFF'FFFFu; bool isCtrl = (Rr & 0x8000'0000u) != 0;
     if(!isCtrl) { pc = sPc + 4 * Rops; nextPc = pc + 4; }  // bail: avance secuencial
+    // Mismo caso que arriba: guardia no pasada -> el bloque no ha corrido, no hay que juzgarlo.
+    if(!isCtrl && Rops != K) {
+      for(int r = 0; r < 32; r++) gpr[r] = iG[r];
+      pc = iPc; nextPc = iNext; inDelay = iIn; justBranched = iJb;
+      cop0[C0_Count] = iCnt; cop0[C0_Random] = iRnd;
+      return K;                                  // manda el interprete, ya avanzado arriba
+    }
     bool bad = (pc != iPc) || (nextPc != iNext);
     for(int r = 1; r < 32; r++) if(gpr[r] != iG[r]) bad = true;
     if(bad) {
@@ -1591,15 +1752,36 @@ auto CPU::jitTryBlock() -> u32 {
   jitChain = 0;                       // presupuesto de cadena fresco por entrada del driver
   jitChainOps = 0;                    // ops que la cadena commitee por su cuenta (las sumamos al salir)
   jitGuard = 0;                       // el primer bloque siempre pasa por el trampolín (chequeo completo)
+  const u64 entryVAdbg = pc;          // solo para el chequeo de pc canonico de abajo
   u32 Rraw = blk.fn(gpr, this);
   gpr[0] = 0;
   // Bit alto = el bloque terminó en un branch absorbido: ya escribió pc/nextPc/inDelay/
   // justBranched por sí mismo. Sólo avanzamos contadores; NO tocamos el control de flujo.
   bool ctrl = (Rraw & 0x8000'0000u) != 0;
   u32 R = Rraw & 0x7FFF'FFFFu;
+  // DIAGNOSTICO (KESTREL_JIT_PCCHK): en modo de 32 bits toda direccion virtual valida es la
+  // extension de signo de sus 32 bits bajos. Un pc con basura arriba solo puede venir de una
+  // salida de control que compuso mal el destino, y saltarlo hace que la excepcion aparezca
+  // muy lejos del bloque culpable. Aqui se caza en el acto, con el bloque delante.
+  if(jit::g_pcChk && ctrl && (u64)(s64)(s32)pc != pc) {
+    std::fprintf(stderr, "[pcchk] bloque phys=%08x entryVA=%016llx nOps=%u -> pc=%016llx nextPc=%016llx\n",
+                 phys, (unsigned long long)entryVAdbg, blk.nOps,
+                 (unsigned long long)pc, (unsigned long long)nextPc);
+    for(u32 i = 0; i < blk.nOps && i < blk.src.size(); i++)
+      std::fprintf(stderr, "   op[%u]=%08x  %s\n", i, blk.src[i],
+                   disasm(blk.src[i], entryVAdbg + 4 * i).c_str());
+    std::fflush(stderr);
+    halt("pcchk");
+  }
   if(g_jitStats) { g_jitBlocks++; g_jitOps += R; }
 
-  if(!ctrl) {
+  // R==0 = el bloque salio SIN retirar nada (guardia del prologo no pasada, o bail limpio en
+  // la op 0: mem-op que faultaria, ALU que desborda). Entonces NO ha pasado nada y no hay
+  // estado de flujo que avanzar. Pisar nextPc/inDelay/justBranched aqui destruye una ranura
+  // de retardo en curso: si se entro al bloque con inDelay puesto, nextPc guarda el destino
+  // del salto y sustituirlo por pc+4 pierde el salto entero. El int�rprete re-ejecuta la op
+  // 0 con el estado intacto, que es justo lo que el bail promete.
+  if(!ctrl && R) {
     // Avanza el estado exactamente R instrucciones secuenciales no-branch.
     pc += 4 * R;
     nextPc = pc + 4;
@@ -1624,6 +1806,7 @@ auto CPU::jitTryBlock() -> u32 {
     cc->hits += p;
     jitChainOps += p;
   }
+  if(g_jitStats) { g_chainOps += jitChainOps; g_chainLinks += jitChain; }
   // R = ops del ÚLTIMO bloque; jitChainOps = las de los eslabones anteriores, ya contabilizadas
   // en retired/Count/hits por el prólogo del sucesor. El total es lo que avanzó el guest.
   return R + jitChainOps;

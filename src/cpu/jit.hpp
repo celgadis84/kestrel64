@@ -242,6 +242,9 @@ public:
   }
   // jb rel32 (CF=1, sin prestamo → resta sin margen): placeholder; devuelve offset del disp32.
   auto jb_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x82); usize at = buf.used; imm32(0); return at; }
+  // jo rel32: 0F 80. El flag OF de x86 tras un add/sub de 32 bits ES el desbordamiento con
+  // signo de 32 bits que define MIPS para ADDI/ADD/SUB, asi que la trampa no se calcula.
+  auto jo_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x80); usize at = buf.used; imm32(0); return at; }
   // Reserva 8 bytes alineados para una ranura de enlace; devuelve su offset en el buffer.
   auto reserveSlot() -> usize {
     while(buf.used & 7) buf.emit(0x90);
@@ -306,6 +309,7 @@ struct Block {
   bool hasMem = false;    // contiene al menos un load/store (afecta modo diff)
   bool hasStore = false;  // contiene al menos un store (muta memoria)
   bool hasBranch = false; // termina en un branch absorbido (escribe pc/nextPc; salida de control)
+  bool hasTrap = false;   // contiene ALU con trampa de desbordamiento (puede bailar sin efectos)
   bool dead = false;      // SMC invalidó este bloque: find() lo trata como miss → recompila in-place
   std::vector<u32> src;   // opcodes originales, para validación
   // Sello de I-cache por linea cubierta (<=9: 64 ops = 256 B desde un offset cualquiera).
