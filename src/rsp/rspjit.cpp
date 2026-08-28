@@ -176,6 +176,8 @@ struct E {
   auto pmovzxwd(u8 dst, u8 src) -> void { sse38(0x33, dst, src); }
   auto psrld_i (u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x72); modrm(3, 2, dst); u8_(n); }
   auto psrldq_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x73); modrm(3, 3, dst); u8_(n); }
+  auto psraw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 4, dst); u8_(n); }
+  auto psrlw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 2, dst); u8_(n); }
   auto zerox(u8 r) -> void { sse_rr(0xEF, r, r); }            // pxor x,x
   auto onesx(u8 r) -> void { sse_rr(0x76, r, r); }            // pcmpeqd x,x  -> todo unos
 };
@@ -263,7 +265,9 @@ auto emitCall(Ctx& c, void* fn, u32 op) -> void {
 //
 // Solo xmm0..xmm5, volatiles en Win64: cero derrames. Reparto fijo: xmm0 = S, xmm1 = T ya
 // barajado, xmm2..xmm5 temporales.
-enum : u8 { X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
+enum : u8 { X_PMULLW = 0xD5, X_PMULHW = 0xE5, X_PCMPGTW = 0x65,
+            X_PUNPCKLWD = 0x61, X_PUNPCKHWD = 0x69,
+            X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
             X_PADDW = 0xFD, X_PSUBW = 0xF9, X_PADDD = 0xFE, X_PSUBD = 0xFA,
             X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B };
 
@@ -276,6 +280,8 @@ auto vuInline(const Rsp& rsp, u32 op) -> bool {
   if((op >> 21 & 0x1f) < 0x10) return false;   // movimientos escalar<->vector: no
   switch(op & 0x3f) {
   case 0x04:                                     // VMUDL
+  case 0x05: case 0x06: case 0x07:               // VMUDM / VMUDN / VMUDH
+  case 0x0f:                                     // VMADH
   case 0x10: case 0x11: case 0x14: case 0x15:    // VADD / VSUB / VADDC / VSUBC
   case 0x1d:                                     // VSAR
   case 0x28: case 0x29: case 0x2a: case 0x2b:    // VAND / VNAND / VOR / VNOR
@@ -284,6 +290,28 @@ auto vuInline(const Rsp& rsp, u32 op) -> bool {
   default: return false;
   }
 #endif
+}
+
+// Acarreo de salida (0/1 por banda de 16 bits) de sum = a + b: la misma formula que
+// vcarry16 del interprete, (a&b) | (~sum & (a|b)) desplazado 15. DESTRUYE a.
+auto emitCarry16(E& e, u8 a, u8 b, u8 sum, u8 out, u8 tmp) -> void {
+  e.movx(out, a); e.sse_rr(X_PAND, out, b);      // a & b
+  e.sse_rr(X_POR, a, b);                         // a | b
+  e.movx(tmp, sum); e.sse_rr(X_PANDN, tmp, a);   // ~sum & (a|b)
+  e.sse_rr(X_POR, out, tmp); e.psrlw_i(out, 15);
+}
+
+// D = saturacion con signo de (acch:accm), igual que vsatSigned: rearmar los pares de 16
+// bits como enteros de 32 con signo y bajarlos con packssdw. No toca h ni m; los dos
+// temporales se eligen fuera de ellos.
+auto emitSatSigned(E& e, Ctx& c, u8 h, u8 m, u32 vd) -> void {
+  u8 t0 = 0, t1 = 1;
+  while(t0 == h || t0 == m) t0++;
+  while(t1 == h || t1 == m || t1 == t0) t1++;
+  e.movx(t0, m); e.sse_rr(X_PUNPCKLWD, t0, h);
+  e.movx(t1, m); e.sse_rr(X_PUNPCKHWD, t1, h);
+  e.sse_rr(X_PACKSSDW, t0, t1);
+  e.stx(t0, rBX, c.VR(vd));
 }
 
 auto emitVu(Ctx& c, u32 op) -> void {
@@ -369,6 +397,48 @@ auto emitVu(Ctx& c, u32 op) -> void {
     e.sse_rr(X_PCMPEQD, 3, 0); e.sse_rr(X_PANDN, 3, 2);   // (~(d==0)) & 1
     e.sse_rr(X_PCMPEQD, 4, 0); e.sse_rr(X_PANDN, 4, 2);
     e.sse_rr(X_PACKSSDW, 3, 4); e.stx(3, rBX, c.coOff[0]);
+  } break;
+
+  // --- familia MAC ---------------------------------------------------------
+  // El producto de 48 bits se arma igual que vprodSS/SU/US del interprete: mullo da el limbo
+  // bajo, mulhi el medio y el alto es la extension de signo del medio. La correccion de signo
+  // de SU/US es la misma resta condicional (-= el otro operando donde este es negativo).
+
+  // VMUDM: acc = signext32(S.s * T.u); D = accm
+  // VMUDN: acc = signext32(S.u * T.s); D = accl
+  case 0x05: case 0x06: {
+    const u8 sgn = (fn == 0x05) ? 0 : 1;         // el operando que va con signo
+    const u8 oth = (fn == 0x05) ? 1 : 0;
+    e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);      // limbo bajo
+    e.movx(3, 0); e.sse_rr(X_PMULHUW, 3, 1);
+    e.zerox(4); e.sse_rr(X_PCMPGTW, 4, sgn);     // mascara: operando con signo < 0
+    e.sse_rr(X_PAND, 4, oth);
+    e.sse_rr(X_PSUBW, 3, 4);                     // limbo medio corregido
+    e.movx(4, 3); e.psraw_i(4, 15);              // limbo alto = signo del medio
+    e.stx(2, rBX, c.aOff[2]); e.stx(3, rBX, c.aOff[1]); e.stx(4, rBX, c.aOff[0]);
+    e.stx((fn == 0x05) ? 3 : 2, rBX, c.VR(vd));
+  } break;
+
+  // VMUDH: acc = (S.s * T.s) << 16, accl = 0; D = satSigned
+  case 0x07: {
+    e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);      // -> accm
+    e.movx(3, 0); e.sse_rr(X_PMULHW, 3, 1);      // -> acch
+    e.zerox(4); e.stx(4, rBX, c.aOff[2]);
+    e.stx(2, rBX, c.aOff[1]); e.stx(3, rBX, c.aOff[0]);
+    emitSatSigned(e, c, 3, 2, vd);
+  } break;
+
+  // VMADH: (acch:accm) += S.s*T.s como suma de 32 bits; accl intacto; D = satSigned
+  case 0x0f: {
+    e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);      // lo
+    e.movx(3, 0); e.sse_rr(X_PMULHW, 3, 1);      // hi
+    e.ldx(4, rBX, c.aOff[1]);                    // accm
+    e.movx(5, 4); e.sse_rr(X_PADDW, 5, 2);       // nm = accm + lo
+    emitCarry16(e, 4, 2, 5, 0, 1);               // S y T ya no hacen falta: se usan de temporal
+    e.ldx(4, rBX, c.aOff[0]);
+    e.sse_rr(X_PADDW, 4, 3); e.sse_rr(X_PADDW, 4, 0);   // nh = acch + hi + acarreo
+    e.stx(5, rBX, c.aOff[1]); e.stx(4, rBX, c.aOff[0]);
+    emitSatSigned(e, c, 4, 5, vd);
   } break;
 
   default: c.ok = false; break;     // no puede pasar: vuInline decide lo mismo

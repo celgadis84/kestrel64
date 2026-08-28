@@ -146,9 +146,24 @@ cuerpo SSE es corto, el bloque emite ESE MISMO cuerpo en linea, con `vs`/`vt`/
 xmm0..xmm5 — volatiles en Win64, o sea cero derrames.
 
 Cubiertas hoy (`vuInline`): VAND/VNAND/VOR/VNOR/VXOR/VNXOR, VSAR, VADD, VSUB,
-VADDC, VSUBC y VMUDL. Son ~29 % de las COP2 que ejecuta SM64. El resto sigue
-saliendo por el CALL a la entrada especializada, que es exactamente el codigo de
-antes: la lista se amplia una operacion a la vez, con fuzz de por medio.
+VADDC, VSUBC, VMUDL y la primera tanda de la familia MAC — VMUDM, VMUDN, VMUDH y
+VMADH. Son ~43 % de las COP2 que ejecuta SM64. El resto sigue saliendo por el
+CALL a la entrada especializada, que es exactamente el codigo de antes: la lista
+se amplia una operacion a la vez, con fuzz de por medio.
+
+Los productos se arman igual que en `vprodSS/SU/US`: `pmullw` da el limbo bajo,
+`pmulhw`/`pmulhuw` el medio y `psraw 15` del medio el alto; la correccion de
+signo de las variantes mixtas (VMUDM/VMUDN) es una resta condicional guiada por
+`pcmpgtw` contra cero. VMADH acumula sobre `acch:accm` como una suma de 32 bits
+partida en dos bandas de 16, con el acarreo de `emitCarry16` — la misma formula
+que `vcarry16` en el interprete, `(a&b) | (~s & (a|b))` desplazado 15, sin
+comparaciones y sin ensanchar. `emitSatSigned` cierra VMUDH/VMADH rearmando los
+pares de 16 bits en enteros de 32 con signo (`punpcklwd`/`punpckhwd`) y bajando
+con `packssdw`.
+
+El mismo `vcarry16` sustituyo en el interprete al ensanchado a 32 bits de
+`vadd48` (35 -> 9 instrucciones, 3.80 -> 1.57 ns/op, bit a bit identico sobre
+2 M de casos al azar).
 
 El emisor reproduce los intrinsecos de `vuOpT` en el mismo orden — no hay una
 segunda semantica. Y hay dos oraculos que lo demuestran:
@@ -156,8 +171,10 @@ segunda semantica. Y hay dos oraculos que lo demuestran:
 * `--rspjitfuzz N`: monta bloques reales de cuatro operaciones vectoriales al
   azar en IMEM (los 16 modificadores de elemento, registros solapados a
   proposito), los compila, y compara el estado vectorial completo contra
-  interpretar las mismas cuatro instrucciones desde el mismo estado. 200 000
-  bloques, 0 diferencias.
+  interpretar las mismas cuatro instrucciones desde el mismo estado. 400 000
+  bloques, 0 diferencias. La rotacion de opcodes incluye las de la familia MAC:
+  importa que se mezclen de verdad, porque una deja el acumulador escrito y la
+  siguiente lo lee — un fallo de acarreo solo asoma con varias seguidas.
 * el de siempre: mismo md5 de framebuffer con `KESTREL_RSPJIT=0`, y el modo
   `rspinterp` de `gate_all`.
 
@@ -168,8 +185,12 @@ el consumo y deja sitio para las operaciones que faltan.
 
 ## Siguiente
 
-La familia MAC (VMADN/VMADH/VMADM/VMULF/VMUDN/VMUDM) es el ~60 % de las COP2 y
-sigue pasando por el CALL. Inline ademas abre la puerta a lo que de verdad
-importa ahi: mantener el acumulador de 48 bits (`acch`/`accm`/`accl`) en
-registros xmm a lo largo de una racha de operaciones dentro del bloque, en vez
-de recargarlo y reescribirlo — seis accesos de 16 bytes por instruccion.
+Falta el resto de la familia MAC: VMULF/VMULU (0x00/0x01), VMACF/VMACU
+(0x08/0x09), VMADL (0x0c), VMADM (0x0d) y VMADN (0x0e). VMADN sola son 18.3 M de
+las ~58 M de COP2 por 300 intercambios de SM64.
+
+Y despues lo que de verdad importa ahi: mantener el acumulador de 48 bits
+(`acch`/`accm`/`accl`) en xmm6..xmm8 a lo largo de una racha de operaciones
+dentro del bloque — se guardan una vez por bloque (los thunks preservan
+xmm6..15) en vez de recargar y reescribir seis accesos de 16 bytes por
+instruccion.
