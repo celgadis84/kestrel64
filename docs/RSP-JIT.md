@@ -145,12 +145,12 @@ cuerpo SSE es corto, el bloque emite ESE MISMO cuerpo en linea, con `vs`/`vt`/
 `vd` y el modificador de elemento resueltos como constantes y usando solo
 xmm0..xmm5 — volatiles en Win64, o sea cero derrames.
 
-Cubiertas hoy (`vuInline`): VAND/VNAND/VOR/VNOR/VXOR/VNXOR, VSAR, VADD, VSUB,
-VADDC, VSUBC y **la familia MAC entera** — VMULF/VMULU, VMUDL/VMUDM/VMUDN/VMUDH,
-VMACF/VMACU y VMADL/VMADM/VMADN/VMADH. Es el grueso de las COP2 que ejecuta SM64.
-Lo que sigue saliendo por el CALL a la entrada especializada son las comparaciones
-(VLT/VEQ/VGE/VCH/VCL/VCR/VMRG), la familia del reciproco y los movimientos
-escalar↔vector.
+Cubiertas hoy (`vuInline`): VAND/VNAND/VOR/VNOR/VXOR/VNXOR, VSAR, VABS, VADD,
+VSUB, VADDC, VSUBC, **la familia MAC entera** — VMULF/VMULU, VMUDL/VMUDM/VMUDN/
+VMUDH, VMACF/VMACU y VMADL/VMADM/VMADN/VMADH — y las **comparaciones simples**
+VLT/VEQ/VNE/VGE mas VMRG. Es el grueso de las COP2 que ejecuta SM64. Lo que sigue
+saliendo por el CALL a la entrada especializada son las comparaciones de recorte
+(VCH/VCL/VCR), la familia del reciproco y los movimientos escalar↔vector.
 
 Los productos se arman igual que en `vprodSS/SU/US`: `pmullw` da el limbo bajo,
 `pmulhw`/`pmulhuw` el medio y `psraw 15` del medio el alto; la correccion de
@@ -211,10 +211,46 @@ La estimacion del peor caso por instruccion subio de 200 a 400 bytes: VMACU son
 tira el bloque) pero lo tira **despues** de compilarlo. Se vio en el fuzz: 13
 bloques de 400 000 salian sin compilar hasta subir la cifra.
 
+## Comparaciones y VMRG
+
+Tres piezas nuevas y ninguna semantica nueva:
+
+* `emitFlagMask` / `emitFlagStore`: una bandera del RSP guarda 0/1 por banda, y la
+  mascara de seleccion es `pcmpgtw` contra cero; la vuelta es `pcmpeqd` + `psrlw 15`
+  (el vector de unos de 16 bits) y un `pand`. Son `vmaskFromFlag` y `vflagFromMask`
+  del interprete, emitidas.
+* `emitSelectST`: `blendv(T, S, cm)` con mascaras de todo-unos es exactamente
+  `(S & cm) | (T & ~cm)`. Se evita `pblendvb` a proposito — usa xmm0 como operando
+  implicito, y xmm0 es justo donde vive S.
+* VABS sale de la misma resta hecha con dos saturaciones distintas: `psubw` para el
+  acumulador (T=-32768 deja 0x8000) y `psubsw` para el destino (0x7fff). El caso
+  S==0 se limpia con un `pandn` en las dos salidas.
+
+Las cuatro comparaciones comparten cuerpo: `pcmpeqw` para S==T, las mascaras de
+VCO.low/high, la formula de cada una (VLT `T>S || (S==T && low && high)`, VEQ
+`!high && S==T`, VNE `S!=T || high`, VGE `S>T || (S==T && !(low && high))`), la
+seleccion, y despues VCC.low = la mascara y VCC.high + VCO enteros a cero. VMRG es
+la misma seleccion leyendo VCC.low, sin escribirla, borrando solo VCO.
+
+El censo (`KESTREL_VUSTAT=1`, SM64, 60 intercambios) dice lo que valen: VLT 0.85 %,
+VGE 0.77 %, VMRG 0.94 %, VABS 0.51 %, VEQ/VNE ~0 de todas las instrucciones del RSP;
+las de recorte que quedan fuera suman 0.84 % (VCL 0.38, VCH 0.33, VCR 0.13) y la
+familia del reciproco 3.84 %. De punta a punta no se ve: bench de 300 intercambios
+con parallel-rdp en lockstep da 51.45 s antes y 52.07 s despues, o sea ruido. Es lo
+esperado y ya estaba dicho arriba — el ahorro cae en el hilo del RSP, que hoy tiene
+holgura.
+
 ## Siguiente
 
-Lo que de verdad importa ahi: mantener el acumulador de 48 bits
-(`acch`/`accm`/`accl`) en xmm6..xmm8 a lo largo de una racha de operaciones
-dentro del bloque — se guardan una vez por bloque (los thunks preservan
-xmm6..15) en vez de recargar y reescribir seis accesos de 16 bytes por
-instruccion.
+1. **El acumulador en registros.** Mantener `acch`/`accm`/`accl` en xmm6..xmm8 a lo
+   largo de una racha de operaciones dentro del bloque: se guardan una vez por bloque
+   (los thunks preservan xmm6..15) en vez de recargar y reescribir seis accesos de
+   16 bytes por instruccion. Es lo que de verdad importa de lo que queda.
+2. **VCH / VCL / VCR.** Cabe, pero no en seis registros volatiles: hacen falta
+   xmm6..xmm7 salvados en el prologo, o un area de rascar en `Rsp`. 0.84 % de las
+   instrucciones del RSP.
+3. **La familia del reciproco** (VRCP/VRCPL/VRCPH/VMOV, 3.84 %). No es SSE — operan
+   sobre UNA banda — pero siguen pagando el CALL y el redecodificado; en linea serian
+   un `pextrw` + tabla + `pinsrw`.
+4. **El mix de `--rspbench` esta sesgado** y no sirve para elegir donde tocar; el
+   censo bueno es `KESTREL_VUSTAT=1`.

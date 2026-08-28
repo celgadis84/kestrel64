@@ -244,6 +244,8 @@ struct Ctx {
   s32 vOff = 0;        // offset de Rsp::vpr[0]
   s32 aOff[3] = {};    // acch / accm / accl
   s32 coOff[2] = {};   // vcoh / vcol
+  s32 ccOff[2] = {};   // vcch / vccl
+  s32 ceOff = 0;       // vce
   bool ok = true;   // false = algo no se pudo emitir; el bloque se tira sin registrar
   auto RG(u32 n) const -> s32 { return rOff + (s32)(4 * n); }
   auto VR(u32 n) const -> s32 { return vOff + (s32)(16 * n); }
@@ -272,7 +274,7 @@ enum : u8 { X_PMULLW = 0xD5, X_PMULHW = 0xE5, X_PCMPGTW = 0x65,
             X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
             X_PADDW = 0xFD, X_PSUBW = 0xF9, X_PADDD = 0xFE, X_PSUBD = 0xFA,
             X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B,
-            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75 };
+            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75, X_PSUBSW = 0xE9 };
 
 auto vuInline(const Rsp& rsp, u32 op) -> bool {
 #if KESTREL_VUSTAT
@@ -289,7 +291,10 @@ auto vuInline(const Rsp& rsp, u32 op) -> bool {
   case 0x0c: case 0x0d: case 0x0e:               // VMADL / VMADM / VMADN
   case 0x0f:                                     // VMADH
   case 0x10: case 0x11: case 0x14: case 0x15:    // VADD / VSUB / VADDC / VSUBC
+  case 0x13:                                     // VABS
   case 0x1d:                                     // VSAR
+  case 0x20: case 0x21: case 0x22: case 0x23:    // VLT / VEQ / VNE / VGE
+  case 0x27:                                     // VMRG
   case 0x28: case 0x29: case 0x2a: case 0x2b:    // VAND / VNAND / VOR / VNOR
   case 0x2c: case 0x2d:                          // VXOR / VNXOR
     return true;
@@ -377,6 +382,29 @@ auto emitDouble48(E& e) -> void {
   e.psllw_i(2, 1);
 }
 
+// blendv(T, S, cm) sin blendv: con mascaras de todo-unos es (S & cm) | (T & ~cm), sin
+// perder un bit. Se evita `pblendvb` a proposito: usa xmm0 como operando implicito y xmm0
+// es justamente donde vive S. Entra S=xmm0, T=xmm1, la mascara en `cm`; sale en `dst`.
+auto emitSelectST(E& e, u8 dst, u8 cm, u8 tmp) -> void {
+  e.movx(dst, 0);  e.sse_rr(X_PAND,  dst, cm);
+  e.movx(tmp, cm); e.sse_rr(X_PANDN, tmp, 1);
+  e.sse_rr(X_POR, dst, tmp);
+}
+
+// Una bandera del RSP guarda 0/1 por banda; la mascara de seleccion es cmpgt contra cero.
+auto emitFlagMask(E& e, u8 dst, u8 tmpZero, s32 off) -> void {
+  e.ldx(dst, rBX, off);
+  e.zerox(tmpZero);
+  e.sse_rr(X_PCMPGTW, dst, tmpZero);
+}
+
+// ...y al reves: 0xffff -> 1. `pcmpeqd` + `psrlw 15` da el vector de unos de 16 bits.
+auto emitFlagStore(E& e, u8 mask, u8 tmp, s32 off) -> void {
+  e.onesx(tmp); e.psrlw_i(tmp, 15);
+  e.sse_rr(X_PAND, tmp, mask);
+  e.stx(tmp, rBX, off);
+}
+
 auto emitVu(Ctx& c, u32 op) -> void {
   E& e = c.e;
   const u32 fn = op & 0x3f, el = op >> 21 & 0xf;
@@ -405,6 +433,64 @@ auto emitVu(Ctx& c, u32 op) -> void {
     if(fn & 1) { e.onesx(2); e.sse_rr(X_PXOR, 0, 2); }   // las negadas (NAND/NOR/NXOR)
     e.stx(0, rBX, c.aOff[2]);
     e.stx(0, rBX, c.VR(vd));
+  } break;
+
+  // --- VLT / VEQ / VNE / VGE: comparan, seleccionan y dejan la decision en VCC.low ---
+  // cm = "gana S". accl = D = seleccion; VCC.high y VCO enteros a cero. Es la formula del
+  // interprete tal cual, con la mascara de VCO.low/high reconstruida desde la bandera.
+  case 0x20: case 0x21: case 0x22: case 0x23: {
+    e.movx(2, 0); e.sse_rr(X_PCMPEQW, 2, 1);              // xmm2 = S==T
+    emitFlagMask(e, 3, 5, c.coOff[1]);                    // xmm3 = VCO.low
+    emitFlagMask(e, 4, 5, c.coOff[0]);                    // xmm4 = VCO.high
+    if(fn == 0x20) {                                      // VLT: T>S || (S==T && low && high)
+      e.sse_rr(X_PAND, 3, 4); e.sse_rr(X_PAND, 3, 2);
+      e.movx(2, 1); e.sse_rr(X_PCMPGTW, 2, 0);
+      e.sse_rr(X_POR, 2, 3);
+    } else if(fn == 0x21) {                               // VEQ: !high && S==T
+      e.sse_rr(X_PANDN, 4, 2); e.movx(2, 4);
+    } else if(fn == 0x22) {                               // VNE: S!=T || high
+      e.onesx(5); e.sse_rr(X_PXOR, 2, 5); e.sse_rr(X_POR, 2, 4);
+    } else {                                              // VGE: S>T || (S==T && !(low && high))
+      e.sse_rr(X_PAND, 3, 4); e.onesx(5); e.sse_rr(X_PXOR, 3, 5);
+      e.sse_rr(X_PAND, 3, 2);
+      e.movx(2, 0); e.sse_rr(X_PCMPGTW, 2, 1);
+      e.sse_rr(X_POR, 2, 3);
+    }
+    emitSelectST(e, 3, 2, 4);
+    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    emitFlagStore(e, 2, 4, c.ccOff[1]);
+    e.zerox(5);
+    e.stx(5, rBX, c.ccOff[0]); e.stx(5, rBX, c.coOff[0]); e.stx(5, rBX, c.coOff[1]);
+  } break;
+
+  // --- VMRG: selecciona por VCC.low sin tocarla; solo borra VCO --------------
+  case 0x27: {
+    emitFlagMask(e, 2, 5, c.ccOff[1]);
+    emitSelectST(e, 3, 2, 4);
+    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    e.zerox(5); e.stx(5, rBX, c.coOff[0]); e.stx(5, rBX, c.coOff[1]);
+  } break;
+
+  // --- VABS: el signo de S aplicado a T. No toca banderas --------------------
+  // El unico caso que no es una negacion normal es T=-32768: el acumulador se queda con
+  // el patron de negar en 16 bits (0x8000) y el destino con el saturado (0x7fff). Es la
+  // misma resta hecha con dos saturaciones distintas: psubw y psubsw.
+  case 0x13: {
+    e.zerox(5);
+    e.movx(2, 5); e.sse_rr(X_PCMPGTW, 2, 0);     // xmm2 = S<0
+    e.movx(3, 0); e.sse_rr(X_PCMPEQW, 3, 5);     // xmm3 = S==0
+    e.movx(4, 5); e.sse_rr(X_PSUBW, 4, 1);       // -T (envuelve)
+    e.sse_rr(X_PAND, 4, 2);
+    e.movx(5, 2); e.sse_rr(X_PANDN, 5, 1);       // T donde S>=0
+    e.sse_rr(X_POR, 4, 5);
+    e.movx(5, 3); e.sse_rr(X_PANDN, 5, 4);       // S==0 -> 0
+    e.stx(5, rBX, c.aOff[2]);
+    e.zerox(5); e.sse_rr(X_PSUBSW, 5, 1);        // -T saturado
+    e.sse_rr(X_PAND, 5, 2);
+    e.movx(4, 2); e.sse_rr(X_PANDN, 4, 1);
+    e.sse_rr(X_POR, 5, 4);
+    e.sse_rr(X_PANDN, 3, 5);
+    e.stx(3, rBX, c.VR(vd));
   } break;
 
   // VMUDL: acc = zeroext(mulhi sin signo); D = accl
@@ -854,6 +940,9 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   ctx.aOff[2]  = (s32)((const u8*)&rsp.accl   - (const u8*)&rsp);
   ctx.coOff[0] = (s32)((const u8*)&rsp.vcoh   - (const u8*)&rsp);
   ctx.coOff[1] = (s32)((const u8*)&rsp.vcol   - (const u8*)&rsp);
+  ctx.ccOff[0] = (s32)((const u8*)&rsp.vcch   - (const u8*)&rsp);
+  ctx.ccOff[1] = (s32)((const u8*)&rsp.vccl   - (const u8*)&rsp);
+  ctx.ceOff    = (s32)((const u8*)&rsp.vce    - (const u8*)&rsp);
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
   E& e = ctx.e;
 
