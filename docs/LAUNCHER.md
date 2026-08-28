@@ -186,21 +186,68 @@ con cada tramo pintado de su indice y un `readPixels` de un pixel). Cada tramo d
 lleva el identificador de su parte, y esos identificadores son los de `options.py`: si
 falta uno, en la interfaz no se puede pinchar.
 
+### La carcasa del mando es una sola pieza
+
+El mando no son tres cajas solapadas (eso se veia deforme). Es su **silueta real**: media
+planta a mano (`PAD_HALF`, la pala central, el entrante y la pala derecha hasta el canto de
+atras), espejada, suavizada con Catmull-Rom (`smoothPoly`, 30 puntos de control -> 128) y
+extruida con los cantos redondeados. Los tres mangos son secciones superelipticas que bajan,
+se estrechan y se curvan hacia el jugador, cosidas en un tubo (`handleRings` + `loft`).
+
+Primitivas nuevas que hacen falta para eso, todas en `gl.js`:
+
+| Funcion | Que hace |
+|---------|----------|
+| `smoothPoly(pts, per)` | Catmull-Rom cerrada: contorno sin esquinas |
+| `chartArea(poly)` | area firmada en el plano (x,z); el signo = la orientacion |
+| `earClip(poly)` | triangula un poligono **concavo** (los entrantes entre palas) |
+| `polyInset(poly)` | normal interior + inglete por vertice, para encoger el contorno |
+| `roundPrism(poly, h, r, seg)` | extrusion con los cantos de arriba y abajo redondeados |
+| `loft(rings, opt)` | cose una pila de anillos en un tubo con normales suaves |
+
+### La trampa de la orientacion (culling)
+
+`gl.enable(CULL_FACE)` esta activo, asi que **un triangulo al reves no da error: desaparece**.
+Aparecio tres veces seguidas y de tres maneras distintas:
+
+- Los botones salian como **medias lunas**: las tapas del cilindro miraban hacia dentro.
+  `cylinder`, `sphere` y `extrude` venian con el bobinado invertido desde el primer dia.
+- La carcasa se veia **por dentro**: las paredes de `roundPrism` al reves (volumen -114).
+- Un **faldon** colgando del cuerpo: `polyInset` elegia el lado interior por vertice
+  midiendo contra el centroide, y eso se invierte en los vertices reflejos (los entrantes).
+  Ahora el lado sale del bobinado global del poligono, y en un vertice reflejo el inglete
+  se queda en 1.
+
+Reglas que quedan: en un poligono del plano (x,z) la normal es `n_y = -area_firmada`, asi
+que **las tapas se orientan triangulo a triangulo** por su propia area, y los barridos
+normalizan la orientacion de ENTRADA (`chartArea(poly) > 0 -> reverse`) en vez de dar la
+vuelta a la malla entera (voltear toda la malla arregla las paredes y rompe las tapas).
+
 Trampa de la caja redondeada: el radio nunca puede pasar de la mitad del lado mas corto. La
 primitiva lleva la rejilla del cubo hacia dentro y luego la empuja `r` hacia fuera, asi que
 con `r > lado/2` la pieza se **hincha** hasta `2r` en ese eje. Costo una isla de botones C
 que se tragaba los cuatro botones que tenia encima.
 
-Pruebas, las dos sin depender de que haya GPU en la maquina de turno:
+### Pruebas, las dos sin depender de que haya GPU en la maquina de turno
 
 - `node tools/launcher/models_test.js` — sin navegador: que estan todos los identificadores,
   que los indices caben en `Uint16` (WebGL1 no tiene mas), normales unitarias, arrays
-  cuadrados, tramos contiguos que suman el total, y la caja envolvente en las medidas reales.
-- `web/smoke.html` — con navegador: monta las dos escenas y **barre la superficie del mando a
-  clics** (90x60 puntos) para comprobar que cada boton se puede pinchar de verdad. Con Edge
-  sin ventana:
+  cuadrados, tramos contiguos que suman el total, la caja envolvente en las medidas reales
+  y el **volumen firmado** de cada primitiva y de cada pieza: cerrada y bien orientada da
+  positivo y parecido al analitico (cilindro `2pi`, cono `pi`, esfera `4/3 pi`, cubo `8`).
+  Eso es lo que caza las caras invertidas, que a ojo pasan por buenas.
+  Un identificador puede ocupar varios tramos **seguidos** (el stick son tres colores); si
+  reaparece mas tarde es que se ha reutilizado por error en otro control, y falla.
+- `web/smoke.html` — con navegador: monta las dos escenas y **pincha cada control en el
+  centro de su cara de arriba**, proyectado con la misma camara que dibuja. Si vuelve otro
+  identificador, dice quien tapa a quien. El Z se comprueba aparte, girando la camara por
+  debajo, porque va en la panza del mango central y de frente lo tapa el mango (que se
+  cumpla eso tambien se comprueba). Un barrido a ciegas de miles de clics no vale: tumbaba
+  el renderer por software y ademas no decia quien tapaba. Con Edge sin ventana:
   `msedge --headless=new --use-angle=swiftshader --enable-unsafe-swiftshader
    --screenshot=x.png http://127.0.0.1:9140/smoke.html`.
+  Detalle que costo un rato: hay que llamar a `sc.resize()` antes de proyectar, porque el
+  lienzo todavia no se ha dibujado y su relacion de aspecto es la de por defecto (300x150).
 
 ## Biblioteca y caratulas
 

@@ -79,6 +79,7 @@ function mountPad(host, opts) {
   host.appendChild(canvas);
   try { sc = new GL.Scene(canvas); } catch (e) { host.removeChild(canvas); return null; }
 
+  canvas._scene = sc;                    // la pagina de pruebas necesita la camara para proyectar
   sc.setMesh(MODELS.buildController());
   sc.gloss = 0.85;
   const st = { yaw: 0, pitch: 0.42, dist: 26, min: 14, max: 46, tx: 0, ty: -0.2, tz: 0 };
@@ -149,7 +150,7 @@ function mountPad(host, opts) {
     select(id) { sel = id; recompute(); p.redraw(); },
     show() { startPoll(); p.redraw(); },
     hide() { stopPoll(); },
-    reset() { cam.reset(0, 0.42); },
+    reset(yaw, pitch) { cam.reset(yaw === undefined ? 0 : yaw, pitch === undefined ? 0.42 : pitch); },
     destroy() { stopPoll(); if (ro) ro.disconnect(); sc.dispose(); canvas.remove(); },
   };
 }

@@ -4,33 +4,85 @@ canvas{display:block;width:100%;height:100%}#log{color:#8f8;font:12px monospace;
 <div id="a"></div><div id="b"></div><pre id="log"></pre>
 <script src="gl.js"></script><script src="models.js"></script><script src="scene3d.js"></script>
 <script>
-const L=[], hit=new Set();
-function art(){
-  const c=document.createElement("canvas"); c.width=180; c.height=254;
-  const g=c.getContext("2d");
-  g.fillStyle="#1a3fa0"; g.fillRect(0,0,180,254);
-  g.fillStyle="#ffcf3a"; g.fillRect(12,12,156,60);
-  g.fillStyle="#fff"; g.font="bold 22px sans-serif"; g.fillText("KESTREL", 20, 130);
+/* Prueba de que cada control se puede pinchar DE VERDAD: se calcula el centro de cada tramo,
+   se proyecta con la misma camara que dibuja la escena y se hace un clic ahi. Si vuelve otro
+   id, ese control esta tapado por otra pieza (el Z lo esta a proposito: va en la panza del
+   mango, y para eso estan las pastillas de la interfaz). Un barrido a ciegas de miles de
+   clics tumbaba el renderer por software, y ademas esto dice QUIEN tapa a quien. */
+const L = [], M4 = GL.M4;
+function art() {
+  const c = document.createElement("canvas"); c.width = 180; c.height = 254;
+  const g = c.getContext("2d");
+  g.fillStyle = "#1a3fa0"; g.fillRect(0, 0, 180, 254);
+  g.fillStyle = "#ffcf3a"; g.fillRect(12, 12, 156, 60);
+  g.fillStyle = "#fff"; g.font = "bold 22px sans-serif"; g.fillText("KESTREL", 20, 130);
   return c.toDataURL("image/png");
 }
-try{
-  const p=SCENE3D.mountPad(document.getElementById("a"),{onPick:i=>hit.add(i)});
-  L.push(p?"pad OK":"pad NULL");
-  if(p) p.select("A");
-  const s=SCENE3D.mountShelf(document.getElementById("b"),{});
-  L.push(s?"shelf OK":"shelf NULL");
-  if(s) s.setArt(art());
-  // Barrido de clics: comprueba que TODOS los ids se pueden pinchar de verdad.
-  const cv=document.querySelector("#a canvas"), r=cv.getBoundingClientRect();
-  for(let y=0;y<60;y++) for(let x=0;x<90;x++){
-    cv.dispatchEvent(new MouseEvent("click",{clientX:r.left+(x+0.5)*r.width/90,
-                                             clientY:r.top+(y+0.5)*r.height/60,bubbles:true}));
+function centers(mesh) {
+  const out = {};
+  for (const p of mesh.parts) {
+    if (!p.id) continue;
+    const vs = [], seen = new Set();
+    for (let i = p.start; i < p.start + p.count; i++) {
+      const v = mesh.idx[i];
+      if (seen.has(v)) continue;
+      seen.add(v);
+      vs.push([mesh.pos[v * 3], mesh.pos[v * 3 + 1], mesh.pos[v * 3 + 2]]);
+    }
+    // Centro de la CARA DE ARRIBA, no de la pieza: el centro geometrico de un brazo de la
+    // cruceta cae en el cruce (donde manda el vecino) y el de un gatillo tumbado queda
+    // enterrado en la carcasa. La cara de arriba es justo lo que ve y pincha el usuario.
+    let top = -1e9;
+    for (const q of vs) top = Math.max(top, q[1]);
+    const face = vs.filter(q => q[1] > top - 0.06);
+    const c = [0, 1, 2].map(k => face.reduce((a, q) => a + q[k], 0) / face.length);
+    out[p.id] = [c[0], c[1] - 0.02, c[2]];
   }
-  const want=["A","B","START","Z","L","R","CU","CD","CL","CR","DU","DD","DL","DR","STICK"];
-  const miss=want.filter(k=>!hit.has(k));
-  L.push("pinchables: "+[...hit].sort().join(",")); 
-  L.push(miss.length?("FALTAN: "+miss.join(",")):"todos los ids pinchables");
-}catch(e){L.push("EXC "+e.message+" "+e.stack);}
-window.onerror=(m)=>{L.push("ERR "+m);document.getElementById("log").textContent=L.join("\n");};
-document.getElementById("log").textContent=L.join("\n");
+  return out;
+}
+try {
+  let got = null;
+  const pad = SCENE3D.mountPad(document.getElementById("a"), { onPick: i => { got = i; } });
+  L.push(pad ? "pad OK" : "pad NULL");
+  const shelf = SCENE3D.mountShelf(document.getElementById("b"), {});
+  L.push(shelf ? "shelf OK" : "shelf NULL");
+  if (shelf) shelf.setArt(art());
+  if (pad) {
+    pad.select("A");
+    const mesh = MODELS.buildController(), cen = centers(mesh);
+    const cv = document.querySelector("#a canvas"), r = cv.getBoundingClientRect();
+    const sc = cv._scene;
+    const asp = sc.resize();   // el lienzo aun no se ha dibujado: sin esto la relacion de
+                               // aspecto es la de por defecto (300x150) y las x salen encogidas
+    const proj = M4.persp(0.62, asp, 0.5, 200);
+    const hit = id => {
+      const p = cen[id];
+      const view = M4.lookAt(sc.eye[0], sc.eye[1], sc.eye[2],
+                             sc.target[0], sc.target[1], sc.target[2]);
+      const mvp = M4.mul(proj, view);
+      const w = mvp[3] * p[0] + mvp[7] * p[1] + mvp[11] * p[2] + mvp[15];
+      const sx = (mvp[0] * p[0] + mvp[4] * p[1] + mvp[8] * p[2] + mvp[12]) / w;
+      const sy = (mvp[1] * p[0] + mvp[5] * p[1] + mvp[9] * p[2] + mvp[13]) / w;
+      got = null;
+      cv.dispatchEvent(new MouseEvent("click", { bubbles: true,
+        clientX: r.left + (0.5 + sx * 0.5) * r.width,
+        clientY: r.top + (0.5 - sy * 0.5) * r.height }));
+      return got;
+    };
+    // Desde la vista de partida se ven todos menos el Z, que va en la panza del mango
+    // central: ese se comprueba girando la camara por debajo, que es lo que hace el usuario.
+    const want = ["A", "B", "START", "L", "R", "CU", "CD", "CL", "CR",
+                  "DU", "DD", "DL", "DR", "STICK"];
+    const bad = [];
+    for (const id of want) { const g = hit(id); if (g !== id) bad.push(id + "->" + (g || "nada")); }
+    if (hit("Z") === "Z") bad.push("Z visible de frente (deberia taparlo el mango)");
+    pad.reset(0, -0.85);
+    const gz = hit("Z");
+    if (gz !== "Z") bad.push("Z desde abajo->" + (gz || "nada"));
+    pad.reset();
+    L.push(bad.length ? "TAPADOS: " + bad.join(" ") : "los 15 controles se pinchan donde toca");
+  }
+} catch (e) { L.push("EXC " + e.message + " " + e.stack); }
+window.onerror = m => { L.push("ERR " + m); document.getElementById("log").textContent = L.join("\n"); };
+document.getElementById("log").textContent = L.join("\n");
 </script>

@@ -197,8 +197,8 @@ function cylinder(r, h, seg, r1) {
       uvs.push(0.5 + Math.cos(a) * 0.5, 0.5 + Math.sin(a) * 0.5);
     }
     for (let i = 0; i < seg; i++) {
-      if (ny > 0) tris.push(base, base + 1 + i, base + 2 + i);
-      else        tris.push(base, base + 2 + i, base + 1 + i);
+      if (ny > 0) tris.push(base, base + 2 + i, base + 1 + i);
+      else        tris.push(base, base + 1 + i, base + 2 + i);
     }
   }
   return { verts, norms, uvs, tris };
@@ -217,7 +217,7 @@ function sphere(r, seg) {
   }
   for (let j = 0; j < rings; j++) for (let i = 0; i < seg; i++) {
     const q = j * (seg + 1) + i;
-    tris.push(q, q + seg + 1, q + 1, q + 1, q + seg + 1, q + seg + 2);
+    tris.push(q, q + 1, q + seg + 1, q + 1, q + seg + 2, q + seg + 1);
   }
   return { verts, norms, uvs, tris };
 }
@@ -229,8 +229,8 @@ function extrude(poly, h) {
     const base = verts.length / 3;
     for (const p of poly) { verts.push(p[0], s * h / 2, p[1]); norms.push(0, s, 0); uvs.push(0.5, 0.5); }
     for (let i = 1; i < n - 1; i++) {
-      if (s > 0) tris.push(base, base + i, base + i + 1);
-      else       tris.push(base, base + i + 1, base + i);
+      if (s > 0) tris.push(base, base + i + 1, base + i);
+      else       tris.push(base, base + i, base + i + 1);
     }
   }
   for (let i = 0; i < n; i++) {
@@ -240,9 +240,195 @@ function extrude(poly, h) {
     const base = verts.length / 3;
     verts.push(p0[0], -h / 2, p0[1], p1[0], -h / 2, p1[1], p1[0], h / 2, p1[1], p0[0], h / 2, p0[1]);
     for (let k = 0; k < 4; k++) { norms.push(nx, 0, nz); uvs.push(0.5, 0.5); }
-    tris.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    tris.push(base, base + 2, base + 1, base, base + 3, base + 2);
   }
   return { verts, norms, uvs, tris };
+}
+
+/* --------------------------------------------------- poligonos y cuerpos lofteados */
+// Triangula un poligono XZ que puede ser concavo (la silueta del mando tiene dos entrantes
+// entre las palas, y un abanico desde el centro los cruzaria).
+function earClip(p) {
+  const n = p.length, out = [], v = [];
+  for (let i = 0; i < n; i++) v.push(i);
+  const cross = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const a = p[i], b = p[(i + 1) % n]; sum += a[0] * b[1] - b[0] * a[1]; }
+  const ccw = sum > 0;
+  const inside = (a, b, c, q) => {
+    const d1 = cross(a, b, q), d2 = cross(b, c, q), d3 = cross(c, a, q);
+    return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+  };
+  let guard = 0;
+  while (v.length > 3 && guard++ < n * n) {
+    let cut = false;
+    for (let k = 0; k < v.length; k++) {
+      const ia = v[(k + v.length - 1) % v.length], ib = v[k], ic = v[(k + 1) % v.length];
+      const a = p[ia], b = p[ib], c = p[ic], cr = cross(a, b, c);
+      if (ccw ? cr <= 0 : cr >= 0) continue;                  // vertice reflejo: no es oreja
+      let clean = true;
+      for (const w of v) {
+        if (w === ia || w === ib || w === ic) continue;
+        if (inside(a, b, c, p[w])) { clean = false; break; }
+      }
+      if (!clean) continue;
+      out.push(ia, ib, ic); v.splice(k, 1); cut = true; guard = 0; break;
+    }
+    if (!cut) break;                                          // poligono raro: se cierra en abanico
+  }
+  for (let i = 1; i < v.length - 1; i++) out.push(v[0], v[i], v[i + 1]);
+  return { tris: out, ccw };
+}
+
+// Area firmada de un contorno en el plano (x, z). Positiva = antihorario en ese plano, que
+// visto desde +Y es horario: de aqui sale hacia donde mira cada cara.
+function chartArea(poly) {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a / 2;
+}
+
+// Normal hacia dentro de cada vertice (bisectriz) y su factor de inglete, para poder encoger
+// el contorno sin que las esquinas se despeguen. El lado de dentro sale del sentido de giro
+// del poligono entero, NO de mirar al centro: en un entrante la bisectriz se aleja del centro
+// y ese criterio la voltearia, que es como salen faldones colgando del canto.
+function polyInset(poly) {
+  const n = poly.length, dir = [], mit = [];
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const a = poly[i], b = poly[(i + 1) % n]; sum += a[0] * b[1] - b[0] * a[1]; }
+  const ccw = sum > 0;
+  const edgeN = (a, b) => {                       // normal interior de la arista a->b
+    const dx = b[0] - a[0], dz = b[1] - a[1], l = Math.hypot(dx, dz) || 1;
+    return ccw ? [-dz / l, dx / l] : [dz / l, -dx / l];
+  };
+  for (let i = 0; i < n; i++) {
+    const p0 = poly[(i + n - 1) % n], p1 = poly[i], p2 = poly[(i + 1) % n];
+    const n1 = edgeN(p0, p1), n2 = edgeN(p1, p2);
+    let bx = n1[0] + n2[0], bz = n1[1] + n2[1];
+    const l = Math.hypot(bx, bz) || 1; bx /= l; bz /= l;
+    const cosH = Math.max(0.4, bx * n1[0] + bz * n1[1]);
+    // En un vertice entrante el inglete estira hacia fuera y el canto se dobla sobre si
+    // mismo: ahi se encoge recto, sin amplificar.
+    const turn = ((p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0])) * (ccw ? 1 : -1);
+    dir.push([bx, bz]); mit.push(turn < 0 ? 1 : Math.min(2.0, 1 / cosH));
+  }
+  return { dir, mit };
+}
+
+// Extrusion con los cantos de arriba y abajo redondeados: la silueta manda y el radio solo
+// mata la arista. Es lo que da forma a la carcasa del mando.
+function roundPrism(poly, h, r, seg) {
+  seg = seg || 3;
+  // El sentido del contorno decide hacia donde miran las paredes: se normaliza aqui para
+  // que dibujar la silueta en un sentido u otro de igual.
+  if (chartArea(poly) > 0) poly = poly.slice().reverse();
+  const ins = polyInset(poly), dir = ins.dir, mit = ins.mit, n = poly.length;
+  const verts = [], norms = [], uvs = [], tris = [], rings = [];
+  for (let s = -1; s <= 1; s += 2)
+    for (let k = 0; k <= seg; k++) {
+      const a = (Math.PI / 2) * (s < 0 ? k / seg - 1 : k / seg);
+      rings.push({ a: a, y: s * (h / 2 - r) + r * Math.sin(a), in: r * (1 - Math.cos(a)) });
+    }
+  for (let j = 0; j < rings.length; j++) {
+    const R = rings[j], ca = Math.cos(R.a), sa = Math.sin(R.a);
+    for (let i = 0; i < n; i++) {
+      const p = poly[i], d = dir[i], off = R.in * mit[i];
+      verts.push(p[0] + d[0] * off, R.y, p[1] + d[1] * off);
+      norms.push(-d[0] * ca, sa, -d[1] * ca);
+      uvs.push(i / n, j / (rings.length - 1));
+    }
+  }
+  for (let j = 0; j < rings.length - 1; j++) for (let i = 0; i < n; i++) {
+    const i2 = (i + 1) % n, q = j * n, w = (j + 1) * n;
+    tris.push(q + i, q + i2, w + i, q + i2, w + i2, w + i);
+  }
+  // Tapas: el contorno ya encogido por el radio, triangulado con recorte de orejas.
+  const caps = [[0, -1], [rings.length - 1, 1]];
+  for (const cap of caps) {
+    const R = rings[cap[0]], up = cap[1];
+    const flat = poly.map((p, i) => [p[0] + dir[i][0] * R.in * mit[i],
+                                     p[1] + dir[i][1] * R.in * mit[i]]);
+    const ear = earClip(flat), base = verts.length / 3;
+    for (const f of flat) { verts.push(f[0], R.y, f[1]); norms.push(0, up, 0); uvs.push(0.5, 0.5); }
+    // Una tapa plana en XZ mira hacia -Y cuando sus puntos van en sentido antihorario en el
+    // plano (x, z): se orienta cada triangulo por su area firmada, no por el giro del contorno.
+    for (let i = 0; i < ear.tris.length; i += 3) {
+      const t = ear.tris, a = flat[t[i]], b2 = flat[t[i + 1]], c = flat[t[i + 2]];
+      const ar = (b2[0] - a[0]) * (c[1] - a[1]) - (b2[1] - a[1]) * (c[0] - a[0]);
+      if (ar * up < 0) tris.push(base + t[i], base + t[i + 1], base + t[i + 2]);
+      else             tris.push(base + t[i], base + t[i + 2], base + t[i + 1]);
+    }
+  }
+  return { verts, norms, uvs, tris };
+}
+
+// Cose una pila de anillos (todos con la misma cantidad de puntos [x,y,z]) en un tubo con
+// normales suaves. Los mangos del mando son esto: secciones ovaladas que bajan y se afilan.
+function loft(rings, opt) {
+  opt = opt || {};
+  if (chartArea(rings[0].map(p => [p[0], p[2]])) > 0)
+    rings = rings.map(r => r.slice().reverse());     // mismo criterio que roundPrism
+  const m = rings.length, n = rings[0].length;
+  const verts = [], norms = [], uvs = [], tris = [];
+  for (let j = 0; j < m; j++) for (let i = 0; i < n; i++) {
+    const p = rings[j][i];
+    verts.push(p[0], p[1], p[2]); norms.push(0, 0, 0); uvs.push(i / n, j / (m - 1));
+  }
+  const acc = (ia, ib, ic) => {
+    const a = ia * 3, b = ib * 3, c = ic * 3;
+    const ux = verts[b] - verts[a], uy = verts[b + 1] - verts[a + 1], uz = verts[b + 2] - verts[a + 2];
+    const vx = verts[c] - verts[a], vy = verts[c + 1] - verts[a + 1], vz = verts[c + 2] - verts[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const k of [a, b, c]) { norms[k] += nx; norms[k + 1] += ny; norms[k + 2] += nz; }
+  };
+  for (let j = 0; j < m - 1; j++) for (let i = 0; i < n; i++) {
+    const i2 = (i + 1) % n, q = j * n, w = (j + 1) * n;
+    tris.push(q + i, q + i2, w + i, q + i2, w + i2, w + i);
+    acc(q + i, q + i2, w + i); acc(q + i2, w + i2, w + i);
+  }
+  // Una punta colapsada deja la normal a cero: ahi se apunta a lo largo del eje del tubo.
+  const cy = rings[0][0][1] > rings[m - 1][0][1] ? -1 : 1;
+  for (let i = 0; i < verts.length; i += 3) {
+    const l = Math.hypot(norms[i], norms[i + 1], norms[i + 2]);
+    if (l > 1e-6) { norms[i] /= l; norms[i + 1] /= l; norms[i + 2] /= l; }
+    else { norms[i] = 0; norms[i + 1] = cy; norms[i + 2] = 0; }
+  }
+  const ends = [opt.capStart ? 0 : -1, opt.capEnd ? m - 1 : -1];
+  for (const end of ends) {
+    if (end < 0) continue;
+    const ring = rings[end], up = end === 0 ? -1 : 1, base = verts.length / 3;
+    const c = [0, 0, 0];
+    for (const p of ring) { c[0] += p[0] / n; c[1] += p[1] / n; c[2] += p[2] / n; }
+    verts.push(c[0], c[1], c[2]); norms.push(0, up, 0); uvs.push(0.5, 0.5);
+    for (const p of ring) { verts.push(p[0], p[1], p[2]); norms.push(0, up, 0); uvs.push(0.5, 0.5); }
+    for (let i = 0; i < n; i++) {
+      const p0 = ring[i], p1 = ring[(i + 1) % n];
+      const ar = (p0[0] - c[0]) * (p1[2] - c[2]) - (p0[2] - c[2]) * (p1[0] - c[0]);
+      const a = base + 1 + i, b = base + 1 + (i + 1) % n;
+      if (ar * up < 0) tris.push(base, a, b); else tris.push(base, b, a);
+    }
+  }
+  return { verts, norms, uvs, tris };
+}
+
+// Curva suave que pasa por los puntos de control (Catmull-Rom), para siluetas sin esquinas:
+// el contorno del mando se define con 30 puntos y sale con 120.
+function smoothPoly(pts, per) {
+  per = per || 4;
+  const n = pts.length, out = [];
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i + n - 1) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+    for (let k = 0; k < per; k++) {
+      const t = k / per, t2 = t * t, t3 = t2 * t;
+      out.push([0, 1].map(c => 0.5 * ((2 * p1[c]) + (-p0[c] + p2[c]) * t +
+        (2 * p0[c] - 5 * p1[c] + 4 * p2[c] - p3[c]) * t2 +
+        (-p0[c] + 3 * p1[c] - 3 * p2[c] + p3[c]) * t3)));
+    }
+  }
+  return out;
 }
 
 /* -------------------------------------------------------------------- escena */
@@ -415,7 +601,8 @@ class Scene {
   }
 }
 
-return { M4, Builder, Scene, roundedBox, cylinder, sphere, extrude };
+return { M4, Builder, Scene, roundedBox, cylinder, sphere, extrude,
+         earClip, polyInset, roundPrism, loft, smoothPoly, chartArea };
 })();
 
 if (typeof module !== "undefined") module.exports = GL;   // para las pruebas con node

@@ -16,7 +16,7 @@
 const MODELS = (() => {
 
 const G = (typeof GL !== "undefined") ? GL : require("./gl.js");
-const { M4, Builder, roundedBox, cylinder, sphere, extrude } = G;
+const { M4, Builder, roundedBox, cylinder, sphere, extrude, roundPrism, loft, smoothPoly } = G;
 
 const C = {
   body:    [0.760, 0.752, 0.723],   // el gris hueso del mando original
@@ -59,72 +59,118 @@ function dpadArm(len, wide, dx, dz) {
 }
 
 /* ------------------------------------------------------------------- el mando */
+// Silueta real vista desde arriba: un tridente de tres palas con dos entrantes en el borde
+// de delante, de donde salen los tres mangos. Media silueta a mano (de la izquierda del
+// centro hacia la derecha y por detras hasta el centro), la otra mitad es su espejo, y una
+// Catmull-Rom la suaviza: asi el cuerpo es UNA pieza con su contorno, no cajas solapadas.
+//
+// Ejes: X a la derecha, Z hacia el jugador. Ancho total 17.4 cm, como el mando de verdad.
+const PAD_HALF = [
+  [0.00,  3.20], [1.85, 3.05], [2.95, 2.35], [3.55, 1.30],   // pala central y entrante
+  [4.25,  1.85], [5.20, 2.20], [6.30, 2.35], [7.50, 2.00],   // frente de la pala derecha
+  [8.35,  1.00], [8.68, -0.35], [8.50, -1.85], [7.70, -2.85],// punta y canto de atras
+  [6.30, -3.30], [4.60, -3.50], [3.00, -3.85], [1.50, -4.05], [0.00, -4.10],
+];
+
+function padOutline() {
+  const back = PAD_HALF.slice(1, -1).reverse().map(p => [-p[0], p[1]]);
+  return smoothPoly(PAD_HALF.concat(back), 4);
+}
+
+// Un mango: secciones de rectangulo redondeado (superelipse, que es la seccion real: el
+// mango de N64 no es un tubo) que bajan, se ensanchan un poco al salir del cuerpo, se
+// afilan despues y cierran en punta roma.
+function handleRings(len, rx, rz, bend, steps, seg) {
+  const rings = [], e = 0.66;
+  for (let k = 0; k <= steps; k++) {
+    const t = k / steps;
+    const w = 1 + 0.08 * Math.sin(Math.PI * Math.min(1, t * 1.7)) - 0.20 * t * t;
+    const s = w * Math.sqrt(Math.max(0, 1 - Math.pow(t, 4)));
+    const y = -len * t, z = bend * t * t;
+    const ring = [];
+    for (let i = 0; i < seg; i++) {
+      const a = i / seg * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+      ring.push([Math.sign(ca) * Math.pow(Math.abs(ca), e) * rx * s, y,
+                 z + Math.sign(sa) * Math.pow(Math.abs(sa), e) * rz * s]);
+    }
+    rings.push(ring);
+  }
+  return rings;
+}
+
 // Los ids son los mismos del esquema de opciones (options.py): A, B, START, Z, L, R,
 // CU/CD/CL/CR, DU/DD/DL/DR y STICK. Si aqui falta uno, en la interfaz no se puede pinchar.
 function buildController() {
   const b = new Builder();
-  const TOP = 0.8;                            // cara superior del cuerpo
+  const TH = 2.8, TOP = TH / 2;               // grosor del cuerpo y cara de arriba (y = 1.4)
 
-  // --- cuerpo: tres palas unidas, cada una una caja redondeada -----------------
+  // --- carcasa: una sola extrusion redondeada del contorno ---------------------
   b.part(null, C.body);
-  b.push(M4.trans(0, 0, 0.1)).add(roundedBox(6.4, 1.6, 5.4, 0.55, 5)).pop();
-  for (const s of [-1, 1]) {
-    b.push(M4.mul(M4.trans(s * 5.2, -0.05, -0.35), M4.rotY(-s * 0.13)))
-     .add(roundedBox(6.0, 1.5, 4.6, 0.6, 5)).pop();
-  }
-  // Los tres mangos. El central lleva el Z debajo; los laterales caen abiertos.
+  b.add(roundPrism(padOutline(), TH, 0.62, 4));
+
+  // --- los tres mangos ---------------------------------------------------------
   b.part(null, C.bodyDark);
-  b.push(M4.mul(M4.trans(0, -2.9, 1.30), M4.rotX(0.22)))
-   .add(roundedBox(2.4, 5.8, 2.6, 1.0, 5)).pop();
+  b.push(M4.trans(0, 0.55, 1.45));
+  b.add(loft(handleRings(7.4, 1.42, 1.78, 0.85, 18, 24), { capStart: true }));
+  b.pop();
   for (const s of [-1, 1]) {
-    b.push(M4.mul(M4.mul(M4.trans(s * 6.5, -2.6, 0.75), M4.rotZ(-s * 0.30)), M4.rotX(0.16)))
-     .add(roundedBox(2.4, 5.6, 2.6, 1.0, 5)).pop();
+    b.push(M4.mul(M4.mul(M4.trans(s * 6.20, 0.25, 0.65), M4.rotZ(s * 0.33)), M4.rotX(0.13)));
+    b.add(loft(handleRings(7.1, 1.38, 1.72, 0.75, 18, 24), { capStart: true }));
+    b.pop();
   }
 
   // --- cruceta (pala izquierda) -----------------------------------------------
-  const dcx = -5.15, dcz = -0.15;
+  const dcx = -5.35, dcz = -0.85;
+  b.part(null, C.bodyDark);                   // rebaje donde se apoya la cruceta
+  b.push(M4.trans(dcx, TOP - 0.10, dcz)).add(cylinder(1.75, 0.30, 28)).pop();
   b.part(null, C.dpad);
-  b.push(M4.trans(dcx, TOP + 0.06, dcz)).add(roundedBox(1.5, 0.34, 1.5, 0.12, 2)).pop();
+  b.push(M4.trans(dcx, TOP + 0.08, dcz)).add(roundedBox(1.5, 0.34, 1.5, 0.12, 2)).pop();
   const arms = [["DU", 0, -1], ["DD", 0, 1], ["DL", -1, 0], ["DR", 1, 0]];
-  for (const [id, ax, az] of arms) {
-    b.part(id, C.dpad);
-    b.push(M4.trans(dcx, TOP + 0.16, dcz)).add(extrude(dpadArm(1.05, 0.66, ax, az), 0.34)).pop();
+  for (const arm of arms) {
+    b.part(arm[0], C.dpad);
+    b.push(M4.trans(dcx, TOP + 0.18, dcz)).add(extrude(dpadArm(1.05, 0.66, arm[1], arm[2]), 0.34)).pop();
   }
 
   // --- stick (pala central) ----------------------------------------------------
+  const scz = 0.30;
   b.part(null, C.bodyDark);
-  b.push(M4.trans(0, TOP - 0.05, 0.55)).add(cylinder(1.30, 0.30, 28)).pop();
+  b.push(M4.trans(0, TOP - 0.02, scz)).add(cylinder(1.35, 0.34, 28)).pop();
   b.part("STICK", C.stick);
-  b.push(M4.trans(0, TOP + 0.35, 0.55)).add(cylinder(0.44, 0.80, 24, 0.38)).pop();
-  b.push(M4.trans(0, TOP + 0.82, 0.55)).add(cylinder(0.66, 0.26, 28, 0.60)).pop();
+  b.push(M4.trans(0, TOP + 0.46, scz)).add(cylinder(0.50, 0.92, 24, 0.44)).pop();
+  b.push(M4.trans(0, TOP + 1.02, scz)).add(cylinder(0.78, 0.28, 28, 0.72)).pop();
+  b.part("STICK", [0.235, 0.242, 0.262]);            // el hueco del pulgar, hundido
+  b.push(M4.trans(0, TOP + 1.16, scz)).add(cylinder(0.58, 0.06, 24)).pop();
 
   // --- A, B, C y Start ---------------------------------------------------------
-  const rcx = 5.15;
   const btn = (id, col, x, z, r, h) => {
     b.part(id, col);
-    b.push(M4.trans(x, TOP + h / 2 - 0.02, z)).add(cylinder(r, h, 26, r * 0.94)).pop();
+    b.push(M4.trans(x, TOP + h / 2 - 0.04, z)).add(cylinder(r, h, 26, r * 0.94)).pop();
   };
-  btn("A", C.a, rcx - 0.15, 0.95, 0.62, 0.34);
-  btn("B", C.b, rcx - 1.35, 0.20, 0.52, 0.32);
-  b.part(null, C.bodyDark);                          // isla de las C, hundida
-  b.push(M4.trans(rcx + 0.55, TOP - 0.06, -1.15)).add(roundedBox(2.1, 0.30, 2.1, 0.15, 3)).pop();
-  const cd = 0.66;
-  btn("CU", C.c, rcx + 0.55, -1.15 - cd, 0.34, 0.28);
-  btn("CD", C.c, rcx + 0.55, -1.15 + cd, 0.34, 0.28);
-  btn("CL", C.c, rcx + 0.55 - cd, -1.15, 0.34, 0.28);
-  btn("CR", C.c, rcx + 0.55 + cd, -1.15, 0.34, 0.28);
-  // Start va DEBAJO del stick, hacia el jugador, como en el mando real.
+  btn("A", C.a, 5.95, 0.95, 0.64, 0.34);
+  btn("B", C.b, 4.55, -0.10, 0.50, 0.32);
+  // Las cuatro C van en rombo sobre un rebaje redondo, no sobre una plancha cuadrada.
+  const ccx = 6.40, ccz = -1.75, cd = 0.70;
+  b.part(null, C.bodyDark);
+  b.push(M4.trans(ccx, TOP - 0.05, ccz)).add(cylinder(1.32, 0.26, 26)).pop();
+  btn("CU", C.c, ccx, ccz - cd, 0.34, 0.28);
+  btn("CD", C.c, ccx, ccz + cd, 0.34, 0.28);
+  btn("CL", C.c, ccx - cd, ccz, 0.34, 0.28);
+  btn("CR", C.c, ccx + cd, ccz, 0.34, 0.28);
+  // Start va ENCIMA del stick, hacia el fondo, como en el mando real.
   b.part("START", C.start);
-  b.push(M4.trans(0, TOP + 0.12, 2.05)).add(cylinder(0.46, 0.30, 24)).pop();
+  b.push(M4.trans(0, TOP + 0.14, -3.05)).add(cylinder(0.52, 0.34, 24)).pop();
 
-  // --- gatillos: L y R arriba en el canto, Z debajo del mango central ----------
-  for (const [id, s] of [["L", -1], ["R", 1]]) {
-    b.part(id, C.body);
-    b.push(M4.mul(M4.trans(s * 5.1, TOP - 0.30, -2.45), M4.rotX(-0.34)))
-     .add(roundedBox(2.0, 0.78, 1.30, 0.32, 4)).pop();
+  // --- gatillos: L y R en el canto de atras, Z bajo el mango central -----------
+  for (const t of [["L", -1], ["R", 1]]) {
+    b.part(t[0], C.body);
+    b.push(M4.mul(M4.trans(t[1] * 6.30, TOP + 0.06, -3.10), M4.rotX(-0.50)))
+     .add(roundedBox(2.3, 0.78, 0.95, 0.30, 4)).pop();
   }
+  // Ranura del Controller Pak, en la trasera del mango central: se ve desde abajo.
+  b.part(null, [0.16, 0.165, 0.185]);
+  b.push(M4.trans(0, -2.30, 0.35)).add(roundedBox(2.05, 1.45, 0.55, 0.10, 2)).pop();
   b.part("Z", C.bodyDark);
-  b.push(M4.mul(M4.trans(0, -1.62, 1.62), M4.rotX(0.42)))
+  b.push(M4.mul(M4.trans(0, -1.55, 2.35), M4.rotX(0.38)))
    .add(roundedBox(1.55, 0.62, 1.45, 0.28, 4)).pop();
 
   return b.build();
@@ -175,7 +221,7 @@ function buildBox(opts) {
   return b.build();
 }
 
-return { buildController, buildCart, buildBox, plane, COLORS: C };
+return { buildController, buildCart, buildBox, plane, padOutline, handleRings, COLORS: C };
 })();
 
 if (typeof module !== "undefined") module.exports = MODELS;

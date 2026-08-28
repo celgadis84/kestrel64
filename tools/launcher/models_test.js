@@ -49,13 +49,19 @@ function checkMesh(name, m, expectIds, bound) {
 
   // Cobertura de partes: todos los tramos suman exactamente el total de indices y no se
   // pisan entre si (un solape significaria que un tramo se cerro mal).
-  let sum = 0, prevEnd = 0;
+  let sum = 0, prevEnd = 0, lastId = null;
   const seen = new Set();
   for (const p of m.parts) {
     ok(p.start === prevEnd, `${name}: hueco o solape de tramos en ${p.id || "(sin id)"}`);
     ok(p.count > 0, `${name}: tramo vacio ${p.id}`);
     prevEnd = p.start + p.count; sum += p.count;
-    if (p.id) { ok(!seen.has(p.id), `${name}: id repetido ${p.id}`); seen.add(p.id); }
+    // Un control puede ocupar varios tramos seguidos (el stick son tres colores), pero si un
+    // id reaparece MAS TARDE es que se ha reutilizado por error en otro control.
+    if (p.id) {
+      ok(!seen.has(p.id) || p.id === lastId, `${name}: id repetido ${p.id}`);
+      seen.add(p.id);
+    }
+    lastId = p.id;
   }
   ok(sum === m.idx.length, `${name}: los tramos suman ${sum} de ${m.idx.length} indices`);
 
@@ -69,7 +75,7 @@ function checkMesh(name, m, expectIds, bound) {
 const PAD_IDS = ["A", "B", "START", "Z", "L", "R", "CU", "CD", "CL", "CR",
                  "DU", "DD", "DL", "DR", "STICK"];
 
-checkMesh("mando",    MODELS.buildController(), PAD_IDS, [17.3, 7.6, 7.0]);
+checkMesh("mando",    MODELS.buildController(), PAD_IDS, [17.6, 9.4, 7.3]);
 checkMesh("cartucho", MODELS.buildCart(),       ["LABEL"], [9.3, 11.8, 2.5]);
 checkMesh("caja",     MODELS.buildBox(),        ["COVER", "BACK"], [13.5, 19.0, 3.0]);
 
@@ -81,6 +87,54 @@ checkMesh("caja",     MODELS.buildBox(),        ["COVER", "BACK"], [13.5, 19.0, 
   bb.push(GL.M4.trans(5.4, -3.4, 3.2)).merge(MODELS.buildCart(), "cart:").pop();
   checkMesh("estante", bb.build(), ["COVER", "BACK", "cart:LABEL"], [19.4, 19.0, 5.9]);
 }
+
+/* Volumen firmado: si una primitiva tiene los triangulos al reves, el culling se come esa
+   cara y la pieza sale hueca o a medias (asi salieron los botones como medias lunas hasta
+   que se vio que las tapas del cilindro miraban hacia dentro). Cerrada y bien orientada =
+   volumen positivo y parecido al analitico. */
+function volume(m) {
+  const V = m.verts || m.pos, T = m.tris || m.idx;
+  let v = 0;
+  for (let i = 0; i < T.length; i += 3) {
+    const p = [0, 1, 2].map(k => [V[T[i + k] * 3], V[T[i + k] * 3 + 1], V[T[i + k] * 3 + 2]]);
+    const u = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+    const w = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+    const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+    v += (p[0][0] * n[0] + p[0][1] * n[1] + p[0][2] * n[2]) / 6;
+  }
+  return v;
+}
+
+{
+  const PI = Math.PI;
+  const cases = [
+    ["cilindro",   GL.cylinder(1, 2, 32),                          2 * PI],
+    ["cono",       GL.cylinder(1, 3, 32, 0),                       PI],
+    ["esfera",     GL.sphere(1, 32),                               4 / 3 * PI],
+    ["extrude",    GL.extrude([[-1, -1], [1, -1], [1, 1], [-1, 1]], 1), 4],
+    ["roundedBox", GL.roundedBox(2, 2, 2, 0.001, 1),               8],
+    ["roundPrism", GL.roundPrism([[-1, -1], [1, -1], [1, 1], [-1, 1]], 2, 0.001, 2), 8],
+    ["loft",       GL.loft([-1, 1].map(y => {
+                     const ring = [];
+                     for (let i = 0; i < 24; i++) {
+                       const a = i / 24 * 2 * PI;
+                       ring.push([Math.cos(a), y, Math.sin(a)]);
+                     }
+                     return ring;
+                   }), { capStart: true, capEnd: true }), 2 * PI],
+  ];
+  for (const [name, mesh, want] of cases) {
+    const v = volume(mesh);
+    ok(v > 0, `${name}: volumen ${v.toFixed(2)} <= 0, los triangulos estan al reves`);
+    ok(Math.abs(v - want) < want * 0.25,
+       `${name}: volumen ${v.toFixed(2)}, se esperaba ~${want.toFixed(2)}`);
+  }
+}
+
+// Las piezas del lanzador tambien cierran hacia fuera.
+for (const [name, mesh] of [["mando", MODELS.buildController()], ["cartucho", MODELS.buildCart()],
+                            ["caja", MODELS.buildBox()]])
+  ok(volume(mesh) > 0, `${name}: volumen negativo, alguna parte esta del reves`);
 
 console.log(fails ? `\n${fails} fallos` : "\nOK");
 process.exit(fails ? 1 : 0);
