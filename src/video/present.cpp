@@ -40,6 +40,7 @@ struct Vk {
   VkSwapchainKHR swap = VK_NULL_HANDLE;
   VkFormat swapFormat = VK_FORMAT_UNDEFINED;
   VkExtent2D extent = {};
+  bool needRecreate = false;   // el present pidio rehacer la cadena
   std::vector<VkImage> swapImages;
 
   // Host-visible source image holding the current N64 frame (R8G8B8A8).
@@ -78,10 +79,11 @@ auto barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout 
   vkCmdPipelineBarrier(cb, srcS, dstS, 0, 0, nullptr, 0, nullptr, 1, &b);
 }
 
-auto createSwapchain(Vk& v) -> bool {
+auto createSwapchain(Vk& v, bool quiet = false) -> bool {
   VkSurfaceCapabilitiesKHR caps;
   VkResult rc = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(v.phys, v.surface, &caps);
-  std::fprintf(stderr, "[video] surfaceCaps rc=%d minImg=%u maxImg=%u curExt=%ux%u\n",
+  if(!quiet)
+    std::fprintf(stderr, "[video] surfaceCaps rc=%d minImg=%u maxImg=%u curExt=%ux%u\n",
                rc, caps.minImageCount, caps.maxImageCount, caps.currentExtent.width, caps.currentExtent.height);
   // A broken surface (VK_ERROR_UNKNOWN etc.) yields garbage caps; a swapchain
   // built on it crashes the driver in vkAcquireNextImageKHR. Bail to compose-only.
@@ -90,7 +92,7 @@ auto createSwapchain(Vk& v) -> bool {
   u32 nfmt = 0; vkGetPhysicalDeviceSurfaceFormatsKHR(v.phys, v.surface, &nfmt, nullptr);
   std::vector<VkSurfaceFormatKHR> fmts(nfmt);
   vkGetPhysicalDeviceSurfaceFormatsKHR(v.phys, v.surface, &nfmt, fmts.data());
-  std::fprintf(stderr, "[video] surfaceFormats=%u\n", nfmt);
+  if(!quiet) std::fprintf(stderr, "[video] surfaceFormats=%u\n", nfmt);
   if(nfmt == 0) return false;
   VkSurfaceFormatKHR pick = fmts[0];
   for(auto& f : fmts) if(f.format == VK_FORMAT_B8G8R8A8_UNORM) { pick = f; break; }
@@ -118,7 +120,8 @@ auto createSwapchain(Vk& v) -> bool {
   ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;   // vsync, always supported
   ci.clipped = VK_TRUE;
   VkResult sc = vkCreateSwapchainKHR(v.dev, &ci, nullptr, &v.swap);
-  std::fprintf(stderr, "[video] createSwapchain rc=%d ext=%ux%u fmt=%d imgCount=%u\n",
+  if(!quiet)
+    std::fprintf(stderr, "[video] createSwapchain rc=%d ext=%ux%u fmt=%d imgCount=%u\n",
                sc, v.extent.width, v.extent.height, pick.format, imgCount);
   if(sc != VK_SUCCESS) return false;
 
@@ -126,6 +129,28 @@ auto createSwapchain(Vk& v) -> bool {
   v.swapImages.resize(n);
   vkGetSwapchainImagesKHR(v.dev, v.swap, &n, v.swapImages.data());
   return true;
+}
+
+// Rehacer la cadena de intercambio con el tamano actual de la ventana.
+//
+// El blit de presentacion escala del framebuffer del guest al `extent` DE LA CADENA, y ese
+// extent se fija cuando la cadena se crea. Una ventana redimensionada (o puesta a pantalla
+// completa) seguia presentando contra el tamano viejo: lo que se veia era el compositor
+// estirando o recortando una imagen del tamano equivocado. Hay que rehacerla cuando el
+// tamano cambia y cuando el driver dice OUT_OF_DATE.
+//
+// vkDeviceWaitIdle primero: las imagenes viejas pueden seguir en vuelo en la cola.
+auto recreateSwapchain(Vk& v) -> bool {
+  vkDeviceWaitIdle(v.dev);
+  VkSwapchainKHR old = v.swap;
+  v.swap = VK_NULL_HANDLE;
+  v.swapImages.clear();
+  bool ok = createSwapchain(v, /*quiet=*/true);
+  if(old != VK_NULL_HANDLE) vkDestroySwapchainKHR(v.dev, old, nullptr);
+  // Una linea por recreacion, no por frame: solo ocurre al redimensionar o cuando el driver
+  // marca la cadena obsoleta, y es justo lo que hace falta ver si la ventana sale mal.
+  std::fprintf(stderr, "[video] swapchain recreado %ux%u ok=%d\n", v.extent.width, v.extent.height, (int)ok);
+  return ok;
 }
 
 // La cola grafica puede ser la de parallel-rdp (ver initVulkan). vkQueueSubmit y
@@ -343,8 +368,19 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
     std::memcpy(dst, px + y * w, std::min(w, v.srcW) * 4);
   }
 
+  // La ventana pudo cambiar de tamano desde el frame anterior. El extent de la cadena es
+  // el destino del blit, asi que si no se rehace la imagen sale del tamano equivocado.
+  {
+    int fbw = 0, fbh = 0;
+    if(v.win) glfwGetFramebufferSize(v.win, &fbw, &fbh);
+    if(fbw == 0 || fbh == 0) return;                       // minimizada: nada que presentar
+    if((u32)fbw != v.extent.width || (u32)fbh != v.extent.height)
+      if(!recreateSwapchain(v)) return;
+  }
+
   u32 idx = 0;
   VkResult acq = vkAcquireNextImageKHR(v.dev, v.swap, UINT64_MAX, v.semAcquire, VK_NULL_HANDLE, &idx);
+  if(acq == VK_ERROR_OUT_OF_DATE_KHR) { recreateSwapchain(v); return; }   // rehacer y saltar el frame
   // Skip the frame on ANY non-success (resize, surface lost, headless caps). We
   // must not submit waiting on an unsignaled acquire semaphore, nor index a
   // stale swapchain — either would crash instead of gracefully dropping a frame.
@@ -360,11 +396,28 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   barrier(v.cmd, swap, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
           0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
+  // Destino centrado que conserva la relacion de aspecto del guest. Estirar a la ventana
+  // entera deforma la imagen en cuanto la ventana deja de ser 4:3 (maximizar, pantalla
+  // completa en un monitor ancho), que es lo que hacia antes.
+  const u32 ew = v.extent.width, eh = v.extent.height;
+  u32 dw = ew, dh = (u32)((u64)ew * v.srcH / v.srcW);
+  if(dh > eh) { dh = eh; dw = (u32)((u64)eh * v.srcW / v.srcH); }
+  const s32 dx = (s32)(ew - dw) / 2, dy = (s32)(eh - dh) / 2;
+
+  // Las bandas laterales quedarian con basura del frame anterior: el blit solo cubre el
+  // rectangulo util y la imagen del swapchain entra en UNDEFINED.
+  if(dw != ew || dh != eh) {
+    VkClearColorValue black = {};
+    VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdClearColorImage(v.cmd, swap, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rng);
+  }
+
   VkImageBlit blit = {};
   blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
   blit.srcOffsets[1] = { (s32)v.srcW, (s32)v.srcH, 1 };
   blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-  blit.dstOffsets[1] = { (s32)v.extent.width, (s32)v.extent.height, 1 };
+  blit.dstOffsets[0] = { dx, dy, 0 };
+  blit.dstOffsets[1] = { dx + (s32)dw, dy + (s32)dh, 1 };
   vkCmdBlitImage(v.cmd, v.srcImage, VK_IMAGE_LAYOUT_GENERAL, swap,
                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
 
@@ -385,10 +438,15 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &v.semRender;
     pi.swapchainCount = 1; pi.pSwapchains = &v.swap; pi.pImageIndices = &idx;
-    vkQueuePresentKHR(v.queue, &pi);
+    VkResult pr = vkQueuePresentKHR(v.queue, &pi);
+    if(pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) v.needRecreate = true;
   }
 
   vkWaitForFences(v.dev, 1, &v.fence, VK_TRUE, UINT64_MAX);   // simple: one frame in flight
+
+  // El present dijo que la cadena ya no vale (redimension a mitad de frame): se rehace aqui,
+  // fuera del candado de cola y con el frame ya terminado.
+  if(v.needRecreate) { v.needRecreate = false; recreateSwapchain(v); }
 }
 
 auto destroyVulkan(Vk& v) -> void {
