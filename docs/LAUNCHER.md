@@ -4,9 +4,18 @@
 sola variable de entorno a mano.
 
 ```bash
-tools/launcher/run_launcher.cmd            # abre servidor + ventana
+tools/launcher/run_launcher.cmd            # abre servidor + ventana (desarrollo)
 python tools/launcher/kestrel_launcher.py --no-open --port 9140
+sh scripts/gui.sh                          # lo congela en dist/kestrel64-gui.exe
 ```
+
+Lo que se instala es el `.exe` congelado, y es **el** icono del escritorio: el lanzador es
+la cara del programa, el emulador se ejecuta directo solo desde la asociacion de ROM del
+Explorador. Detalles del empaquetado en `docs/distribucion.md`.
+
+Hasta donde alcanza el censo de emuladores de N64, ninguno lleva una interfaz de este tipo:
+biblioteca con caratulas en 3D, overclock por dominio de reloj, mando editable y telemetria
+en vivo del nucleo, todo servido en local por el propio lanzador.
 
 ## Por que un servidor local y no una ventana nativa
 

@@ -14,6 +14,9 @@
 #define AppName    "kestrel64"
 #define AppVer     "0.0.1-M1"
 #define AppExe     "kestrel64.exe"
+; Lo que abre el usuario es el lanzador grafico; el emulador se ejecuta directo solo
+; desde la asociacion de ROM del Explorador.
+#define GuiExe     "kestrel64-gui.exe"
 
 [Setup]
 AppId={{9C1F5A62-7C1D-4E56-9A0B-6E5B2C4D8F31}
@@ -30,7 +33,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\{#AppExe}
+UninstallDisplayIcon={app}\{#GuiExe}
 
 [Languages]
 Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
@@ -46,8 +49,8 @@ Name: "assoc";       Description: "Abrir las ROM .z64 / .n64 / .v64 con {#AppNam
 Source: "..\dist\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Icons]
-Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExe}"
-Name: "{autodesktop}\{#AppName}";     Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+Name: "{group}\{#AppName}";           Filename: "{app}\{#GuiExe}"
+Name: "{autodesktop}\{#AppName}";     Filename: "{app}\{#GuiExe}"; Tasks: desktopicon
 
 [Registry]
 ; Asociacion de ROM. El emulador arranca en pausa sin --run, asi que el verbo lo lleva puesto:
@@ -60,4 +63,4 @@ Root: HKA; Subkey: "Software\Classes\kestrel64.rom\DefaultIcon"; ValueType: stri
 Root: HKA; Subkey: "Software\Classes\kestrel64.rom\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --run ""%1"""; Tasks: assoc
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#GuiExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent

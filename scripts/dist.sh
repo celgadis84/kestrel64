@@ -27,9 +27,21 @@ echo "empaquetando desde $BUILD/"
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$EXE" "$OUT/"
 
-# El lanzador grafico, si esta compilado/presente, viaja con el emulador: es la cara del
-# programa para quien no vive en una terminal.
-if [ -d tools/launcher ]; then
+# Que backend grafico lleva dentro el .exe se decidio con cmake y desde fuera no se ve.
+# El lanzador lo necesita para saber si tiene sentido pasarle KESTREL_PRDP, asi que se
+# deja anotado aqui, que es el unico sitio que conoce el dir de build de origen.
+case "$BUILD" in
+  *prdp*) echo prdp > "$OUT/kestrel64.build" ;;
+  *)      echo soft > "$OUT/kestrel64.build" ;;
+esac
+
+# El lanzador grafico es la cara del programa para quien no vive en una terminal, y viaja
+# congelado: un solo kestrel64-gui.exe con el interprete de Python y la web dentro, para no
+# exigir Python instalado. Si PyInstaller no esta, se cae al arbol de fuentes de siempre.
+if sh scripts/gui.sh "$OUT" >/dev/null 2>&1; then
+  echo "  + kestrel64-gui.exe"
+elif [ -d tools/launcher ]; then
+  echo "  (sin PyInstaller: va el lanzador en Python, que necesita Python 3 instalado)"
   mkdir -p "$OUT/tools"
   cp -r tools/launcher "$OUT/tools/"
   # Bytecode y caratulas descargadas son estado de ESTA maquina, no del programa.
@@ -71,7 +83,8 @@ done
 cat > "$OUT/LEEME.txt" <<'TXT'
 kestrel64 -- emulador de Nintendo 64
 
-Arrancar:   doble clic en kestrel64.exe y elegir la ROM, o desde consola:
+Arrancar:   doble clic en kestrel64-gui.exe (el lanzador). Tambien vale doble clic
+            en kestrel64.exe y elegir la ROM, o desde consola:
               kestrel64.exe ruta\la.rom.z64
 
 Lanzado desde una consola el emulador arranca EN PAUSA a proposito: es el modo de
@@ -85,9 +98,13 @@ lo que hay que actualizar es el driver de video.
 Las DLL de esta carpeta son parte del programa: deben quedarse junto al .exe.
 (Si no hay ninguna, este build va enlazado estatico y el .exe se basta solo.)
 
-tools\launcher\run_launcher.cmd abre el lanzador grafico: biblioteca de ROM con
-caratulas, overclock por componente, mando, telemetria y depurador. Ese lanzador
-esta escrito en Python y necesita Python 3 instalado; el emulador en si no.
+kestrel64-gui.exe es el lanzador grafico y la forma normal de usar esto: biblioteca
+de ROM con caratulas, overclock por componente, mando, telemetria y depurador. No
+necesita nada instalado, lleva el interprete y la interfaz dentro. El perfil, el mapa
+de mando y las caratulas descargadas se guardan en %LOCALAPPDATA%\kestrel64.
+
+(Si en esta carpeta no hay kestrel64-gui.exe sino tools\launcher\, ese paquete se
+empaqueto sin PyInstaller y el lanzador necesita Python 3 instalado.)
 TXT
 
 # Zip portable: es lo que se manda a otra maquina tal cual. Se usa el ZipFile de .NET y no

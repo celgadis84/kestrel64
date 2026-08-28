@@ -2872,3 +2872,31 @@ navegador por `JSON.parse` como `double` y perdian los **bits bajos** (el PC
 `0xffffffff80246dd8` se convertia en otra direccion, y un punto de ruptura puesto ahi habria
 caido en otro sitio). Arreglado en el puente, que aun tiene el entero exacto: todo entero que
 no cabe en 2^53 sale como cadena hexadecimal. Nada de esto toca el binario del emulador.
+
+## 2026-08-28 — Savestates + lanzador congelado en un solo .exe
+
+**Estados guardados** (`src/core/savestate.cpp`, detalle en `docs/SAVESTATES.md`). Un
+unico visitante bidireccional: la lista de campos se escribe una vez y sirve para guardar
+y para cargar, asi que las dos direcciones no pueden desincronizarse. Sale de la maquina
+con el RCP quieto (`rdpDrain` + `rspAwaitIdle` + terminar la tarea RSP en lockstep), que
+es lo que hace que un fichero guardado en modo hilos cargue en lockstep y viceversa.
+Se guardan tambien las caches de la CPU — el VR4300 no tiene coherencia, una linea sucia
+de la D-cache existe SOLO ahi — y el medio de guardado del cartucho.
+
+- Teclas F5 (guardar) / F7 (cargar) / F6 (cambiar ranura, 0-9), y ordenes de telemetria
+  `state.save` / `state.load`. Ni la ventana ni el hilo de telemetria guardan: dejan la
+  ranura en un buzon (`System::stateSaveReq/stateLoadReq`) y el bucle de la CPU lo
+  atiende bajo `coreMutex`, tambien en pausa.
+- `test/state_test.py`: guarda, avanza, carga y compara CPU + RCP + RSP (con `vpr`) +
+  cuatro trozos de RDRAM + el framebuffer; luego relanza en lockstep un estado guardado
+  en hilos. ALL PASS con interprete y con JIT.
+- De paso, `rcp.regs` publica `vi.flips`/`vi.fields`/`vi.syncs`, que antes no salian.
+
+**`kestrel64-gui.exe`** (`scripts/gui.sh`): PyInstaller congela el lanzador con el
+interprete de Python y `web/` dentro, 8.4 MB, sin exigir Python instalado. El lanzador
+sabe donde vive (`FROZEN`): recursos en `sys._MEIPASS`, emulador AL LADO del `.exe` en vez
+de `build*/`, y perfil/mando/caratulas en `%LOCALAPPDATA%\kestrel64` porque Archivos de
+programa no es escribible. `dist.sh` lo mete en `dist/` y deja `kestrel64.build` con el
+backend con el que se compilo el emulador (desde fuera del binario no se ve). El
+instalador ya apunta el icono del escritorio y del menu al lanzador; la asociacion de ROM
+sigue yendo a `kestrel64.exe --run "%1"`. Multi-SO queda para la ultima fase.

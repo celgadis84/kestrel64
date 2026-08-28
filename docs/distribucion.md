@@ -55,15 +55,34 @@ ldd build-static/kestrel64.exe | grep -v /c/WINDOWS     # no imprime nada
 Medido: 1.7 MB de `.exe` (748 KB dinamico + los ~1 MB de runtime que antes iban en las DLL),
 cero dependencias propias, SM64 arranca y renderiza con el `PATH` vacio.
 
-## Lo que todavia no es autocontenido: el lanzador
+## El lanzador tambien es autocontenido — `sh scripts/gui.sh`
 
-`kestrel64.exe` ya no depende de nada que no traiga Windows o el driver de la GPU. El
-lanzador grafico (`tools/launcher/`) si: esta escrito en Python y sirve su interfaz web en
-local, asi que en una maquina sin Python 3 no arranca. El emulador se usa igual sin el.
+El lanzador esta escrito en Python, pero exigir Python 3 instalado a quien solo quiere jugar
+es una barrera absurda. PyInstaller lo congela: `scripts/gui.sh` produce un unico
+`kestrel64-gui.exe` (~8.4 MB) con el interprete, la biblioteca estandar y `web/` dentro.
 
-Cerrarlo es un empaquetado, no un rediseno: PyInstaller sobre `kestrel_launcher.py` produce
-un segundo `.exe` que el instalador puede colocar al lado. Queda pendiente a proposito --
-primero el nucleo, que es lo que se ejecuta.
+Lo unico que cambia en el codigo es donde vive cada cosa, y lo decide una constante
+(`FROZEN` en `kestrel_launcher.py`):
+
+| | arbol de fuentes | congelado |
+|---|---|---|
+| `web/` | `tools/launcher/web` | `sys._MEIPASS/web` (temporal que desempaqueta PyInstaller) |
+| emulador | `build*/kestrel64.exe` | `kestrel64.exe` **al lado** del `.exe` del lanzador |
+| perfil, mando, caratulas | `tools/launcher/` | `%LOCALAPPDATA%\kestrel64` |
+
+La tercera fila no es un capricho: `Archivos de programa` no es escribible, y el perfil se
+guarda solo, sin boton de guardar. La segunda tampoco: instalado hay **un** emulador, no un
+menu de builds. Con que backend grafico se compilo ese emulador no se ve desde fuera del
+binario, asi que `dist.sh` deja la nota al lado en `kestrel64.build` (`soft` o `prdp`) y el
+lanzador la lee para saber si tiene sentido pasarle `KESTREL_PRDP`.
+
+Dos detalles de `--windowed` (sin consola detras) que rompen si no se tratan: `sys.stdout`
+es `None` y cualquier `print` revienta -- se le da `os.devnull` al arrancar --, y una segunda
+copia no puede coger el puerto 9140, asi que en vez de morir en silencio abre la ventana de
+la instancia que ya esta corriendo.
+
+`dist.sh` llama a `gui.sh` solo; si PyInstaller no esta instalado se cae al arbol de fuentes
+de siempre y lo dice en el `LEEME.txt`.
 
 ## Instalador
 

@@ -38,15 +38,36 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Dos formas de vivir: dentro del arbol de fuentes (desarrollo) y dentro de
+# kestrel64-gui.exe (lo que se instala). Cambian tres cosas y solo tres:
+#
+#   - los recursos (web/) los desempaqueta PyInstaller en un temporal, sys._MEIPASS;
+#   - el emulador no esta en build/ sino AL LADO del .exe, en el directorio de instalacion;
+#   - el perfil y las caratulas no pueden escribirse en Archivos de programa, asi que se van
+#     a %LOCALAPPDATA%\kestrel64.
+#
+# Todo lo demas -- el servidor, la API, la interfaz -- es identico en los dos casos.
+FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(os.path.abspath(__file__))
-KESTREL = os.path.dirname(os.path.dirname(HERE))       # .../N64/kestrel64
-ROOT = os.path.dirname(KESTREL)                         # .../N64
-WEB = os.path.join(HERE, "web")
-CACHE = os.path.join(HERE, "cache")
+if FROZEN:
+    RES = getattr(sys, "_MEIPASS", HERE)          # recursos empaquetados (solo lectura)
+    APPDIR = os.path.dirname(os.path.abspath(sys.executable))
+    KESTREL = APPDIR
+    STATE = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "kestrel64")
+else:
+    RES = HERE
+    KESTREL = os.path.dirname(os.path.dirname(HERE))   # .../N64/kestrel64
+    APPDIR = KESTREL
+    STATE = HERE
+ROOT = os.path.dirname(KESTREL)
+WEB = os.path.join(RES, "web")
+CACHE = os.path.join(STATE, "cache")
 ART = os.path.join(CACHE, "boxart")
-PROFILE = os.path.join(HERE, "profile.json")
+PROFILE = os.path.join(STATE, "profile.json")
+os.makedirs(STATE, exist_ok=True)
 
-sys.path.insert(0, HERE)
+if not FROZEN:
+    sys.path.insert(0, HERE)
 import options as OPT  # noqa: E402
 import tele as TELE  # noqa: E402
 
@@ -109,7 +130,7 @@ def load_profile():
 
 
 def save_profile(p):
-    os.makedirs(HERE, exist_ok=True)
+    os.makedirs(STATE, exist_ok=True)
     tmp = PROFILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(p, f, ensure_ascii=False, indent=1)
@@ -130,6 +151,23 @@ def builds():
         if os.path.isfile(exe):
             out.append(dict(id=pid, label=label, desc=desc, exe=exe, dir=d,
                             mtime=int(os.path.getmtime(exe))))
+    if not out:
+        # Instalacion: un solo kestrel64.exe al lado del lanzador. Que plugin lleva dentro
+        # se decidio al compilarlo, asi que aqui no hay eleccion que ofrecer.
+        exe = os.path.join(APPDIR, "kestrel64.exe")
+        if os.path.isfile(exe):
+            # Que backend lleva dentro no se ve desde fuera del .exe, asi que el empaquetado
+            # (scripts/dist.sh) deja la nota al lado. Sin nota se asume el oraculo.
+            pid, label = "soft", "SoftRDP"
+            try:
+                with open(os.path.join(APPDIR, "kestrel64.build"), encoding="utf-8") as f:
+                    tag = f.read().strip()
+            except OSError:
+                tag = ""
+            if tag.startswith("prdp"):
+                pid, label = "prdp", "paraLLEl-RDP"
+            out.append(dict(id=pid, label=label, dir=".", exe=exe,
+                            desc="El emulador instalado.", mtime=int(os.path.getmtime(exe))))
     return out
 
 
@@ -581,7 +619,7 @@ class H(BaseHTTPRequestHandler):
         # El mapeo del mando va en fichero, no en variables: son 18 asignaciones.
         pad = prof.get("pad")
         if pad:
-            pf = os.path.join(HERE, "pad1.cfg")
+            pf = os.path.join(STATE, "pad1.cfg")
             with open(pf, "w", encoding="utf-8") as f:
                 for k, v in pad.items():
                     f.write("%s %s %s\n" % (k, v.get("key", "") or "-", v.get("gp", "") or "-"))
@@ -601,9 +639,23 @@ def main():
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
 
+    # Empaquetado sin consola, sys.stdout es None y cualquier print revienta. Se le da un
+    # sumidero para que el codigo de siempre no tenga que preguntar donde vive.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = sys.stdout
+
     os.makedirs(ART, exist_ok=True)
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
     url = "http://127.0.0.1:%d/" % a.port
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
+    except OSError:
+        # El puerto ya esta cogido: o hay otra copia del lanzador abierta -- y entonces lo
+        # util es ensenar SU ventana, no fallar -- o el puerto es de otro programa.
+        if not a.no_open:
+            open_app(url)
+        return
     print("kestrel64 launcher -> %s" % url)
     if not a.no_open:
         threading.Thread(target=lambda: (time.sleep(0.4), open_app(url)), daemon=True).start()
