@@ -178,6 +178,8 @@ struct E {
   auto psrldq_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x73); modrm(3, 3, dst); u8_(n); }
   auto psraw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 4, dst); u8_(n); }
   auto psrlw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 2, dst); u8_(n); }
+  auto psllw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 6, dst); u8_(n); }
+  auto pslld_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x72); modrm(3, 6, dst); u8_(n); }
   auto zerox(u8 r) -> void { sse_rr(0xEF, r, r); }            // pxor x,x
   auto onesx(u8 r) -> void { sse_rr(0x76, r, r); }            // pcmpeqd x,x  -> todo unos
 };
@@ -269,7 +271,8 @@ enum : u8 { X_PMULLW = 0xD5, X_PMULHW = 0xE5, X_PCMPGTW = 0x65,
             X_PUNPCKLWD = 0x61, X_PUNPCKHWD = 0x69,
             X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
             X_PADDW = 0xFD, X_PSUBW = 0xF9, X_PADDD = 0xFE, X_PSUBD = 0xFA,
-            X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B };
+            X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B,
+            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75 };
 
 auto vuInline(const Rsp& rsp, u32 op) -> bool {
 #if KESTREL_VUSTAT
@@ -279,8 +282,11 @@ auto vuInline(const Rsp& rsp, u32 op) -> bool {
   if(!rsp.sse) return false;             // KESTREL_NORSPSSE: manda el respaldo escalar
   if((op >> 21 & 0x1f) < 0x10) return false;   // movimientos escalar<->vector: no
   switch(op & 0x3f) {
+  case 0x00: case 0x01:                          // VMULF / VMULU
   case 0x04:                                     // VMUDL
   case 0x05: case 0x06: case 0x07:               // VMUDM / VMUDN / VMUDH
+  case 0x08: case 0x09:                          // VMACF / VMACU
+  case 0x0c: case 0x0d: case 0x0e:               // VMADL / VMADM / VMADN
   case 0x0f:                                     // VMADH
   case 0x10: case 0x11: case 0x14: case 0x15:    // VADD / VSUB / VADDC / VSUBC
   case 0x1d:                                     // VSAR
@@ -312,6 +318,63 @@ auto emitSatSigned(E& e, Ctx& c, u8 h, u8 m, u32 vd) -> void {
   e.movx(t1, m); e.sse_rr(X_PUNPCKHWD, t1, h);
   e.sse_rr(X_PACKSSDW, t0, t1);
   e.stx(t0, rBX, c.VR(vd));
+}
+
+// D = saturacion sin signo de accl guiada por (acch:accm), igual que vsatUnsignedN: 0 si el
+// entero de 32 bits queda por debajo de -0x8000, 0xffff si pasa de 0x7fff, y accl si cabe.
+// ENTRA con acch en xmm0 y accm en xmm5 (lo que dejan emitAccAdd48 y el doblado), el resto
+// libre. La mezcla del interprete (_mm_blendv_epi8 con todo-unos y con cero) es, con
+// mascaras de todo-unos, exactamente (accl | desborde) & ~subdesborde -- sin pblendvb, que
+// ademas usa xmm0 como operando implicito.
+auto emitSatUnsignedN(E& e, Ctx& c, u32 vd) -> void {
+  e.movx(1, 5); e.sse_rr(X_PUNPCKLWD, 1, 0);      // (acch:accm) como 4 enteros de 32, bajos
+  e.movx(2, 5); e.sse_rr(X_PUNPCKHWD, 2, 0);      // ... y altos
+  e.onesx(3); e.psrld_i(3, 17);                   // 0x00007fff por banda de 32
+  e.movx(4, 1); e.sse_rr(X_PCMPGTD, 4, 3);
+  e.movx(5, 2); e.sse_rr(X_PCMPGTD, 5, 3);
+  e.sse_rr(X_PACKSSDW, 4, 5);                     // desborde por arriba
+  e.onesx(3); e.pslld_i(3, 15);                   // 0xffff8000 = -0x8000 por banda de 32
+  e.movx(5, 3); e.sse_rr(X_PCMPGTD, 5, 1);
+  e.sse_rr(X_PCMPGTD, 3, 2);
+  e.sse_rr(X_PACKSSDW, 5, 3);                     // desborde por abajo
+  e.ldx(0, rBX, c.aOff[2]);
+  e.sse_rr(X_POR, 0, 4);
+  e.sse_rr(X_PANDN, 5, 0);                        // ~subdesborde & (accl | desborde)
+  e.stx(5, rBX, c.VR(vd));
+}
+
+// acc(48 bits, en memoria) += el triple que traen xmm2/xmm3/xmm4 (bajo/medio/alto). Es la
+// cuenta de vadd48 rebanada a rebanada, con el mismo acarreo por banda de 16. Entra con
+// xmm0/xmm1/xmm5 libres y sale con el nuevo acch en xmm0 y el nuevo accm en xmm5, ya
+// escritas las tres rebanadas -- que es justo lo que piden las dos saturaciones.
+auto emitAccAdd48(E& e, Ctx& c) -> void {
+  e.ldx(5, rBX, c.aOff[2]);
+  e.movx(0, 5); e.sse_rr(X_PADDW, 0, 2);          // accl + bajo
+  e.stx(0, rBX, c.aOff[2]);
+  emitCarry16(e, 5, 2, 0, 1, 2);                  // acarreo de la baja -> xmm1
+  e.ldx(5, rBX, c.aOff[1]);
+  e.movx(0, 5); e.sse_rr(X_PADDW, 0, 3);          // accm + medio
+  emitCarry16(e, 5, 3, 0, 2, 3);                  // primer acarreo de la media -> xmm2
+  e.movx(5, 0); e.sse_rr(X_PADDW, 5, 1);          // ... + el acarreo de abajo
+  emitCarry16(e, 0, 1, 5, 3, 1);                  // segundo acarreo -> xmm3
+  e.stx(5, rBX, c.aOff[1]);
+  e.sse_rr(X_POR, 2, 3);                          // los dos nunca son 1 a la vez: basta un OR
+  e.ldx(0, rBX, c.aOff[0]);
+  e.sse_rr(X_PADDW, 0, 4); e.sse_rr(X_PADDW, 0, 2);
+  e.stx(0, rBX, c.aOff[0]);
+}
+
+// Duplica el producto de 48 bits que traen xmm2 (bajo) y xmm3 (medio): desplaza uno a la
+// izquierda arrastrando el bit alto de cada rebanada, y deja el alto en xmm4. Sale lo mismo
+// que vadd48(p,p) del interprete: el acarreo de cada banda ES su bit alto, y el segundo
+// acarreo de la media no puede darse porque el desplazado tiene el bit 0 a cero. Usa xmm5.
+auto emitDouble48(E& e) -> void {
+  e.movx(4, 3); e.psraw_i(4, 15);                 // alto = extension de signo del medio
+  e.psllw_i(4, 1);
+  e.movx(5, 3); e.psrlw_i(5, 15); e.sse_rr(X_POR, 4, 5);
+  e.psllw_i(3, 1);
+  e.movx(5, 2); e.psrlw_i(5, 15); e.sse_rr(X_POR, 3, 5);
+  e.psllw_i(2, 1);
 }
 
 auto emitVu(Ctx& c, u32 op) -> void {
@@ -417,6 +480,74 @@ auto emitVu(Ctx& c, u32 op) -> void {
     e.movx(4, 3); e.psraw_i(4, 15);              // limbo alto = signo del medio
     e.stx(2, rBX, c.aOff[2]); e.stx(3, rBX, c.aOff[1]); e.stx(4, rBX, c.aOff[0]);
     e.stx((fn == 0x05) ? 3 : 2, rBX, c.VR(vd));
+  } break;
+
+  // VMULF / VMULU: acc = S.s*T.s*2 + 0x8000; D = satSigned / satMulU
+  case 0x00: case 0x01: {
+    e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);      // limbo bajo
+    e.movx(3, 0); e.sse_rr(X_PMULHW, 3, 1);      // limbo medio
+    emitDouble48(e);                             // x2:x3:x4 = producto por dos
+    e.onesx(5); e.psllw_i(5, 15);                // 0x8000 por banda
+    e.movx(0, 2); e.sse_rr(X_PADDW, 0, 5);
+    e.stx(0, rBX, c.aOff[2]);
+    emitCarry16(e, 2, 5, 0, 1, 5);
+    e.movx(5, 3); e.sse_rr(X_PADDW, 5, 1);
+    emitCarry16(e, 3, 1, 5, 2, 1);
+    e.stx(5, rBX, c.aOff[1]);
+    e.movx(0, 4); e.sse_rr(X_PADDW, 0, 2);
+    e.stx(0, rBX, c.aOff[0]);
+    if(fn == 0x00) { emitSatSigned(e, c, 0, 5, vd); break; }
+    // VMULU: acch<0 -> 0; (acch^accm)<0 -> 0xffff; si no, accm. Con mascaras de todo-unos
+    // la doble mezcla del interprete es (accm | signo-cruzado) & ~negativo.
+    e.zerox(1); e.movx(2, 1);
+    e.sse_rr(X_PCMPGTW, 1, 0);
+    e.movx(3, 0); e.sse_rr(X_PXOR, 3, 5);
+    e.sse_rr(X_PCMPGTW, 2, 3);
+    e.movx(4, 5); e.sse_rr(X_POR, 4, 2);
+    e.sse_rr(X_PANDN, 1, 4);
+    e.stx(1, rBX, c.VR(vd));
+  } break;
+
+  // VMACF / VMACU: acc += S.s*T.s*2; D = satSigned / satMacU
+  case 0x08: case 0x09: {
+    e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);
+    e.movx(3, 0); e.sse_rr(X_PMULHW, 3, 1);
+    emitDouble48(e);
+    emitAccAdd48(e, c);
+    if(fn == 0x08) { emitSatSigned(e, c, 0, 5, vd); break; }
+    // VMACU: acch<0 -> 0; acch!=0 o accm<0 -> 0xffff; si no, accm.
+    e.zerox(1); e.movx(2, 1); e.movx(3, 1);
+    e.sse_rr(X_PCMPGTW, 1, 0);                   // negativo
+    e.sse_rr(X_PCMPEQW, 2, 0); e.onesx(4); e.sse_rr(X_PXOR, 2, 4);   // acch != 0
+    e.sse_rr(X_PCMPGTW, 3, 5);                   // accm < 0
+    e.sse_rr(X_POR, 2, 3);
+    e.movx(4, 5); e.sse_rr(X_POR, 4, 2);
+    e.sse_rr(X_PANDN, 1, 4);
+    e.stx(1, rBX, c.VR(vd));
+  } break;
+
+  // VMADL: acc += zeroext(mulhi sin signo), sin extension de signo; D = satUnsignedN
+  case 0x0c: {
+    e.movx(2, 0); e.sse_rr(X_PMULHUW, 2, 1);
+    e.zerox(3); e.zerox(4);
+    emitAccAdd48(e, c);
+    emitSatUnsignedN(e, c, vd);
+  } break;
+
+  // VMADM: acc += signext32(S.s * T.u); D = satSigned
+  // VMADN: acc += signext32(S.u * T.s); D = satUnsignedN
+  case 0x0d: case 0x0e: {
+    const u8 sgn = (fn == 0x0d) ? 0 : 1;
+    const u8 oth = (fn == 0x0d) ? 1 : 0;
+    e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);
+    e.movx(3, 0); e.sse_rr(X_PMULHUW, 3, 1);
+    e.zerox(4); e.sse_rr(X_PCMPGTW, 4, sgn);
+    e.sse_rr(X_PAND, 4, oth);
+    e.sse_rr(X_PSUBW, 3, 4);                     // limbo medio corregido
+    e.movx(4, 3); e.psraw_i(4, 15);              // limbo alto = signo del medio
+    emitAccAdd48(e, c);
+    if(fn == 0x0d) emitSatSigned(e, c, 0, 5, vd);
+    else           emitSatUnsignedN(e, c, vd);
   } break;
 
   // VMUDH: acc = (S.s * T.s) << 16, accl = 0; D = satSigned
@@ -685,7 +816,11 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
 
   // Holgura de buffer: si no cabe el peor caso de este bloque, se recicla la tabla entera.
   // Se puede hacer aqui sin peligro porque el llamante no esta dentro de ningun bloque.
-  const usize worst = 64 + n * 200;  // la VU en linea es la secuencia mas larga (~170 bytes)
+  // La VU en linea es la secuencia mas larga con diferencia: VMACU son el doblado del
+  // producto, la suma de 48 bits con sus tres acarreos y la saturacion, ~290 bytes. Quedarse
+  // corto no corrompe nada -- el emisor detecta el desbordamiento y tira el bloque -- pero
+  // lo tira DESPUES de compilarlo, y eso es trabajo perdido cada vez.
+  const usize worst = 64 + n * 400;
   if(c.buf.used + worst > c.buf.cap) c.clear();
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 

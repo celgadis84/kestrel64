@@ -146,10 +146,11 @@ cuerpo SSE es corto, el bloque emite ESE MISMO cuerpo en linea, con `vs`/`vt`/
 xmm0..xmm5 — volatiles en Win64, o sea cero derrames.
 
 Cubiertas hoy (`vuInline`): VAND/VNAND/VOR/VNOR/VXOR/VNXOR, VSAR, VADD, VSUB,
-VADDC, VSUBC, VMUDL y la primera tanda de la familia MAC — VMUDM, VMUDN, VMUDH y
-VMADH. Son ~43 % de las COP2 que ejecuta SM64. El resto sigue saliendo por el
-CALL a la entrada especializada, que es exactamente el codigo de antes: la lista
-se amplia una operacion a la vez, con fuzz de por medio.
+VADDC, VSUBC y **la familia MAC entera** — VMULF/VMULU, VMUDL/VMUDM/VMUDN/VMUDH,
+VMACF/VMACU y VMADL/VMADM/VMADN/VMADH. Es el grueso de las COP2 que ejecuta SM64.
+Lo que sigue saliendo por el CALL a la entrada especializada son las comparaciones
+(VLT/VEQ/VGE/VCH/VCL/VCR/VMRG), la familia del reciproco y los movimientos
+escalar↔vector.
 
 Los productos se arman igual que en `vprodSS/SU/US`: `pmullw` da el limbo bajo,
 `pmulhw`/`pmulhuw` el medio y `psraw 15` del medio el alto; la correccion de
@@ -183,13 +184,36 @@ poco, y era de esperar: en modo hilos el RSP tiene holgura (ocupacion 65-78 %,
 `cpuWait` ~25 %), asi que ahorrar CPU en ese hilo no sube los fps todavia — baja
 el consumo y deja sitio para las operaciones que faltan.
 
+## La familia MAC completa
+
+Las nueve que faltaban se apoyan en tres piezas, y ninguna repite semantica: son
+los mismos pasos que `vadd48`, `vprod*` y las saturaciones del interprete.
+
+* `emitDouble48` dobla el producto de 48 bits desplazando uno a la izquierda y
+  arrastrando el bit alto de cada rebanada. Sale exactamente lo que da
+  `vadd48(p,p)`: el acarreo de cada banda **es** su bit alto, y el segundo acarreo
+  de la rebanada media no puede darse nunca, porque el desplazado tiene el bit 0
+  a cero. VMULF/VMULU/VMACF/VMACU lo usan; el `+0x8000` de VMUL* va detras con el
+  acarreo normal.
+* `emitAccAdd48` suma el triple al acumulador rebanada a rebanada con
+  `emitCarry16`, dejando el nuevo `acch` en xmm0 y el nuevo `accm` en xmm5 — que es
+  justo lo que piden las saturaciones. Con seis registros volatiles y tres
+  acarreos vivos el reparto es apretado: cada `emitCarry16` reusa como temporal el
+  operando que acaba de morir.
+* Las saturaciones "sin signo" (`vsatUnsignedN`, VMULU, VMACU) las escribe el
+  interprete con dos `_mm_blendv_epi8`. Con mascaras de todo-unos esa doble mezcla
+  es, sin perder un bit, `(x | desborde) & ~subdesborde` — tres operaciones
+  logicas. De paso evita `pblendvb`, que usa xmm0 como operando implicito y
+  obligaria a mover el reparto de registros.
+
+La estimacion del peor caso por instruccion subio de 200 a 400 bytes: VMACU son
+~290 y quedarse corto no corrompe nada (el emisor detecta el desbordamiento y
+tira el bloque) pero lo tira **despues** de compilarlo. Se vio en el fuzz: 13
+bloques de 400 000 salian sin compilar hasta subir la cifra.
+
 ## Siguiente
 
-Falta el resto de la familia MAC: VMULF/VMULU (0x00/0x01), VMACF/VMACU
-(0x08/0x09), VMADL (0x0c), VMADM (0x0d) y VMADN (0x0e). VMADN sola son 18.3 M de
-las ~58 M de COP2 por 300 intercambios de SM64.
-
-Y despues lo que de verdad importa ahi: mantener el acumulador de 48 bits
+Lo que de verdad importa ahi: mantener el acumulador de 48 bits
 (`acch`/`accm`/`accl`) en xmm6..xmm8 a lo largo de una racha de operaciones
 dentro del bloque — se guardan una vez por bloque (los thunks preservan
 xmm6..15) en vez de recargar y reescribir seis accesos de 16 bytes por
