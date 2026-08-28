@@ -185,6 +185,12 @@ struct E {
   auto ldx (u8 dst, u8 base, s32 d) -> void { sse_m(0x66, 0x6F, dst, base, d); }   // movdqa x,[b+d]
   auto stx (u8 src, u8 base, s32 d) -> void { sse_m(0x66, 0x7F, src, base, d); }   // movdqa [b+d],x
   auto ldxu(u8 dst, u8 base, s32 d) -> void { sse_m(0xF3, 0x6F, dst, base, d); }   // movdqu x,[b+d]
+  // pextrw r32, xmm, imm8 -- saca una banda de 16 bits a un registro entero (SSE2).
+  auto pextrw(u8 dst, u8 src, u8 lane) -> void {
+    u8_(0x66);
+    if((dst | src) & 8) u8_((u8)(0x40 | ((dst & 8) >> 1) | ((src & 8) >> 3)));
+    u8_(0x0F); u8_(0xC5); modrm(3, (u8)(dst & 7), (u8)(src & 7)); u8_(lane);
+  }
   auto movx(u8 dst, u8 src) -> void { sse_rr(0x6F, dst, src); }                    // movdqa x,x
   auto pshufb_x(u8 dst, u8 src) -> void { sse38(0x00, dst, src); }
   auto pmovsxwd(u8 dst, u8 src) -> void { sse38(0x23, dst, src); }
@@ -261,6 +267,7 @@ struct Ctx {
   s32 coOff[2] = {};   // vcoh / vcol
   s32 ccOff[2] = {};   // vcch / vccl
   s32 ceOff = 0;       // vce
+  s32 divInOff = 0, divOutOff = 0, divDpOff = 0;   // estado de la familia del reciproco
   // Acumulador de 48 bits residente en xmm6/7/8 (acch/accm/accl) mientras dure el bloque.
   bool accReg = false;      // el prologo los salvo: se puede cachear
   u8   accValid = 0;        // bit i: xmm(6+i) tiene la rebanada i
@@ -340,6 +347,7 @@ auto vuInline(const Rsp& rsp, u32 op) -> bool {
   case 0x27:                                     // VMRG
   case 0x28: case 0x29: case 0x2a: case 0x2b:    // VAND / VNAND / VOR / VNOR
   case 0x2c: case 0x2d:                          // VXOR / VNXOR
+  case 0x32: case 0x33: case 0x36:               // VRCPH / VMOV / VRSQH
     return true;
   default: return false;
   }
@@ -467,6 +475,26 @@ auto emitVu(Ctx& c, u32 op) -> void {
     e.ldxu(2, rAX, 0);              // la fila de mascaras no esta alineada: movdqu
     e.pshufb_x(1, 2);
   }
+  // --- VMOV / VRCPH / VRSQH: no miran S, y su unica salida vectorial es UNA banda ---
+  // El acumulador bajo se lleva T entero (barajado); del resultado solo cambia la banda
+  // `de` de vd, asi que se escribe con un store de 16 bits en vez de leer, mezclar y
+  // reescribir el registro. VRCPH y VRSQH son el mismo codigo en el interprete: arman la
+  // mitad alta del dividendo (divin), marcan doble precision y entregan la mitad alta del
+  // resultado anterior (divout).
+  if(fn == 0x33 || fn == 0x32 || fn == 0x36) {
+    const u32 de = op >> 11 & 7;
+    accPut(c, 1, 2);                                   // accl = T barajado
+    if(fn == 0x33) {
+      e.pextrw(rAX, 1, (u8)de);                        // VMOV: vd[de] = T[de]
+    } else {
+      e.mov_imm32(rAX, 1); e.st8(rAX, rBX, c.divDpOff);
+      e.pextrw(rAX, 1, (u8)(el & 7)); e.st16(rAX, rBX, c.divInOff);
+      e.ld16z(rAX, rBX, c.divOutOff);
+    }
+    e.st16(rAX, rBX, c.VR(vd) + (s32)(2 * de));
+    return;
+  }
+
   e.ldx(0, rBX, c.VR(vs));
 
   switch(fn) {
@@ -993,6 +1021,9 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   ctx.ccOff[0] = (s32)((const u8*)&rsp.vcch   - (const u8*)&rsp);
   ctx.ccOff[1] = (s32)((const u8*)&rsp.vccl   - (const u8*)&rsp);
   ctx.ceOff    = (s32)((const u8*)&rsp.vce    - (const u8*)&rsp);
+  ctx.divInOff  = (s32)((const u8*)&rsp.divin  - (const u8*)&rsp);
+  ctx.divOutOff = (s32)((const u8*)&rsp.divout - (const u8*)&rsp);
+  ctx.divDpOff  = (s32)((const u8*)&rsp.divdp  - (const u8*)&rsp);
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
   E& e = ctx.e;
 

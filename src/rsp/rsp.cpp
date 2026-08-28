@@ -1421,7 +1421,12 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
                              // bloque mezcle CALL con VU en linea y se pruebe el volcado del
                              // acumulador cacheado antes de la llamada.
                              0x24, 0x25, 0x26, 0x27,
-                             0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d };
+                             0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+                             // Familia del reciproco. VRCPH/VMOV/VRSQH estan en linea;
+                             // VRCP/VRCPL/VRSQ/VRSQL no, y ademas encadenan estado
+                             // (divin/divdp/divout), asi que la mezcla comprueba que la
+                             // version en linea deja ese estado exactamente igual.
+                             0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36 };
   const u32 nf = (u32)(sizeof fns / sizeof fns[0]);
   const u32 nOps = 4;
 
@@ -1431,17 +1436,21 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
   u32 st = 0xc0ffee11u;
   auto rnd = [&]() -> u32 { st ^= st << 13; st ^= st >> 17; st ^= st << 5; return st; };
 
-  struct VState { R128 vpr[32], acch, accm, accl, vcoh, vcol, vcch, vccl, vce; };
+  struct VState { R128 vpr[32], acch, accm, accl, vcoh, vcol, vcch, vccl, vce;
+                  u16 divin, divout; u8 divdp, pad[3]; };
   VState in{}, outInterp{}, outJit{};
   auto save = [&](VState& z) {
     std::memcpy(z.vpr, vpr, sizeof vpr);
     z.acch = acch; z.accm = accm; z.accl = accl;
     z.vcoh = vcoh; z.vcol = vcol; z.vcch = vcch; z.vccl = vccl; z.vce = vce;
+    z.divin = divin; z.divout = divout; z.divdp = divdp ? 1 : 0;
+    z.pad[0] = z.pad[1] = z.pad[2] = 0;   // el memcmp compara la estructura entera
   };
   auto load = [&](const VState& z) {
     std::memcpy(vpr, z.vpr, sizeof vpr);
     acch = z.acch; accm = z.accm; accl = z.accl;
     vcoh = z.vcoh; vcol = z.vcol; vcch = z.vcch; vccl = z.vccl; vce = z.vce;
+    divin = z.divin; divout = z.divout; divdp = z.divdp != 0;
   };
 
   u64 fails = 0, checked = 0;
@@ -1452,6 +1461,7 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
       vcoh.el[n] = rnd() & 1; vcol.el[n] = rnd() & 1;
       vcch.el[n] = rnd() & 1; vccl.el[n] = rnd() & 1; vce.el[n] = rnd() & 1;
     }
+    divin = (u16)rnd(); divout = (u16)rnd(); divdp = (rnd() & 1) != 0;
     save(in);
 
     u32 ops[8];
