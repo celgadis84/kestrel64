@@ -161,9 +161,24 @@ struct E {
   // pagando por instruccion vectorial en el prologo del thunk de COP2. Todos los
   // registros caben en 3 bits, asi que ninguna forma necesita REX.
   auto sse_m(u8 p0, u8 opc, u8 reg, u8 base, s32 d) -> void {
-    u8_(p0); u8_(0x0F); u8_(opc); mem(reg, base, d);
+    u8_(p0);
+    if((reg | base) & 8) u8_((u8)(0x40 | ((reg & 8) >> 1) | ((base & 8) >> 3)));
+    u8_(0x0F); u8_(opc); mem((u8)(reg & 7), base, d);
   }
-  auto sse_rr(u8 opc, u8 dst, u8 src) -> void { u8_(0x66); u8_(0x0F); u8_(opc); modrm(3, dst, src); }
+  // REX solo cuando hace falta: xmm8..15 en el campo reg (REX.R) o en el r/m (REX.B).
+  auto sse_rr(u8 opc, u8 dst, u8 src) -> void {
+    u8_(0x66);
+    if((dst | src) & 8) u8_((u8)(0x40 | ((dst & 8) >> 1) | ((src & 8) >> 3)));
+    u8_(0x0F); u8_(opc); modrm(3, (u8)(dst & 7), (u8)(src & 7));
+  }
+  // movdqa entre xmm y [rsp+disp8]. RSP como base exige SIB, que el resto del emisor
+  // no necesita: aqui es solo para salvar/restaurar xmm6..xmm8 en el prologo.
+  auto xmmSpill(u8 reg, u8 disp, bool store) -> void {
+    u8_(0x66);
+    if(reg & 8) u8_(0x44);
+    u8_(0x0F); u8_(store ? 0x7F : 0x6F);
+    modrm(1, (u8)(reg & 7), rSPx); u8_(0x24); u8_(disp);
+  }
   auto sse38(u8 opc, u8 dst, u8 src) -> void {
     u8_(0x66); u8_(0x0F); u8_(0x38); u8_(opc); modrm(3, dst, src);
   }
@@ -246,12 +261,40 @@ struct Ctx {
   s32 coOff[2] = {};   // vcoh / vcol
   s32 ccOff[2] = {};   // vcch / vccl
   s32 ceOff = 0;       // vce
+  // Acumulador de 48 bits residente en xmm6/7/8 (acch/accm/accl) mientras dure el bloque.
+  bool accReg = false;      // el prologo los salvo: se puede cachear
+  u8   accValid = 0;        // bit i: xmm(6+i) tiene la rebanada i
+  u8   accDirty = 0;        // bit i: xmm(6+i) es mas nueva que la memoria
   bool ok = true;   // false = algo no se pudo emitir; el bloque se tira sin registrar
   auto RG(u32 n) const -> s32 { return rOff + (s32)(4 * n); }
   auto VR(u32 n) const -> s32 { return vOff + (s32)(16 * n); }
 };
 
+// --- el acumulador de la VU, residente en registro -----------------------------
+// Una racha de operaciones MAC recarga y reescribe las mismas tres rebanadas de 16 bytes
+// una y otra vez. xmm6..xmm8 son callee-saved en Win64: el bloque los salva una vez en el
+// prologo y a partir de ahi el acumulador vive en registro. La memoria se pone al dia solo
+// al salir del bloque, o antes de un CALL -- el helper lee y escribe la copia de memoria,
+// asi que ahi hay que volcar lo sucio y olvidar lo cacheado.
+auto accGet(Ctx& c, u8 dst, u32 i) -> void {
+  if(!c.accReg) { c.e.ldx(dst, rBX, c.aOff[i]); return; }
+  if(!(c.accValid & (1u << i))) { c.e.ldx((u8)(6 + i), rBX, c.aOff[i]); c.accValid |= (u8)(1u << i); }
+  c.e.movx(dst, (u8)(6 + i));
+}
+auto accPut(Ctx& c, u8 src, u32 i) -> void {
+  if(!c.accReg) { c.e.stx(src, rBX, c.aOff[i]); return; }
+  c.e.movx((u8)(6 + i), src);
+  c.accValid |= (u8)(1u << i); c.accDirty |= (u8)(1u << i);
+}
+auto accFlush(Ctx& c) -> void {
+  if(!c.accReg) return;
+  for(u32 i = 0; i < 3; i++) if(c.accDirty & (1u << i)) c.e.stx((u8)(6 + i), rBX, c.aOff[i]);
+  c.accDirty = 0;
+}
+auto accSpill(Ctx& c) -> void { accFlush(c); c.accValid = 0; }
+
 auto emitCall(Ctx& c, void* fn, u32 op) -> void {
+  accSpill(c);                   // el helper trabaja sobre la copia de memoria
   c.e.mov64_rr(rCX, rBX);        // arg0 = Rsp*
   c.e.mov_imm32(rDX, op);        // arg1 = opcode
   c.e.mov_imm64(rAX, (u64)fn);
@@ -342,7 +385,7 @@ auto emitSatUnsignedN(E& e, Ctx& c, u32 vd) -> void {
   e.movx(5, 3); e.sse_rr(X_PCMPGTD, 5, 1);
   e.sse_rr(X_PCMPGTD, 3, 2);
   e.sse_rr(X_PACKSSDW, 5, 3);                     // desborde por abajo
-  e.ldx(0, rBX, c.aOff[2]);
+  accGet(c, 0, 2);
   e.sse_rr(X_POR, 0, 4);
   e.sse_rr(X_PANDN, 5, 0);                        // ~subdesborde & (accl | desborde)
   e.stx(5, rBX, c.VR(vd));
@@ -353,20 +396,20 @@ auto emitSatUnsignedN(E& e, Ctx& c, u32 vd) -> void {
 // xmm0/xmm1/xmm5 libres y sale con el nuevo acch en xmm0 y el nuevo accm en xmm5, ya
 // escritas las tres rebanadas -- que es justo lo que piden las dos saturaciones.
 auto emitAccAdd48(E& e, Ctx& c) -> void {
-  e.ldx(5, rBX, c.aOff[2]);
+  accGet(c, 5, 2);
   e.movx(0, 5); e.sse_rr(X_PADDW, 0, 2);          // accl + bajo
-  e.stx(0, rBX, c.aOff[2]);
+  accPut(c, 0, 2);
   emitCarry16(e, 5, 2, 0, 1, 2);                  // acarreo de la baja -> xmm1
-  e.ldx(5, rBX, c.aOff[1]);
+  accGet(c, 5, 1);
   e.movx(0, 5); e.sse_rr(X_PADDW, 0, 3);          // accm + medio
   emitCarry16(e, 5, 3, 0, 2, 3);                  // primer acarreo de la media -> xmm2
   e.movx(5, 0); e.sse_rr(X_PADDW, 5, 1);          // ... + el acarreo de abajo
   emitCarry16(e, 0, 1, 5, 3, 1);                  // segundo acarreo -> xmm3
-  e.stx(5, rBX, c.aOff[1]);
+  accPut(c, 5, 1);
   e.sse_rr(X_POR, 2, 3);                          // los dos nunca son 1 a la vez: basta un OR
-  e.ldx(0, rBX, c.aOff[0]);
+  accGet(c, 0, 0);
   e.sse_rr(X_PADDW, 0, 4); e.sse_rr(X_PADDW, 0, 2);
-  e.stx(0, rBX, c.aOff[0]);
+  accPut(c, 0, 0);
 }
 
 // Duplica el producto de 48 bits que traen xmm2 (bajo) y xmm3 (medio): desplaza uno a la
@@ -412,7 +455,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
 
   // VSAR no mira operandos: copia la rebanada del acumulador que nombra el elemento.
   if(fn == 0x1d) {
-    if(el >= 8 && el <= 10) e.ldx(0, rBX, c.aOff[el - 8]);
+    if(el >= 8 && el <= 10) accGet(c, 0, el - 8);
     else                    e.zerox(0);
     e.stx(0, rBX, c.VR(vd));
     return;
@@ -431,7 +474,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
   case 0x28: case 0x29: case 0x2a: case 0x2b: case 0x2c: case 0x2d: {
     e.sse_rr(fn <= 0x29 ? X_PAND : fn <= 0x2b ? X_POR : X_PXOR, 0, 1);
     if(fn & 1) { e.onesx(2); e.sse_rr(X_PXOR, 0, 2); }   // las negadas (NAND/NOR/NXOR)
-    e.stx(0, rBX, c.aOff[2]);
+    accPut(c, 0, 2);
     e.stx(0, rBX, c.VR(vd));
   } break;
 
@@ -457,7 +500,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
       e.sse_rr(X_POR, 2, 3);
     }
     emitSelectST(e, 3, 2, 4);
-    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    accPut(c, 3, 2); e.stx(3, rBX, c.VR(vd));
     emitFlagStore(e, 2, 4, c.ccOff[1]);
     e.zerox(5);
     e.stx(5, rBX, c.ccOff[0]); e.stx(5, rBX, c.coOff[0]); e.stx(5, rBX, c.coOff[1]);
@@ -467,7 +510,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
   case 0x27: {
     emitFlagMask(e, 2, 5, c.ccOff[1]);
     emitSelectST(e, 3, 2, 4);
-    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    accPut(c, 3, 2); e.stx(3, rBX, c.VR(vd));
     e.zerox(5); e.stx(5, rBX, c.coOff[0]); e.stx(5, rBX, c.coOff[1]);
   } break;
 
@@ -484,7 +527,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
     e.movx(5, 2); e.sse_rr(X_PANDN, 5, 1);       // T donde S>=0
     e.sse_rr(X_POR, 4, 5);
     e.movx(5, 3); e.sse_rr(X_PANDN, 5, 4);       // S==0 -> 0
-    e.stx(5, rBX, c.aOff[2]);
+    accPut(c, 5, 2);
     e.zerox(5); e.sse_rr(X_PSUBSW, 5, 1);        // -T saturado
     e.sse_rr(X_PAND, 5, 2);
     e.movx(4, 2); e.sse_rr(X_PANDN, 4, 1);
@@ -497,8 +540,8 @@ auto emitVu(Ctx& c, u32 op) -> void {
   case 0x04: {
     e.sse_rr(X_PMULHUW, 0, 1);
     e.zerox(2);
-    e.stx(2, rBX, c.aOff[0]); e.stx(2, rBX, c.aOff[1]);
-    e.stx(0, rBX, c.aOff[2]); e.stx(0, rBX, c.VR(vd));
+    accPut(c, 2, 0); accPut(c, 2, 1);
+    accPut(c, 0, 2); e.stx(0, rBX, c.VR(vd));
   } break;
 
   // VADD / VSUB: envuelve a 16 bits en accl, satura con signo en D, borra VCO
@@ -507,7 +550,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
     const u8 d = (fn == 0x11) ? X_PSUBD : X_PADDD;
     e.ldx(2, rBX, c.coOff[1]);                       // acarreo/prestamo de entrada (0/1)
     e.movx(3, 0); e.sse_rr(w, 3, 1); e.sse_rr(w, 3, 2);
-    e.stx(3, rBX, c.aOff[2]);
+    accPut(c, 3, 2);
     // la misma cuenta exacta en 32 bits: al reempaquetar con signo sale sclamp16
     e.pmovsxwd(3, 0); e.pmovsxwd(4, 1); e.sse_rr(d, 3, 4);
     e.pmovsxwd(4, 2); e.sse_rr(d, 3, 4);
@@ -522,7 +565,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
   // VADDC: suma sin signo, acarreo de salida a VCO.low, VCO.high a cero
   case 0x14: {
     e.movx(3, 0); e.sse_rr(X_PADDW, 3, 1);
-    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    accPut(c, 3, 2); e.stx(3, rBX, c.VR(vd));
     e.pmovzxwd(3, 0); e.pmovzxwd(4, 1); e.sse_rr(X_PADDD, 3, 4); e.psrld_i(3, 16);
     e.movx(4, 0); e.psrldq_i(4, 8); e.pmovzxwd(4, 4);
     e.movx(5, 1); e.psrldq_i(5, 8); e.pmovzxwd(5, 5); e.sse_rr(X_PADDD, 4, 5); e.psrld_i(4, 16);
@@ -534,7 +577,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
   // VSUBC: resta sin signo; prestamo a VCO.low, "distinto de cero" a VCO.high
   case 0x15: {
     e.movx(3, 0); e.sse_rr(X_PSUBW, 3, 1);
-    e.stx(3, rBX, c.aOff[2]); e.stx(3, rBX, c.VR(vd));
+    accPut(c, 3, 2); e.stx(3, rBX, c.VR(vd));
     e.pmovzxwd(3, 0); e.pmovzxwd(4, 1); e.sse_rr(X_PSUBD, 3, 4);            // dlo
     e.movx(4, 0); e.psrldq_i(4, 8); e.pmovzxwd(4, 4);
     e.movx(5, 1); e.psrldq_i(5, 8); e.pmovzxwd(5, 5); e.sse_rr(X_PSUBD, 4, 5);   // dhi
@@ -564,7 +607,7 @@ auto emitVu(Ctx& c, u32 op) -> void {
     e.sse_rr(X_PAND, 4, oth);
     e.sse_rr(X_PSUBW, 3, 4);                     // limbo medio corregido
     e.movx(4, 3); e.psraw_i(4, 15);              // limbo alto = signo del medio
-    e.stx(2, rBX, c.aOff[2]); e.stx(3, rBX, c.aOff[1]); e.stx(4, rBX, c.aOff[0]);
+    accPut(c, 2, 2); accPut(c, 3, 1); accPut(c, 4, 0);
     e.stx((fn == 0x05) ? 3 : 2, rBX, c.VR(vd));
   } break;
 
@@ -575,13 +618,13 @@ auto emitVu(Ctx& c, u32 op) -> void {
     emitDouble48(e);                             // x2:x3:x4 = producto por dos
     e.onesx(5); e.psllw_i(5, 15);                // 0x8000 por banda
     e.movx(0, 2); e.sse_rr(X_PADDW, 0, 5);
-    e.stx(0, rBX, c.aOff[2]);
+    accPut(c, 0, 2);
     emitCarry16(e, 2, 5, 0, 1, 5);
     e.movx(5, 3); e.sse_rr(X_PADDW, 5, 1);
     emitCarry16(e, 3, 1, 5, 2, 1);
-    e.stx(5, rBX, c.aOff[1]);
+    accPut(c, 5, 1);
     e.movx(0, 4); e.sse_rr(X_PADDW, 0, 2);
-    e.stx(0, rBX, c.aOff[0]);
+    accPut(c, 0, 0);
     if(fn == 0x00) { emitSatSigned(e, c, 0, 5, vd); break; }
     // VMULU: acch<0 -> 0; (acch^accm)<0 -> 0xffff; si no, accm. Con mascaras de todo-unos
     // la doble mezcla del interprete es (accm | signo-cruzado) & ~negativo.
@@ -640,8 +683,8 @@ auto emitVu(Ctx& c, u32 op) -> void {
   case 0x07: {
     e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);      // -> accm
     e.movx(3, 0); e.sse_rr(X_PMULHW, 3, 1);      // -> acch
-    e.zerox(4); e.stx(4, rBX, c.aOff[2]);
-    e.stx(2, rBX, c.aOff[1]); e.stx(3, rBX, c.aOff[0]);
+    e.zerox(4); accPut(c, 4, 2);
+    accPut(c, 2, 1); accPut(c, 3, 0);
     emitSatSigned(e, c, 3, 2, vd);
   } break;
 
@@ -649,12 +692,12 @@ auto emitVu(Ctx& c, u32 op) -> void {
   case 0x0f: {
     e.movx(2, 0); e.sse_rr(X_PMULLW, 2, 1);      // lo
     e.movx(3, 0); e.sse_rr(X_PMULHW, 3, 1);      // hi
-    e.ldx(4, rBX, c.aOff[1]);                    // accm
+    accGet(c, 4, 1);                    // accm
     e.movx(5, 4); e.sse_rr(X_PADDW, 5, 2);       // nm = accm + lo
     emitCarry16(e, 4, 2, 5, 0, 1);               // S y T ya no hacen falta: se usan de temporal
-    e.ldx(4, rBX, c.aOff[0]);
+    accGet(c, 4, 0);
     e.sse_rr(X_PADDW, 4, 3); e.sse_rr(X_PADDW, 4, 0);   // nh = acch + hi + acarreo
-    e.stx(5, rBX, c.aOff[1]); e.stx(4, rBX, c.aOff[0]);
+    accPut(c, 5, 1); accPut(c, 4, 0);
     emitSatSigned(e, c, 4, 5, vd);
   } break;
 
@@ -777,6 +820,12 @@ auto emitMem(Ctx& c, u32 op) -> void {
   const bool wide  = (maj == 0x23 || maj == 0x27 || maj == 0x2b);   // LW / LWU / SW
   const bool store = (maj == 0x29 || maj == 0x2b);                  // SH / SW
   const u32  lim   = wide ? 0xffcu : 0xffeu;    // ultima direccion que no envuelve
+
+  // El volcado del acumulador cacheado va AQUI, antes de la bifurcacion: el emitCall de la
+  // rama lenta solo emitiria los stx dentro de esa rama, pero apagaria accDirty en tiempo
+  // de compilacion, y entonces el camino rapido (el habitual) saldria del bloque con el
+  // acumulador vivo solo en xmm6..xmm8 y la copia de memoria vieja.
+  accFlush(c);   // solo volcar: una carga/almacenamiento escalar de la RSP no toca el acumulador
 
   e.ld32(rAX, rBX, c.RG(rs));
   if(simm) e.alu_imm(D_ADD, rAX, (u32)simm);
@@ -906,7 +955,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   // producto, la suma de 48 bits con sus tres acarreos y la saturacion, ~290 bytes. Quedarse
   // corto no corrompe nada -- el emisor detecta el desbordamiento y tira el bloque -- pero
   // lo tira DESPUES de compilarlo, y eso es trabajo perdido cada vez.
-  const usize worst = 64 + n * 400;
+  const usize worst = 96 + n * 400;
   if(c.buf.used + worst > c.buf.cap) c.clear();
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 
@@ -915,11 +964,12 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   // por que pagar el puntero a DMEM ni el hueco de sombra de la ABI. El prologo se queda
   // en push rbx / mov rbx,rcx, y el epilogo en pop rbx / ret.
   bool needsDmem = false, needsCall = false;
+  u32 vuOps = 0;                         // COP2 en linea: deciden si vale cachear el acumulador
   for(u32 i = 0; i < n; i++) {
     u32 op = at((pc0 + 4 * i) & 0xffc), maj = op >> 26;
     switch(classify(op)) {
     case Kind::Cop2:
-      if(!vuInline(rsp, op)) needsCall = true; break;   // la VU en linea no llama a nadie
+      if(vuInline(rsp, op)) vuOps++; else needsCall = true; break;   // la VU en linea no llama a nadie
     case Kind::Lwc2: case Kind::Swc2: case Kind::ExecMem:
       needsCall = true; break;
     case Kind::Mem:                        // camino rapido en DMEM + envoltura al helper
@@ -949,12 +999,23 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   // Prologo. RBX = Rsp*, RDI = DMEM (solo si hace falta). Los dos son callee-saved en Win64,
   // de ahi los push. Alineacion: al entrar RSP=8 (mod 16) y un CALL exige RSP=0, asi que el
   // hueco depende de cuantos push hubo -- 40 con dos, 32 con uno; sin CALL no hace falta.
-  const u8 frame = needsCall ? (needsDmem ? 40 : 32) : 0;
+  // Con dos o mas COP2 en linea el acumulador se queda en xmm6/7/8, que son callee-saved:
+  // hay que salvarlos, y su hueco va DETRAS del de sombra y alineado a 16.
+  const bool accReg = vuOps >= 2;
+  const u8 pushes = (u8)(1 + (needsDmem ? 1 : 0));
+  u8 frame = 0, accBase = 0;
+  if(needsCall || accReg) {
+    u8 base = needsCall ? 32 : 0;
+    if(accReg) { accBase = base; base = (u8)(base + 48); }
+    frame = (u8)(base + ((pushes & 1) ? 0 : 8));
+  }
+  ctx.accReg = accReg;
   e.push(rBX);
   if(needsDmem) e.push(rDI);
   e.mov64_rr(rBX, rCX);
   if(needsDmem) e.ld64(rDI, rBX, dmpOff);
   if(frame) e.sub_rsp(frame);
+  if(accReg) for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (u8)(accBase + 16 * k), true);
 
   for(u32 i = 0; i < n; i++) {
     const u32 a = (pc0 + 4 * i) & 0xffc;
@@ -979,6 +1040,8 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     }
   }
 
+  accFlush(ctx);
+  if(accReg) for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (u8)(accBase + 16 * k), false);
   if(frame) e.add_rsp(frame);
   if(needsDmem) e.pop(rDI);
   e.pop(rBX); e.ret();

@@ -240,17 +240,58 @@ con parallel-rdp en lockstep da 51.45 s antes y 52.07 s despues, o sea ruido. Es
 esperado y ya estaba dicho arriba — el ahorro cae en el hilo del RSP, que hoy tiene
 holgura.
 
+## El acumulador en registro
+
+Una racha de operaciones MAC recarga y reescribe las mismas tres rebanadas de 16
+bytes una y otra vez: `emitAccAdd48` sola son seis accesos por instruccion. xmm6,
+xmm7 y xmm8 son callee-saved en Win64, asi que el bloque los salva una vez en el
+prologo y a partir de ahi **acch/accm/accl viven en registro**; la memoria se pone
+al dia al salir del bloque.
+
+- El bloque decide en el prescan: con **dos o mas COP2 en linea** compensa salvar
+  los tres registros. Con una sola, no.
+- La cache es minima y explicita — `accValid` (la rebanada esta en el registro) y
+  `accDirty` (el registro es mas nuevo que la memoria) — con `accGet`/`accPut`
+  sustituyendo a los `ldx`/`stx` sobre `aOff[]`. Nada mas cambia en los emisores.
+- **Antes de cada CALL, `accSpill`**: el helper del interprete lee y escribe la copia
+  de memoria, asi que hay que volcar lo sucio y ademas *olvidar* lo cacheado — el
+  helper pudo escribirlo. Va dentro de `emitCall`, que es por donde pasan todas las
+  llamadas del bloque.
+- **Trampa: un CALL emitido dentro de una rama.** `emitMem` compila la carga/almacen
+  escalar como camino rapido en linea + rama lenta con CALL para la direccion que
+  envuelve. El `accSpill` de ese `emitCall` emite los `stx` **solo dentro de la rama
+  lenta**, pero apaga `accDirty` en tiempo de compilacion para todo lo que venga
+  despues: por el camino rapido — el habitual — el bloque salia con el acumulador vivo
+  solo en xmm6..xmm8 y la copia de memoria vieja. Se ve unicamente en los modos
+  threaded porque ahi los cortes de presupuesto de la RSP caen en otros sitios, se
+  compilan bloques con otras formas y aparece la mezcla VU-sucia + memoria; y el md5
+  salia distinto en cada pasada, que es la firma de que la forma del bloque depende del
+  reloj. Arreglo: `emitMem` vuelca **antes** de la bifurcacion. Volcar basta (no hace
+  falta invalidar): una carga/almacen escalar de la RSP solo toca DMEM, nunca el
+  acumulador. Regla general — un `emitCall` bajo condicion exige que el volcado se emita
+  fuera de la condicion.
+- El hueco de los tres `movdqa` va **detras** del hueco de sombra de la ABI y alineado
+  a 16. Como la alineacion de RSP depende de cuantos `push` haya hecho el prologo, el
+  tamaño del marco se calcula (32 de sombra si hay CALL) + 48 + 8 si los push fueron
+  pares. Y `xmm8` obligo a meter REX en `sse_rr`/`sse_m`, mas un `xmmSpill` con SIB,
+  porque RSP como base no se puede codificar sin el.
+
+Medido (SM64, lockstep, 300 intercambios, parallel-rdp): **52.07 s -> 51.19 s**
+(-1.7 %; una corrida cada cifra, el ruido de esta medida es de medio segundo). El
+fuzz cubre el caso que importa: la rotacion de opcodes incluye a proposito VCL/VCH/VCR,
+que NO estan en linea, para que los bloques mezclen CALL con VU en linea y se pruebe el
+volcado. 400 000 bloques, 0 diferencias. Lo que el fuzz **no** cubre son los caminos
+mixtos con memoria: sus bloques son solo COP2, asi que el fallo de `emitMem` de arriba
+paso limpio por el fuzz y lo cazo el md5 de sm64 en threaded. El fuzz es un oraculo de
+semantica de la VU, no de gestion de registros a lo largo del bloque.
+
 ## Siguiente
 
-1. **El acumulador en registros.** Mantener `acch`/`accm`/`accl` en xmm6..xmm8 a lo
-   largo de una racha de operaciones dentro del bloque: se guardan una vez por bloque
-   (los thunks preservan xmm6..15) en vez de recargar y reescribir seis accesos de
-   16 bytes por instruccion. Es lo que de verdad importa de lo que queda.
-2. **VCH / VCL / VCR.** Cabe, pero no en seis registros volatiles: hacen falta
-   xmm6..xmm7 salvados en el prologo, o un area de rascar en `Rsp`. 0.84 % de las
-   instrucciones del RSP.
-3. **La familia del reciproco** (VRCP/VRCPL/VRCPH/VMOV, 3.84 %). No es SSE — operan
+1. **VCH / VCL / VCR.** No caben en seis registros volatiles, pero ahora que el
+   prologo ya salva xmm6..xmm8 hay sitio: los bloques sin racha MAC pueden usarlos de
+   temporales. 0.84 % de las instrucciones del RSP.
+2. **La familia del reciproco** (VRCP/VRCPL/VRCPH/VMOV, 3.84 %). No es SSE — operan
    sobre UNA banda — pero siguen pagando el CALL y el redecodificado; en linea serian
    un `pextrw` + tabla + `pinsrw`.
-4. **El mix de `--rspbench` esta sesgado** y no sirve para elegir donde tocar; el
+3. **El mix de `--rspbench` esta sesgado** y no sirve para elegir donde tocar; el
    censo bueno es `KESTREL_VUSTAT=1`.

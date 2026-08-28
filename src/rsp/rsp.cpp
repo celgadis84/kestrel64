@@ -1416,7 +1416,11 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
   // en vuInline y no entra aqui, el oraculo deja de mirarla.
   static const u32 fns[] = { 0x00, 0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
                              0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x13, 0x14, 0x15, 0x1d,
-                             0x20, 0x21, 0x22, 0x23, 0x27,
+                             0x20, 0x21, 0x22, 0x23,
+                             // VCL/VCH/VCR NO estan en linea: entran a proposito para que el
+                             // bloque mezcle CALL con VU en linea y se pruebe el volcado del
+                             // acumulador cacheado antes de la llamada.
+                             0x24, 0x25, 0x26, 0x27,
                              0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d };
   const u32 nf = (u32)(sizeof fns / sizeof fns[0]);
   const u32 nOps = 4;
