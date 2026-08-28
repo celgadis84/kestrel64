@@ -674,6 +674,25 @@ auto Presenter::pumpFrame() -> bool {
   if(glfwWindowShouldClose(v.win)) return false;
   glfwPollEvents();
 
+  // --- teclas de estado guardado ---------------------------------------------
+  // F5 guarda, F7 carga, F6 pasa a la siguiente ranura (0..9). Por FLANCO: glfwGetKey
+  // sondea, y mantener F5 medio segundo son treinta peticiones de guardado.
+  if(stSave && stLoad && stSlot) {
+    const int keys[3] = {GLFW_KEY_F5, GLFW_KEY_F7, GLFW_KEY_F6};
+    bool now[3];
+    for(int i = 0; i < 3; i++) now[i] = glfwGetKey(v.win, keys[i]) == GLFW_PRESS;
+    int slot = stSlot->load(std::memory_order_relaxed);
+    if(now[0] && !stPrev[0]) stSave->store(slot, std::memory_order_release);
+    if(now[1] && !stPrev[1]) stLoad->store(slot, std::memory_order_release);
+    if(now[2] && !stPrev[2]) {
+      slot = (slot + 1) % 10;
+      stSlot->store(slot, std::memory_order_relaxed);
+      std::printf("[state] ranura %d\n", slot);
+      std::fflush(stdout);
+    }
+    for(int i = 0; i < 3; i++) stPrev[i] = now[i];
+  }
+
   // --- player-1 keyboard → N64 pad -------------------------------------------
   // Buttons: X=A  C=B  Space=Z  Enter=Start  Q=L  E=R ; D-pad = arrows ;
   // C-buttons = I/J/K/L ; analog stick = W/A/S/D (full ±80 deflection).

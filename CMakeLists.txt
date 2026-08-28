@@ -28,6 +28,7 @@ add_executable(kestrel64
   src/core/system.cpp
   src/core/memory.cpp
   src/core/rom.cpp
+  src/core/savestate.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/net/tcp.cpp

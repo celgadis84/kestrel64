@@ -1,4 +1,5 @@
 #include "system.hpp"
+#include "savestate.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -25,6 +26,7 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   if(!rom.loadFile(romPath, error)) return false;
   memory.loadRom(rom.data);  // exposes CART_ROM region for telemetry
   memory.attachSaveFile(romPath);  // load existing .eep/.sra/.fla, if any, next to the ROM
+  this->romPath = romPath;         // base de los nombres de ranura de estado (rom.stN)
   std::printf("[system] loaded \"%s\" (%s, %.2f MB, entry 0x%08x)\n",
               rom.header.name.c_str(),
               rom.originalOrder == Rom::Order::Z64 ? "z64" :
@@ -205,6 +207,7 @@ auto System::startVideo(bool batch) -> void {
   if(!want) return;
   videoOn = presenter.start(&memory, &shutdown, &n64SpeedPct, &rspSpeedPct, &rdramSpeedPct,
                             rom.valid() ? rom.header.name.c_str() : nullptr);
+  presenter.bindState(&stateSaveReq, &stateLoadReq, &stateSlot);
   if(videoOn) std::printf("[video] VI presentation armed (window opens on main thread)\n");
 }
 
@@ -276,6 +279,47 @@ static auto framebufferHash(Memory& mem) -> u64 {
   u64 hsh = 1469598103934665603ull ^ origin ^ ((u64)w << 32) ^ ((u64)type << 48);
   for(usize i = 0; i < bytes; i++) { hsh ^= ram[origin + i]; hsh *= 1099511628211ull; }
   return hsh;
+}
+
+// Atiende una peticion de guardar/cargar estado. Corre en el hilo de ejecucion, entre
+// subtramos, que es el unico punto donde se puede dejar el RCP quieto de verdad:
+//
+//   - el RDP se drena (en modo hilos la cola la consume su propio hilo; con comandos a
+//     medias, el estado guardado tendria un FIFO que apunta a una lista que ya no existe);
+//   - la tarea del RSP se termina. El microcodigo se guarda con el nucleo PARADO a
+//     proposito: en modo hilos una tarea a medias vive en el worker y nadie la reanudaria
+//     tras cargar, asi que un estado con el RSP corriendo se colgaria justo al cargarlo en
+//     el otro modo de RCP. Terminandola, el fichero vale en Lockstep y en Threaded.
+//
+// El coreMutex se coge aqui, no dentro de saveState/loadState: la telemetria puede estar
+// leyendo registros en el mismo instante.
+auto System::serviceStateReq() -> void {
+  int save = stateSaveReq.exchange(-1, std::memory_order_acq_rel);
+  int load = stateLoadReq.exchange(-1, std::memory_order_acq_rel);
+  if(save < 0 && load < 0) return;
+
+  std::lock_guard<std::mutex> lk(coreMutex);
+  memory.rdpDrain();
+  memory.rspAwaitIdle();
+  // Lockstep: la tarea la lleva ESTE hilo intercalada con la CPU, asi que aqui puede
+  // quedar a medias. Se la deja acabar. El tope es el mismo presupuesto de seguridad que
+  // usa el propio nucleo: si no para, ya estaba colgada antes de pedir el estado.
+  for(int i = 0; i < 64 && memory.rsp.running; i++) memory.rsp.step(1u << 20);
+
+  std::string err, msg;
+  if(save >= 0) {
+    std::string path = stateSlotPath(*this, save);
+    if(saveState(*this, path, err)) msg = "estado guardado en ranura " + std::to_string(save);
+    else                            msg = "fallo al guardar ranura " + std::to_string(save) + ": " + err;
+  }
+  if(load >= 0) {
+    std::string path = stateSlotPath(*this, load);
+    if(loadState(*this, path, err)) msg = "estado cargado de ranura " + std::to_string(load);
+    else                            msg = "fallo al cargar ranura " + std::to_string(load) + ": " + err;
+  }
+  std::printf("[state] %s\n", msg.c_str());
+  std::fflush(stdout);
+  { std::lock_guard<std::mutex> ml(stateMsgMutex); stateMsg = msg; }
 }
 
 auto System::run() -> void {
@@ -491,6 +535,7 @@ auto System::run() -> void {
     stableNext = stableEvery;
   }
   while(!shutdown.load()) {
+    serviceStateReq();
     if(cpu.halted && exitOnHalt) { shutdown.store(true); break; }
     if(paused.load() || cpu.halted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));

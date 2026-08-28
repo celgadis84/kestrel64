@@ -41,6 +41,7 @@ private:
   auto cmdCpuStep(const json::Value& args, json::Value& data) -> void;
   auto cmdCpuDisasm(const json::Value& args, json::Value& data) -> bool;
   auto cmdRunControl(const std::string& cmd, json::Value& data) -> void;
+  auto cmdState(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
   auto cmdRcpRegs(const json::Value& args, json::Value& data) -> void;
   auto cmdRspRegs(const json::Value& args, json::Value& data) -> void;
   // Decode the live VI framebuffer to RGBA8888 (blob) + geometry (data).

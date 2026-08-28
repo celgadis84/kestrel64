@@ -142,6 +142,23 @@ struct System {
   std::vector<u32> breakpoints;
   std::atomic<u32> lastBpHit{0};   // PC of the breakpoint that last fired (0 = none)
 
+  // Ruta de la ROM cargada. La necesita el nombre de las ranuras de estado (rom.stN).
+  std::string romPath;
+
+  // Peticiones de estado guardado. Las pone quien sea (ventana, telemetria) y las atiende
+  // el bucle de ejecucion, que es el unico sitio donde se puede parar el RCP en un punto
+  // limpio: entre campos, con el RDP drenado y sin tarea de RSP a medias. Tomar el estado
+  // desde el hilo de la ventana con el RDP rasterizando daria un fichero que no se puede
+  // recargar en el otro modo de RCP. -1 = nada pendiente, si no = numero de ranura.
+  std::atomic<int> stateSaveReq{-1}, stateLoadReq{-1};
+  std::atomic<int> stateSlot{0};        // ranura activa (la que mueven las teclas)
+  std::string      stateMsg;            // ultimo resultado, para telemetria/registro
+  std::mutex       stateMsgMutex;
+
+  // Atiende una peticion de estado pendiente. La llama el bucle de ejecucion al principio
+  // de cada vuelta -- tambien estando en pausa, que es cuando mas se guarda.
+  auto serviceStateReq() -> void;
+
   auto requestShutdown() -> void { shutdown.store(true); }
 
   System();       // out-of-line: unique_ptr<Server> holds an incomplete type here

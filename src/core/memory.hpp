@@ -110,7 +110,10 @@ struct Region {
   auto contains(u32 addr) const -> bool { return addr >= base && addr - base < size; }
 };
 
+struct StateVisitor;
+
 struct Memory {
+  friend struct StateVisitor;   // savestate: punteros de reanudacion del FIFO del RDP
   static constexpr u32 RDRAM_SIZE_EXPANDED = 0x0080'0000;  // 8 MB (Expansion Pak)
   static constexpr u32 DMEM_SIZE = 0x1000;                 // 4 KB
   static constexpr u32 IMEM_SIZE = 0x1000;                 // 4 KB

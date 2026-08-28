@@ -18,7 +18,10 @@ namespace kestrel {
 
 struct Memory;
 
+struct StateVisitor;
+
 struct SoftRdp {
+  friend struct StateVisitor;   // savestate: lee/escribe el estado de pipeline privado
   // Execute the command list in RDRAM spanning [start, end) physical addresses.
   // Returns the number of commands executed. Writes pixels into RDRAM directly.
   // Rasterize the RDP command FIFO from `start` to `end`. When `xbus` is set the

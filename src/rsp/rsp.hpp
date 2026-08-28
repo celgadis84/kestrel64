@@ -71,7 +71,10 @@ struct alignas(16) R128 {
   auto bcast(u32 e) const -> __m128i;
 };
 
+struct StateVisitor;
+
 struct Rsp {
+  friend struct StateVisitor;   // savestate: lee/escribe el estado privado de ejecucion
   Memory* mem = nullptr;   // owning bus (DMEM/IMEM + COP0 register routing)
 
   // --- scalar unit -----------------------------------------------------------

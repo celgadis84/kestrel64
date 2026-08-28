@@ -37,6 +37,14 @@ struct Presenter {
   // Tear down Vulkan/GLFW.
   auto close() -> void;
 
+  // Ata las teclas de estado guardado (F5 guardar / F7 cargar / F6 cambiar de ranura) a los
+  // buzones del System. La ventana corre en el hilo principal y la CPU en un worker, asi que
+  // la tecla no guarda nada: deja la peticion y el bucle de ejecucion la atiende con el RCP
+  // parado. Sin atar, las teclas no hacen nada.
+  auto bindState(std::atomic<int>* save, std::atomic<int>* load, std::atomic<int>* slot) -> void {
+    stSave = save; stLoad = load; stSlot = slot;
+  }
+
 private:
   Memory* mem = nullptr;
   std::atomic<bool>* shutdown = nullptr;
@@ -46,6 +54,10 @@ private:
   std::string windowTitle = "kestrel64";   // set to the loaded ROM's internal name
   Vk* vk = nullptr;         // pimpl: all Vulkan/GLFW handles
   std::vector<u32> frame;   // scratch R8G8B8A8 buffer uploaded to the Vulkan image
+  std::atomic<int>* stSave = nullptr;   // buzones de estado guardado (ver bindState)
+  std::atomic<int>* stLoad = nullptr;
+  std::atomic<int>* stSlot = nullptr;
+  bool stPrev[3] = {};      // flanco de F5/F7/F6: la tecla se sondea, no llega como evento
 };
 
 }  // namespace kestrel

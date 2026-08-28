@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "../core/savestate.hpp"
 #include "../core/system.hpp"
 #include <algorithm>
 #include <chrono>
@@ -99,6 +100,8 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     cmdProfCpu(args, data); done();
   } else if(cmd == "prof.rsp") {
     cmdProfRsp(args, data); done();
+  } else if(cmd == "state.save" || cmd == "state.load") {
+    if(cmdState(cmd, args, data)) done(); else fail(data.get("msg").asString());
   } else {
     fail("unknown command: " + cmd);
   }
@@ -323,6 +326,33 @@ auto Server::cmdRunControl(const std::string& cmd, json::Value& data) -> void {
 // Dump the RCP MMIO register file (memory.rcp). This is the state the boot code /
 // scheduler polls: MI mask/intr drive CPU IP2; VI current/intr drive the retrace
 // interrupt; SP status/pc the RSP; DPC the RDP FIFO. interruptPending() folds MI.
+// state.save / state.load {slot}. NO guarda aqui: el estado solo se puede tomar con el RCP
+// quieto, y quien puede pararlo es el bucle de ejecucion. Asi que esto deja la peticion en
+// el buzon y espera a que la atienda -- el bucle la mira tambien en pausa, que es como la
+// va a usar el lanzador. Si nadie contesta en 5 s es que no hay bucle corriendo, y eso se
+// dice en vez de colgar al cliente.
+auto Server::cmdState(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
+  int slot = (int)args.get("slot").asInt();
+  if(slot < 0 || slot > 9) { data.set("msg", "slot fuera de rango (0..9)"); return false; }
+  auto& box = (cmd == "state.save") ? system.stateSaveReq : system.stateLoadReq;
+  box.store(slot, std::memory_order_release);
+  for(int i = 0; i < 500; i++) {
+    if(box.load(std::memory_order_acquire) < 0) {
+      std::string msg;
+      { std::lock_guard<std::mutex> ml(system.stateMsgMutex); msg = system.stateMsg; }
+      data.set("slot", (u64)slot);
+      data.set("msg", msg);
+      data.set("path", stateSlotPath(system, slot));
+      // El bucle deja el motivo en el mensaje; "fallo" delante es el unico marcador que
+      // hay, y basta: el cliente quiere saber si hay fichero, no parsear el error.
+      return msg.rfind("fallo", 0) != 0;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  data.set("msg", "el bucle de ejecucion no atendio la peticion (5 s)");
+  return false;
+}
+
 auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   std::lock_guard<std::mutex> lk(system.coreMutex);
   Rcp& r = system.memory.rcp;
@@ -361,6 +391,12 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   vi.set("vburst", (u64)r.vi_vburst);
   vi.set("xscale", (u64)r.vi_xscale);
   vi.set("yscale", (u64)r.vi_yscale);
+  // Contadores de progreso del video. Son lo unico que distingue "va lento" de "colgado"
+  // desde fuera, y lo que usa la prueba de estado guardado para saber que la maquina sigue
+  // avanzando: flips = buffers mostrados, fields = campos emitidos, syncs = listas de RDP.
+  vi.set("flips", (u64)r.viFlips);
+  vi.set("fields", (u64)r.viFields);
+  vi.set("syncs", (u64)r.dpSyncs);
   data.set("vi", vi);
   json::Value ai = json::Value::object();
   ai.set("dram", (u64)r.ai_dram);
