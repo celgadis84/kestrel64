@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8"><title>gl smoke</title>
+<style>body{margin:0;background:#11141c}#a,#b{width:700px;height:460px;display:inline-block}
+canvas{display:block;width:100%;height:100%}#log{color:#8f8;font:12px monospace;white-space:pre-wrap}</style>
+<div id="a"></div><div id="b"></div><pre id="log"></pre>
+<script src="gl.js"></script><script src="models.js"></script><script src="scene3d.js"></script>
+<script>
+const L=[], hit=new Set();
+function art(){
+  const c=document.createElement("canvas"); c.width=180; c.height=254;
+  const g=c.getContext("2d");
+  g.fillStyle="#1a3fa0"; g.fillRect(0,0,180,254);
+  g.fillStyle="#ffcf3a"; g.fillRect(12,12,156,60);
+  g.fillStyle="#fff"; g.font="bold 22px sans-serif"; g.fillText("KESTREL", 20, 130);
+  return c.toDataURL("image/png");
+}
+try{
+  const p=SCENE3D.mountPad(document.getElementById("a"),{onPick:i=>hit.add(i)});
+  L.push(p?"pad OK":"pad NULL");
+  if(p) p.select("A");
+  const s=SCENE3D.mountShelf(document.getElementById("b"),{});
+  L.push(s?"shelf OK":"shelf NULL");
+  if(s) s.setArt(art());
+  // Barrido de clics: comprueba que TODOS los ids se pueden pinchar de verdad.
+  const cv=document.querySelector("#a canvas"), r=cv.getBoundingClientRect();
+  for(let y=0;y<60;y++) for(let x=0;x<90;x++){
+    cv.dispatchEvent(new MouseEvent("click",{clientX:r.left+(x+0.5)*r.width/90,
+                                             clientY:r.top+(y+0.5)*r.height/60,bubbles:true}));
+  }
+  const want=["A","B","START","Z","L","R","CU","CD","CL","CR","DU","DD","DL","DR","STICK"];
+  const miss=want.filter(k=>!hit.has(k));
+  L.push("pinchables: "+[...hit].sort().join(",")); 
+  L.push(miss.length?("FALTAN: "+miss.join(",")):"todos los ids pinchables");
+}catch(e){L.push("EXC "+e.message+" "+e.stack);}
+window.onerror=(m)=>{L.push("ERR "+m);document.getElementById("log").textContent=L.join("\n");};
+document.getElementById("log").textContent=L.join("\n");
+</script>

@@ -11,6 +11,7 @@ const api = async (p, body) => {
 };
 
 let SCHEMA = null, CFG = {}, BUILDS = [], ROMS = [], SEL = -1, MODE = "cover", DIRTY = false;
+let PADGL = null, PAD_SEL = null, SHELF = null;
 
 function toast(msg, bad) {
   const t = $("#toast");
@@ -236,14 +237,75 @@ function buildPad() {
   $$("#pad3d [data-id]").forEach(el => {
     el.onclick = ev => { ev.stopPropagation(); selectPad(el.dataset.id, el); };
   });
-  $("#pad-reset").onclick = () => { CFG.pad = padDefaults(); touch(); drawer(null); toast("Mando restaurado"); };
+  $("#pad-reset").onclick = () => {
+    CFG.pad = padDefaults(); touch(); PAD_SEL = null;
+    if (PADGL) PADGL.select(null);
+    drawer(null); toast("Mando restaurado");
+  };
   // El stick no es un boton: abre las cuatro direcciones a la vez.
-  $(".pb.stick").onclick = () => selectPad("STICK", $(".pb.stick"));
+  $(".pb.stick").onclick = () => selectPad("STICK");
+  mountPadGL();
+}
+
+/* El mando de verdad, en WebGL. Si el navegador no da contexto 3D se queda el de CSS, que
+   mapea exactamente los mismos ids, asi que la funcionalidad no depende de esto. */
+function mountPadGL() {
+  if (PADGL || typeof SCENE3D === "undefined") return;
+  PADGL = SCENE3D.mountPad($("#padgl"), {
+    onPick: id => selectPad(id),
+    pressed: padPressed,
+  });
+  if (!PADGL) return;
+  $("#padgl").classList.add("on");
+  $("#pad3d").classList.add("off");
+  padChips();
+}
+
+/* Tira de fichas debajo del modelo. El Z vive en la cara de abajo del mando y hay botones
+   que quedan tapados segun como se gire: con esto SIEMPRE hay manera de llegar a todos. */
+function padChips() {
+  const row = document.createElement("div");
+  row.className = "padchips";
+  SCHEMA.pad_buttons.forEach(b => {
+    const c = document.createElement("button");
+    c.textContent = b.id; c.title = b.label; c.dataset.chip = b.id;
+    c.onclick = () => selectPad(b.id);
+    row.appendChild(c);
+  });
+  const st = document.createElement("button");
+  st.textContent = "STICK"; st.title = "Stick analogico"; st.dataset.chip = "STICK";
+  st.onclick = () => selectPad("STICK");
+  row.appendChild(st);
+  $("#padgl").appendChild(row);
+}
+
+/* Que controles estan pulsados ahora mismo, leyendo el gamepad por el MISMO mapa que se le
+   pasa al emulador: si aqui se enciende el boton equivocado, el mapa esta mal. */
+function padPressed() {
+  const gp = (navigator.getGamepads && navigator.getGamepads()[0]) || null;
+  if (!gp || !CFG.pad) return [];
+  const on = [];
+  for (const id in CFG.pad) {
+    const g = CFG.pad[id] && CFG.pad[id].gp;
+    if (!g) continue;
+    const i = GLFW_GP.indexOf(g);
+    const b = i >= 0 ? gp.buttons[i] : gp.buttons[Number((g.match(/^BUTTON_(\d+)$/) || [])[1])];
+    if (b && b.pressed) on.push(id);
+  }
+  // El stick izquierdo va directo al emulador, sin mapa: se enciende solo con moverlo.
+  if (Math.hypot(gp.axes[0] || 0, gp.axes[1] || 0) > 0.35) on.push("STICK");
+  // Las cuatro direcciones del stick comparten pieza en el modelo (ids SX+/SX-/SY+/SY-).
+  if (on.some(k => k[0] === "S" && k.length === 3)) on.push("STICK");
+  return on;
 }
 
 function selectPad(id, el) {
+  PAD_SEL = id;
   $$("#pad3d .sel").forEach(x => x.classList.remove("sel"));
-  el.classList.add("sel");
+  if (!el) el = $(`#pad3d [data-id="${id}"]`);
+  if (el) el.classList.add("sel");
+  if (PADGL) PADGL.select(id);
+  $$("#padgl .padchips button").forEach(c => c.classList.toggle("on", c.dataset.chip === id));
   drawer(id);
 }
 
@@ -295,10 +357,9 @@ document.addEventListener("keydown", e => {
   if (!g) return;
   CFG.pad[capturing.k].key = g;
   touch();
-  const id = $("#pad3d .sel") ? ($("#pad3d .sel").dataset.id || "STICK") : null;
   capturing.el.classList.remove("listen");
   capturing = null;
-  drawer(id);
+  drawer(PAD_SEL);
 });
 
 function glfwKey(e) {
@@ -328,10 +389,9 @@ function pollGamepad() {
     if (gp.buttons[i].pressed) {
       CFG.pad[capturing.k].gp = GLFW_GP[i] || ("BUTTON_" + i);
       touch();
-      const id = $("#pad3d .sel") ? ($("#pad3d .sel").dataset.id || "STICK") : null;
       capturing.el.classList.remove("listen");
       capturing = null;
-      drawer(id);
+      drawer(PAD_SEL);
       return;
     }
   }
@@ -369,7 +429,9 @@ function renderStage() {
     updateDock(); return;
   }
   if (SEL >= list.length) SEL = 0;
-  ({cover: rCover, rows: rRows, grid: rGrid, wheel: rWheel, list: rList}[MODE] || rCover)(st, list);
+  if (MODE !== "shelf" && SHELF) { SHELF.destroy(); SHELF = null; }
+  ({cover: rCover, rows: rRows, grid: rGrid, wheel: rWheel, list: rList,
+    shelf: rShelf}[MODE] || rCover)(st, list);
   updateDock();
 }
 
@@ -502,6 +564,27 @@ function rList(st, list) {
     tr.ondblclick = launch;
     tb.appendChild(tr);
   });
+}
+
+/* Estante: la caja de carton y el cartucho del juego elegido, en 3D de verdad, con la
+   caratula puesta de textura. Se navega con las flechas como en las demas vistas. */
+function rShelf(st, list) {
+  const r = list[SEL] || list[0];
+  st.innerHTML = `<div class="shelf"><div class="shelf-name"></div></div>`;
+  const host = $(".shelf", st);
+  $(".shelf-name", host).innerHTML = r
+    ? `<b>${r.title}</b>${r.header ? r.header.region_label + " &middot; " + r.header.mb + " MB" : r.file}`
+    : "";
+  if (SHELF) { SHELF.destroy(); SHELF = null; }
+  if (typeof SCENE3D !== "undefined") SHELF = SCENE3D.mountShelf(host, {});
+  if (!SHELF) { host.innerHTML = `<p class="hint">Este navegador no da WebGL.</p>`; return; }
+  host.insertBefore(SHELF.canvas, $(".shelf-name", host));
+  SHELF.setArt(r ? artUrl(r) : null);
+  st.onwheel = e => {
+    e.preventDefault();
+    const n = SEL + (e.deltaY > 0 ? 1 : -1);
+    if (n >= 0 && n < list.length) { SEL = n; renderStage(); }
+  };
 }
 
 function updateDock() {
@@ -925,7 +1008,7 @@ async function dbgMem() {
 
 /* ==================================================================== modales */
 function openModal(sel) { $(sel).classList.add("on"); }
-function closeModal(el) { el.classList.remove("on"); }
+function closeModal(el) { el.classList.remove("on"); if (PADGL) PADGL.hide(); }
 
 function wire() {
   $$(".tab").forEach(t => t.onclick = () => {
@@ -952,7 +1035,7 @@ function wire() {
   $("#fb-ok").onclick = () => { closeModal($("#m-folder")); loadRoms(fbCur); };
   $("#btn-oc").onclick = () => { buildOC(); openModal("#m-oc"); };
   $("#btn-video").onclick = () => { buildVideo(); openModal("#m-video"); };
-  $("#btn-input").onclick = () => openModal("#m-input");
+  $("#btn-input").onclick = () => { openModal("#m-input"); if (PADGL) PADGL.show(); };
   $("#btn-console").onclick = () => { openModal("#m-console"); pollStatus(); };
   $("#btn-tele").onclick = () => { openModal("#m-tele"); teleTick(true); };
   $$("#teletabs button").forEach(b => b.onclick = () => {

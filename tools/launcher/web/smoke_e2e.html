@@ -1,0 +1,27 @@
+<!doctype html><meta charset="utf-8"><title>e2e</title>
+<style>html,body{margin:0;background:#000}iframe{width:1500px;height:940px;border:0}
+#log{position:fixed;left:0;bottom:0;color:#8f8;font:12px monospace;background:#000a}</style>
+<iframe id="f" src="/"></iframe><pre id="log"></pre>
+<script>
+const L=[];
+const say=m=>{L.push(m);document.getElementById("log").textContent=L.join("\n");};
+window.onerror=m=>say("ERR "+m);
+const f=document.getElementById("f");
+f.onload=()=>{
+  const w=f.contentWindow, d=f.contentDocument;
+  w.onerror=m=>say("APP-ERR "+m);
+  setTimeout(()=>{
+    try{
+      say("padgl mounted: "+(!!d.querySelector("#padgl canvas")));
+      say("chips: "+d.querySelectorAll("#padgl .padchips button").length);
+      d.querySelector('#modes button[data-mode="shelf"]').click();
+      say("shelf canvas: "+d.querySelectorAll("#stage .shelf canvas").length);
+      setTimeout(()=>{
+        try{ d.querySelectorAll("#padgl .padchips button")[3].click();
+             say("sel drawer: "+(d.querySelector("#pad-drawer h4")||{}).textContent); }
+        catch(e){ say("EXC2 "+e.message); }
+      },300);
+    }catch(e){say("EXC "+e.message);}
+  },1200);
+};
+</script>

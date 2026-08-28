@@ -41,6 +41,12 @@ kestrel_launcher.py   servidor HTTP + escaneo de ROMs + caratulas + proceso del 
 web/index.html        estructura
 web/style.css         tema oscuro, coverflow 3D, mando 3D
 web/app.js            estado, vistas, modales, captura de teclas
+web/gl.js             motor WebGL1 minimo (matrices, primitivas, seleccion por color)
+web/models.js         geometria propia: mando, cartucho y caja
+web/scene3d.js        pega esa geometria a la interfaz (mando editable, estante)
+web/smoke.html        prueba visual suelta de las mallas + barrido de clics
+web/smoke_e2e.html    la aplicacion entera dentro de un iframe, para captura sin manos
+models_test.js        prueba de geometria sin navegador (`node tools/launcher/models_test.js`)
 run_launcher.cmd      arranque en Windows
 ```
 
@@ -149,15 +155,61 @@ instruccion por instruccion: el mapa solo entra en juego cuando `m.loaded` es ci
 gatillos no son botones sino ejes, asi que `LEFT_TRIGGER`/`RIGHT_TRIGGER` usan codigos
 negativos internos que el lector resuelve contra `gp.axes`.
 
-En la interfaz esto es un mando de N64 en 3D (CSS `preserve-3d`, se endereza al pasar el
-raton): se pulsa un boton y se abre su cajon con captura en vivo de tecla y de boton de
-gamepad (via `navigator.getGamepads()`).
+En la interfaz esto es un mando de N64 **en 3D de verdad** (WebGL, `web/scene3d.js`): se
+gira arrastrando, se acerca con la rueda, se pincha un boton del modelo y se abre su cajon
+con captura en vivo de tecla y de boton de gamepad (via `navigator.getGamepads()`). Mientras
+el cajon esta abierto se sondea el gamepad **por el mismo mapa que se le pasa al emulador**,
+asi que el boton que se enciende en el modelo es la comprobacion de que el mapa esta bien.
+
+Debajo del modelo hay una tira de fichas con los quince controles. No es adorno: el `Z` vive
+en la cara de abajo del mando y siempre hay algun boton tapado segun como se gire, de modo
+que la tira garantiza que se pueda llegar a todos sin pelearse con la camara.
+
+Si el navegador no da contexto WebGL, `SCENE3D.mountPad` devuelve `null` y se queda el mando
+de CSS (`preserve-3d`) de antes, que mapea exactamente los mismos identificadores. La
+funcionalidad no depende del 3D.
+
+## Los modelos 3D
+
+Mando, cartucho y caja estan **dibujados en codigo** (`web/models.js`), con medidas del
+aparato real en centimetros: mando 17.3 cm de ancho, cartucho 8.8 x 11.4 x 2.1, caja de
+carton 13.5 x 19.0 x 3.0. No hay ningun modelo descargado, y no por gusto: los modelos de
+N64 que circulan por los repositorios 3D o no son descargables o llevan licencias
+(`Editorial`, "todos los derechos reservados") que no permiten meterlos dentro de un
+programa que se reparte. Comprobado antes de escribir una linea, via
+`https://api.sketchfab.com/v3/models/<uid>` (campos `license` e `isDownloadable`).
+
+`web/gl.js` es el motor: matrices columna, un constructor de mallas con pila de
+transformaciones, primitivas (caja redondeada, cilindro, esfera, extrusion de poligono),
+sombreado con luz clave + relleno frio + especular, y **seleccion por color** (una pasada
+con cada tramo pintado de su indice y un `readPixels` de un pixel). Cada tramo de la malla
+lleva el identificador de su parte, y esos identificadores son los de `options.py`: si
+falta uno, en la interfaz no se puede pinchar.
+
+Trampa de la caja redondeada: el radio nunca puede pasar de la mitad del lado mas corto. La
+primitiva lleva la rejilla del cubo hacia dentro y luego la empuja `r` hacia fuera, asi que
+con `r > lado/2` la pieza se **hincha** hasta `2r` en ese eje. Costo una isla de botones C
+que se tragaba los cuatro botones que tenia encima.
+
+Pruebas, las dos sin depender de que haya GPU en la maquina de turno:
+
+- `node tools/launcher/models_test.js` — sin navegador: que estan todos los identificadores,
+  que los indices caben en `Uint16` (WebGL1 no tiene mas), normales unitarias, arrays
+  cuadrados, tramos contiguos que suman el total, y la caja envolvente en las medidas reales.
+- `web/smoke.html` — con navegador: monta las dos escenas y **barre la superficie del mando a
+  clics** (90x60 puntos) para comprobar que cada boton se puede pinchar de verdad. Con Edge
+  sin ventana:
+  `msedge --headless=new --use-angle=swiftshader --enable-unsafe-swiftshader
+   --screenshot=x.png http://127.0.0.1:9140/smoke.html`.
 
 ## Biblioteca y caratulas
 
-Cinco modos de vista: **Coverflow** (3D con reflejo, rueda del raton), **Filas** estilo
+Seis modos de vista: **Coverflow** (3D con reflejo, rueda del raton), **Filas** estilo
 Netflix agrupadas por region, **Rejilla**, **Rueda** estilo Hyperspin (arco por coseno) y
-**Tabla** con ID de cartucho, region, formato, tamano y CRC. Flechas navegan, Enter lanza,
+**Tabla** con ID de cartucho, region, formato, tamano y CRC, y **Estante**, que pone la caja
+de carton y el cartucho del juego elegido en 3D con la caratula de textura (si no hay
+caratula, la portada se queda de un gris azulado, que se lee como "no hay" y no como un
+fallo de carga). Flechas navegan, Enter lanza,
 doble clic lanza.
 
 La cabecera se lee de verdad y se normaliza el orden de bytes, que es distinto segun el

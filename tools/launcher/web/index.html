@@ -45,6 +45,7 @@
       <button data-mode="grid" title="Rejilla de caratulas">Rejilla</button>
       <button data-mode="wheel" title="Rueda estilo Hyperspin">Rueda</button>
       <button data-mode="list" title="Tabla con detalles">Tabla</button>
+      <button data-mode="shelf" title="Caja y cartucho en 3D">Estante</button>
     </div>
   </div>
 
@@ -119,6 +120,7 @@
   <p class="lead">Pulsa un boton del mando de la pantalla para abrir su cajon y reasignarlo.
      Cada control admite una tecla y un boton de gamepad.</p>
   <div class="padwrap">
+    <div class="padgl" id="padgl"></div>
     <div class="pad3d" id="pad3d">
       <div class="padbody">
         <div class="wing left"></div><div class="wing right"></div>
@@ -191,6 +193,9 @@
 
 <div id="toast"></div>
 
+<script src="gl.js"></script>
+<script src="models.js"></script>
+<script src="scene3d.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
