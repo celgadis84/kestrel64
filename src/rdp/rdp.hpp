@@ -142,6 +142,10 @@ private:
   }
 
   auto depthTest(Memory& mem, int x, int y, s32 d) -> bool;   // Z_CMP / Z_UPD on one pixel
+  // Escritura al color image SIN el test de scissor: la usan los llamadores que ya lo han
+  // hecho (blendPixel entra por su propio test y luego escribe hasta tres veces). El test
+  // seguia repitiendose en cada eslabon de coverPixel -> blendPixel -> putPixel.
+  [[gnu::always_inline]] auto storePixel(Memory& mem, int x, int y, u32 rgba32) -> void;
   auto putPixel(Memory& mem, int x, int y, u32 rgba32) -> void;
   // Blender: fold `src` (pipeline RGBA, alpha = combined alpha) against the framebuffer
   // per SET_OTHER_MODES render-mode word. Only engages when IM_RD (read-enable, bit 0x40)
@@ -158,12 +162,86 @@ private:
   auto fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void;
   auto drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void;
   auto texRect(Memory& mem, const u64* w, bool flip) -> void;
+  // RDRAM -> TMEM recortado al primer limite (0x1000 en TMEM, fin de RDRAM): copia el
+  // MISMO prefijo que el bucle byte a byte que sustituye, porque ambos limites son
+  // monotonos y la copia va en orden ascendente.
+  template<typename V> auto copyRun(const V& m, u32 src, u32 dst, u32 n) -> void;
   auto loadTile(Memory& mem, u32 tile, bool block, u64 cmd) -> void;
+  // Constantes derivadas de un `Tile` que NO dependen del texel: el filtro de 3 puntos
+  // muestrea 3-4 veces el MISMO tile por pixel, y recalcular esto en cada toma era el grueso
+  // de `sampleTexel` (43 % del hilo del RDP en el perfil). Se arma una vez por pixel y las
+  // tomas solo hacen desplazamiento + pliegue + decodificacion. `kind` colapsa el par
+  // (size, fmt) a un unico salto de tabla en vez de la cadena de ifs anidados.
+  struct TexFold {
+    u32 shiftS, shiftT, maskS, maskT, cmS, cmT;
+    int sMax, tMax;
+    u32 rowBytes, base, palette, kind;
+    // Caso comun del pliegue: sin SHIFT, con mask y sin clamp ni mirror. Ahi las dos
+    // etapas de `foldCoord` se reducen a un AND, y el tile decide el camino una vez.
+    bool fastS, fastT;
+    int  andS, andT;
+  };
+  enum : u32 { TK_CI4, TK_IA4, TK_I4, TK_YUV, TK_IA16, TK_RGBA16, TK_RGBA32,
+               TK_CI8, TK_IA8, TK_I8, TK_BAD };
+  auto foldOf(u32 tile) const -> TexFold;
+  auto tlutEntry(u32 idx) const -> u32;          // entrada de paleta -> RGBA8888
+  // Muestreo y filtro ESPECIALIZADOS por formato. El despacho (size, fmt) se hace una sola
+  // vez por pixel en `sampleTexFiltered`; a partir de ahi las 3-4 tomas del filtro son codigo
+  // sin ramas de formato y se alinean dentro del filtro, en vez de tres llamadas a una
+  // funcion generica que vuelve a decidir el formato en cada toma.
+  // always_inline: clang la dejaba fuera de linea y el filtro pagaba 3 llamadas por pixel
+  // (35 % del hilo del RDP en el perfil); especializada es corta y merece alinearse.
+  // Pliegue de una coordenada (SHIFT + clamp/mirror/mask) separado de la lectura: el
+  // filtro de 3 puntos comparte cuatro pliegues entre sus tres tomas.
+  [[gnu::always_inline]] static inline auto foldCoord(int c, u32 sh, u32 mask, u32 cm, int lim) -> int;
+  template<u32 K> [[gnu::always_inline]] inline auto fetchK(const TexFold& f, int s, int t) const -> u32;
+  template<u32 K> [[gnu::always_inline]] inline auto texelK(const TexFold& f, int s, int t) const -> u32;
+  template<u32 K> auto filterK(const TexFold& f, double s, double t) const -> u32;
+  auto texelAt(const TexFold& f, int s, int t) const -> u32;   // version generica (despacha)
+  // Filtro con el pliegue YA armado: el tile es constante dentro de una primitiva, asi que
+  // el rasterizador lo arma una vez por triangulo en vez de una vez por pixel.
+  auto sampleTexFold(const TexFold& f, double s, double t) const -> u32;
   auto sampleTexel(u32 tile, int s, int t) -> u32;
   auto sampleRawIndex(u32 tile, int s, int t) -> int;   // raw CI index (pre-TLUT) for 8bpp CI blits
   auto sampleTexFiltered(u32 tile, double s, double t) -> u32;  // point or N64 3-point
   // Run the color combiner: texel0/texel1 sampled, shade (Gouraud) → final RGBA.
   // Honours 1-cycle (comb[1]) and 2-cycle (comb[0] feeds COMBINED into comb[1]).
+  // --- plan del combinador -----------------------------------------------------------
+  // Los 8 selectores de cada ciclo son constantes hasta el siguiente SET_COMBINE, y el
+  // numero de ciclos hasta el siguiente SET_OTHER_MODES. Resolverlos con un `switch` por
+  // canal y por pixel salia el 13 % del hilo del RDP; el plan los traduce UNA vez a un
+  // indice de fila y el camino por pixel queda en tabla. La llave es el par de palabras
+  // SET_COMBINE mas el tipo de ciclo, asi que cualquier via que los cambie (comando,
+  // savestate, MCP) invalida el plan sola, sin bandera que se pueda quedar rancia.
+  enum : u32 { CR_CIN, CR_TEX0, CR_TEX1, CR_PRIM, CR_SHADE, CR_ENV,
+               CR_CINA, CR_TEX0A, CR_TEX1A, CR_PRIMA, CR_SHADEA, CR_ENVA,
+               CR_ONE, CR_ZERO, CR_LOD, CR_PLOD, CR_ROWS, CR_NOISE = 0xff };
+  struct CombPlan {
+    u8   sel[2][8] = {};   // [ciclo][aR,bR,cR,dR,aA,bA,cA,dA] -> fila
+    u32  need = 0;         // filas a materializar (bitmask)
+    bool fast = false;     // false: algun selector es NOISE -> camino generico
+    bool two  = false;     // 2-cycle
+    u32  keyHi = ~0u, keyLo = ~0u, keyCyc = ~0u;
+  } combPlan;
+  // --- plan del blender --------------------------------------------------------------
+  // Los muxes P/A/M/B, el bit de lectura de framebuffer, FORCE_BLEND, AA_EN y el modo de
+  // dither salen todos de SET_OTHER_MODES, o sea que son constantes de primitiva; se
+  // estaban redescodificando por pixel (y `blendPixel` volvia a llamar a `cycleType()`
+  // tres veces). Misma disciplina que el plan del combinador: la llave es el par de
+  // palabras de modo, no una bandera de suciedad, asi que savestate/MCP no lo dejan rancio.
+  struct BlendPlan {
+    u32  keyHi = ~0u, keyLo = ~0u;
+    u8   psel = 0, asel = 0, msel = 0, bsel = 0;
+    u8   dither = 3;      // RGB_DITHER_SEL: 0 magic, 1 bayer, 2 ruido, 3 off
+    bool usesMem = false; // el mux referencia CLR_MEM o MEM_alpha
+    bool imRd = false;    // IM_RD: lecturas de framebuffer habilitadas
+    bool force = false;   // FORCE_BLEND
+    bool aaEn = false;    // ANTIALIAS_EN
+    bool passthru = true; // FILL/COPY: sin blender ni dither
+  } blendPlan;
+  auto buildBlendPlan() -> void;
+  auto buildCombPlan() -> void;
+  auto combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32;   // referencia (y camino NOISE)
   auto combineColor(u32 tex0, u32 tex1, u32 shade) -> u32;
 };
 

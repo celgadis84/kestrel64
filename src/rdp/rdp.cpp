@@ -3,6 +3,10 @@
 #include "../core/memory.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#if defined(__SSE4_1__)
+#include <smmintrin.h>
+#endif
 #include <cstdio>
 
 namespace kestrel {
@@ -16,6 +20,46 @@ static const bool g_noBlend  = std::getenv("KESTREL_NOBLEND")  != nullptr;
 static const bool g_noAA     = std::getenv("KESTREL_NOAA")     != nullptr;
 static const bool g_noFilter = std::getenv("KESTREL_NOFILTER") != nullptr;
 static const bool g_noRaster = std::getenv("KESTREL_NORASTER") != nullptr;  // DIAG: salta el rasterizado
+#if defined(__SSE4_1__)
+// RGBA de 32 bits a cuatro carriles de 16 bits y vuelta, para el filtro de textura. El pixel
+// vive como R<<24|G<<16|B<<8|A, o sea que en memoria little-endian el byte 0 es el alpha: un
+// solo `pshufb` reparte los bytes a carriles al desempaquetar y los junta al empaquetar, sin
+// pasar por memoria ni por cuatro desplazamientos. Los rangos del filtro caben
+// de sobra en int16 -- diferencia de texeles +-255, peso 0..32, producto +-8160, suma de dos
+// +0x10 = +-16336 -- asi que el resultado entero es EL MISMO que en 32 bits, pero `pmullw`
+// es una micro-op en este anfitrion (Nehalem) contra las seis de `pmulld`.
+static inline auto unpackRgba16(u32 c) -> __m128i {
+  const __m128i m = _mm_setr_epi8(3,-1, 2,-1, 1,-1, 0,-1, -1,-1,-1,-1, -1,-1,-1,-1);
+  return _mm_shuffle_epi8(_mm_cvtsi32_si128((int)c), m);
+}
+static inline auto packRgba16Clamped(__m128i v) -> u32 {
+  v = _mm_min_epi16(_mm_max_epi16(v, _mm_setzero_si128()), _mm_set1_epi16(255));
+  const __m128i m = _mm_setr_epi8(6,4,2,0, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1);
+  return (u32)_mm_cvtsi128_si32(_mm_shuffle_epi8(v, m));
+}
+
+// Las dos coordenadas a punto fijo 10.5 de una vez. `trunc(v + copysign(0.5, v))` es
+// exactamente el `floor(v + 0.5)` / `ceil(v - 0.5)` del escalar: para v >= 0 el argumento
+// es > 0 (trunc == floor) y para v < 0 es < 0 (trunc == ceil). Mismo valor, sin ramas.
+static inline auto stFixed(double s, double t) -> __m128i {
+  const __m128d v = _mm_mul_pd(_mm_set_pd(t, s), _mm_set1_pd(32.0));
+  const __m128d sgn = _mm_and_pd(v, _mm_castsi128_pd(_mm_set_epi32((int)0x80000000, 0,
+                                                                  (int)0x80000000, 0)));
+  return _mm_cvttpd_epi32(_mm_add_pd(v, _mm_or_pd(_mm_set1_pd(0.5), sgn)));
+}
+#endif
+
+static const bool g_triDbg   = std::getenv("KESTREL_TRIDBG")   != nullptr;
+
+// `std::lround` no se puede alinear: devuelve `long` y arrastra errno/dominio, asi que clang
+// la deja como llamada a la CRT. En el perfil del hilo del RDP eso salia 6,7% (una llamada por
+// pixel con Z interpolada, dos mas por pixel filtrado). Esta version da el MISMO bit para todo
+// el rango que se usa aqui (coordenadas y Z, muy por debajo de 2^52, donde v+-0.5 es exacto):
+// lround redondea el empate ALEJANDOSE del cero, que es justo floor(v+0.5) / ceil(v-0.5). Y
+// floor/ceil si se alinean a `roundsd` con la linea base SSE4.1 del build.
+static inline auto lroundExact(double v) -> int {
+  return (int)(v < 0.0 ? std::ceil(v - 0.5) : std::floor(v + 0.5));
+}
 
 
 // --- raw big-endian RDRAM access (physical addresses) ------------------------
@@ -174,6 +218,10 @@ auto SoftRdp::depthTest(Memory& mem, int x, int y, s32 d) -> bool {
 auto SoftRdp::putPixel(Memory& mem, int x, int y, u32 rgba32) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1) return;
   if(x < 0 || y < 0) return;
+  storePixel(mem, x, y, rgba32);
+}
+
+auto SoftRdp::storePixel(Memory& mem, int x, int y, u32 rgba32) -> void {
   pxWrites++;         // DPC counters: this pixel reaches the color image
   auto& m = mem.rdram;
   if(ci_size == 3) {  // 32bpp RGBA8888
@@ -210,14 +258,33 @@ auto SoftRdp::readFb(Memory& mem, int x, int y) -> u32 {
   return (r << 24) | (g << 16) | (b << 8) | al;
 }
 
+auto SoftRdp::buildBlendPlan() -> void {
+  // 1-cycle evalua la config del PRIMER ciclo del blender (GBL_c1: m1a<<30, m1b<<26,
+  // m2a<<22, m2b<<18); en 2-cycle la escritura final usa el SEGUNDO (<<28/24/20/16).
+  BlendPlan p;
+  const int sh = (cycleType() == 1) ? 0 : 2;
+  p.psel = (u8)((other_lo >> (28 + sh)) & 3);
+  p.asel = (u8)((other_lo >> (24 + sh)) & 3);
+  p.msel = (u8)((other_lo >> (20 + sh)) & 3);
+  p.bsel = (u8)((other_lo >> (16 + sh)) & 3);
+  p.usesMem  = (p.msel == 1) || (p.bsel == 1);
+  p.imRd     = (other_lo & 0x40) != 0;
+  p.force    = ((other_lo >> 14) & 1) != 0;
+  p.aaEn     = (other_lo & 0x08) != 0;
+  p.passthru = cycleType() >= 2;
+  p.dither   = (u8)((other_hi >> 6) & 3);
+  p.keyHi = other_hi; p.keyLo = other_lo;
+  blendPlan = p;
+}
+
 auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
   // Blend mux from the render-mode word (other_lo). 1-cycle mode evaluates the FIRST
   // blender cycle's config (GBL_c1: m1a<<30, m1b<<26, m2a<<22, m2b<<18); 2-cycle mode's
   // final write uses the SECOND cycle (GBL_c2: <<28/24/20/16). P/M pick a colour
   // (IN/MEM/BLEND/FOG), A picks a coefficient, B picks the second coefficient.
-  int sh = (cycleType() == 1) ? 0 : 2;   // 2-cycle → shift down 2 to hit the cyc1 fields
-  int Psel = (other_lo >> (28 + sh)) & 3, Asel = (other_lo >> (24 + sh)) & 3;
-  int Msel = (other_lo >> (20 + sh)) & 3, Bsel = (other_lo >> (16 + sh)) & 3;
+  if(blendPlan.keyHi != other_hi || blendPlan.keyLo != other_lo) buildBlendPlan();
+  const BlendPlan& bp = blendPlan;
+  const int Psel = bp.psel, Asel = bp.asel, Msel = bp.msel, Bsel = bp.bsel;
   auto pick = [&](int sel) -> u32 {   // P/M colour mux: IN / MEM / BLEND / FOG
     switch(sel) { case 0: return src; case 1: return memc; case 2: return blend_color; default: return fog_color; }
   };
@@ -243,15 +310,23 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
   // an additive pass with B = ONE carry the framebuffer through untouched while the
   // incoming colour still loses its 1/32.
   a0 >>= 3; a1 >>= 3;
-  bool force = (other_lo >> 14) & 1;
+  const bool force = bp.force;
   // FORCE_BLEND takes the plain >>5; otherwise the RDP runs the sum through its divider,
   // normalising by the actual coefficient weight (a0 + a1 + 1) rather than by a fixed 32.
   int sum = (a0 >> 2) + (a1 >> 2) + 1;
+  // El divisor sale de dos coeficientes de 5 bits: `a0>>2` y `a1>>2` estan en 0..7, o sea
+  // `sum` en 1..15, y el numerador va enmascarado a 11 bits (0..2047). En ese rango
+  // `n / d` es EXACTAMENTE `(n * ceil(2^16/d)) >> 16` (comprobado exhaustivamente para
+  // todos los d y todos los n del rango), asi que la division entera por pixel y por canal
+  // -- 20-26 ciclos cada una en el host -- se va a un multiplicador y un desplazamiento.
+  static const u32 kRecip[16] = { 0, 65536, 32768, 21846, 16384, 13108, 10923, 9363,
+                                  8192, 7282, 6554, 5958, 5462, 5042, 4682, 4370 };
+  const u32 recip = kRecip[sum & 15];
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   u32 out = 0;
   for(int i = 0; i < 3; i++) {
     int blended = ch(P, i) * a0 + ch(M, i) * (a1 + 1);
-    int v = force ? (blended >> 5) : (((blended >> 2) & 0x7ff) / sum);
+    int v = force ? (blended >> 5) : (int)((((u32)(blended >> 2) & 0x7ff) * recip) >> 16);
     v = v < 0 ? 0 : v > 255 ? 255 : v;
     out |= (u32)v << (24 - i * 8);
   }
@@ -272,7 +347,7 @@ auto SoftRdp::ditherRgb(int x, int y, u32 c) const -> u32 {
     { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 },   // magic square
     { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 },   // standard Bayer
   };
-  u32 mode = (other_hi >> 6) & 3;
+  const u32 mode = blendPlan.dither;   // el llamador ya valido el plan (blendPixel)
   if(mode == 3) return c;
   u32 out = c & 0xff;                      // alpha/coverage untouched by RGB dither
   for(int i = 0; i < 3; i++) {
@@ -301,17 +376,24 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> voi
   // selects CLR_MEM (M) or MEM_alpha (B). When the blender references memory but reads are
   // disabled, hardware writes the pipeline colour straight through; otherwise the blender
   // evaluates with memc=0 (its memory inputs are never consulted). COPY/FILL bypass it.
-  if(g_noBlend || cycleType() >= 2) { putPixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
-  int sh = (cycleType() == 1) ? 0 : 2;
-  int Msel = (other_lo >> (20 + sh)) & 3, Bsel = (other_lo >> (16 + sh)) & 3;
-  bool usesMem = (Msel == 1) || (Bsel == 1);
-  if(usesMem && !(other_lo & 0x40)) { putPixel(mem, x, y, ditherRgb(x, y, src)); return; }
+  if(blendPlan.keyHi != other_hi || blendPlan.keyLo != other_lo) buildBlendPlan();
+  const BlendPlan& bp = blendPlan;
+  if(g_noBlend || bp.passthru) { storePixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
+  if(bp.usesMem && !bp.imRd) { storePixel(mem, x, y, ditherRgb(x, y, src)); return; }
   // blend_en = FORCE_BLEND || (ANTIALIAS_EN && the pixel is not fully covered). That is
   // the hardware rule verbatim ("if not force blend, allow blend enable - use CVG bits"):
   // with neither bit set the blender is bypassed and the P colour is written as-is.
-  bool blendEn = ((other_lo >> 14) & 1) || (aaEdge && (other_lo & 0x08));
-  u32 memc = usesMem ? readFb(mem, x, y) : 0;
-  putPixel(mem, x, y, ditherRgb(x, y, blendColor(src, memc, blendEn)));
+  bool blendEn = bp.force || (aaEdge && bp.aaEn);
+  // El blender tiene dos atajos que devuelven el color P intacto (blender deshabilitado, y
+  // el caso opaco clasico A=IN alpha, B=1-A, alpha==0xff). Ambos se deciden con datos que
+  // ya estan aqui, y en ese caso el color de memoria SOLO se usa si P es CLR_MEM. Leer el
+  // framebuffer por pixel para tirarlo despues es trafico de RDRAM gratuito: se elide.
+  // Cuando el color de memoria si cuenta, la regla es la misma de siempre
+  // (`usesMem ? readFb : 0`), asi que el resultado no cambia en ningun caso.
+  const bool shortcut = !blendEn || (bp.asel == 0 && bp.bsel == 0 && (src & 0xff) == 0xff);
+  const bool memUnused = shortcut && bp.psel != 1;
+  u32 memc = (bp.usesMem && !memUnused) ? readFb(mem, x, y) : 0;
+  storePixel(mem, x, y, ditherRgb(x, y, blendColor(src, memc, blendEn)));
 }
 
 // Edge anti-aliasing. When AA_EN (other_lo bit 0x08) is set and a pixel is only
@@ -321,13 +403,14 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> voi
 // pixels (cvg>=1) take the normal blend/write path. `src` is the pipeline RGBA.
 auto SoftRdp::coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
-  if(g_noAA || !(other_lo & 0x08) || cvg >= 0.999) { blendPixel(mem, x, y, src); return; }
+  if(blendPlan.keyHi != other_hi || blendPlan.keyLo != other_lo) buildBlendPlan();
+  if(g_noAA || !blendPlan.aaEn || cvg >= 0.999) { blendPixel(mem, x, y, src); return; }
   if(cvg < 0.0) cvg = 0.0;
   u32 fb = readFb(mem, x, y);
   // Pipeline colour first through the blender (if IM_RD), then coverage-fold vs the
   // original framebuffer. On an edge the two references coincide closely enough. A
   // partially covered pixel is exactly the case ANTIALIAS_EN enables the blender for.
-  u32 base = (other_lo & 0x40) ? blendColor(src, fb, true) : src;
+  u32 base = blendPlan.imRd ? blendColor(src, fb, true) : src;
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   u32 out = 0;
   for(int i = 0; i < 3; i++) {
@@ -335,7 +418,7 @@ auto SoftRdp::coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void
     v = v < 0 ? 0 : v > 255 ? 255 : v;
     out |= (u32)v << (24 - i * 8);
   }
-  putPixel(mem, x, y, out | (src & 0xff));
+  storePixel(mem, x, y, out | (src & 0xff));
 }
 
 auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
@@ -475,14 +558,16 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     dRdx = comp(w[5], w[7], 0); dGdx = comp(w[5], w[7], 1); dBdx = comp(w[5], w[7], 2); dAdx = comp(w[5], w[7], 3);
     dRde = comp(w[8], w[10], 0); dGde = comp(w[8], w[10], 1); dBde = comp(w[8], w[10], 2); dAde = comp(w[8], w[10], 3);
   }
+#if !defined(__SSE4_1__)
   auto clamp8 = [](double v) -> u32 { int i = (int)(v + 0.5); return (u32)(i < 0 ? 0 : i > 255 ? 255 : i); };
+#endif
   // Texel the combiner sees on a flat (no-tex-coord) primitive. The RDP texel bus for a
   // primitive with no texture block presents all-ones (0xFFFFFFFF, opaque white): the Krom
   // "Fill Triangle" demos route this through the combiner alpha (TEX0_A * LOD_FRAC = 1) so
   // the blender's coverage weight is 1 and blend_color shows solid. If the combiner ignores
   // texel this is harmless.
   u32 flatTexel = (combProg && !textured && !gouraud && !fillMode) ? 0xffffffff : 0;
-  if(std::getenv("KESTREL_TRIDBG")) {
+  if(g_triDbg) {
     static int n = 0;
     if(n++ < 4) std::fprintf(stderr, "[tri] op=%02x cyc=%u shade=%d tex=%d comb=%06x/%08x\n"
                               "      c0R[a=%d b=%d c=%d d=%d] c0A[a=%d b=%d c=%d d=%d]\n"
@@ -494,6 +579,11 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                               prim_color, env_color, blend_color, fog_color, fill_color, flatTexel, other_lo, other_hi);
   }
 
+  // Invariantes de la primitiva sacados del bucle por pixel: el tile no cambia dentro de un
+  // triangulo, ni el tipo de ciclo, ni el bit de alpha-compare.
+  const TexFold texF   = foldOf(texTile);
+  const bool    copyCy = cycleType() == 2;
+  const bool    alphaCmpEn = (other_lo & 1) != 0;
   int yTop = (int)std::ceil(yh), yBot = (int)std::ceil(yl);
   yTop = std::max(yTop, sy0); yBot = std::min(yBot, sy1);
   for(int y = yTop; y < yBot; y++) {
@@ -516,7 +606,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     // back. Returns whether the colour should be drawn.
     auto zPass = [&](int x, double dx) -> bool {
       if(!zActive) return true;
-      return depthTest(mem, x, y, zSrc ? (s32)prim_z : (s32)std::lround(eZ + dZdx * dx));
+      return depthTest(mem, x, y, zSrc ? (s32)prim_z : (s32)lroundExact(eZ + dZdx * dx));
     };
     // Sub-pixel coverage the way the RDP raster does it: instead of a single horizontal
     // box fraction, the primitive edges are evaluated at several sub-scanlines and
@@ -529,6 +619,28 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       L = leftMajor ? a : b; R = leftMajor ? b : a;
       if(L > R) std::swap(L, R);
     };
+#if defined(__SSE4_1__)
+    // Los cuatro canales de sombra (y el par S/T) son la MISMA cuenta con operandos
+    // distintos: `e + d*dx`. Van por parejas en registros de dos `double`, con los mismos
+    // productos y sumas IEEE que el escalar, asi que los valores no cambian. El clamp8 es
+    // `(int)(v + 0.5)` acotado a 0..255: suma, truncado (`cvttpd`) y min/max enteros.
+    const __m128d vRG = _mm_set_pd(eG, eR), vBA = _mm_set_pd(eA, eB), vST = _mm_set_pd(eT, eS);
+    const __m128d cRG = _mm_set_pd(dGdx, dRdx), cBA = _mm_set_pd(dAdx, dBdx),
+                  cST = _mm_set_pd(dTdx, dSdx);
+    auto shadeVec = [&](__m128d vdx) -> u32 {
+      const __m128d h = _mm_set1_pd(0.5);
+      __m128i i0 = _mm_cvttpd_epi32(_mm_add_pd(_mm_add_pd(vRG, _mm_mul_pd(cRG, vdx)), h));
+      __m128i i1 = _mm_cvttpd_epi32(_mm_add_pd(_mm_add_pd(vBA, _mm_mul_pd(cBA, vdx)), h));
+      __m128i v = _mm_unpacklo_epi64(i0, i1);
+      v = _mm_min_epi32(_mm_max_epi32(v, _mm_setzero_si128()), _mm_set1_epi32(255));
+      // Empaquetado sin pasar por memoria: tras el clamp cada carril cabe en su byte bajo,
+      // asi que un `pshufb` los junta en el orden RGBA que espera el resto del pipeline
+      // (little-endian: el byte 0 del resultado es el de menor peso, o sea el alpha).
+      const __m128i packRgba = _mm_setr_epi8(12, 8, 4, 0, -1, -1, -1, -1,
+                                             -1, -1, -1, -1, -1, -1, -1, -1);
+      return (u32)_mm_cvtsi128_si32(_mm_shuffle_epi8(v, packRgba));
+    };
+#endif
     static const double subY[4] = {0.125, 0.375, 0.625, 0.875};
     static const double subX[2] = {0.25, 0.75};
     // Las cuatro sub-scanlines no dependen de x: se evaluan UNA vez por linea, no por
@@ -563,24 +675,38 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         pxWrites++;
       } else if(textured) {
         double dx = x - xA;
+#if defined(__SSE4_1__)
+        const __m128d vdx = _mm_set1_pd(dx);
+        const __m128d st = _mm_mul_pd(_mm_add_pd(vST, _mm_mul_pd(cST, vdx)),
+                                      _mm_set1_pd(1.0 / 32.0));   // 1/32 exacto: potencia de dos
+        const double su = _mm_cvtsd_f64(st), tu = _mm_cvtsd_f64(_mm_unpackhi_pd(st, st));
+#else
         double su = (eS + dSdx * dx) / 32.0, tu = (eT + dTdx * dx) / 32.0;  // 1/32 → texel
-        u32 tex = sampleTexFiltered(texTile, su, tu);
+#endif
+        u32 tex = sampleTexFold(texF, su, tu);
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.
+#if defined(__SSE4_1__)
+        u32 shd = gouraud ? shadeVec(vdx) : 0;
+#else
         u32 shd = gouraud ? ((clamp8(eR + dRdx * dx) << 24) | (clamp8(eG + dGdx * dx) << 16)
                             | (clamp8(eB + dBdx * dx) << 8) | clamp8(eA + dAdx * dx)) : 0;
-        bool copy = cycleType() == 2;
-        u32 c = (combProg && !copy) ? combineColor(tex, tex, shd) : tex;
+#endif
+        u32 c = (combProg && !copyCy) ? combineColor(tex, tex, shd) : tex;
         // Alpha compare (see texRect): COPY mode keys on the 1-bit texel alpha (drop
         // alpha==0); 1-/2-cycle compares COMBINED alpha against the blend_color
         // threshold. Disabled → texel drawn regardless of its 5551 transparency bit.
-        bool apass = !(other_lo & 1) ||
-                     (copy ? (c & 0xff) != 0 : ((c & 0xff) >= (blend_color & 0xff)));
+        bool apass = !alphaCmpEn ||
+                     (copyCy ? (c & 0xff) != 0 : ((c & 0xff) >= (blend_color & 0xff)));
         if(apass && zPass(x, dx)) coverPixel(mem, x, y, c, cvg);
       } else if(gouraud) {
         double dx = x - xA;
+#if defined(__SSE4_1__)
+        u32 shd = shadeVec(_mm_set1_pd(dx));
+#else
         u32 shd = (clamp8(eR + dRdx * dx) << 24) | (clamp8(eG + dGdx * dx) << 16)
                 | (clamp8(eB + dBdx * dx) << 8)  |  clamp8(eA + dAdx * dx);
+#endif
         u32 c = combProg ? combineColor(0, 0, shd) : shd;
         if(zPass(x, dx)) coverPixel(mem, x, y, c, cvg);
       } else { double dx = x - xA;
@@ -596,116 +722,164 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
-auto SoftRdp::sampleTexel(u32 tileIdx, int s, int t) -> u32 {
-  // Point-sample one texel out of TMEM for `tileIdx`. Coordinates are integer
-  // texels (the caller already did S>>5 etc). Wrap by mask when the tile carries
-  // one, else clamp to the SET_TILE_SIZE box. Decodes the common RGBA16/IA16/
-  // I8/IA8/RGBA32 formats; unknowns fall back to opaque white.
+auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
+  // Todo lo que un tile aporta al muestreo y NO depende del texel concreto. El filtro de 3
+  // puntos toma 3-4 texeles del MISMO tile por pixel: sacando esto del bucle de tomas se
+  // recalcula una vez en vez de cuatro, y la decodificacion pasa a ser un salto de tabla.
   const Tile& tl = tiles[tileIdx & 7];
-  // Tile SHIFT: scales the incoming texel coordinate (shift 1..10 → >>, 11..15 → <<).
-  auto applyShift = [](int c, u32 sh) -> int {
-    if(!sh) return c;
-    return sh <= 10 ? (c >> sh) : (c << (16 - sh));
-  };
-  s = applyShift(s, tl.shiftS); t = applyShift(t, tl.shiftT);
-  int sMax = (int)(tl.sh >> 2) - (int)(tl.sl >> 2);
-  int tMax = (int)(tl.th >> 2) - (int)(tl.tl >> 2);
-  // Wrap/mirror/clamp per axis (HW-accurate, two stages like the RDP sampler).
-  // cmN bit0 = mirror, bit1 = clamp. Stage 1 (clamp): when the clamp bit is set OR
-  // there is no mask, the coordinate is clamped to the SET_TILE_SIZE box [0,lim];
-  // this is the ONLY place negatives are pinned. Stage 2 (mask): when maskN != 0,
-  // fold the coordinate into a 2^mask period — mirror flips it (bitwise ~c) on odd
-  // periods. Both stages run in two's complement so negative coords (the roms start
-  // S/T below zero, e.g. -14) mirror/wrap exactly as on hardware instead of collapsing
-  // to texel 0. Note: no premature `c<0 → 0` before masking.
-  // Texel address folding — matches angrylion's tcclamp→tcmask order (the two stages
-  // run in sequence, NOT mutually exclusive). Stage 1 (clamp): when the clamp bit is
-  // set OR there is no mask, pin the coordinate to the tile-size box [0,lim]. Stage 2
-  // (mask): when maskN != 0, mirror on odd 2^mask periods then fold into 2^mask. With
-  // clamp+mask both active and 2^mask > lim the mask is idempotent (clamp stays
-  // visible); with 2^mask <= lim it re-wraps — exactly as hardware does. Both stages
-  // are two's-complement so negative coords (roms start S/T at -14) fold correctly.
-  auto wrap = [](int c, u32 mask, u32 cm, int lim) -> int {
-    if((cm & 2) || mask == 0) {                     // clamp stage
-      if(c < 0) c = 0;
-      else if(lim >= 0 && c > lim) c = lim;
-    }
-    if(mask) {                                       // mask stage (wrap + mirror)
-      if((cm & 1) && ((c >> (int)mask) & 1)) c = ~c; // mirror: flip on odd period
-      c &= (1 << mask) - 1;
-    }
-    return c;
-  };
-  s = wrap(s, tl.maskS, tl.cmS, sMax);
-  t = wrap(t, tl.maskT, tl.cmT, tMax);
-  u32 rowBytes = tl.line * 8;
-  u32 base = tl.tmem * 8;
+  TexFold f;
+  f.shiftS = tl.shiftS;  f.shiftT = tl.shiftT;
+  f.maskS  = tl.maskS;   f.maskT  = tl.maskT;
+  f.cmS    = tl.cmS;     f.cmT    = tl.cmT;
+  f.sMax   = (int)(tl.sh >> 2) - (int)(tl.sl >> 2);
+  f.tMax   = (int)(tl.th >> 2) - (int)(tl.tl >> 2);
+  f.rowBytes = tl.line * 8;
+  f.base     = tl.tmem * 8;
+  f.palette  = tl.palette;
+  // Camino rapido del pliegue: SHIFT nulo + mask activa + ni clamp ni mirror => la etapa
+  // de clamp no se ejecuta (cm & 2 == 0 y mask != 0) y la de mask se queda en el AND.
+  f.fastS = tl.shiftS == 0 && tl.maskS != 0 && (tl.cmS & 3) == 0;
+  f.fastT = tl.shiftT == 0 && tl.maskT != 0 && (tl.cmT & 3) == 0;
+  f.andS  = (1 << tl.maskS) - 1;
+  f.andT  = (1 << tl.maskT) - 1;
+  switch(tl.size) {                       // (size, fmt) -> un solo `kind`
+    case 0:  f.kind = tl.fmt == 2 ? TK_CI4 : tl.fmt == 3 ? TK_IA4  : TK_I4;     break;
+    case 1:  f.kind = tl.fmt == 2 ? TK_CI8 : tl.fmt == 3 ? TK_IA8  : TK_I8;     break;
+    case 2:  f.kind = tl.fmt == 1 ? TK_YUV : tl.fmt == 3 ? TK_IA16 : TK_RGBA16; break;
+    case 3:  f.kind = TK_RGBA32; break;
+    default: f.kind = TK_BAD;    break;   // inalcanzable: `size` son 2 bits
+  }
+  return f;
+}
+
+auto SoftRdp::tlutEntry(u32 idx) const -> u32 {
   // Decode one palette entry (CI formats). TEXTLUT mode picks RGBA5551 vs IA16.
-  auto tlutLookup = [&](u32 idx) -> u32 {
-    u16 e = tlut[idx & 0xff];
-    if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
-                          return (i << 24) | (i << 16) | (i << 8) | a; }
-    // A palette entry expands exactly like a texel: 5 bits replicated into 8
-    // (v<<3 | v>>2), as parallel-rdp does on both read paths. krom's GRB decoders pin
-    // this down: their palettes hold the odd 5-bit values 1,3,..,31 and the hardware
-    // captures only reproduce once the entry is replicated and then scaled by the
-    // LOD_FRAC(0xff)→COMBINED_ALPHA and 31/32 blender paths — zero-filling the entry
-    // cannot reach those levels for any choice of the two scales.
-    u32 r = exp5((e >> 11) & 0x1f), g = exp5((e >> 6) & 0x1f);
-    u32 b = exp5((e >> 1)  & 0x1f), a = (e & 1) ? 255 : 0;   // RGBA5551 palette
-    return (r << 24) | (g << 16) | (b << 8) | a;
-  };
-  if(tl.size == 0) {                                   // 4-bit texels (CI4 / IA4 / I4)
+  u16 e = tlut[idx & 0xff];
+  if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
+                        return (i << 24) | (i << 16) | (i << 8) | a; }
+  // A palette entry expands exactly like a texel: 5 bits replicated into 8 (v<<3 | v>>2), as
+  // parallel-rdp does on both read paths. krom GRB decoders pin this down: their palettes hold
+  // the odd 5-bit values 1,3,..,31 and the hardware captures only reproduce once the entry is
+  // replicated and then scaled by the LOD_FRAC(0xff)->COMBINED_ALPHA and 31/32 blender paths -
+  // zero-filling the entry cannot reach those levels for any choice of the two scales.
+  u32 r = exp5((e >> 11) & 0x1f), g = exp5((e >> 6) & 0x1f);
+  u32 b = exp5((e >> 1)  & 0x1f), a = (e & 1) ? 255 : 0;   // RGBA5551 palette
+  return (r << 24) | (g << 16) | (b << 8) | a;
+}
+
+auto SoftRdp::foldCoord(int c, u32 sh, u32 mask, u32 cm, int lim) -> int {
+  // Pliegue de UNA coordenada de textura: SHIFT del tile y luego clamp/mirror/mask. Va
+  // aparte de la lectura porque el filtro de 3 puntos toca cuatro coordenadas distintas
+  // (s0, s0+1, t0, t0+1) repartidas en tres tomas: plegandolas por separado salen cuatro
+  // pliegues por pixel en vez de seis.
+  // Tile SHIFT: scales the incoming texel coordinate (shift 1..10 -> >>, 11..15 -> <<).
+  if(sh) c = sh <= 10 ? (c >> sh) : (c << (16 - sh));
+  // Texel address folding - matches angrylion tcclamp->tcmask order (the two stages run in
+  // sequence, NOT mutually exclusive). Stage 1 (clamp): when the clamp bit is set OR there is
+  // no mask, pin the coordinate to the tile-size box [0,lim]; this is the ONLY place negatives
+  // are pinned. Stage 2 (mask): when maskN != 0, mirror on odd 2^mask periods then fold into
+  // 2^mask. With clamp+mask both active and 2^mask > lim the mask is idempotent (clamp stays
+  // visible); with 2^mask <= lim it re-wraps - exactly as hardware does. Both stages are
+  // two complement so negative coords (roms start S/T at -14) fold correctly instead of
+  // collapsing to texel 0. Note: no premature `c<0 -> 0` before masking.
+  if((cm & 2) || mask == 0) {                     // clamp stage
+    if(c < 0) c = 0;
+    else if(lim >= 0 && c > lim) c = lim;
+  }
+  if(mask) {                                       // mask stage (wrap + mirror)
+    if((cm & 1) && ((c >> (int)mask) & 1)) c = ~c; // mirror: flip on odd period
+    c &= (1 << mask) - 1;
+  }
+  return c;
+}
+
+template<u32 K>
+auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
+  // Lee UN texel de TMEM con las coordenadas YA plegadas (ver `foldCoord`). `K` fija el
+  // formato en tiempo de compilacion: la decodificacion sale sin ramas.
+  const u32 rowBytes = f.rowBytes, base = f.base;
+  if constexpr(K == TK_CI4 || K == TK_IA4 || K == TK_I4) {     // 4-bit texels
     u32 off = base + (u32)t * rowBytes + (u32)s / 2;
     if(off >= 0x1000) return 0;
     u8 nib = (s & 1) ? (tmem[off] & 0xf) : (tmem[off] >> 4);
-    if(tl.fmt == 2) return tlutLookup(tl.palette * 16 + nib);        // CI4 → 16-entry sub-palette
-    if(tl.fmt == 3) { u32 i = (((nib >> 1) & 7) * 255) / 7, a = (nib & 1) ? 255 : 0;  // IA4 (3I/1A)
-                      return (i << 24) | (i << 16) | (i << 8) | a; }
-    u32 i = nib * 17;                        // I4 → intensity replicated to R,G,B AND alpha
-    return (i << 24) | (i << 16) | (i << 8) | i;   // HW: I formats set alpha = intensity
-  }
-  if(tl.size == 2) {                                   // 16-bit texels
+    if constexpr(K == TK_CI4) return tlutEntry(f.palette * 16 + nib);  // 16-entry sub-palette
+    else if constexpr(K == TK_IA4) {
+      u32 i = (((nib >> 1) & 7) * 255) / 7, a = (nib & 1) ? 255 : 0;   // IA4 (3I/1A)
+      return (i << 24) | (i << 16) | (i << 8) | a;
+    } else {
+      u32 i = nib * 17;                      // I4 -> intensity replicated to R,G,B AND alpha
+      return (i << 24) | (i << 16) | (i << 8) | i;   // HW: I formats set alpha = intensity
+    }
+  } else if constexpr(K == TK_YUV) {              // YUV 4:2:2 (UYVY pairs) via SET_CONVERT
+    // TMEM layout per 32-bit texel pair [U, Y0, V, Y1]: luma at the odd byte of each texel,
+    // chroma at the even bytes and shared across the pair (4:2:2). Convert with the
+    // SET_CONVERT coefficients: R=Y+K0*V, G=Y+K1*U+K2*V, B=Y+K3*U (V,U signed about 128,
+    // K/128 scale, HW rounds the >>7).
+    u32 off = base + (u32)t * rowBytes + (u32)s * 2;
+    u32 pairBase = base + (u32)t * rowBytes + (s & ~1u) * 2;
+    if(pairBase + 2 >= 0x1000 || off + 1 >= 0x1000) return 0;
+    int Y = tmem[off + 1], dU = (int)tmem[pairBase] - 128, dV = (int)tmem[pairBase + 2] - 128;
+    auto cl = [](int v) -> u32 { return (u32)(v < 0 ? 0 : v > 255 ? 255 : v); };
+    u32 r = cl(Y + ((k0 * dV + 0x40) >> 7));
+    u32 g = cl(Y + ((k1 * dU + k2 * dV + 0x40) >> 7));
+    u32 b = cl(Y + ((k3 * dU + 0x40) >> 7));
+    return (r << 24) | (g << 16) | (b << 8) | 0xff;   // opaque
+  } else if constexpr(K == TK_IA16 || K == TK_RGBA16) {        // 16-bit texels
     u32 off = base + (u32)t * rowBytes + (u32)s * 2;
     if(off + 1 >= 0x1000) return 0;
-    if(tl.fmt == 1) {                                  // YUV 4:2:2 (UYVY pairs) → RGB via SET_CONVERT
-      // TMEM layout per 32-bit texel pair [U, Y0, V, Y1]: luma at the odd byte of each
-      // texel, chroma at the even bytes and shared across the pair (4:2:2). Convert with
-      // the SET_CONVERT coefficients: R=Y+K0*V, G=Y+K1*U+K2*V, B=Y+K3*U (V,U signed about
-      // 128, K/128 scale, HW rounds the >>7).
-      u32 pairBase = base + (u32)t * rowBytes + (s & ~1u) * 2;
-      if(pairBase + 2 >= 0x1000 || off + 1 >= 0x1000) return 0;
-      int Y = tmem[off + 1], dU = (int)tmem[pairBase] - 128, dV = (int)tmem[pairBase + 2] - 128;
-      auto cl = [](int v) -> u32 { return (u32)(v < 0 ? 0 : v > 255 ? 255 : v); };
-      u32 r = cl(Y + ((k0 * dV + 0x40) >> 7));
-      u32 g = cl(Y + ((k1 * dU + k2 * dV + 0x40) >> 7));
-      u32 b = cl(Y + ((k3 * dU + 0x40) >> 7));
-      return (r << 24) | (g << 16) | (b << 8) | 0xff;   // opaque
-    }
     u16 px = ((u16)tmem[off] << 8) | tmem[off + 1];
-    if(tl.fmt == 3) { u32 i = (px >> 8) & 0xff, a = px & 0xff;   // IA16
-                      return (i << 24) | (i << 16) | (i << 8) | a; }
-    u32 r = exp5((px >> 11) & 0x1f);          // RGBA5551 (default)
-    u32 g = exp5((px >> 6)  & 0x1f);
-    u32 b = exp5((px >> 1)  & 0x1f);
-    u32 a = (px & 1) ? 255 : 0;
-    return (r << 24) | (g << 16) | (b << 8) | a;
-  }
-  if(tl.size == 3) {                                   // 32-bit RGBA8888
+    if constexpr(K == TK_IA16) {
+      u32 i = (px >> 8) & 0xff, a = px & 0xff;                 // IA16
+      return (i << 24) | (i << 16) | (i << 8) | a;
+    } else {
+      u32 r = exp5((px >> 11) & 0x1f);        // RGBA5551 (default)
+      u32 g = exp5((px >> 6)  & 0x1f);
+      u32 b = exp5((px >> 1)  & 0x1f);
+      u32 a = (px & 1) ? 255 : 0;
+      return (r << 24) | (g << 16) | (b << 8) | a;
+    }
+  } else if constexpr(K == TK_RGBA32) {                        // 32-bit RGBA8888
     u32 off = base + (u32)t * rowBytes + (u32)s * 4;
     if(off + 3 >= 0x1000) return 0;
     return ((u32)tmem[off] << 24) | ((u32)tmem[off+1] << 16) | ((u32)tmem[off+2] << 8) | tmem[off+3];
-  }
-  if(tl.size == 1) {                                   // 8-bit I8 / IA8
+  } else if constexpr(K == TK_CI8 || K == TK_IA8 || K == TK_I8) {   // 8-bit texels
     u32 off = base + (u32)t * rowBytes + (u32)s;
     if(off >= 0x1000) return 0;
     u8 v = tmem[off];
-    if(tl.fmt == 2) return tlutLookup(v);                        // CI8 → full 256-entry palette
-    if(tl.fmt == 3) { u32 i = (v >> 4) * 17, a = (v & 0xf) * 17;  // IA8 (4/4)
-                      return (i << 24) | (i << 16) | (i << 8) | a; }
-    return ((u32)v << 24) | ((u32)v << 16) | ((u32)v << 8) | v;   // I8 → grey opaque
+    if constexpr(K == TK_CI8) return tlutEntry(v);              // full 256-entry palette
+    else if constexpr(K == TK_IA8) {
+      u32 i = (v >> 4) * 17, a = (v & 0xf) * 17;                // IA8 (4/4)
+      return (i << 24) | (i << 16) | (i << 8) | a;
+    } else {
+      return ((u32)v << 24) | ((u32)v << 16) | ((u32)v << 8) | v;   // I8 -> grey opaque
+    }
+  } else {
+    return 0xffffffff;
   }
-  return 0xffffffff;
+}
+
+template<u32 K>
+auto SoftRdp::texelK(const TexFold& f, int s, int t) const -> u32 {
+  return fetchK<K>(f, foldCoord(s, f.shiftS, f.maskS, f.cmS, f.sMax),
+                      foldCoord(t, f.shiftT, f.maskT, f.cmT, f.tMax));
+}
+
+// Despacho de formato -> especializacion. `KEST_TEXKINDS(X)` lista los formatos una sola vez
+// para que el muestreo suelto y el filtro compartan exactamente el mismo juego.
+#define KEST_TEXKINDS(X) X(TK_CI4) X(TK_IA4) X(TK_I4) X(TK_YUV) X(TK_IA16) \
+                         X(TK_RGBA16) X(TK_RGBA32) X(TK_CI8) X(TK_IA8) X(TK_I8)
+
+auto SoftRdp::texelAt(const TexFold& f, int s, int t) const -> u32 {
+  switch(f.kind) {
+#define KEST_CASE(K) case K: return texelK<K>(f, s, t);
+    KEST_TEXKINDS(KEST_CASE)
+#undef KEST_CASE
+    default: return 0xffffffff;
+  }
+}
+
+auto SoftRdp::sampleTexel(u32 tileIdx, int s, int t) -> u32 {
+  return texelAt(foldOf(tileIdx), s, t);
 }
 
 auto SoftRdp::sampleRawIndex(u32 tileIdx, int s, int t) -> int {
@@ -739,37 +913,68 @@ auto SoftRdp::sampleRawIndex(u32 tileIdx, int s, int t) -> int {
   return off < 0x1000 ? tmem[off] : 0;
 }
 
-auto SoftRdp::sampleTexFiltered(u32 tile, double s, double t) -> u32 {
-  // Point sample unless SAMPLE_TYPE (other_hi bit 13 = full mode bit 45) selects the
-  // N64's 3-point ("bilinear") filter. The RDP is not a 4-tap bilinear: it picks the
-  // triangle of texels around the sample and lerps by the fractional coords. No -0.5
-  // GL-style bias: the RDP addresses texel origins directly, sfrac/tfrac are the low
-  // fractional bits of the S/T coordinate.
+template<u32 K>
+auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
+  // Point sample unless SAMPLE_TYPE (other_hi bit 13 = full mode bit 45) selects the N64's
+  // 3-point ("bilinear") filter. The RDP is not a 4-tap bilinear: it picks the triangle of
+  // texels around the sample and lerps by the fractional coords. No -0.5 GL-style bias: the
+  // RDP addresses texel origins directly, sfrac/tfrac are the low fractional bits of S/T.
   if(g_noFilter || !((other_hi >> 13) & 1))
-    return sampleTexel(tile, (int)std::floor(s), (int)std::floor(t));
-  // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double
-  // lerp rounded at the end lands on a different level whenever the exact result sits on
-  // a .5 boundary, and the 5-bit framebuffer then quantizes that difference into a
-  // visible band. Weights are the 5-bit S/T fractions, the rounding is +0x10 before an
-  // arithmetic >>5 (so a negative slope truncates toward -inf, as on HW).
-  int si = (int)std::lround(s * 32.0), ti = (int)std::lround(t * 32.0);
+    return texelK<K>(f, (int)std::floor(s), (int)std::floor(t));
+  // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double lerp
+  // rounded at the end lands on a different level whenever the exact result sits on a .5
+  // boundary, and the 5-bit framebuffer then quantizes that difference into a visible band.
+  // Weights are the 5-bit S/T fractions, the rounding is +0x10 before an arithmetic >>5 (so a
+  // negative slope truncates toward -inf, as on HW).
+#if defined(__SSE4_1__)
+  const __m128i sti = stFixed(s, t);
+  const int si = _mm_cvtsi128_si32(sti), ti = _mm_extract_epi32(sti, 1);
+#else
+  int si = lroundExact(s * 32.0), ti = lroundExact(t * 32.0);
+#endif
   int fx = si & 31, fy = ti & 31;
   int s0 = si >> 5, t0 = ti >> 5;
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
-  u32 c10 = sampleTexel(tile, s0 + 1, t0), c01 = sampleTexel(tile, s0, t0 + 1);
+  // Cuatro pliegues, no seis: las tres tomas se reparten s0/s0+1 y t0/t0+1.
+  const int sw0 = f.fastS ? (s0 & f.andS)     : foldCoord(s0,     f.shiftS, f.maskS, f.cmS, f.sMax),
+            sw1 = f.fastS ? ((s0 + 1) & f.andS) : foldCoord(s0 + 1, f.shiftS, f.maskS, f.cmS, f.sMax),
+            tw0 = f.fastT ? (t0 & f.andT)     : foldCoord(t0,     f.shiftT, f.maskT, f.cmT, f.tMax),
+            tw1 = f.fastT ? ((t0 + 1) & f.andT) : foldCoord(t0 + 1, f.shiftT, f.maskT, f.cmT, f.tMax);
+  u32 c10 = fetchK<K>(f, sw1, tw0), c01 = fetchK<K>(f, sw0, tw1);
+  const bool midTexel = ((other_hi >> 12) & 1) && fx == 16 && fy == 16;
+#if defined(__SSE4_1__)
+  // Los cuatro canales hacen la misma cuenta entera: un vector de 4x int32. Mismos
+  // operandos, mismos desplazamientos aritmeticos, mismo clamp final => mismos valores.
+  {
+    const __m128i v10 = unpackRgba16(c10), v01 = unpackRgba16(c01);
+    if(midTexel) {
+      const __m128i v00 = unpackRgba16(fetchK<K>(f, sw0, tw0)),
+                    v11 = unpackRgba16(fetchK<K>(f, sw1, tw1));
+      __m128i sum = _mm_add_epi16(_mm_add_epi16(v00, v10), _mm_add_epi16(v01, v11));
+      return packRgba16Clamped(_mm_srai_epi16(_mm_add_epi16(sum, _mm_set1_epi16(2)), 2));
+    }
+    const bool upper = fx + fy >= 32;
+    const __m128i b = unpackRgba16(upper ? fetchK<K>(f, sw1, tw1) : fetchK<K>(f, sw0, tw0));
+    const int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
+    __m128i acc = _mm_add_epi16(_mm_mullo_epi16(_mm_sub_epi16(v10, b), _mm_set1_epi16((short)wx)),
+                                _mm_mullo_epi16(_mm_sub_epi16(v01, b), _mm_set1_epi16((short)wy)));
+    acc = _mm_add_epi16(_mm_srai_epi16(_mm_add_epi16(acc, _mm_set1_epi16(0x10)), 5), b);
+    return packRgba16Clamped(acc);
+  }
+#endif
   int o[4];
-  if(((other_hi >> 12) & 1) && fx == 16 && fy == 16) {
-    // MID_TEXEL: at the exact centre of the quad the filter degenerates to the average
-    // of all four texels (MPEG half-pel motion compensation).
-    u32 c00 = sampleTexel(tile, s0, t0), c11 = sampleTexel(tile, s0 + 1, t0 + 1);
+  if(midTexel) {
+    // MID_TEXEL: at the exact centre of the quad the filter degenerates to the average of all
+    // four texels (MPEG half-pel motion compensation).
+    u32 c00 = fetchK<K>(f, sw0, tw0), c11 = fetchK<K>(f, sw1, tw1);
     for(int i = 0; i < 4; i++)
       o[i] = (ch(c00, i) + ch(c10, i) + ch(c01, i) + ch(c11, i) + 2) >> 2;
   } else {
-    // The RDP is a 3-tap filter, not a 4-tap bilinear: it takes the triangle half the
-    // sample falls in. Past the diagonal the base flips to the opposite corner and the
-    // weights flip with it (and swap axes).
+    // The RDP is a 3-tap filter, not a 4-tap bilinear: it takes the triangle half the sample
+    // falls in. Past the diagonal the base flips to the opposite corner and the weights flip
+    // with it (and swap axes).
     bool upper = fx + fy >= 32;
-    u32 base = upper ? sampleTexel(tile, s0 + 1, t0 + 1) : sampleTexel(tile, s0, t0);
+    u32 base = upper ? fetchK<K>(f, sw1, tw1) : fetchK<K>(f, sw0, tw0);
     int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
     for(int i = 0; i < 4; i++) {
       int b = ch(base, i);
@@ -784,7 +989,202 @@ auto SoftRdp::sampleTexFiltered(u32 tile, double s, double t) -> u32 {
   return r;
 }
 
+auto SoftRdp::sampleTexFold(const TexFold& f, double s, double t) const -> u32 {
+  // Despacho de formato: una vez por pixel (o por primitiva si el llamador ya lo saco del
+  // bucle). A partir de aqui el filtro entero va especializado, con las 3-4 tomas alineadas.
+  switch(f.kind) {
+#define KEST_CASE(K) case K: return filterK<K>(f, s, t);
+    KEST_TEXKINDS(KEST_CASE)
+#undef KEST_CASE
+    default: return 0xffffffff;
+  }
+}
+
+auto SoftRdp::sampleTexFiltered(u32 tile, double s, double t) -> u32 {
+  return sampleTexFold(foldOf(tile), s, t);
+}
+
+auto SoftRdp::buildCombPlan() -> void {
+  // Traduce cada selector a una fila de la tabla de fuentes. Las tablas siguen una a una a
+  // los `switch` de `combineColorSlow`, que es la referencia: mismo caso, misma fuente.
+  auto mapA = [](int i) -> u32 {   // RGB sub_a (0..15); 6 = ONE (0x100), 7 = NOISE
+    switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
+      case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
+      case 6: return CR_ONE; case 7: return CR_NOISE; default: return CR_ZERO; }
+  };
+  auto mapB = [](int i) -> u32 {   // RGB sub_b (0..15); 6 = key center, 7 = K4 -> 0
+    switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
+      case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
+      default: return CR_ZERO; }
+  };
+  auto mapC = [](int i) -> u32 {   // RGB mul (0..31); 6 = key scale, 15 = K5 -> 0
+    switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
+      case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
+      case 7: return CR_CINA; case 8: return CR_TEX0A; case 9: return CR_TEX1A;
+      case 10: return CR_PRIMA; case 11: return CR_SHADEA; case 12: return CR_ENVA;
+      case 13: return CR_LOD; case 14: return CR_PLOD; default: return CR_ZERO; }
+  };
+  auto mapD = [](int i) -> u32 {   // RGB add (0..7); 6 = ONE
+    switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
+      case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
+      case 6: return CR_ONE; default: return CR_ZERO; }
+  };
+  auto mapAABD = [](int i) -> u32 {   // alpha sub_a / sub_b / add (0..7); 6 = ONE
+    switch(i) { case 0: return CR_CINA; case 1: return CR_TEX0A; case 2: return CR_TEX1A;
+      case 3: return CR_PRIMA; case 4: return CR_SHADEA; case 5: return CR_ENVA;
+      case 6: return CR_ONE; default: return CR_ZERO; }
+  };
+  auto mapAC = [](int i) -> u32 {     // alpha mul (0..7); 0 = LOD_FRAC, 6 = PRIM_LOD_FRAC
+    switch(i) { case 0: return CR_LOD; case 1: return CR_TEX0A; case 2: return CR_TEX1A;
+      case 3: return CR_PRIMA; case 4: return CR_SHADEA; case 5: return CR_ENVA;
+      case 6: return CR_PLOD; default: return CR_ZERO; }
+  };
+  CombPlan p;
+  p.two = cycleType() == 1;
+  p.fast = true;
+  p.need = 0;
+  for(int c = 0; c < 2; c++) {
+    const CombSet& cs = comb[c];
+    u32 r[8] = { mapA(cs.aR), mapB(cs.bR), mapC(cs.cR), mapD(cs.dR),
+                 mapAABD(cs.aA), mapAABD(cs.bA), mapAC(cs.cA), mapAABD(cs.dA) };
+    for(int k = 0; k < 8; k++) p.sel[c][k] = (u8)r[k];
+    // Solo cuentan (para NOISE y para la mascara) los ciclos que de verdad se ejecutan:
+    // en 1-cycle el hardware evalua la ecuacion del segundo ciclo y el primero no existe.
+    if(!p.two && c == 0) continue;
+    for(int k = 0; k < 8; k++) {
+      if(r[k] == CR_NOISE) { p.fast = false; continue; }
+      p.need |= 1u << r[k];
+    }
+  }
+  p.keyHi = combine_hi; p.keyLo = combine_lo; p.keyCyc = cycleType();
+  combPlan = p;
+}
+
 auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
+  if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo
+     || combPlan.keyCyc != cycleType()) buildCombPlan();
+  const CombPlan& p = combPlan;
+  if(!p.fast) return combineColorSlow(tex0, tex1, shade);   // NOISE: orden de std::rand() intacto
+#if defined(__SSE4_1__)
+  // Los cuatro canales corren la MISMA ecuacion entera con operandos distintos, asi que
+  // van en un solo vector de 4x int32 (carriles R,G,B,A). Los selectores de alpha son
+  // otros que los de RGB: el carril 3 se trae de su fila con un blend (mascara 0xC0 de
+  // `_mm_blend_epi16` = los bytes 12..15 = el int de indice 3). Aritmetica entera pura,
+  // mismos valores exactos que el camino escalar de abajo, que sigue como referencia.
+  {
+    const __m128i k80 = _mm_set1_epi32(0x80), k100 = _mm_set1_epi32(0x100),
+                  k1ff = _mm_set1_epi32(0x1ff);
+    __m128i rowv[CR_ROWS];
+    auto put4 = [&](u32 r, u32 c) {
+      rowv[r] = _mm_set_epi32((int)(c & 0xff), (int)((c >> 8) & 0xff),
+                              (int)((c >> 16) & 0xff), (int)((c >> 24) & 0xff));
+    };
+    const u32 need = p.need;
+    if(need & (1u << CR_CIN))   rowv[CR_CIN] = _mm_loadu_si128((const __m128i*)combined);
+    if(need & (1u << CR_CINA))  rowv[CR_CINA]  = _mm_set1_epi32(combined[3]);
+    if(need & (1u << CR_TEX0))  put4(CR_TEX0, tex0);
+    if(need & (1u << CR_TEX1))  put4(CR_TEX1, tex1);
+    if(need & (1u << CR_PRIM))  put4(CR_PRIM, prim_color);
+    if(need & (1u << CR_SHADE)) put4(CR_SHADE, shade);
+    if(need & (1u << CR_ENV))   put4(CR_ENV, env_color);
+    if(need & (1u << CR_TEX0A)) rowv[CR_TEX0A] = _mm_set1_epi32((int)(tex0 & 0xff));
+    if(need & (1u << CR_TEX1A)) rowv[CR_TEX1A] = _mm_set1_epi32((int)(tex1 & 0xff));
+    if(need & (1u << CR_PRIMA)) rowv[CR_PRIMA] = _mm_set1_epi32((int)(prim_color & 0xff));
+    if(need & (1u << CR_SHADEA))rowv[CR_SHADEA]= _mm_set1_epi32((int)(shade & 0xff));
+    if(need & (1u << CR_ENVA))  rowv[CR_ENVA]  = _mm_set1_epi32((int)(env_color & 0xff));
+    if(need & (1u << CR_ONE))   rowv[CR_ONE]   = _mm_set1_epi32(0x100);
+    if(need & (1u << CR_ZERO))  rowv[CR_ZERO]  = _mm_setzero_si128();
+    if(need & (1u << CR_LOD))   rowv[CR_LOD]   = _mm_set1_epi32(lodFrac());
+    if(need & (1u << CR_PLOD))  rowv[CR_PLOD]  = _mm_set1_epi32((int)prim_lod_frac);
+    // special_expand vectorizado: (v-0x80) & 0x1ff, extension de signo desde el bit 8, +0x80.
+    auto sexpv = [&](__m128i v) -> __m128i {
+      __m128i x = _mm_and_si128(_mm_sub_epi32(v, k80), k1ff);
+      x = _mm_sub_epi32(_mm_xor_si128(x, k100), k100);
+      return _mm_add_epi32(x, k80);
+    };
+    auto runCycle = [&](int c) -> __m128i {
+      const u8* s = p.sel[c];
+      auto pick = [&](int i) { return _mm_blend_epi16(rowv[s[i]], rowv[s[i + 4]], 0xC0); };
+      __m128i A = sexpv(pick(0)), B = sexpv(pick(1)), C = pick(2), D = sexpv(pick(3));
+      __m128i t = _mm_mullo_epi32(_mm_sub_epi32(A, B), C);
+      return _mm_add_epi32(_mm_srai_epi32(_mm_add_epi32(t, k80), 8), D);
+    };
+    __m128i fin;
+    if(p.two) {
+      __m128i mid = runCycle(0);
+      // COMBINED del segundo ciclo = resultado CRUDO del primero (sin clamp).
+      if(need & (1u << CR_CIN))  rowv[CR_CIN]  = mid;
+      if(need & (1u << CR_CINA)) rowv[CR_CINA] = _mm_shuffle_epi32(mid, 0xff);
+      fin = runCycle(1);
+    } else {
+      fin = runCycle(1);
+    }
+    __m128i cl = sexpv(fin);
+    cl = _mm_min_epi32(_mm_max_epi32(cl, _mm_setzero_si128()), _mm_set1_epi32(255));
+    _mm_storeu_si128((__m128i*)combined, cl);
+    u32 rgba = ((u32)combined[0] << 24) | ((u32)combined[1] << 16)
+             | ((u32)combined[2] << 8)  |  (u32)combined[3];
+    combined[3] += (combined[3] + 1) >> 8;   // alpha latcheado = EXPANDIDO (0xff -> 0x100)
+    return rgba;
+  }
+#endif
+  // Filas de fuentes. Las escalares (alpha, ONE, LOD...) se replican en los 4 carriles para
+  // que el camino RGB indexe por canal y el de alpha por el carril 3 sin ramas extra.
+  int rows[CR_ROWS][4];
+  auto put4 = [&](u32 r, u32 c) {
+    rows[r][0] = (int)((c >> 24) & 0xff); rows[r][1] = (int)((c >> 16) & 0xff);
+    rows[r][2] = (int)((c >> 8)  & 0xff); rows[r][3] = (int)( c        & 0xff);
+  };
+  auto bc = [&](u32 r, int v) { rows[r][0] = rows[r][1] = rows[r][2] = rows[r][3] = v; };
+  const u32 need = p.need;
+  if(need & (1u << CR_CIN))   { for(int i = 0; i < 4; i++) rows[CR_CIN][i] = combined[i]; }
+  if(need & (1u << CR_CINA))  bc(CR_CINA, combined[3]);
+  if(need & (1u << CR_TEX0))  put4(CR_TEX0, tex0);
+  if(need & (1u << CR_TEX1))  put4(CR_TEX1, tex1);
+  if(need & (1u << CR_PRIM))  put4(CR_PRIM, prim_color);
+  if(need & (1u << CR_SHADE)) put4(CR_SHADE, shade);
+  if(need & (1u << CR_ENV))   put4(CR_ENV, env_color);
+  if(need & (1u << CR_TEX0A)) bc(CR_TEX0A, (int)(tex0 & 0xff));
+  if(need & (1u << CR_TEX1A)) bc(CR_TEX1A, (int)(tex1 & 0xff));
+  if(need & (1u << CR_PRIMA)) bc(CR_PRIMA, (int)(prim_color & 0xff));
+  if(need & (1u << CR_SHADEA))bc(CR_SHADEA,(int)(shade & 0xff));
+  if(need & (1u << CR_ENVA))  bc(CR_ENVA,  (int)(env_color & 0xff));
+  if(need & (1u << CR_ONE))   bc(CR_ONE,  0x100);
+  if(need & (1u << CR_ZERO))  bc(CR_ZERO, 0);
+  if(need & (1u << CR_LOD))   bc(CR_LOD,  lodFrac());
+  if(need & (1u << CR_PLOD))  bc(CR_PLOD, (int)prim_lod_frac);
+  // special_expand + ecuacion de 9 bits, identicas a la version generica.
+  auto sexp = [](int v) -> int { int x = (v - 0x80) & 0x1ff; if(x & 0x100) x |= ~0x1ff; return x + 0x80; };
+  auto eq = [&](int a, int b, int c, int dd) -> int {
+    a = sexp(a); b = sexp(b); dd = sexp(dd);
+    return (((a - b) * c + 0x80) >> 8) + dd;
+  };
+  auto runCycle = [&](int c, int* out) {
+    const u8* s = p.sel[c];
+    for(int i = 0; i < 3; i++)
+      out[i] = eq(rows[s[0]][i], rows[s[1]][i], rows[s[2]][i], rows[s[3]][i]);
+    out[3] = eq(rows[s[4]][3], rows[s[5]][3], rows[s[6]][3], rows[s[7]][3]);
+  };
+  int mid[4], fin[4];
+  if(p.two) {                       // 2-cycle: cycle0 (raw) -> COMBINED -> cycle1
+    runCycle(0, mid);
+    // COMBINED del segundo ciclo es el resultado CRUDO del primero, no el clampado.
+    if(need & (1u << CR_CIN))  { for(int i = 0; i < 4; i++) rows[CR_CIN][i] = mid[i]; }
+    if(need & (1u << CR_CINA)) bc(CR_CINA, mid[3]);
+    runCycle(1, fin);
+  } else {                          // 1-cycle usa la ecuacion del segundo ciclo
+    runCycle(1, fin);
+  }
+  auto clampN = [&](int v) -> int { int x = sexp(v); return x < 0 ? 0 : x > 255 ? 255 : x; };
+  for(int i = 0; i < 4; i++) combined[i] = clampN(fin[i]);
+  u32 rgba = ((u32)combined[0] << 24) | ((u32)combined[1] << 16)
+           | ((u32)combined[2] << 8)  |  (u32)combined[3];
+  // El alpha latcheado es el EXPANDIDO: 0xff pasa a 0x100 (ver version generica).
+  combined[3] += (combined[3] + 1) >> 8;
+  return rgba;
+}
+
+auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
   // N64 color combiner — modelled on parallel-rdp (HW-exact). The RDP works in a 9-bit
   // signed fixed-point space where 0x100 == 1.0, NOT 255. Per channel the equation is
   //   out = (((A - B) * C + 0x80) >> 8) + D
@@ -942,6 +1342,17 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
+// Copia hasta `n` bytes de RDRAM a TMEM parando donde paraba el bucle byte a byte: los
+// dos limites (0x1000 en TMEM, tamano de RDRAM) son monotonos y la copia va en orden
+// ascendente, asi que recortar la cuenta una vez copia EXACTAMENTE el mismo prefijo.
+template<typename V>
+auto SoftRdp::copyRun(const V& m, u32 src, u32 dst, u32 n) -> void {
+  if(dst >= 0x1000 || src >= m.size()) return;
+  u32 lim = std::min(0x1000u - dst, (u32)(m.size() - src));
+  if(n > lim) n = lim;
+  if(n) std::memcpy(&tmem[dst], &m[src], n);
+}
+
 auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   // Copy texels from the texture image (RDRAM, ti_addr/ti_width/ti_size) into TMEM
   // at the tile's base. LOAD_TILE walks a [SL,TL]..[SH,TH] rectangle (fields in
@@ -959,7 +1370,7 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     if(block) {
       u32 count = (sh >= sl) ? (sh - sl + 1) : 1, nb = (count + 1) / 2;
       u32 dst = tl.tmem * 8, src = ti_addr + (sl >> 1);
-      for(u32 i = 0; i < nb && dst + i < 0x1000 && src + i < m.size(); i++) tmem[dst + i] = m[src + i];
+      copyRun(m, src, dst, nb);
       accountTmem(mem, nb);
     } else {
       u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2, rowBytes = tl.line * 8;
@@ -984,19 +1395,22 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   if(block) {
     u32 count = (sh >= sl) ? (sh - sl + 1) : 1;        // linear texel count
     u32 dst = tl.tmem * 8, src = ti_addr + sl * bpt, nb = count * bpt;
-    for(u32 i = 0; i < nb && dst + i < 0x1000 && src + i < m.size(); i++) tmem[dst + i] = m[src + i];
+    copyRun(m, src, dst, nb);
     accountTmem(mem, nb);
     return;
   }
   u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2;
   u32 rowBytes = tl.line * 8;
   accountTmem(mem, u64(t1 - t0 + 1) * (s1 - s0 + 1) * bpt);
-  for(u32 ty = t0; ty <= t1; ty++)
-    for(u32 tx = s0; tx <= s1; tx++) {
-      u32 src = ti_addr + (ty * ti_width + tx) * bpt;
-      u32 dst = tl.tmem * 8 + (ty - t0) * rowBytes + (tx - s0) * bpt;
-      for(u32 b = 0; b < bpt && dst + b < 0x1000 && src + b < m.size(); b++) tmem[dst + b] = m[src + b];
-    }
+  // Los texeles de una fila son contiguos en el texture image (paso `bpt`) y tambien en
+  // TMEM (paso `bpt` desde el inicio de la fila), asi que la fila entera es un solo run.
+  // Copiar byte a byte con dos comprobaciones de limite POR BYTE salia el 7 % del hilo.
+  const u32 rowRun = (s1 - s0 + 1) * bpt;
+  for(u32 ty = t0; ty <= t1; ty++) {
+    u32 src = ti_addr + (ty * ti_width + s0) * bpt;
+    u32 dst = tl.tmem * 8 + (ty - t0) * rowBytes;
+    copyRun(m, src, dst, rowRun);
+  }
 }
 
 auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {

@@ -161,8 +161,12 @@ auto dumpStats() -> void;
 
 auto init(u8* rdram, u32 size) -> bool {
   if(g) return g->ok;
+  // Por defecto SI, cuando el backend esta compilado: la GPU es el camino del emulador.
+  // KESTREL_PRDP=0 fuerza SoftRDP (lo que usan los gates deterministas y el A/B de perf).
+  // Si Vulkan no arranca esto devuelve false mas abajo y el RDP software toma el relevo
+  // solo -- no hay configuracion que dejar puesta para que una maquina sin GPU funcione.
   const char* e = std::getenv("KESTREL_PRDP");
-  if(!e || e[0] == '0') return false;               // opt-in only
+  if(e && e[0] == '0') return false;
 
   // This thread (the RDP worker) is the sole Granite driver — register it as index 0 so
   // Granite's per-thread lookups resolve instead of spamming "thread does not exist".
