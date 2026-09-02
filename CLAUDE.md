@@ -92,7 +92,11 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
 - Launch: `kestrel64.exe <rom> --mcp` (or `run_mcp.cmd`). Boots **paused** in MCP mode —
   `run_control resume` to advance CPU (`'resume'|'pause'|'reset'`, NOT `'run'`).
 - Bridge: `tools/mcp/kestrel_mcp.py`, port 9128. Tools surfaced as `mcp__kestrel64__*`.
-- Notable capabilities: `read_memory`/`write_memory` (`coherent=1` reads via CPU D-cache =
+- Notable capabilities: `controller_set`/`controller_state` (inject the player-1 pad; the
+  press lasts N **joybus polls**, not milliseconds, so it is the same number of game frames
+  at any emulator speed and the game sees a real release edge -- `KESTREL_BUTTONS` is a
+  fixed variable and `mem.write` on the pad word is overwritten by the window loop),
+  `read_memory`/`write_memory` (`coherent=1` reads via CPU D-cache =
   no STALE kernel state), `capture_framebuffer` (VI→RGBA→PNG+histogram), hotpath profiler
   (`profile_start/stop/reset`, `profile_cpu` PC-bucket 16B, `profile_rsp` IMEM-slot),
   cpu/rsp/rcp registers, disasm, breakpoints, `run_until`.

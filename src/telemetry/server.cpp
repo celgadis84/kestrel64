@@ -2,6 +2,7 @@
 #include "../core/savestate.hpp"
 #include "../core/system.hpp"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <mutex>
@@ -100,6 +101,8 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     cmdProfCpu(args, data); done();
   } else if(cmd == "prof.rsp") {
     cmdProfRsp(args, data); done();
+  } else if(cmd == "pad.set" || cmd == "pad.get") {
+    if(cmdPad(cmd, args, data)) done(); else fail(data.get("msg").asString());
   } else if(cmd == "state.save" || cmd == "state.load") {
     if(cmdState(cmd, args, data)) done(); else fail(data.get("msg").asString());
   } else {
@@ -638,6 +641,74 @@ auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
   data.set("total", (u64)s.profTotal);
   data.set("enabled", s.profOn);
   data.set("hot", list);
+}
+
+// --- pad.set / pad.get -------------------------------------------------------
+// Inyecta el mando 1 desde la red. Existe porque el estado del mando lo publica el bucle
+// de la ventana cada cuadro: escribir los botones "a pelo" por mem.write no sirve de nada,
+// el siguiente cuadro los pisa. Aqui la capa remota manda mientras le queden sondeos.
+//
+// La duracion se mide en SONDEOS del joybus del mando 1, no en milisegundos. Es la unica
+// unidad que el juego percibe: un juego que lee el mando una vez por cuadro ve `polls`
+// cuadros de pulsacion sea cual sea la velocidad a la que corra el emulador, y al agotarse
+// vuelve el mando del anfitrion, o sea que el juego ve el FLANCO DE BAJADA -- que es lo que
+// esperan los menus, y lo que una variable de entorno fija (KESTREL_BUTTONS) no puede dar.
+//
+// args: buttons  = palabra de 16 bits del mando (A=0x8000 ... C-der=0x0001, START=0x1000),
+//                  o una lista por nombre: "START,A" / "dup+z".
+//       stick_x/stick_y = -80..80 (rango analogico que reporta el mando N64).
+//       polls    = sondeos que dura; 0 = soltar ya (devuelve el mando al anfitrion),
+//                  -1 = hasta nueva orden. Por defecto 6 (~6 cuadros = una pulsacion).
+auto Server::cmdPad(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
+  Memory& m = system.memory;
+  if(cmd == "pad.get") {
+    s32 left = m.padRemotePolls.load();
+    s32 st   = m.padRemoteStick.load();
+    data.set("remote", left != 0);
+    data.set("polls_left", (s64)left);
+    data.set("buttons", (u64)(left != 0 ? m.padRemoteButtons.load() : m.padButtons));
+    data.set("stick_x", (s64)(left != 0 ? (s8)(st & 0xff) : m.padStickX));
+    data.set("stick_y", (s64)(left != 0 ? (s8)((st >> 8) & 0xff) : m.padStickY));
+    return true;
+  }
+  // Nombres tal y como los llama el SDK (CONT_*), en minusculas y sin prefijo.
+  static const struct { const char* n; u32 bit; } kNames[] = {
+    {"a",0x8000},{"b",0x4000},{"z",0x2000},{"start",0x1000},
+    {"dup",0x0800},{"ddown",0x0400},{"dleft",0x0200},{"dright",0x0100},
+    {"l",0x0020},{"r",0x0010},
+    {"cup",0x0008},{"cdown",0x0004},{"cleft",0x0002},{"cright",0x0001},
+  };
+  u32 btn = 0;
+  json::Value bv = args.get("buttons");
+  if(bv.isString()) {
+    std::string s = bv.asString(), tok;
+    for(usize i = 0; i <= s.size(); i++) {
+      char c = i < s.size() ? s[i] : ',';
+      if(c == ',' || c == '+' || c == ' ' || c == '|') {
+        if(!tok.empty()) {
+          u32 hit = 0;
+          for(auto& e : kNames) if(tok == e.n) hit = e.bit;
+          if(!hit) { data.set("msg", "pad.set: boton desconocido '" + tok + "'"); return false; }
+          btn |= hit; tok.clear();
+        }
+      } else tok += (char)std::tolower((unsigned char)c);
+    }
+  } else btn = bv.asU32() & 0xffff;
+
+  int sx = args.has("stick_x") ? args.get("stick_x").asInt() : 0;
+  int sy = args.has("stick_y") ? args.get("stick_y").asInt() : 0;
+  if(sx >  80) sx =  80; else if(sx < -80) sx = -80;
+  if(sy >  80) sy =  80; else if(sy < -80) sy = -80;
+  s32 polls = args.has("polls") ? args.get("polls").asInt() : 6;
+
+  m.padRemoteButtons.store(btn, std::memory_order_relaxed);
+  m.padRemoteStick.store(((s32)(u8)(s8)sy << 8) | (u8)(s8)sx, std::memory_order_relaxed);
+  m.padRemotePolls.store(polls, std::memory_order_release);   // publica el resto antes
+  data.set("buttons", (u64)btn);
+  data.set("stick_x", (s64)sx);
+  data.set("stick_y", (s64)sy);
+  data.set("polls", (s64)polls);
+  return true;
 }
 
 }  // namespace kestrel::telemetry

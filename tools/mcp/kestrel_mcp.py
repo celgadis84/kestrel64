@@ -160,6 +160,34 @@ def rcp_registers() -> dict:
     return data
 
 
+def controller_set(buttons="", stick_x: int = 0, stick_y: int = 0, polls: int = 6) -> dict:
+    """Press the player-1 controller from here, overriding the host keyboard/gamepad.
+
+    `buttons` is either a 16-bit word (A=0x8000 ... C-Right=0x0001, START=0x1000) or a
+    name list: "start", "a,b", "z+cup". Names: a b z start dup ddown dleft dright l r
+    cup cdown cleft cright. `stick_x`/`stick_y` are the N64's own -80..80 analog range.
+
+    `polls` is how long the press lasts, counted in joybus reads of controller 1 — not
+    milliseconds. That is the only clock the game itself sees: a game that reads the pad
+    once per frame gets `polls` frames of press whether the emulator runs at 30% or 200%
+    of real time, and when the count runs out the host pad comes back, so the game sees a
+    real release edge (what menus wait for). polls=-1 holds until the next call, polls=0
+    releases immediately.
+
+    Needed because the window loop republishes the pad every frame: writing the button
+    word with write_memory is overwritten before the game ever polls it."""
+    data, _ = query("pad.set", buttons=buttons, stick_x=int(stick_x),
+                    stick_y=int(stick_y), polls=int(polls))
+    return data
+
+
+def controller_state() -> dict:
+    """Effective player-1 pad state: whether the injected pad is driving it, how many
+    joybus polls it has left, and the button word / stick the game will read next."""
+    data, _ = query("pad.get")
+    return data
+
+
 def capture_framebuffer(path: str = "kestrel_fb.png", height: int = 240) -> dict:
     """Grab the live VI framebuffer and write it as a PNG to `path`.
 
@@ -337,6 +365,8 @@ def _serve_mcp():
     mcp.tool()(run_control)
     mcp.tool()(rcp_registers)
     mcp.tool()(rsp_registers)
+    mcp.tool()(controller_set)
+    mcp.tool()(controller_state)
     mcp.tool()(capture_framebuffer)
     mcp.tool()(breakpoint_add)
     mcp.tool()(breakpoint_del)

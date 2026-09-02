@@ -318,6 +318,17 @@ public:
   u32  padButtons = 0;
   s8   padStickX = 0, padStickY = 0;
 
+  // Mando inyectado por telemetria (MCP `pad.set`). Mientras queden sondeos el estado del
+  // mando 1 lo manda la red y no el teclado/gamepad del anfitrion: el bucle de la ventana
+  // reescribe padButtons cada cuadro, asi que sin esta capa una pulsacion inyectada se
+  // perderia antes de que el juego llegase a sondear el joybus. El contador va en SONDEOS
+  // del joybus, no en milisegundos: asi una pulsacion dura lo mismo en lockstep, en
+  // threaded y con el emulador corriendo a 30% o a 200% de tiempo real, y el juego ve un
+  // flanco de bajada de verdad (que es lo que esperan los menus). -1 = hasta nueva orden.
+  std::atomic<u32> padRemoteButtons{0};
+  std::atomic<s32> padRemoteStick{0};    // (u8)x | (u8)y << 8
+  std::atomic<s32> padRemotePolls{0};    // sondeos que quedan; 0 = apagado, -1 = infinito
+
   // Debug: a CPU store hit a physical address it should never touch (e.g. SP DMA
   // registers from a stack overflow). The CPU polls pendingTrap and halts.
   bool        pendingTrap = false;

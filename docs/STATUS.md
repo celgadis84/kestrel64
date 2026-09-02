@@ -3688,3 +3688,59 @@ Pero **no acelera**: SM64 tardaba 29,6 s con el camino en línea contra 29,31 s 
 el techo teórico de la optimización era ~0,24 % — por debajo del ruido, y el código extra
 emitido por bloque lo comía. Revertido. El diseño completo queda escrito aquí por si el reparto
 de instrucciones cambia con otro juego.
+
+## 2026-09-02 (quater) — hasta donde llega Perfect Dark ahora, y mando inyectable por MCP
+
+Con el FIFO del RDP arreglado, PD deja de estar clavado en el copyright. Medido sin tocar
+nada mas (`KESTREL_MAXFLIPS`, arranque HLE, ROM NTSC final):
+
+| tope | resultado |
+|------|-----------|
+| 200 intercambios | logo de Rare, resolucion alta (576x480) |
+| 700 | **logo de Nintendo 64 en 3D**, girando |
+| 1500 | **cinematica de intro en 3D** (interior de dataDyne), 1423 sincronizaciones de RDP en 1500 intercambios |
+| ~4000+ | **logo PERFECT DARK** y despues el **menu "Select Location"** (Game Pak 4 / Controller Pak 4) navegable |
+
+O sea: el juego arranca entero. Los `[frames]` cuadran (1500 intercambios / 2176 campos VI /
+1423 sincronizaciones), la SI sigue sondeando el joybus hasta el ultimo cuadro (antes se
+congelaba en 569 transacciones) y el mando responde.
+
+### Mando inyectable desde la telemetria (`pad.set` / `pad.get`)
+
+Para comprobar lo anterior sin nadie delante hacia falta poder pulsar botones. `KESTREL_BUTTONS`
+no sirve: es una variable fija, deja el boton pisado para siempre y un menu espera un FLANCO DE
+BAJADA. Y escribir `padButtons` por `mem.write` tampoco, porque el bucle de la ventana lo
+reescribe cada cuadro.
+
+Nuevo par de ordenes del servidor (`pad.set`, `pad.get`) y sus herramientas MCP
+(`controller_set`, `controller_state`). El mando remoto pisa al del anfitrion mientras le
+queden sondeos, y **la duracion se cuenta en sondeos del joybus del mando 1, no en
+milisegundos**: es el unico reloj que el juego percibe, asi que una pulsacion dura los mismos
+cuadros de juego con el emulador al 30 % o al 200 % de tiempo real, en lockstep o en threaded.
+`polls=-1` mantiene pulsado hasta nueva orden, `polls=0` suelta. Los botones se pueden dar como
+palabra de 16 bits o por nombre (`"start"`, `"z+cup"`, `"a,b"`).
+
+Con esto se llego al menu solo: cinco pulsaciones de START espaciadas, capturando el
+framebuffer en cada una.
+
+### Lo que se ve de diferente entre backends
+
+Mismo punto del juego, mismos cuadros:
+
+- **parallel-rdp**: limpio. Logo PERFECT DARK y menu correctos.
+- **SoftRDP**: llega al mismo sitio y el menu es legible, pero la cinematica de intro sale
+  cubierta de **lineas blancas por las aristas de los triangulos** y el fondo del menu sale
+  lavado/borroso. El logo de Nintendo 64 sale con **grietas negras** en las caras.
+
+No es una regresion de este cambio (krom regress=0, sm64 md5 sin cambio en los seis modos): es
+la frontera de accuracy que ya estaba documentada como la ultima —- cobertura/AA subpixel —-
+vista por primera vez en un juego real en vez de en una ROM de krom. parallel-rdp es el backend
+por defecto y ahi PD se ve bien, asi que esto no bloquea nada; queda apuntado como el caso de
+prueba mas util que tenemos para el rasterizador propio.
+
+### Lo que si conviene mirar despues
+
+El latido en PD dice `audio: silencio 14-17% descartadas=53550`. En SM64 el silencio esta en
+0,15-0,54 % y los descartes en 0, o sea que esto es de PD: produce audio a rafagas mas grandes
+que el colchon. No es el mismo fallo que se arreglo en el DAC del AI; es el sumidero del
+anfitrion quedandose corto con este juego.

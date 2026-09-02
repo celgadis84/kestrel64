@@ -53,6 +53,7 @@ private:
   auto cmdProfControl(const std::string& cmd, json::Value& data) -> void;
   auto cmdProfCpu(const json::Value& args, json::Value& data) -> void;
   auto cmdProfRsp(const json::Value& args, json::Value& data) -> void;
+  auto cmdPad(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
 };
 
 }  // namespace telemetry

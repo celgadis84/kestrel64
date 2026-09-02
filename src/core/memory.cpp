@@ -1381,11 +1381,23 @@ auto Memory::pifProcessJoybus() -> void {
         if(rx >= 3) { rxp[0] = 0x05; rxp[1] = 0x00;   // tipo 0x0005 (mando estandar)
                       rxp[2] = mempakPresent ? 0x01 : 0x00; }
         break;
-      case 0x01:                                      // read buttons
+      case 0x01: {                                    // read buttons
+        // El mando inyectado por telemetria pisa al del anfitrion mientras le queden
+        // sondeos, y el gasto se contabiliza AQUI (una lectura del joybus del mando 1),
+        // que es lo unico que el juego percibe como el paso del tiempo del mando.
+        u32 btn = padButtons; s8 sx = padStickX, sy = padStickY;
+        s32 left = padRemotePolls.load(std::memory_order_acquire);
+        if(left != 0 && channel == 0) {
+          btn = padRemoteButtons.load(std::memory_order_relaxed);
+          s32 st = padRemoteStick.load(std::memory_order_relaxed);
+          sx = (s8)(st & 0xff); sy = (s8)((st >> 8) & 0xff);
+          if(left > 0) padRemotePolls.store(left - 1, std::memory_order_release);
+        }
         for(int k = 0; k < rx; k++) rxp[k] = 0x00;
-        if(rx >= 2) { rxp[0] = (padButtons >> 8) & 0xff; rxp[1] = padButtons & 0xff; }
-        if(rx >= 4) { rxp[2] = (u8)padStickX; rxp[3] = (u8)padStickY; }  // analog stick
+        if(rx >= 2) { rxp[0] = (btn >> 8) & 0xff; rxp[1] = btn & 0xff; }
+        if(rx >= 4) { rxp[2] = (u8)sx; rxp[3] = (u8)sy; }  // analog stick
         break;
+      }
       case 0x02:                                      // leer 32 bytes del Controller Pak
       case 0x03: {                                    // escribir 32 bytes
         // La direccion viaja como (bloque << 5) | CRC5(bloque): 11 bits de bloque de 32
