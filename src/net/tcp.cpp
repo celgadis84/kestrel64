@@ -44,7 +44,11 @@ auto TcpServer::listen(u16 port) -> bool {
   addr.sin_port = htons(port);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // 127.0.0.1 only
   if(::bind((int)sock, (sockaddr*)&addr, sizeof addr) != 0) { closesock(sock); sock = BADSOCK; return false; }
-  if(::listen((int)sock, 1) != 0) { closesock(sock); sock = BADSOCK; return false; }
+  // Cola de espera, no de uno. El servidor atiende a un cliente cada vez, y con backlog 1
+  // cualquier conexion nueva mientras el actual esta ocupado (una orden larga como
+  // cpu.run_until bloquea el unico hilo) sale rechazada con ECONNREFUSED, que parece que
+  // el emulador se ha muerto. Con la cola, el que llega espera su turno.
+  if(::listen((int)sock, 8) != 0) { closesock(sock); sock = BADSOCK; return false; }
   return true;
 }
 

@@ -3470,3 +3470,103 @@ se llega por cadena nunca recibe entrada — es cobertura, no conflicto. Detalle
 `docs/PERF-CPU.md` §20.4-20.5.
 
 Portones: gate_all 355 s, gate_prdp 298 s, ambos verdes, `nodump=0` en los dos krom.
+
+## 2026-09-02 — Perfect Dark: donde se para exactamente, y por que no es una regresion
+
+El usuario pidio arrancar Perfect Dark y ver si ya funciona. **No funciona todavia**: arranca,
+abre ventana, pinta la pantalla de copyright de Rare (capturada, 576x240, 47 colores distintos)
+y ahi se queda. Esto es lo que se ha medido, para no volver a empezar de cero.
+
+### No es una regresion de este trabajo
+
+Se construyo un binario de referencia en un worktree del commit `0f6634f` (anterior a toda la
+tanda de optimizaciones de esta sesion) y se corrio el mismo ROM con el mismo entorno:
+
+```
+actual  : 400 swaps, 2784 campos VI, 1 RDP syncs, 2177M insns, [statehash] 71b8f8a731083f52
+0f6634f : 400 swaps, 2784 campos VI, 1 RDP syncs, 2177M insns, [statehash] 71b8f8a731083f52
+```
+
+Hash de estado y cuenta de instrucciones **identicos al bit**. El paron es anterior, y ninguna
+de las optimizaciones de esta sesion lo ha causado ni lo ha empeorado.
+
+El dynarec tampoco diverge: interprete y JIT dan el mismo `[statehash]` y la misma cuenta de
+instrucciones retiradas con `KESTREL_THREADS=0`.
+
+### El 54,8 % de CPU en `0x70001930` **no** es un panico
+
+El perfilador colocaba mas de la mitad de las muestras en un bucket de 16 bytes en el fisico
+`0x1930`, que desensamblado es `sw a0,0(sp)` seguido de `beq zero,zero,.` (`1000ffff`). Leyendo
+la RDRAM viva (no el ROM: de `0x1050` en adelante el ROM lleva `libzip` comprimido y el
+desensamblado del ROM ahi es basura) y cruzandolo con `src/lib/boot.c` del decomp, esa funcion
+es `idleproc`:
+
+```c
+static void idleproc(void *data)
+{
+	while (true);
+}
+```
+
+O sea, el **hilo idle**. Que se lleve la mitad de la CPU solo significa que el juego no tiene
+nada que hacer. El sintoma real es otro.
+
+### El estado real: todo el mundo esperando
+
+El escaner de hilos (`KESTREL_THREADSCAN=1`) ya reconoce hilos de juegos con TLB y lee las
+OSThread de forma **coherente** con la D-cache; antes no veia ninguno en PD. Con eso:
+
+```
+thr id=1  pri=0   RUNNING  pc=70001938                      <- idle
+thr id=3  pri=10  WAITING  mq=8008db30 (0 de 32)            <- MAIN,  g_SchedMesgQueue
+thr id=2  pri=30  WAITING  mq=8008dc10 (0 de 8)             <- SCHED, cola de interrupciones
+thr id=4  pri=20  WAITING  mq=80091810 (0 de 8)             <- AUDIO
+thr id=6  pri=11  WAITING  mq=8008faa8 (0 de 10)            <- RESET
+thr id=5  pri=40  WAITING  mq=80094ab0 (0 de 1)             <- FAULT
+thr id=0  pri=254 WAITING  mq=80090230 (0 de 5)             <- vimgr (libultra)
+thr id=0  pri=150 WAITING  mq=80099a00 (0 de 64)            <- pimgr (libultra)
+```
+
+(prioridades segun `THREADPRI_*` de `include/constants.h` del decomp).
+
+La cadena de despertar es: interrupcion VI -> `send_mesg(OS_EVENT_VI)` -> vimgr -> retrace a los
+clientes -> `osSched` -> `g_SchedMesgQueue` -> hilo MAIN. Las interrupciones VI **si** llegan y
+**si** se reconocen: `KESTREL_VILOG=1` cuenta 449 escrituras de `VI_CURRENT` (el ACK que hace
+`exceptasm.s` justo antes de `send_mesg 0x38`) en 520 campos. Y `mi_intr=00` al final confirma
+que nada queda pendiente sin atender.
+
+Con las colas vacias no se puede distinguir «nunca se envio» de «se envio y se consumio», asi
+que el siguiente paso es instrumentar `send_mesg`/`osRecvMesg` por direccion, no seguir mirando
+el estado final.
+
+### Lo demas que se sabe
+
+- RCP parado y limpio: `sp_status=00000203` (HALT|BROKE|SIG2 = tarea terminada), `rspRun=0`,
+  `dpc_status=00000000`. Solo **1 RDP sync** en 400 swaps: despues del primer cuadro no se
+  vuelve a mandar trabajo al RDP.
+- `[exchist] Int(0)=11071 CpU(11)=4`. Los dos **AdEL** que salian antes eran **falsa alarma
+  auto-infligida**: los provocaba el propio volcado de hilos del emulador. Su lambda `rd`
+  llamaba a `read32()`, que lanza la excepcion de verdad -- `takeException` ya ha escrito
+  EPC/Cause/BadVAddr para cuando el volcado vuelve a poner `memAbort=false` --, y el bucle
+  que sondea las dos bases (`0x80000000` y `0x70000000`) fallaba a proposito en una de ellas.
+  `badv` coincidia bit a bit con `base+0x463e4` y `base+0x463f0`, las dos direcciones del
+  walker. Arreglado: la lectura va por `probing=true` (translate sin efectos secundarios,
+  `~0` si no traduce) + `peekPhysCoherent`. `[exchist]` queda limpio y el `[statehash]` no
+  cambia. Ademas era un bug de verdad: el volcado corrompia EPC/Cause/BadVAddr del guest.
+- La Expansion Pak esta puesta (`RDRAM_SIZE_EXPANDED`, 8 MB) y `osMemSize` en `0x318` lleva el
+  tamano real, asi que no es el chequeo de memoria de PD.
+- El apano del CIC-6105 (`*(0xA00002E8) = 0xC86E2000`) sigue haciendo falta mientras el IPL3 LLE
+  no este; sin el PD no pasa del cargador.
+
+### Herramientas arregladas por el camino
+
+- `KESTREL_THREADSCAN` leia la RDRAM cruda: el estado de las OSThread salia de hace varios
+  cambios de contexto (aparecian dos hilos en RUNNING a la vez). Ahora lee por
+  `peekPhysCoherent`, o sea a traves de la D-cache write-back de la CPU.
+- El mismo escaner exigia punteros y PC guardados en KSEG0, asi que era ciego justo en los
+  juegos con TLB, y descartaba `id == 0`, que es como se registran los hilos que crea la propia
+  libultra (vimgr, pimgr) — los dos primeros eslabones de la cadena de retrace.
+- El servidor de telemetria escuchaba con `listen(sock, 1)`. Atiende a un cliente cada vez, asi
+  que una orden larga (`cpu.run_until` con timeout grande) bloquea el unico hilo y **rechaza**
+  las conexiones siguientes: parece que el emulador se ha caido cuando solo esta ocupado.
+  Backlog a 8: el que llega espera turno.

@@ -633,7 +633,23 @@ auto CPU::unimplemented(u32 op) -> void {
       std::fflush(stderr);
     }
     if(mem && envFlag("KESTREL_THREADS", true)) {   // walk libultra all-threads list (tlnext)
-      auto rd = [&](u32 va){ memAbort=false; u32 v=read32(va); memAbort=false; return v; };
+      // Lectura de depuracion: NUNCA por read32(). read32 lanza la excepcion de verdad
+      // -- takeException ya ha escrito EPC/Cause/BadVAddr cuando volvemos a poner
+      // memAbort=false -- asi que sondear una base que no existe, justo lo que hace el
+      // bucle de las dos bases de abajo, corrompia el estado del guest y ensuciaba
+      // [exchist] con AdEL fantasma que parecian un fallo del juego. Con probing=true
+      // translate() no tiene efectos secundarios y devuelve ~0 si no traduce; la lectura
+      // va por la D-cache para no ensenar RDRAM rancia detras de una linea sucia.
+      auto rd = [&](u32 va) -> u32 {
+        bool sv = probing; probing = true;
+        u64 ph = translate(sext32(va), AccRead);
+        probing = sv;
+        if(ph == ~0ull) return 0;
+        u32 p = (u32)ph;
+        if((usize)p + 3 >= mem->rdram.size()) return 0;
+        return ((u32)peekPhysCoherent(p)<<24)   | ((u32)peekPhysCoherent(p+1)<<16)
+             | ((u32)peekPhysCoherent(p+2)<<8)  |  (u32)peekPhysCoherent(p+3);
+      };
       const char* sn[]={"?","STOPPED","RUNNABLE","RUNNING","4","WAITING","6","7","8"};
       // .lib globals have KSEG0 VMA 0x8004xxxx but the game runs it TLB-mapped at 0x7000xxxx;
       // probe both bases and use whichever yields a sane tail pointer.
@@ -656,27 +672,43 @@ auto CPU::unimplemented(u32 op) -> void {
       // que es lo unico que importa cuando la maquina se queda sin hilo ejecutable.
       if(std::getenv("KESTREL_THREADSCAN")) {
         const auto& ram = mem->rdram;
+        // Coherente a proposito: libultra escribe las OSThread por KSEG0, asi que el
+        // estado recien cambiado puede vivir todavia en una linea sucia del D-cache.
+        // Leer la RDRAM cruda ensenaba el estado de hace varios cambios de contexto.
         auto p32 = [&](u32 p) -> u32 { if((usize)p + 3 >= ram.size()) return 0;
-          return ((u32)ram[p]<<24)|((u32)ram[p+1]<<16)|((u32)ram[p+2]<<8)|ram[p+3]; };
-        auto ptrOk = [&](u32 v) { return v == 0 || ((v >> 24) == 0x80 && (v & 0x1fffffff) + 0x1b0 < ram.size()); };
+          return ((u32)peekPhysCoherent(p)<<24)   | ((u32)peekPhysCoherent(p+1)<<16)
+               | ((u32)peekPhysCoherent(p+2)<<8)  |  (u32)peekPhysCoherent(p+3); };
+        // Los punteros de una OSThread apuntan o bien a KSEG0 (0x8xxxxxxx) o bien al
+        // segmento que el juego mapea por TLB (Perfect Dark corre su codigo y guarda sus
+        // contextos en 0x70000000). Aceptar solo KSEG0 dejaba el escaneo ciego justo en
+        // los juegos con TLB, que son los que mas falta hacen depurar.
+        auto ptrOk = [&](u32 v) {
+          if(v == 0) return true;
+          if((v >> 24) == 0x80) return (v & 0x1fffffff) + 0x1b0 < ram.size();
+          return (v >> 28) == 7;   // segmento mapeado por TLB
+        };
+        auto codeOk = [&](u32 v) { return !(v & 3) && ((v >> 24) == 0x80 || (v >> 28) == 7); };
         int found = 0;
         for(u32 p = 0; p + 0x200 < (u32)ram.size() && found < 24; p += 8) {
           u32 pri = p32(p + 0x04), st = p32(p + 0x10) >> 16, id = p32(p + 0x14);
-          if(pri > 255 || id == 0 || id > 64) continue;
+          // id==0 es legitimo: los hilos que crea la propia libultra (vimgr, pimgr)
+          // se registran con id 0, y son justo los que hay que ver cuando el juego se
+          // queda esperando un retrace que no llega.
+          if(pri > 255 || id > 64) continue;
           if(st != 1 && st != 2 && st != 4 && st != 8) continue;
           if(!ptrOk(p32(p + 0x00)) || !ptrOk(p32(p + 0x0c)) || !ptrOk(p32(p + 0x08))) continue;
           // El desplazamiento exacto de context.pc depende de como quede alineado el
           // contexto (u64 por registro), asi que se aceptan las dos posiciones vistas.
           u32 pcA = p32(p + 0x118), pcB = p32(p + 0x11c);
-          u32 tpc = ((pcA >> 24) == 0x80 && !(pcA & 3)) ? pcA : pcB;
-          if((tpc >> 24) != 0x80 || (tpc & 3)) continue;
+          u32 tpc = codeOk(pcA) ? pcA : pcB;
+          if(!codeOk(tpc)) continue;
           const char* sn = st==1?"STOPPED":st==2?"RUNNABLE":st==4?"RUNNING":"WAITING";
           u32 q = p32(p + 0x08);
           std::fprintf(stderr, "  [scan] thr@%08x id=%u pri=%u %s pc=%08x ra=%08x sp=%08x mq=%08x",
                        0x80000000u + p, id, pri, sn, tpc, p32(p + 0x104), p32(p + 0xf4), q);
           if(q && (q >> 24) == 0x80) {          // OSMesgQueue: validCount +8, msgCount +0x10
             u32 qp = q & 0x1fffffff;
-            std::fprintf(stderr, " (mensajes %u de %u)", p32(qp + 0x08), p32(qp + 0x10));
+            std::fprintf(stderr, " (mensajes %d de %d)", (s32)p32(qp + 0x08), (s32)p32(qp + 0x10));
           }
           std::fprintf(stderr, "\n");
           found++;
