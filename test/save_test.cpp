@@ -4,6 +4,8 @@
 // command state machine. EEPROM is validated end-to-end by SM64 boot, not here.
 #include "../src/core/memory.hpp"
 #include <cstdio>
+#include <cstring>
+#include <memory>
 
 using namespace kestrel;
 
@@ -26,7 +28,9 @@ static void useType(Memory& m, Memory::SaveType t) {
 }
 
 int main() {
-  Memory m;
+  // Memory ya no cabe varias veces en la pila de Windows (1 MB): todas al monton.
+  auto mp = std::make_unique<Memory>();
+  Memory& m = *mp;
   m.reset(/*expansionPak=*/true);   // sizes RDRAM etc.; rom stays empty
 
   std::printf("SRAM 256k linear round-trip:\n");
@@ -85,7 +89,8 @@ int main() {
   {
     const char* romp = "save_test_tmp.z64";   // → save_test_tmp.sra beside it
     std::remove("save_test_tmp.sra");
-    Memory a;
+    auto ap = std::make_unique<Memory>();
+    Memory& a = *ap;
     a.reset(true);
     useType(a, Memory::SaveType::Sram256k);
     a.attachSaveFile(romp);                    // no file yet → backing stays zero
@@ -93,13 +98,178 @@ int main() {
     chk("pre-flush dirty", a.saveDirty ? 1 : 0, 1);
     a.flushSaveFile();                          // writes save_test_tmp.sra
 
-    Memory b;
+    auto bp = std::make_unique<Memory>();
+    Memory& b = *bp;
     b.reset(true);
     useType(b, Memory::SaveType::Sram256k);
     b.attachSaveFile(romp);                    // loads the .sra written above
     chk("reloaded word @0x40", b.read32(SAVE + 0x40), 0xCAFEF00D);
     chk("untouched byte @0", b.read8(SAVE + 0), 0x00);
     std::remove("save_test_tmp.sra");
+  }
+
+
+  // --- Controller Pak (joybus, canal 0) --------------------------------------
+  // Se conduce por el camino REAL: bloque de ordenes en RDRAM -> SI DMA a PIF RAM ->
+  // pifProcessJoybus -> SI DMA de vuelta, igual que hace __osContRamRead. Los dos CRC se
+  // recalculan aqui a partir del codigo del SDK, no se reusa el del emulador: si ambos
+  // estuvieran mal a la vez el test no valdria nada.
+  std::printf("\nController Pak:\n");
+  {
+    auto addrCrc = [](u16 a) {                       // __osContAddressCrc
+      u8 t = 0;
+      for(int i = 0; i < 16; i++) {
+        u8 t2 = (t & 0x10) ? 21 : 0;
+        t = (u8)(t << 1); t |= (u8)((a & 0x400) ? 1 : 0); a = (u16)(a << 1); t ^= t2;
+      }
+      return (u8)(t & 0x1f);
+    };
+    auto dataCrc = [](const u8* d) {                 // __osContDataCrc
+      u8 t = 0;
+      for(int i = 0; i <= 32; i++) {
+        for(int j = 7; j >= 0; j--) {
+          u8 t2 = (t & 0x80) ? 133 : 0;
+          t = (u8)(t << 1);
+          if(i != 32) t |= (u8)((d[i] & (1 << j)) ? 1 : 0);
+          t ^= t2;
+        }
+      }
+      return t;
+    };
+
+    auto pp = std::make_unique<Memory>();
+    Memory& m = *pp;
+    m.reset(true);
+    chk("pak presente", m.mempakPresent ? 1 : 0, 1);
+    chk("tamano del pak", (u32)m.mempak.size(), 32 * 1024);
+
+    // El pak sale formateado: bloque de ID (1/3/4/6) con las dos sumas buenas y deviceid
+    // impar, que es lo que mira __osGetId antes de dar el pak por utilizable.
+    for(int blk : {1, 3, 4, 6}) {
+      const u8* id = &m.mempak[blk * 32];
+      u16 sum = 0, isum = 0;
+      for(int j = 0; j < 28; j += 2) {
+        u16 d = (u16)((id[j] << 8) | id[j + 1]);
+        sum = (u16)(sum + d); isum = (u16)(isum + (u16)~d);
+      }
+      char name[32];
+      std::snprintf(name, sizeof name, "ID blq %d suma", blk);
+      chk(name, (u32)((id[0x1C] << 8) | id[0x1D]), sum);
+      std::snprintf(name, sizeof name, "ID blq %d suma inv", blk);
+      chk(name, (u32)((id[0x1E] << 8) | id[0x1F]), isum);
+      std::snprintf(name, sizeof name, "ID blq %d deviceid impar", blk);
+      chk(name, (u32)(((id[0x18] << 8) | id[0x19]) & 1), 1);
+    }
+    {                                                 // suma de la tabla de inodos
+      const u8* n = &m.mempak[8 * 32];
+      u32 s = 0;
+      for(int j = 10; j < 256; j++) s = (s + n[j]) & 0xffff;
+      chk("inodos: suma", (u32)((n[0] << 8) | n[1]), s);
+      chk("inodos: pagina 5 libre", (u32)((n[10] << 8) | n[11]), 3);
+      chk("inodos: copia igual", (u32)std::memcmp(&m.mempak[8 * 32], &m.mempak[16 * 32], 256), 0);
+    }
+
+    // Ejecuta un bloque de ordenes joybus y devuelve la RDRAM ya releida.
+    const u32 CMDBUF = 0x1000;
+    auto run = [&](const u8* blockIn, u32 n) {
+      for(u32 i = 0; i < 64; i++) m.rdram[CMDBUF + i] = i < n ? blockIn[i] : 0x00;
+      m.write32(0xA480'0000, CMDBUF);                 // SI_DRAM_ADDR
+      m.write32(0xA480'0010, 0);                      // RDRAM -> PIF (ejecuta)
+      m.write32(0xA480'0004, 0);                      // PIF -> RDRAM (respuesta)
+    };
+
+    {                                                 // estado: tipo 0x0005 y pak dentro
+      u8 blk[8] = { 1, 3, 0x00, 0xff, 0xff, 0xff, 0xfe, 0 };
+      run(blk, 8);
+      chk("estado: tipo alto", m.rdram[CMDBUF + 3], 0x05);
+      chk("estado: tipo bajo", m.rdram[CMDBUF + 4], 0x00);
+      chk("estado: CONT_CARD_ON", m.rdram[CMDBUF + 5], 0x01);
+    }
+
+    const u16 block = 40;                             // primera pagina de datos
+    u8 payload[32];
+    for(int k = 0; k < 32; k++) payload[k] = (u8)(0xA0 + k);
+    {                                                 // escritura: la respuesta es el CRC
+      u8 blk[64] = {0};
+      u16 wire = (u16)((block << 5) | addrCrc(block));
+      blk[0] = 35; blk[1] = 1; blk[2] = 0x03;
+      blk[3] = (u8)(wire >> 8); blk[4] = (u8)wire;
+      for(int k = 0; k < 32; k++) blk[5 + k] = payload[k];
+      blk[38] = 0xfe;
+      run(blk, 39);
+      chk("escritura: CRC de datos", m.rdram[CMDBUF + 37], dataCrc(payload));
+      chk("escritura: sin bit de ausente", (u32)(m.rdram[CMDBUF + 1] & 0xc0), 0);
+      chk("escritura: llega al pak", (u32)std::memcmp(&m.mempak[block * 32], payload, 32), 0);
+      chk("escritura: marca sucio", m.mempakDirty ? 1 : 0, 1);
+    }
+    {                                                 // lectura: 32 bytes + CRC
+      u8 blk[64] = {0};
+      u16 wire = (u16)((block << 5) | addrCrc(block));
+      blk[0] = 3; blk[1] = 33; blk[2] = 0x02;
+      blk[3] = (u8)(wire >> 8); blk[4] = (u8)wire;
+      blk[38] = 0xfe;
+      run(blk, 39);
+      chk("lectura: datos", (u32)std::memcmp(&m.rdram[CMDBUF + 5], payload, 32), 0);
+      chk("lectura: CRC de datos", m.rdram[CMDBUF + 37], dataCrc(payload));
+      chk("lectura: sin bit de ausente", (u32)(m.rdram[CMDBUF + 1] & 0xc0), 0);
+    }
+    {                                                 // ventana del Rumble: fuera del pak
+      u16 rb = 0x400;                                 // byte 0x8000
+      u8 blk[64] = {0};
+      u16 wire = (u16)((rb << 5) | addrCrc(rb));
+      blk[0] = 3; blk[1] = 33; blk[2] = 0x02;
+      blk[3] = (u8)(wire >> 8); blk[4] = (u8)wire;
+      blk[38] = 0xfe;
+      run(blk, 39);
+      u32 nz = 0;
+      for(int k = 0; k < 32; k++) nz += m.rdram[CMDBUF + 5 + k];
+      chk("fuera de rango: ceros", nz, 0);
+    }
+
+    // Sin pak enchufado el mando responde igual pero con el CRC INVERTIDO: asi es como
+    // __osContRamRead se entera y pasa a preguntar el estado del canal.
+    {
+      auto np = std::make_unique<Memory>();
+      Memory& n = *np;
+      n.mempakPresent = false;
+      n.reset(true);
+      chk("sin pak: memoria vacia", (u32)n.mempak.size(), 0);
+      u8 blk[64] = {0};
+      u16 wire = (u16)((block << 5) | addrCrc(block));
+      blk[0] = 3; blk[1] = 33; blk[2] = 0x02;
+      blk[3] = (u8)(wire >> 8); blk[4] = (u8)wire;
+      blk[38] = 0xfe;
+      for(u32 i = 0; i < 64; i++) n.rdram[CMDBUF + i] = i < 39 ? blk[i] : 0x00;
+      n.write32(0xA480'0000, CMDBUF);
+      n.write32(0xA480'0010, 0);
+      n.write32(0xA480'0004, 0);
+      u8 zeros[32] = {0};
+      chk("sin pak: CRC invertido", n.rdram[CMDBUF + 37], (u8)~dataCrc(zeros));
+      u8 st[8] = { 1, 3, 0x00, 0xff, 0xff, 0xff, 0xfe, 0 };
+      for(u32 i = 0; i < 64; i++) n.rdram[CMDBUF + i] = i < 8 ? st[i] : 0x00;
+      n.write32(0xA480'0000, CMDBUF);
+      n.write32(0xA480'0010, 0);
+      n.write32(0xA480'0004, 0);
+      chk("sin pak: CONT_CARD_ON a cero", n.rdram[CMDBUF + 5], 0x00);
+    }
+
+    // Persistencia: el .mpk va aparte del save de la cartuchera y sobrevive al apagado.
+    {
+      const char* romp = "save_test_tmp.z64";
+      std::remove("save_test_tmp.mpk");
+      m.attachSaveFile(romp);      // sin fichero: el pak formateado se queda como esta
+      chk("escritura: sigue en el pak", (u32)std::memcmp(&m.mempak[block * 32], payload, 32), 0);
+      m.mempakDirty = true;
+      m.flushSaveFile();
+
+      auto qp = std::make_unique<Memory>();
+      Memory& q = *qp;
+      q.reset(true);
+      q.attachSaveFile(romp);
+      chk("recargado del .mpk", (u32)std::memcmp(&q.mempak[block * 32], payload, 32), 0);
+      std::remove("save_test_tmp.mpk");
+      std::remove("save_test_tmp.sra");
+    }
   }
 
   std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);

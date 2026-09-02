@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string_view>
 #ifdef _WIN32
 #include <windows.h>
@@ -68,6 +69,9 @@ enum : u32 {
   BASE_SI     = 0x0480'0000,
 };
 
+// Definido mas abajo, junto al resto del Controller Pak; reset() lo necesita antes.
+static auto mempakFormat(std::vector<u8>& p) -> void;
+
 auto Memory::reset(bool expansionPak) -> void {
   rdram.assign(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000, 0);
   dmem.assign(DMEM_SIZE, 0);
@@ -80,6 +84,10 @@ auto Memory::reset(bool expansionPak) -> void {
   if(!isEeprom() && saveType != SaveType::None && saveRam.empty())
     saveRam.assign(saveSize(), isFlash() ? 0xFF : 0x00);
   flashMode = FlashMode::Status;
+  // El Controller Pak es del MANDO, no de la cartuchera: se enchufa siempre salvo que se
+  // pida lo contrario (algun juego mira si hay pak para ofrecer el Rumble en su sitio).
+  if(const char* m = std::getenv("KESTREL_MEMPAK")) mempakPresent = m[0] != '0';
+  if(mempakPresent && mempak.empty()) mempakFormat(mempak);
   if(const char* b = std::getenv("KESTREL_BUTTONS")) padButtons = (u32)strtoul(b, nullptr, 16);
   initMap();
 }
@@ -114,45 +122,130 @@ auto Memory::saveSize() const -> u32 {
   }
 }
 
-// Mirror the battery/flash backing to a file beside the ROM. The extension follows the
-// mupen/ares convention so saves are interchangeable: .eep (EEPROM), .sra (SRAM), .fla
-// (FlashRAM). The path is the ROM path with its extension replaced.
-auto Memory::attachSaveFile(const std::string& romPath) -> void {
-  saveFilePath.clear();
-  if(saveType == SaveType::None) return;
-  const char* ext = isEeprom() ? ".eep" : isFlash() ? ".fla" : ".sra";
+// Path of the ROM with its extension replaced. Only an extension belonging to the final
+// path component is stripped, so a directory with a dot in it stays intact.
+static auto withExt(const std::string& romPath, const char* ext) -> std::string {
   usize dot = romPath.find_last_of('.');
   usize slash = romPath.find_last_of("/\\");
-  // Only strip an extension that belongs to the final path component.
   if(dot == std::string::npos || (slash != std::string::npos && dot < slash))
-    saveFilePath = romPath + ext;
-  else
-    saveFilePath = romPath.substr(0, dot) + ext;
+    return romPath + ext;
+  return romPath.substr(0, dot) + ext;
+}
 
-  std::vector<u8>* back = isEeprom() ? &eeprom : &saveRam;
-  if(FILE* f = std::fopen(saveFilePath.c_str(), "rb")) {
-    std::fseek(f, 0, SEEK_END);
-    long n = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    if(n > 0) {
-      usize want = saveSize();
-      usize rd = (usize)n < want ? (usize)n : want;   // tolerate short/long files
-      if(back->size() < want) back->resize(want, isFlash() ? 0xFF : 0x00);
-      std::fread(back->data(), 1, rd, f);
-      std::printf("[save] loaded %s (%zu bytes)\n", saveFilePath.c_str(), rd);
-    }
+// Carga un respaldo de disco sobre una memoria YA dimensionada; tolera ficheros cortos o
+// largos (se lee lo que quepa) y no toca nada si el fichero no existe.
+static auto loadInto(const std::string& path, std::vector<u8>& back, const char* what) -> void {
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if(!f) return;
+  std::fseek(f, 0, SEEK_END);
+  long n = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+  if(n > 0) {
+    usize rd = (usize)n < back.size() ? (usize)n : back.size();
+    std::fread(back.data(), 1, rd, f);
+    std::printf("[%s] loaded %s (%zu bytes)\n", what, path.c_str(), rd);
+  }
+  std::fclose(f);
+}
+
+static auto storeFrom(const std::string& path, const std::vector<u8>& back) -> void {
+  if(path.empty() || back.empty()) return;
+  if(FILE* f = std::fopen(path.c_str(), "wb")) {
+    std::fwrite(back.data(), 1, back.size(), f);
     std::fclose(f);
   }
 }
 
-auto Memory::flushSaveFile() const -> void {
-  if(saveFilePath.empty() || saveType == SaveType::None || !saveDirty) return;
-  const std::vector<u8>& back = isEeprom() ? eeprom : saveRam;
-  if(back.empty()) return;
-  if(FILE* f = std::fopen(saveFilePath.c_str(), "wb")) {
-    std::fwrite(back.data(), 1, back.size(), f);
-    std::fclose(f);
+// --- Controller Pak ----------------------------------------------------------
+// CRC de direccion (5 bits) y de datos (8 bits) del protocolo joybus, portados de
+// __osContAddressCrc / __osContDataCrc del SDK. El juego los comprueba en CADA bloque:
+// si el CRC de datos no cuadra reintenta tres veces y luego pregunta el estado del pak,
+// asi que devolverlos mal equivale a un pak roto.
+static auto mempakAddrCrc(u16 blockAddr) -> u8 {
+  u8 crc = 0;
+  for(int i = 0; i < 16; i++) {
+    u8 poly = (crc & 0x10) ? 0x15 : 0x00;
+    crc = (u8)((crc << 1) | (u8)((blockAddr & 0x400) ? 1 : 0));
+    blockAddr = (u16)(blockAddr << 1);
+    crc ^= poly;
   }
+  return crc & 0x1f;
+}
+
+// 33 vueltas, no 32: la ultima mete un byte de ceros por la derecha (el resto del CRC).
+static auto mempakDataCrc(const u8* data) -> u8 {
+  u8 crc = 0;
+  for(int i = 0; i <= 32; i++) {
+    for(int j = 7; j >= 0; j--) {
+      u8 poly = (crc & 0x80) ? 0x85 : 0x00;
+      crc = (u8)(crc << 1);
+      if(i != 32) crc |= (u8)((data[i] & (1 << j)) ? 1 : 0);
+      crc ^= poly;
+    }
+  }
+  return crc;
+}
+
+// Un pak sale de fabrica FORMATEADO, y osPfsInitPak lo da por inservible si no lo esta
+// (bloque de ID con suma mala -> __osCheckPackId -> PFS_ERR_ID_FATAL). Se construye aqui
+// el mismo contenido que deja osPfsReFormat: bloque de ID por cuadruplicado en los bloques
+// 1/3/4/6, tabla de inodos en el 8 con su copia en el 16, y directorio (bloque 24, 16
+// bloques) a cero. Bloques de 32 bytes, todo big-endian.
+static auto mempakFormat(std::vector<u8>& p) -> void {
+  p.assign(32 * 1024, 0);
+  auto be16 = [](u8* q, u16 v) { q[0] = (u8)(v >> 8); q[1] = (u8)v; };
+  auto be32 = [](u8* q, u32 v) {
+    q[0] = (u8)(v >> 24); q[1] = (u8)(v >> 16); q[2] = (u8)(v >> 8); q[3] = (u8)v;
+  };
+
+  u8 id[32] = {0};                       // __OSPackId
+  be32(id + 0x00, 0);                    // repaired: nunca reparado
+  be32(id + 0x04, 0x4b657374);           // random: sello del pak, cualquier valor sirve
+  be16(id + 0x18, 1);                    // deviceid: __osGetId exige el bit 0 puesto
+  id[0x1A] = 1;                          // banks: 32 KiB = un banco
+  id[0x1B] = 0;                          // version
+  u16 sum = 0, isum = 0;                 // __osIdCheckSum: 14 medias palabras
+  for(int j = 0; j < 28; j += 2) {
+    u16 d = (u16)((id[j] << 8) | id[j + 1]);
+    sum = (u16)(sum + d); isum = (u16)(isum + (u16)~d);
+  }
+  be16(id + 0x1C, sum); be16(id + 0x1E, isum);
+  for(int b : {1, 3, 4, 6}) std::memcpy(&p[(usize)b * 32], id, 32);
+
+  u8 inode[256] = {0};                   // __OSInode: 128 entradas de media palabra
+  const int startPage = 5;               // banks * 2 + 3
+  for(int j = startPage; j < 128; j++) be16(inode + j * 2, 3);   // PFS_PAGE_NOT_USED
+  u32 s = 0;                             // __osSumcalc sobre el resto de la tabla
+  for(int j = startPage * 2; j < 256; j++) s = (s + inode[j]) & 0xffff;
+  be16(inode + 0, (u16)s);
+  std::memcpy(&p[8 * 32], inode, 256);   // inode_table
+  std::memcpy(&p[16 * 32], inode, 256);  // minode_table (copia de respaldo)
+}
+
+// Mirror the battery/flash backing to a file beside the ROM. The extension follows the
+// mupen/ares convention so saves are interchangeable: .eep (EEPROM), .sra (SRAM), .fla
+// (FlashRAM), .mpk (Controller Pak). The path is the ROM path with its extension replaced.
+auto Memory::attachSaveFile(const std::string& romPath) -> void {
+  // El Controller Pak va aparte: no depende del tipo de save de la cartuchera.
+  if(mempakPresent) {
+    if(mempak.empty()) mempakFormat(mempak);
+    mempakPath = withExt(romPath, ".mpk");
+    loadInto(mempakPath, mempak, "mpk");
+  }
+
+  saveFilePath.clear();
+  if(saveType == SaveType::None) return;
+  saveFilePath = withExt(romPath, isEeprom() ? ".eep" : isFlash() ? ".fla" : ".sra");
+
+  std::vector<u8>* back = isEeprom() ? &eeprom : &saveRam;
+  if(back->size() < saveSize()) back->resize(saveSize(), isFlash() ? 0xFF : 0x00);
+  loadInto(saveFilePath, *back, "save");
+}
+
+auto Memory::flushSaveFile() const -> void {
+  if(mempakDirty) storeFrom(mempakPath, mempak);
+  if(saveFilePath.empty() || saveType == SaveType::None || !saveDirty) return;
+  storeFrom(saveFilePath, isEeprom() ? eeprom : saveRam);
 }
 
 // The backup save fitted to a cartridge (EEPROM 4k/16k, SRAM 256k/768k, FlashRAM) is
@@ -593,6 +686,12 @@ auto Memory::write64(u32 addr, u64 value) -> void {
 }
 
 // --- RCP MMIO register file --------------------------------------------------
+auto Memory::rcpReg32(u32 phys) -> u32 { return mmioRead32(phys); }
+auto Memory::rcpRegWrite32(u32 phys, u32 value) -> void {
+  watchHit(phys, 4, value, false);
+  mmioWrite32(phys, value);
+}
+
 auto Memory::mmioRead32(u32 a) -> u32 {
   u32 blk = a & 0x1ff0'0000;
   u32 off = a & 0x000f'ffff;
@@ -1230,8 +1329,8 @@ auto Memory::siDma(bool toPif) -> void {
 // padding. Any other value is a TX byte count that opens a command whose result
 // goes into the RX area; the RX-size byte carries the channel error flags.
 //
-// Emulated devices: channel 0 = standard controller (no buttons held);
-// channel 4 = 16 kbit EEPROM; every other channel reports "no device".
+// Emulated devices: channel 0 = standard controller with a Controller Pak in its slot;
+// channel 4 = EEPROM; every other channel reports "no device".
 auto Memory::pifProcessJoybus() -> void {
   static int silog = std::getenv("KESTREL_SILOG") ? 1 : 0;
   const u8 NO_DEVICE = 0x80;   // CONT_NO_RESPONSE: (rxsize & 0xC0) >> 4 = 0x8
@@ -1260,13 +1359,50 @@ auto Memory::pifProcessJoybus() -> void {
       switch(cmd) {
       case 0x00:                                      // request status / info
       case 0xFF:                                      // reset (same reply)
-        if(rx >= 3) { rxp[0] = 0x05; rxp[1] = 0x00; rxp[2] = 0x00; }  // type 0x0005, no pak
+        // Byte de estado: CONT_CARD_ON (0x01) si hay accesorio. CONT_CARD_PULL (0x02) se
+        // deja a cero a proposito -- ambos puestos significan "pak recien cambiado" y el
+        // SDK devuelve PFS_ERR_NEW_PACK, que el juego ensena como error al usuario.
+        if(rx >= 3) { rxp[0] = 0x05; rxp[1] = 0x00;   // tipo 0x0005 (mando estandar)
+                      rxp[2] = mempakPresent ? 0x01 : 0x00; }
         break;
       case 0x01:                                      // read buttons
         for(int k = 0; k < rx; k++) rxp[k] = 0x00;
         if(rx >= 2) { rxp[0] = (padButtons >> 8) & 0xff; rxp[1] = padButtons & 0xff; }
         if(rx >= 4) { rxp[2] = (u8)padStickX; rxp[3] = (u8)padStickY; }  // analog stick
         break;
+      case 0x02:                                      // leer 32 bytes del Controller Pak
+      case 0x03: {                                    // escribir 32 bytes
+        // La direccion viaja como (bloque << 5) | CRC5(bloque): 11 bits de bloque de 32
+        // bytes, o sea 64 KiB de espacio para 32 KiB de pak. Lo de arriba es la ventana
+        // del Rumble Pak (0x8000): un Controller Pak no responde nada util ahi.
+        const bool wr = cmd == 0x03;
+        u16 wire = tx >= 3 ? (u16)((pifram[txStart + 1] << 8) | pifram[txStart + 2]) : 0;
+        u16 block = (u16)(wire >> 5);
+        u32 off = (u32)block * 32;
+        u8 data[32];
+        if(wr) {
+          for(int k = 0; k < 32; k++) data[k] = (3 + k) < tx ? pifram[txStart + 3 + k] : 0;
+          if(mempakPresent && off + 32 <= mempak.size()) {
+            std::memcpy(&mempak[off], data, 32);
+            mempakDirty = true;
+          }
+        } else {
+          for(int k = 0; k < 32; k++)
+            data[k] = mempakPresent && off + k < mempak.size() ? mempak[off + k] : 0x00;
+          for(int k = 0; k < rx && k < 32; k++) rxp[k] = data[k];
+        }
+        // El CRC de datos cierra la respuesta en los dos sentidos: en la lectura cubre lo
+        // devuelto, en la escritura lo que el juego mando (asi comprueba que llego bien).
+        // Sin pak enchufado el mando devuelve el CRC INVERTIDO, que es justo como el SDK
+        // detecta la ausencia antes de ir a preguntar el estado.
+        u8 crc = mempakDataCrc(data);
+        if(!mempakPresent) crc = (u8)~crc;
+        int crcAt = wr ? 0 : 32;
+        if(rx > crcAt) rxp[crcAt] = crc;
+        if(silog && mempakAddrCrc(block) != (wire & 0x1f))
+          std::fprintf(stderr, "[silog] mempak addr CRC malo wire=0x%04x\n", wire);
+        break;
+      }
       default: absent(); break;
       }
     } else if(channel == 4) {                          // EEPROM (16 kbit)
@@ -1327,8 +1463,9 @@ auto Memory::viTick(u64 retiredNow) -> bool {
     // serializado con la emision (el scanout es la unica llamada entre hilos). No-op si
     // esta apagado. Antes practicamente no se llamaba (solo al dar la vuelta el contador).
     vrdp::frameBegin();
-    aiTick();   // el drenaje de audio va por campo, no por subtramo
   }
+  // El DAC drena por muestras, no por campos: fuera del cierre de campo, en cada subtramo.
+  aiTick(retiredNow);
   return fieldClose;
 }
 
@@ -1336,21 +1473,38 @@ auto Memory::viTick(u64 retiredNow) -> bool {
 // current buffer empties, pop it, raise MI_AI (audio DMA done) and start the
 // next. This paces the audio driver: it blocks on FIFO_FULL between buffers
 // instead of spinning in the frame builder and starving the gfx thread.
-auto Memory::aiTick() -> void {
-  if(rcp.ai_fifo_count == 0) return;
-  // Bytes played per field from the sample rate: rate = vid_clock/(dacrate+1),
-  // 4 bytes/sample (16-bit stereo), 60 fields/s. Guard against a zero dacrate.
-  u32 rate  = rcp.ai_dacrate ? (48'681'812u / (rcp.ai_dacrate + 1)) : 32'000u;
-  u32 perFld = (rate * 4u) / 60u;
-  if(perFld == 0) perFld = 1;
-  if(rcp.ai_play_remaining > perFld) { rcp.ai_play_remaining -= perFld; return; }
-  // Current buffer finished: pop it, signal AI, advance to the next.
-  rcp.ai_fifo_addr[0] = rcp.ai_fifo_addr[1];
-  rcp.ai_fifo_len[0]  = rcp.ai_fifo_len[1];
-  rcp.ai_fifo_count--;
-  raiseIntr(MI_AI);
-  rcp.ai_play_remaining = rcp.ai_fifo_count ? rcp.ai_fifo_len[0] : 0;
+auto Memory::aiTick(u64 retiredNow) -> void {
+  // El DAC del AI no va por campos, va por muestras: consume 4 bytes (16 bits estereo) cada
+  // 1/rate segundos, con rate = vid_clock/(dacrate+1). La version anterior gastaba COMO MUCHO
+  // un bufer por campo y tiraba el credito sobrante, asi que un juego que encola bufers mas
+  // cortos que un campo -- SM64 los encola a ~0.75 campos -- veia su FIFO drenar al 75% del
+  // ritmo real: se quedaba bloqueado en FIFO_FULL y generaba solo el 75% del audio que le
+  // tocaba. Eso es el audio entrecortado, y no es del sumidero del host: el guest producia de
+  // menos. Ahora el credito se acumula en el mismo reloj que todo lo demas (instrucciones
+  // retiradas) y se drenan TANTOS bufers como quepan en el tiempo transcurrido.
+  u64 delta = retiredNow > rcp.aiLastRetired ? retiredNow - rcp.aiLastRetired : 0;
+  rcp.aiLastRetired = retiredNow;
+  if(rcp.ai_fifo_count == 0) { rcp.aiAcc = 0; return; }   // en silencio no se acumula credito
+  // Un salto enorme (arranque, savestate, pausa larga) no debe vaciar la FIFO de golpe.
+  if(delta > viFieldInsns * 4) delta = viFieldInsns * 4;
+  u32 rate = rcp.ai_dacrate ? (48'681'812u / (rcp.ai_dacrate + 1)) : 32'000u;
+  u64 den  = viFieldInsns * (u64)viFieldHzMilli;      // instrucciones por segundo x1000
+  if(den == 0) return;
+  rcp.aiAcc += delta * ((u64)rate * 4ull * 1000ull);
+  u64 bytes = rcp.aiAcc / den;
+  rcp.aiAcc -= bytes * den;
+  while(bytes && rcp.ai_fifo_count) {
+    if(rcp.ai_play_remaining > bytes) { rcp.ai_play_remaining -= (u32)bytes; break; }
+    bytes -= rcp.ai_play_remaining;
+    // Bufer terminado: se saca, se avisa (MI_AI) y empieza el siguiente.
+    rcp.ai_fifo_addr[0] = rcp.ai_fifo_addr[1];
+    rcp.ai_fifo_len[0]  = rcp.ai_fifo_len[1];
+    rcp.ai_fifo_count--;
+    raiseIntr(MI_AI);
+    rcp.ai_play_remaining = rcp.ai_fifo_count ? rcp.ai_fifo_len[0] : 0;
+  }
 }
+
 
 // --- RCP threading -----------------------------------------------------------
 // Rasterize one RDP FIFO span and do the DP-done bookkeeping. Called inline on
@@ -1373,7 +1527,7 @@ auto Memory::vrdpBringUp() -> void {
 // MESG_DP_COMPLETE para siempre). De ahi que esto solo espere.
 auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
   const char* e = std::getenv("KESTREL_PRDP");
-  if(!e || e[0] == '0') return false;                 // backend no pedido: nada que esperar
+  if(e && e[0] == '0') return false;                  // SoftRDP forzado: nada que esperar
   for(u32 i = 0; i < timeoutMs; i++) {
     if(vrdp::active()) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1558,7 +1712,7 @@ auto Memory::rspAwaitIdle() -> void {
 // La holgura existe por la granularidad del dynarec: una cadena de bloques enlazados retira
 // hasta jit::kGuardMaxOps sin volver al bucle, asi que por debajo de eso el regulador no puede
 // mandar y solo generaria bloqueos inutiles.
-// Holgura por defecto: 256 K instrucciones de CPU. Con la holgura corta el freno entra tantas
+// Holgura por defecto: 1 M instrucciones de CPU. Con la holgura corta el freno entra tantas
 // veces por campo que la CPU pasa mas tiempo en el condvar que emulando, y el RSP se queda sin
 // trabajo encolado por delante; con la holgura larga el adelanto entre dominios crece hasta que
 // el hilo de CPU se come el nucleo que el worker necesita. El tope real lo sigue poniendo
@@ -1573,27 +1727,48 @@ auto Memory::rspAwaitIdle() -> void {
 // borde del despenadero: acelerar la CPU un 3% costaba 11 fps porque el adelanto acumulado
 // entre frenadas crecia con ella. Sintoma reconocible: "N64 speed: CPU" se dispara (aqui
 // 202% -> 451%) mientras el RSP se queda igual, es decir la CPU gasta lo ganado girando.
+// Recalibrado 2026-09-01, despues de acelerar otra vez el hilo de CPU (fetch fast-path,
+// MUL.S sin MXCSR, barajados del RSP en linea). AVISO DE METRICA: el "% de tiempo real" NO
+// sirve para calibrar esto, porque el numerador son CAMPOS VI emitidos y aflojar el freno
+// los infla sin hacer mas trabajo (el guest quema ciclos emulados girando a la espera del
+// RCP: es el mismo artefacto que documenta docs/PERF-CPU.md en "El regulador no se toca").
+// La medida buena es la PARED por un numero fijo de intercambios de buffer, que son los
+// fotogramas de juego que ve el jugador. SM64, 300 intercambios, min de 3 pasadas:
+//   prdp-jit:   256 K -> 4.40s (68.2 int/s)   384 K -> 4.09s (73.3)   512 K -> 3.89s (77.1)
+//               768 K -> 3.85s (77.9)         1 M -> 3.80s (78.9)
+//   threaded-jit (SoftRDP): plano dentro del ruido, 8.06s / 8.03s / 7.93s / 7.86s para
+//               256 K / 512 K / 1 M / 2 M (400 intercambios: 10.61 / 10.55 / 10.62 s).
+// O sea el codo esta en 512 K y la ganancia real es de parallel-rdp (+16% de fotogramas de
+// juego por segundo), no de SoftRDP. El despenadero de 512 K de la calibracion anterior ha
+// desaparecido: entonces el hilo de CPU se comia el nucleo del worker, y desde que rdpSubmit
+// dejo de despertar al RDP 38 K veces por segundo (docs/PERF-RCP-SYNC.md) ya no compite.
+// Segundo eje, la fidelidad: campos VI por intercambio, con lockstep como oraculo (4.09,
+// deterministico y con md5 identico). prdp-jit da 2.73 / 2.80 / 3.12 / 3.20 / 3.24 en la
+// misma serie, o sea todos por DEBAJO del oraculo y la holgura larga es la que mas se le
+// acerca. No hay canje aqui: 1 M es a la vez lo mas rapido y lo mas parecido al oraculo.
+// (SoftRDP en hilos se va al otro lado, ~9-10 campos por intercambio, pero esa desviacion
+// es del backend, no del regulador: apenas se mueve con la holgura.) Default 1 M.
 static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
-                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 262144;
+                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 1048576;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
 // Grano del permiso del regulador (ver paceAllowance). Calibrable como la holgura.
 static const u64 kPaceGrain = std::getenv("KESTREL_PACEGRAIN")
                             ? std::strtoull(std::getenv("KESTREL_PACEGRAIN"), nullptr, 0) : 1024;
 
-auto Memory::rcpPace(u64 cpuRetired) -> void {
-  if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return; }
+auto Memory::rcpPace(u64 cpuRetired) -> u32 {
+  if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return 0xFFFF'FFFFu; }
   u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
   if(!pacePrimed) {
     pacePrimed = true; paceGiveUp = false; paceWaitedNs = 0;
     paceCpu0 = cpuRetired; paceRsp0 = rspNow;
     paceEpisodes.fetch_add(1, std::memory_order_relaxed);
-    return;
+    return paceGrant(0, kPaceSlack);
   }
-  if(paceGiveUp) return;
+  if(paceGiveUp) return 0xFFFF'FFFFu;
   for(;;) {
     u64 ahead = cpuRetired - paceCpu0;
     u64 allow = ((rspNow - paceRsp0) * paceCpuNum) / paceCpuDen + kPaceSlack;
-    if(ahead <= allow) return;
+    if(ahead <= allow) return paceGrant(ahead, allow);
     paceHolds.fetch_add(1, std::memory_order_relaxed);
     auto t0 = std::chrono::steady_clock::now();
     {
@@ -1613,7 +1788,7 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
     paceBlockNs.fetch_add(dt, std::memory_order_relaxed);
     cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
     paceWaitedNs += dt;
-    if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return; }
+    if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return 0xFFFF'FFFFu; }
     u64 rspPrev = rspNow;
     rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
     // Salvavidas: si el RSP deja de avanzar (microcodigo esperando algo de la CPU, worker
@@ -1626,7 +1801,7 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
     // el contador acumulado el freno se soltaba a los 20 ms y la CPU volvia a correr al
     // 175% de la velocidad del N64 mientras el RSP iba al 61%.
     if(rspNow != rspPrev) { paceWaitedNs = 0; continue; }
-    if(paceWaitedNs > kPaceMaxWait) { paceGiveUp = true; return; }
+    if(paceWaitedNs > kPaceMaxWait) { paceGiveUp = true; return 0xFFFF'FFFFu; }
   }
 }
 
@@ -1634,11 +1809,12 @@ auto Memory::rcpPace(u64 cpuRetired) -> void {
 // consume este permiso en el camino rapido, asi que basta con volver al trampolin cuando se
 // agota: la regulacion es la misma que la de rcpPace pero se paga una llamada cada `allow`
 // ops en vez de una por bloque. Sin tarea de RSP en vuelo no hay limite.
-auto Memory::paceAllowance(u64 cpuRetired) -> u32 {
-  if(!pacePrimed || paceGiveUp || !rspBusy.load(std::memory_order_acquire)) return 0xFFFF'FFFFu;
-  u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
-  u64 allow  = ((rspNow - paceRsp0) * paceCpuNum) / paceCpuDen + kPaceSlack;
-  u64 ahead  = cpuRetired - paceCpu0;
+//
+// Toma `ahead`/`allow` YA calculados por rcpPace en vez de releer `rspBusy` y `rsp.cyclesRun`:
+// son las dos lineas que el worker del RSP reescribe sin parar, y releerlas para el permiso
+// justo despues de haberlas leido para el freno pagaba el fallo de cache compartida dos veces
+// por vuelta al trampolin.
+auto Memory::paceGrant(u64 ahead, u64 allow) -> u32 {
   u64 left   = (ahead >= allow) ? 0 : (allow - ahead);
   // Granularidad. Sin ella el permiso se encoge solo al acercarse al limite (100, 50, 20,
   // 9, 1 ...) y la cadena enlazada vuelve al trampolin cada pocas ops; cada vuelta paga dos

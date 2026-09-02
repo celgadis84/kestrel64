@@ -92,6 +92,13 @@ struct Rcp {
   u32 ai_fifo_addr[2] = {}, ai_fifo_len[2] = {};
   u32 ai_fifo_count = 0;     // buffers queued (0..2)
   u32 ai_play_remaining = 0; // bytes left in the currently playing buffer
+  // Reloj del DAC de audio. El AI no consume "un bufer por campo": consume 4 bytes por
+  // muestra a `rate` muestras/s, continuamente, asi que en un campo caben MAS de un bufer
+  // cuando el juego los encola cortos (y menos de uno cuando los encola largos). Estos dos
+  // campos llevan la cuenta en el mismo reloj que todo lo demas (instrucciones retiradas):
+  // `aiLastRetired` es la ultima marca vista y `aiAcc` el resto fraccionario, en unidades de
+  // byte*(viFieldInsns*viFieldHzMilli), para que no se pierda ni un byte por redondeo.
+  u64 aiLastRetired = 0, aiAcc = 0;
   // PI
   u32 pi_dram_addr = 0, pi_cart_addr = 0, pi_rd_len = 0, pi_wr_len = 0, pi_status = 0;
   u32 pi_bsd[8] = {};
@@ -157,6 +164,16 @@ struct Memory {
   bool        saveDirty = false;             // guest wrote the backing → worth flushing
   auto attachSaveFile(const std::string& romPath) -> void;
   auto flushSaveFile() const -> void;
+
+  // --- Controller Pak (accesorio del mando, canal 0) --------------------------
+  // 32 KiB de RAM con bateria dentro del propio mando, no de la cartuchera: existe
+  // aunque el juego no tenga save, y se guarda aparte en un .mpk (convencion mupen/ares).
+  // Se lee y escribe por joybus en bloques de 32 bytes con CRC de direccion (5 bits) y de
+  // datos (8 bits); el SDK reintenta tres veces y da el pak por ausente si el CRC falla.
+  std::vector<u8> mempak;                    // vacia hasta reset(); 32 KiB formateados
+  std::string     mempakPath;                // "" hasta que se engancha una ROM
+  bool            mempakDirty = false;       // el juego escribio: merece la pena volcarlo
+  bool            mempakPresent = true;      // KESTREL_MEMPAK=0 lo desenchufa
 
   // FlashRAM command/status state machine (PI domain 2). Reads at 0x08000000 return
   // the status/silicon-id doubleword in Status mode or array data in Read mode; the
@@ -259,8 +276,17 @@ struct Memory {
   // leer mem->rcp.mi_repeat_on (una carga de puntero mas) en cada escritura. Nulo sin CPU atada.
   u8* cpuStGuard = nullptr;
 
-  auto rcpPace(u64 cpuRetired) -> void;       // frena la CPU si adelanta al RSP en vuelo
-  auto paceAllowance(u64 cpuRetired) -> u32; // ops que quedan antes de la proxima frenada
+  // Frena la CPU si adelanta al RSP en vuelo, y DEVUELVE el permiso que le queda al camino
+  // rapido del prologo del JIT (ops de CPU antes de tener que volver a preguntar). Las dos
+  // cosas salen de los mismos dos valores -- `rspBusy` y `rsp.cyclesRun` -- y esos dos viven
+  // en lineas que el worker del RSP reescribe constantemente: leerlas es un fallo de cache
+  // compartida, no una lectura local. Por eso van juntas: antes eran dos llamadas seguidas
+  // (rcpPace + paceAllowance) que releian el mismo par de lineas. Quien no quiera el permiso
+  // ignora el retorno.
+  auto rcpPace(u64 cpuRetired) -> u32;
+ private:
+  auto paceGrant(u64 ahead, u64 allow) -> u32;   // permiso a partir de lo ya leido
+ public:
   // Publico: System espera aqui antes de abrir la ventana, porque el presentador comparte el
   // contexto Vulkan del backend. Lo LEVANTA el hilo del RDP (Granite ata su estado por hilo),
   // asi que esto solo espera; devuelve false si expira el plazo o si el backend no esta pedido.
@@ -328,6 +354,10 @@ public:
   // sondeo de medias-lineas y la interrupcion del VI midan EL MISMO tiempo. Antes habia
   // dos relojes distintos (750k por campo en el tick, 1.5625M en la lectura).
   u64 viFieldInsns = 782'000;
+  // Campos de video por segundo en mili-hercios (59.94 Hz = 59940). Lo fija System junto a
+  // viFieldInsns; el drenaje del AI lo necesita para pasar de instrucciones a segundos de
+  // guest sin meter coma flotante en una ruta que tiene que ser bit-identica entre modos.
+  u32 viFieldHzMilli = 59'940;
   // Instrucciones de CPU que le tocan por cada instruccion de RSP, en fraccion. La fija
   // System desde Clocks::rspInsnsPerCpuInsn() (3/4 con relojes de serie) y la usa el
   // regulador rcpPace: es el MISMO ratio que el interleave de Lockstep, invertido.
@@ -450,7 +480,20 @@ public:
   auto viTick(u64 retiredNow) -> bool;
   u64  viLastRetired = 0;   // posicion del VI en el tick anterior
   // --- AI drain tick (paces audio DMA FIFO), called once per field from viTick --
-  auto aiTick() -> void;
+  auto aiTick(u64 retiredNow) -> void;
+
+  // Lectura de un registro del RCP por direccion fisica YA alineada, saltando el prologo
+  // de `read32` (cart, dominio de save y el recorrido de regiones de `resolve`). Solo vale
+  // para direcciones que se sabe que son MMIO: las bases fijas de SP/DPC que lee el COP0
+  // del RSP. Mismo decodificador, mismo valor.
+  auto rcpReg32(u32 phys) -> u32;
+  // Escritura de un registro del RCP por direccion fisica YA alineada. Gemela de rcpReg32:
+  // se salta cart, dominio de save y el recorrido de regiones de `resolve`, que para las
+  // bases de SP/DPC no pueden acertar nunca. Tambien se salta la trampa KESTREL_TRAPSPREG,
+  // y eso es MEJOR senal, no peor: esa trampa busca una tienda de la CPU que se ha ido a
+  // los registros del SP (mira `storePc`, un PC de CPU, contra el rango del driver), y el
+  // MTC0 del propio RSP no es eso. El punto de observacion de `watchHit` SI se conserva.
+  auto rcpRegWrite32(u32 phys, u32 value) -> void;
 
 private:
   // Resolve a physical address to a backing pointer + remaining bytes, or nullptr.

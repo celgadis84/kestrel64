@@ -22,7 +22,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 1;
+constexpr u32 kVersion = 3;   // 3: el credito del DAC de audio (aiLastRetired/aiAcc)
 }  // namespace
 
 // Flujo de bytes bidireccional. En escritura acumula en `out`; en lectura consume `in`.
@@ -180,6 +180,7 @@ auto visitRcp(StateIO& io, Rcp& p) -> void {
   io.pod(p.ai_dacrate); io.pod(p.ai_bitrate);
   io.arr(p.ai_fifo_addr, 2); io.arr(p.ai_fifo_len, 2);
   io.pod(p.ai_fifo_count); io.pod(p.ai_play_remaining);
+  io.pod(p.aiLastRetired); io.pod(p.aiAcc);
   io.pod(p.pi_dram_addr); io.pod(p.pi_cart_addr); io.pod(p.pi_rd_len); io.pod(p.pi_wr_len);
   io.pod(p.pi_status); io.arr(p.pi_bsd, 8);
   io.pod(p.ri_mode); io.pod(p.ri_config); io.pod(p.ri_select); io.pod(p.ri_refresh);
@@ -211,6 +212,7 @@ auto visitRam(StateIO& io, Memory& m) -> void {
   io.vecBlob(m.pifram);
   io.vecBlob(m.eeprom);
   io.vecBlob(m.saveRam);
+  io.vecBlob(m.mempak);   // el pak es RAM viva: rebobinar un estado tiene que rebobinarlo
 }
 
 auto visitAll(StateIO& io, System& sys) -> void {
