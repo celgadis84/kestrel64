@@ -37,4 +37,12 @@ auto shutdown() -> void;
 // audio is disabled.
 auto enabled() -> bool;
 
+// Instantanea de hambre para el latido (KESTREL_HEARTBEAT). `silence`/`pulled` son
+// acumulados desde el arranque; `lowSince` es el minimo del anillo DESDE LA ULTIMA
+// llamada -- se rearma aqui -- porque lo que delata un corte es el colchon que hubo en
+// esa ventana, no el minimo historico (que casi siempre es 0 por el cebado inicial).
+// Devuelve false si no hay dispositivo abierto.
+auto statSnapshot(u64& pulled, u64& silence, u64& dropped,
+                  u32& level, u32& lowSince, u32& cap) -> bool;
+
 }  // namespace kestrel::audio

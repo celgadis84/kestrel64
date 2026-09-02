@@ -11,6 +11,7 @@
 // Nothing here writes emulated state, so it cannot perturb determinism.
 
 #include "audio.hpp"
+#include "../core/runtime.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -41,6 +42,9 @@ constexpr int  kBufSamples = kBufFrames * kChannels;
 // Cap the software ring so a fast (faster-than-realtime) emulator can't grow it
 // without bound; when it fills we drop the oldest, keeping latency in check.
 constexpr u32  kRingFrames = 44100 / 4;           // ~250 ms of slack
+// Colchon minimo antes de empezar (o de volver) a tocar: dos bufers de dispositivo. Menos
+// que eso y cualquier campo que tarde un poco mas de la cuenta ya se oye.
+constexpr u32  kPrimeSamples = kBufSamples * 2;
 
 struct Backend {
   std::mutex          mtx;                          // guards the ring
@@ -55,6 +59,20 @@ struct Backend {
   std::atomic<bool>  running{false};
   u32                rate = 0;
   bool               disabled = false;
+  // Cebado. El primer bufer no se manda hasta que el anillo tiene colchon: si se empieza a
+  // tocar con el anillo vacio, el dispositivo se come el arranque en silencio y ya nunca
+  // recupera ventaja, porque el hueco se rellena con ceros en vez de esperar. Tambien se
+  // vuelve a cebar despues de un hueco, para reconstruir el colchon en vez de ir dando
+  // hipidos seguidos.
+  bool               primed = false;
+
+  // Contabilidad del hambre. `KESTREL_AUDIOSTAT` la imprime al cerrar. Sin numeros, un
+  // "se oye entrecortado" no distingue entre el emulador que no produce a tiempo (hueco
+  // en el anillo) y el que produce de mas (se tira lo viejo), y el arreglo es distinto.
+  u64                statPulled = 0, statSilence = 0, statDropped = 0, statPushed = 0;
+  u64                statRefills = 0, statStarved = 0;   // recargas y cuantas salieron cortas
+  u32                statLowMark = 0xffffffffu, statHighMark = 0;
+  u32                statLowLife = 0xffffffffu;   // minimo de por vida (statLowMark se rearma por ventana)
 };
 
 Backend g;
@@ -63,31 +81,49 @@ Backend g;
 auto ringPull(s16* dst, u32 n) -> void {
   std::lock_guard<std::mutex> lk(g.mtx);
   u32 got = n < g.count ? n : g.count;
-  for(u32 i = 0; i < got; i++) {
-    dst[i] = g.ring[g.rdPos];
-    g.rdPos = (g.rdPos + 1) % g.ring.size();
-  }
+  // En dos tramos con memcpy en vez de muestra a muestra con modulo: esto corre con el
+  // mutex cogido y el que espera detras es el hilo de emulacion.
+  const u32 cap = (u32)g.ring.size();
+  u32 first = got < cap - g.rdPos ? got : cap - g.rdPos;
+  std::memcpy(dst, &g.ring[g.rdPos], first * sizeof(s16));
+  if(got > first) std::memcpy(dst + first, &g.ring[0], (got - first) * sizeof(s16));
+  g.rdPos = (g.rdPos + got) % cap;
   g.count -= got;
   for(u32 i = got; i < n; i++) dst[i] = 0;         // underrun → silence, no stall
+  g.statPulled += got; g.statSilence += (n - got);
+  g.statRefills++; if(got < n) g.statStarved++;
+  if(g.count < g.statLowMark) g.statLowMark = g.count;
+  if(g.count < g.statLowLife) g.statLowLife = g.count;
+  if(g.count > g.statHighMark) g.statHighMark = g.count;
 }
 
 auto ringPush(const s16* src, u32 n) -> void {
   std::lock_guard<std::mutex> lk(g.mtx);
   u32 cap = (u32)g.ring.size();
-  for(u32 i = 0; i < n; i++) {
-    if(g.count == cap) {                            // full: drop oldest sample
-      g.rdPos = (g.rdPos + 1) % cap;
-      g.count--;
-    }
-    g.ring[g.wrPos] = src[i];
-    g.wrPos = (g.wrPos + 1) % cap;
-    g.count++;
+  g.statPushed += n;
+  if(n >= cap) { src += n - cap; g.statDropped += n - cap; n = cap; }   // no cabe ni entero
+  if(g.count + n > cap) {                           // lleno: se tira lo mas viejo
+    u32 drop = g.count + n - cap;
+    g.rdPos = (g.rdPos + drop) % cap;
+    g.count -= drop;
+    g.statDropped += drop;
   }
+  u32 first = n < cap - g.wrPos ? n : cap - g.wrPos;
+  std::memcpy(&g.ring[g.wrPos], src, first * sizeof(s16));
+  if(n > first) std::memcpy(&g.ring[0], src + first, (n - first) * sizeof(s16));
+  g.wrPos = (g.wrPos + n) % cap;
+  g.count += n;
 }
 
 // Feeder thread: keep every finished waveOut buffer refilled and requeued.
 auto feederLoop() -> void {
   while(g.running.load(std::memory_order_acquire)) {
+    if(!g.primed) {                                  // esperando colchon: no se toca nada
+      u32 have;
+      { std::lock_guard<std::mutex> lk(g.mtx); have = g.count; }
+      if(have < kPrimeSamples) { Sleep(1); continue; }
+      g.primed = true;
+    }
     bool anyIdle = false;
     for(int i = 0; i < kNumBufs; i++) {
       if(g.hdr[i].dwFlags & WHDR_INQUEUE) continue;  // still playing
@@ -95,6 +131,8 @@ auto feederLoop() -> void {
       if(g.hdr[i].dwFlags & WHDR_PREPARED)
         waveOutUnprepareHeader(g.dev, &g.hdr[i], sizeof(WAVEHDR));
       ringPull(g.buf[i].data(), kBufSamples);
+      // Se acabo el colchon: en vez de encadenar huecos, se para y se vuelve a cebar.
+      { std::lock_guard<std::mutex> lk(g.mtx); if(g.count == 0) g.primed = false; }
       g.hdr[i] = WAVEHDR{};
       g.hdr[i].lpData = reinterpret_cast<LPSTR>(g.buf[i].data());
       g.hdr[i].dwBufferLength = kBufSamples * sizeof(s16);
@@ -125,6 +163,7 @@ auto openDevice(u32 sampleRate) -> void {
   for(int i = 0; i < kNumBufs; i++) g.buf[i].assign(kBufSamples, 0);
   g.ring.assign((size_t)kRingFrames * kChannels, 0);
   g.rdPos = g.wrPos = g.count = 0;
+  g.primed = false;
   g.rate = sampleRate;
   g.running.store(true, std::memory_order_release);
   g.feeder = std::thread(feederLoop);
@@ -132,6 +171,21 @@ auto openDevice(u32 sampleRate) -> void {
 
 auto closeDevice() -> void {
   if(!g.dev) return;
+  if(std::getenv("KESTREL_AUDIOSTAT")) {
+    // Silencio y descartes son las dos caras: hueco = el emulador llego tarde, descarte =
+    // llego de sobra y la latencia se estaba yendo. El minimo del anillo dice cuanto colchon
+    // hubo de verdad; si roza cero, el siguiente hipo ya se oye.
+    double sil = g.statPulled + g.statSilence ? 100.0 * (double)g.statSilence
+                                              / (double)(g.statPulled + g.statSilence) : 0.0;
+    std::fprintf(stderr,
+      "[audio] rate=%u empujadas=%llu servidas=%llu silencio=%llu (%.2f%%) descartadas=%llu\n"
+      "[audio] recargas=%llu cortas=%llu anillo min=%u max=%u de %u muestras\n",
+      g.rate, (unsigned long long)g.statPushed, (unsigned long long)g.statPulled,
+      (unsigned long long)g.statSilence, sil, (unsigned long long)g.statDropped,
+      (unsigned long long)g.statRefills, (unsigned long long)g.statStarved,
+      g.statLowLife == 0xffffffffu ? 0u : g.statLowLife, g.statHighMark,
+      (u32)g.ring.size());
+  }
   g.running.store(false, std::memory_order_release);
   if(g.doneEvt) SetEvent(g.doneEvt);
   if(g.feeder.joinable()) g.feeder.join();
@@ -154,6 +208,13 @@ auto init(u32 sampleRate) -> void {
   if(const char* e = std::getenv("KESTREL_AUDIO"); e && e[0] == '0') { g.disabled = true; return; }
   if(g.disabled) return;
   if(g.dev && g.rate == sampleRate) return;              // already open at this rate
+  // Reabrir el dispositivo corta el sonido, asi que un cambio de dacrate de dos duros no lo
+  // justifica: los juegos ajustan la tasa del AI en pasos minusculos (redondeo del divisor)
+  // y a menos del 1% la diferencia de tono no se oye, mientras que el corte SI.
+  if(g.dev) {
+    u32 lo = g.rate < sampleRate ? g.rate : sampleRate, hi = g.rate ^ sampleRate ^ lo;
+    if((hi - lo) * 100u <= hi) return;   // se sigue tocando a la tasa ya abierta
+  }
   if(g.dev) closeDevice();                               // rate changed → reopen
   openDevice(sampleRate);
 #else
@@ -194,9 +255,35 @@ auto pushRdram(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate) -> v
   for(u32 i = 0; i < nsamp; i++) {                       // big-endian s16 → host
     tmp[i] = (s16)((p[i * 2] << 8) | p[i * 2 + 1]);
   }
+  // Silenciar y volumen se aplican AQUI, no cerrando el dispositivo: el menu puede quitar
+  // el sonido a mitad de partida desde otro hilo, y cerrar waveOut por debajo del hilo que
+  // empuja seria una carrera. Ademas se siguen metiendo muestras (mudas) en el anillo, con
+  // lo que el colchon y las estadisticas de hambre siguen midiendo lo mismo.
+  if(!rt::audioOn.load(std::memory_order_relaxed)) {
+    std::memset(tmp.data(), 0, nsamp * sizeof(s16));
+  } else if(int vol = rt::volume.load(std::memory_order_relaxed); vol != 100) {
+    if(vol < 0) vol = 0; else if(vol > 100) vol = 100;
+    for(u32 i = 0; i < nsamp; i++) tmp[i] = (s16)((int)tmp[i] * vol / 100);
+  }
   ringPush(tmp.data(), nsamp);
 #else
   (void)base; (void)size; (void)addr; (void)len; (void)sampleRate;
+#endif
+}
+
+auto statSnapshot(u64& pulled, u64& silence, u64& dropped,
+                  u32& level, u32& lowSince, u32& cap) -> bool {
+#ifdef _WIN32
+  if(!g.dev) return false;
+  std::lock_guard<std::mutex> lk(g.mtx);
+  pulled = g.statPulled; silence = g.statSilence; dropped = g.statDropped;
+  level = g.count; cap = (u32)g.ring.size();
+  lowSince = g.statLowMark == 0xffffffffu ? g.count : g.statLowMark;
+  g.statLowMark = g.count;                 // rearmado: el minimo es POR VENTANA
+  return true;
+#else
+  (void)pulled; (void)silence; (void)dropped; (void)level; (void)lowSince; (void)cap;
+  return false;
 #endif
 }
 
