@@ -3473,6 +3473,11 @@ Portones: gate_all 355 s, gate_prdp 298 s, ambos verdes, `nodump=0` en los dos k
 
 ## 2026-09-02 — Perfect Dark: donde se para exactamente, y por que no es una regresion
 
+> **SUPERADA por la seccion "RAIZ del cuelgue de Perfect Dark" mas abajo.** El diagnostico
+> de aqui (un solo SYNC_FULL, no se vuelve a mandar trabajo al RDP) era correcto como
+> observacion pero no llegaba a la causa: el trabajo SI se mandaba, kestrel lo tiraba por
+> llegar con el RDP congelado. Se deja por el metodo, no por la conclusion.
+
 El usuario pidio arrancar Perfect Dark y ver si ya funciona. **No funciona todavia**: arranca,
 abre ventana, pinta la pantalla de copyright de Rare (capturada, 576x240, 47 colores distintos)
 y ahi se queda. Esto es lo que se ha medido, para no volver a empezar de cero.
@@ -3570,3 +3575,116 @@ el estado final.
   que una orden larga (`cpu.run_until` con timeout grande) bloquea el unico hilo y **rechaza**
   las conexiones siguientes: parece que el emulador se ha caido cuando solo esta ocupado.
   Backlog a 8: el que llega espera turno.
+
+## 2026-09-02 — RAÍZ del cuelgue de Perfect Dark: el RDP congelado perdía el FIFO
+
+Perfect Dark llevaba desde el principio pintando la pantalla de copyright de Rare y no pasando
+de ahí. El síntoma que se veía por fuera era desconcertante: la máquina **no** estaba
+bloqueada. Audio sonando, VI generando campos, SI/PI/AI/SP con sus interrupciones subiendo y
+el guest reconociéndolas todas… y **una sola interrupción DP en 68 segundos de tiempo de
+guest**. Sólo el camino gráfico estaba muerto.
+
+### Cómo se llegó
+
+El dato que rompió el caso salió de `KESTREL_RSPTRACE`, ampliado con un volcado al **final** de
+cada tarea del RSP (PC de BREAK, ciclos, cabecera OSTask, ventana DPC). Con él la traza queda
+así:
+
+```
+KICK #1 type=1 (gfx) dl=0005d968  → END pc=0x7bc ciclos=1863 → 17 spans RDP → DP intr #1
+KICK #2 type=1 (gfx) dl=0005d968  → END pc=0x7bc ciclos=1867 → CERO spans RDP → sin DP
+KICK #3..∞  type=2 (audio) para siempre
+```
+
+Las dos tareas gráficas son **idénticas**: mismo microcódigo, misma display list, mismo PC
+final, prácticamente los mismos ciclos. La primera rasteriza; la segunda no produce ni un
+píxel. Y al acabar la segunda quedaban 128 bytes de comandos RDP colgados entre
+`DPC_CURRENT` y `DPC_END`.
+
+Instrumentando **cada escritura a los registros DPC** (`KESTREL_DPSYNCLOG`, ahora también
+imprime `[dpwr]`) aparece la secuencia exacta:
+
+```
+END #1
+[dpwr] reg=0c v=00000008 st=00000000   <- SET_FREEZE  (DPC_STATUS bit 3) -> st=0x02
+KICK #2
+[dpwr] reg=04 v=0075e1a8 st=00000402   <- DPC_END ... con FREEZE puesto
+[dpwr] reg=04 ... x15    st=00000002      128 bytes de comandos, incluido el SYNC_FULL
+END #2
+[dpwr] reg=0c v=00000004 st=00000002   <- CLEAR_FREEZE, DESPUÉS de todo
+```
+
+### El bug
+
+En hardware, congelar el RDP **para** el procesador de comandos pero no descarta nada: los
+comandos siguen en el FIFO y, al limpiar FREEZE, el RDP **reanuda desde `DPC_CURRENT` hasta
+`DPC_END`**. kestrel implementaba la mitad buena (`if(!frozen)` alrededor del arranque en la
+escritura de `DPC_END`) y se dejaba la otra: **nadie volvía a arrancar el FIFO al descongelar**.
+Todo `DPC_END` que llegase congelado se perdía para siempre.
+
+El efecto en cascada explica cada síntoma observado:
+
+- sin `SYNC_FULL` retirado no hay interrupción DP;
+- sin DP, `__scHandleRDP` de libultra no corre y el planificador da el RDP por ocupado
+  eternamente: no despacha otra tarea gráfica ni manda `OS_SC_DONE_MSG`;
+- MAIN se queda clavado en el bucle de 6 retrazas del copyright;
+- el audio sigue porque va por su propia lista de tareas del RSP;
+- y **SI se congela** (569 transacciones joybus y ni una más) porque `joysTick()` cuelga del
+  mismo camino — de ahí también que el mando "no respondiera".
+
+### El arreglo
+
+`Memory::dpcAdvance()` (nuevo, `src/core/memory.cpp`) concentra el arranque del procesador de
+comandos: consume de `dpc_submitted` a `dpc_end`, marca `START_GCLK|PIPE_BUSY` y encola el
+trabajo (worker en threaded, síncrono en lockstep). Se llama desde dos sitios:
+
+1. la escritura de `DPC_END`, como siempre;
+2. **al limpiar FREEZE** en `DPC_STATUS`, si quedaba algo pendiente (`dpc_submitted != dpc_end`).
+
+Es semántica genuina del hardware, no un apaño para PD: cualquier juego que congele el RDP
+mientras reprograma tenía exactamente el mismo agujero. La contabilidad de `dpc_submitted`
+(vista del productor) ya era la correcta — sólo faltaba la reanudación.
+
+Resultado: PD encadena tareas gráficas sin parar, una interrupción DP por cuadro, completa las
+6 retrazas del copyright, intercambia búferes (origin alternando) y sigue cargando desde el
+cartucho. El cuelgue de años era esto.
+
+### Dos hipótesis descartadas por el camino (con evidencia)
+
+- **Expansion Pak**: kestrel siempre da 8 MB (`RDRAM_SIZE_EXPANDED`, `reset(expansionPak=true)`)
+  y escribe `osMemSize = 0x800000`. PD ni siquiera lee `0x80000318`: su `osGetMemSize()`
+  **sondea** RDRAM en `0xA0000000 + size` de 4 a 8 MB, y el sondeo pasa. Con arranque HLE PD
+  toma **cero** excepciones TLBL, o sea el camino de mapeo estático (8 MB), y `mainInit`
+  hardcodea `K0BASE + 8 MB`. El framebuffer enseñaba la pantalla de copyright, no un aviso.
+  **Hueco real que queda**: kestrel no tiene modo 4 MB ni interruptor. `Memory::reset(false)` ya
+  lo soporta; falta el toggle + la opción del lanzador, que es lo que otros emuladores exponen.
+- **CIC / IPL3**: `KESTREL_LLE_IPL3` ya ejecuta el IPL3 **propio del cartucho**, sea cual sea el
+  CIC — no hay que implementar chip por chip, el CIC sólo cambia semilla y hand-off. Con el
+  arreglo del hand-off de CIC-6105 (abajo) PD arranca por su IPL3 real y acaba en el **mismo**
+  estado colgado que con boot HLE, así que el CIC no tenía nada que ver.
+
+## 2026-09-02 (bis) — hand-off de CIC-6105 en el arranque LLE
+
+`KESTREL_LLE_IPL3` moría en un TLBL con los cartuchos CIC-6105 (Perfect Dark, Zelda, Banjo).
+Su IPL3 arranca con un descifrador que lee su tabla con `lw t2, 0x44(t3)`, o sea DMEM+0x84,
+justo detrás del stub: sin `t3` cargado la primera lectura va a la dirección `0x44` y el IPL3
+muere. El hand-off real de IPL2 deja `t3 = 0xA4000040` (base del propio IPL3 ya copiado en
+DMEM) y `ra = 0xA4001550`. Añadidos en `CPU::fastBoot`.
+
+Queda pendiente antes de que el camino LLE pueda ser el de por defecto: arranca el RSP con
+IMEM vacía (el volcado `KESTREL_RSPHANG` enseña IMEM a ceros y los 32 GPR del RSP a cero, y el
+mismo ROM con boot HLE no emite ni un `[rsp] WARNING`). Y hay que validarlo contra la suite
+krom, que trae IPL3 no estándar.
+
+## 2026-09-02 (ter) — COP1 simple en línea en el dynarec: MEDIDO Y REVERTIDO
+
+Se implementó el camino rápido en línea de `ADD.S`/`SUB.S`/`MUL.S` en el dynarec de la CPU
+(mismas guardas y misma aritmética que `jitCop1Alu<>`, con el trampolín de siempre como
+oráculo para todo lo que no las cumpla). Correcto: systemtest 0/3721·0/2·0/6 y los statehash
+de lockstep de SM64 y PD idénticos con y sin él a 600 M de instrucciones.
+
+Pero **no acelera**: SM64 tardaba 29,6 s con el camino en línea contra 29,31 s sin él, un 0,8 %
+*peor*. Las ALU de COP1 son ~0,7 % de las instrucciones retiradas (≥4,19 M de 600 M), así que
+el techo teórico de la optimización era ~0,24 % — por debajo del ruido, y el código extra
+emitido por bloque lo comía. Revertido. El diseño completo queda escrito aquí por si el reparto
+de instrucciones cambia con otro juego.

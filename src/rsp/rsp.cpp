@@ -1838,6 +1838,14 @@ auto Rsp::step(u64 maxInsns) -> void {
     // publishes everything the microcode wrote (DMEM output, PC) to the poller.
     if(broke) {
       broke = false;
+      static const bool tr = std::getenv("KESTREL_RSPTRACE") != nullptr;
+      if(tr) { static unsigned n = 0; n++;
+        auto dm = [&](u32 a){ a &= 0xffc;
+          return ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3]; };
+        if(n <= 8) std::fprintf(stderr,
+          "[rsp] END #%u pc=0x%03x cycles=%llu type=%u flags=%08x dl=%08x dlsz=%08x dpc=%06x..%06x\n",
+          n, mem->rcp.sp_pc, (unsigned long long)ran, dm(0xfc0), dm(0xfc4), dm(0xff0), dm(0xff4),
+          mem->rcp.dpc_current.load(), mem->rcp.dpc_end); }
       mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
       if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
     }
@@ -1845,6 +1853,29 @@ auto Rsp::step(u64 maxInsns) -> void {
   }
   if(budget == 0) {                            // microcode hang: force a break
     std::fprintf(stderr, "[rsp] WARNING: budget exhausted at pc=0x%03x (microcode hang?)\n", curpc);
+    // Volcado de la escena del crimen. Un microcodigo colgado no dice nada por si mismo: lo
+    // que hace falta es QUE tarea era (la cabecera OSTask que la CPU dejo en DMEM 0xFC0), en
+    // que instruccion gira y con que registros. Sin esto el aviso solo dice "algo va mal".
+    if(std::getenv("KESTREL_RSPHANG")) {
+      auto dm = [&](u32 a) -> u32 { a &= 0xffc;
+        return ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3]; };
+      auto im = [&](u32 a) -> u32 { a &= 0xffc;
+        return ((u32)mem->imem[a]<<24)|((u32)mem->imem[a+1]<<16)|((u32)mem->imem[a+2]<<8)|mem->imem[a+3]; };
+      std::fprintf(stderr, "[rsphang] OSTask @DMEM 0xFC0: type=%u flags=%08x ucode=%08x size=%08x\n",
+                   dm(0xfc0), dm(0xfc4), dm(0xfd0), dm(0xfd4));
+      std::fprintf(stderr, "[rsphang]   ucode_data=%08x/%08x dram_stack=%08x/%08x out_buf=%08x/%08x\n",
+                   dm(0xfd8), dm(0xfdc), dm(0xfe0), dm(0xfe4), dm(0xfe8), dm(0xfec));
+      std::fprintf(stderr, "[rsphang]   data_ptr=%08x data_size=%08x yield=%08x/%08x\n",
+                   dm(0xfc8), dm(0xfcc), dm(0xff0), dm(0xff4));
+      for(int i = 0; i < 32; i += 4)
+        std::fprintf(stderr, "[rsphang] r%-2d %08x  r%-2d %08x  r%-2d %08x  r%-2d %08x\n",
+                     i, r[i], i+1, r[i+1], i+2, r[i+2], i+3, r[i+3]);
+      for(s32 o = -8; o <= 8; o++) {
+        u32 a = (u32)(((s32)curpc + o * 4) & 0xffc);
+        std::fprintf(stderr, "[rsphang] imem %03x: %08x%s\n", a, im(a), o == 0 ? "   <-- pc" : "");
+      }
+      std::fflush(stderr);
+    }
     mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);
     if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
     running = false;

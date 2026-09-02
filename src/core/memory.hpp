@@ -508,6 +508,7 @@ private:
   auto piDma(bool toCart) -> void;   // PI: cartridge <-> RDRAM
   auto spDma(bool toRam) -> void;    // SP: DMEM/IMEM <-> RDRAM
   auto siDma(bool toPif) -> void;    // SI: PIF RAM <-> RDRAM (64 bytes)
+  auto dpcAdvance() -> void;         // DPC: consume el FIFO pendiente (END o CLEAR_FREEZE)
   auto pifProcessJoybus() -> void;   // parse PIF RAM command block, fill controller/EEPROM responses
 };
 

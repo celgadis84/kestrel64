@@ -932,7 +932,10 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x1c: rcp.sp_semaphore = 0; break;          // write clears
     }
     return;
-  case BASE_DPC & 0x1ff0'0000:
+  case BASE_DPC & 0x1ff0'0000: {
+    static const bool dpwr = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
+    if(dpwr) std::fprintf(stderr, "[dpwr] reg=%02x v=%08x st=%08x start=%06x cur=%06x end=%06x sub=%06x\n",
+                          off & 0xff, v, rcp.dpc_status.load(), rcp.dpc_start, rcp.dpc_current.load(), rcp.dpc_end, rcp.dpc_submitted);
     switch(off & 0xff) {
     case 0x00:  // DPC_START write: latch start, arm START_VALID. Ignored while START_VALID
       // already set (a pending start hasn't been consumed by an END write yet).
@@ -989,33 +992,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         if(rcpMode != RcpMode::Threaded || !rdpBusy.load(std::memory_order_acquire))
           rcp.dpc_current.store(rcp.dpc_start, std::memory_order_release);
       }
-      if(!(rcp.dpc_status & (1u << 1))) { // not frozen
-        bool xbus = rcp.dpc_status & 0x1u;   // DP_STATUS_XBUS: fetch commands from DMEM
-        // Kicking the FIFO starts the graphics clock and marks the pipe busy; both
-        // stay set until a SYNC_FULL drains the pipe (DP_STATUS "flags during a run").
-        rcp.dpc_status |= 0x8u | 0x20u;      // START_GCLK | PIPE_BUSY
-        // Se encola desde donde quedo el ULTIMO encolado, no desde CURRENT: CURRENT es
-        // ahora el avance real del rasterizador y puede ir por detras si el RDP sigue
-        // ocupado con el trabajo anterior.
-        u32 cur = rcp.dpc_submitted;
-        rcp.dpc_submitted = rcp.dpc_end;
-        // Lockstep: rasterize synchronously (deterministic, systemtest path).
-        // Threaded: enqueue; the RDP worker rasterizes async and raises MI_DP itself.
-        // Both routes funnel through rdpRunJob, so results are identical — only the
-        // DP-interrupt/pixel-visibility *timing* differs, exactly as on hardware.
-        // Diagnostico: KESTREL_RDPINLINE corre el RDP en el hilo CPU aun en modo threaded.
-        // Sirve para bisecar que worker introduce una carrera, no para uso normal.
-        static const int rdpInline = std::getenv("KESTREL_RDPINLINE") ? 1 : 0;
-        static const bool dpSyncLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
-        if(dpSyncLog) {
-          std::fprintf(stderr, "[dpkick] span=%06x..%06x xbus=%u busy=%u\n",
-                       cur, rcp.dpc_end, (unsigned)xbus,
-                       (unsigned)rdpBusy.load(std::memory_order_relaxed));
-          std::fflush(stderr);
-        }
-        if(rcpMode == RcpMode::Threaded && !rdpInline) rdpSubmit(cur, rcp.dpc_end, xbus);
-        else                             rdpRunJob(cur, rcp.dpc_end, xbus);
-      }
+      dpcAdvance();
       // (frozen: no run, CURRENT stays where the START reload left it)
       // DP interrupt fires only when the RDP retires a SYNC_FULL (raised inside
       // rdpRunJob) — NOT on every DPC_END write. PD streams the FIFO with many
@@ -1025,7 +1002,9 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x0c: {  // DPC_STATUS write: clear/set flags
       if(v & (1 << 0)) rcp.dpc_status &= ~(1u << 0);  // clear xbus
       if(v & (1 << 1)) rcp.dpc_status |=  (1u << 0);
-      if(v & (1 << 2)) rcp.dpc_status &= ~(1u << 1);  // clear freeze
+      // Descongelar reanuda el FIFO: lo que llego mientras estaba congelado sigue vivo.
+      if(v & (1 << 2)) { rcp.dpc_status &= ~(1u << 1);
+                        if(rcp.dpc_submitted != rcp.dpc_end) dpcAdvance(); }  // clear freeze
       if(v & (1 << 3)) rcp.dpc_status |=  (1u << 1);
       if(v & (1 << 4)) rcp.dpc_status &= ~(1u << 2);  // clear flush
       if(v & (1 << 5)) rcp.dpc_status |=  (1u << 2);
@@ -1037,7 +1016,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       break;
     }
     }
-    return;
+    return; }
   case BASE_VI & 0x1ff0'0000:
     // Mirror the VI programming to the GPU backend so its scanout matches. The N64 VI
     // register index (offset>>2, 0..13) maps 1:1 onto ::RDP::VIRegister. No-op when PRDP off.
@@ -1308,6 +1287,43 @@ auto Memory::spDma(bool toRam) -> void {
   // After any SP DMA completes the length register counts down to a fixed 0xFF8
   // readback (LENGTH=0xFF8, COUNT/SKIP drained). Both RD_LEN and WR_LEN share it.
   rcp.sp_rd_len = rcp.sp_wr_len = 0xff8;
+}
+
+// Arranca el command processor del RDP sobre lo que haya pendiente entre el ultimo trozo
+// encolado y DPC_END. Se llama desde la escritura de DPC_END y TAMBIEN al limpiar FREEZE:
+// congelar el RDP en HW para el procesador de comandos pero NO tira lo pendiente, asi que
+// al descongelar el RDP reanuda desde donde estaba. Sin esa reanudacion los DPC_END que
+// llegan congelados se pierden para siempre -- Perfect Dark congela el RDP entre tareas
+// graficas, y su segunda tarea dejaba 128 bytes de comandos (con su SYNC_FULL) sin ejecutar:
+// sin interrupcion DP el planificador de libultra da el RDP por ocupado eternamente y el
+// juego no vuelve a emitir una tarea grafica nunca mas.
+auto Memory::dpcAdvance() -> void {
+  if(rcp.dpc_status & (1u << 1)) return;      // congelado: no se consume nada todavia
+  bool xbus = rcp.dpc_status & 0x1u;   // DP_STATUS_XBUS: fetch commands from DMEM
+  // Kicking the FIFO starts the graphics clock and marks the pipe busy; both
+  // stay set until a SYNC_FULL drains the pipe (DP_STATUS "flags during a run").
+  rcp.dpc_status |= 0x8u | 0x20u;      // START_GCLK | PIPE_BUSY
+  // Se encola desde donde quedo el ULTIMO encolado, no desde CURRENT: CURRENT es
+  // ahora el avance real del rasterizador y puede ir por detras si el RDP sigue
+  // ocupado con el trabajo anterior.
+  u32 cur = rcp.dpc_submitted;
+  rcp.dpc_submitted = rcp.dpc_end;
+  // Lockstep: rasterize synchronously (deterministic, systemtest path).
+  // Threaded: enqueue; the RDP worker rasterizes async and raises MI_DP itself.
+  // Both routes funnel through rdpRunJob, so results are identical — only the
+  // DP-interrupt/pixel-visibility *timing* differs, exactly as on hardware.
+  // Diagnostico: KESTREL_RDPINLINE corre el RDP en el hilo CPU aun en modo threaded.
+  // Sirve para bisecar que worker introduce una carrera, no para uso normal.
+  static const int rdpInline = std::getenv("KESTREL_RDPINLINE") ? 1 : 0;
+  static const bool dpSyncLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
+  if(dpSyncLog) {
+    std::fprintf(stderr, "[dpkick] span=%06x..%06x xbus=%u busy=%u\n",
+                 cur, rcp.dpc_end, (unsigned)xbus,
+                 (unsigned)rdpBusy.load(std::memory_order_relaxed));
+    std::fflush(stderr);
+  }
+  if(rcpMode == RcpMode::Threaded && !rdpInline) rdpSubmit(cur, rcp.dpc_end, xbus);
+  else                             rdpRunJob(cur, rcp.dpc_end, xbus);
 }
 
 auto Memory::siDma(bool toPif) -> void {

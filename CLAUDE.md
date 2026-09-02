@@ -171,7 +171,13 @@ ver `docs/PERF-CPU.md` §20.5) ·
 `KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST` · `KESTREL_FAULTSTOP=1` (halt on a guest fault with
 the RCP event ring intact) · `KESTREL_WATCHP=<phys>` (store watchpoint hooked in the D-cache;
 bus-level `KESTREL_WATCH` misses cacheable CPU stores) · `KESTREL_EVDUMP=<n>` ·
-`KESTREL_DPSYNCLOG=1` (address of every retired SYNC_FULL).
+`KESTREL_DPSYNCLOG=1` (camino del RDP entero: direccion de cada SYNC_FULL retirado,
+`[dpkick]` por cada arranque del command processor y `[dpwr]` por cada escritura a un
+registro DPC con el estado antes de aplicarla -- con esta traza se vio que Perfect Dark
+perdia el FIFO al congelar el RDP) · `KESTREL_RSPTRACE=1` (KICK y FIN de cada tarea del
+RSP: cabecera OSTask de DMEM 0xFC0, PC del BREAK, ciclos, ventana DPC) ·
+`KESTREL_RSPHANG=1` (si el RSP agota el presupuesto: OSTask, los 32 GPR y +-8 instrucciones
+de IMEM alrededor del PC).
 
 La ventana del emulador lleva **barra de menu nativa con el catalogo entero de opciones**,
 el mismo que el lanzador (`docs/LAUNCHER.md`). Fuente unica = `tools/launcher/options.py`;

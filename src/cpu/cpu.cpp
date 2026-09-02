@@ -212,6 +212,12 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
     gpr[21] = 0;                              // s5 = osResetType (cold)
     gpr[22] = (u64)cic.seed;                 // s6 = CIC seed
     gpr[23] = 0;                              // s7 = CIC version
+    // t3 apunta al PROPIO IPL3 ya copiado en DMEM. No es decorativo: el IPL3 de los
+    // cartuchos CIC-6105 (Perfect Dark, Zelda, Banjo) arranca con un descifrador que lee
+    // su tabla con `lw t2, 0x44(t3)`, es decir DMEM+0x84, justo detras del stub. Sin ese
+    // registro la primera lectura va a la direccion 0x44 y el IPL3 muere en un TLBL.
+    gpr[11] = 0xffff'ffff'a400'0040ull;      // t3 = base del IPL3 en DMEM
+    gpr[31] = 0xffff'ffff'a400'1550ull;      // ra (el IPL3 no vuelve, pero es el valor real)
     gpr[29] = 0xffff'ffff'a400'1ff0ull;      // sp in SP DMEM
     pc = sext32(0xa400'0040);                // execute IPL3 from DMEM (uncached)
     nextPc = pc + 4;
@@ -621,13 +627,22 @@ auto CPU::unimplemented(u32 op) -> void {
       const auto& ram = mem->rdram;
       auto rd = [&](u32 va)->u32{ u32 p=va&0x1fff'ffff; if((usize)p+3>=ram.size()) return 0;
         return ((u32)ram[p]<<24)|((u32)ram[p+1]<<16)|((u32)ram[p+2]<<8)|ram[p+3]; };
+      // La RDRAM cruda ensena estado RANCIO: el guest escribe sus globales por KSEG0 y una
+      // linea sucia del D-cache puede no haber bajado nunca (bss escrito una vez al arrancar).
+      // Volcar tambien la vista coherente es la diferencia entre leer un puntero valido y leer
+      // un cero que no existe: sin ella este volcado miente en justo los campos que importan.
+      auto rdc = [&](u32 va)->u32{ u32 p=va&0x1fff'ffff; if((usize)p+3>=ram.size()) return 0;
+        return ((u32)peekPhysCoherent(p)<<24)|((u32)peekPhysCoherent(p+1)<<16)
+             | ((u32)peekPhysCoherent(p+2)<<8)|(u32)peekPhysCoherent(p+3); };
       const char* p = md;
       while(*p) {
         char* end=nullptr; unsigned long a = std::strtoul(p, &end, 0);
         if(end==p) break;
         u32 base = (u32)a & ~3u;
         std::fprintf(stderr, "[memdump @%08x]\n", base);
-        for(int i=-4;i<12;i++){ u32 va=base+(u32)(i*4); std::fprintf(stderr,"  %08x: %08x\n", va, rd(va)); }
+        for(int i=-4;i<12;i++){ u32 va=base+(u32)(i*4); u32 r=rd(va), c=rdc(va);
+          if(r==c) std::fprintf(stderr,"  %08x: %08x\n", va, r);
+          else     std::fprintf(stderr,"  %08x: %08x  (D$ %08x)\n", va, r, c); }
         p = end; while(*p==',' || *p==' ') p++;
       }
       std::fflush(stderr);
