@@ -2,6 +2,8 @@
 #include "rsp.hpp"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <cstdint>
 
 namespace kestrel::rspjit {
 
@@ -111,7 +113,15 @@ struct E {
   auto ld32(u8 dst, u8 base, s32 d)  -> void { u8_(0x8B); mem(dst, base, d); }   // mov r32,[b+d]
   auto st32(u8 src, u8 base, s32 d)  -> void { u8_(0x89); mem(src, base, d); }   // mov [b+d],r32
   auto alu_rm(u8 opc, u8 dst, u8 base, s32 d) -> void { u8_(opc); mem(dst, base, d); }
+  auto alu_rr(u8 opc, u8 dst, u8 src) -> void { u8_(opc); modrm(3, dst, src); }
   auto alu_imm(u8 digit, u8 dst, u32 imm) -> void { u8_(0x81); modrm(3, digit, dst); u32_(imm); }
+  // forma corta con inmediato de 8 bits sobre memoria: sub dword [base+d], imm
+  auto alu_m_imm8(u8 digit, u8 base, s32 d, u8 imm) -> void { u8_(0x83); mem(digit, base, d); u8_(imm); }
+  auto mov_rr(u8 dst, u8 src) -> void { alu_rr(0x8B, dst, src); }
+  auto test_rr(u8 a, u8 b_) -> void { u8_(0x85); modrm(3, b_, a); }
+  auto test64_rr(u8 a, u8 b_) -> void { u8_(0x48); u8_(0x85); modrm(3, b_, a); }
+  auto bsr(u8 dst, u8 src) -> void { u8_(0x0F); u8_(0xBD); modrm(3, dst, src); }
+  auto cmp8_m_imm(u8 base, s32 d, u8 imm) -> void { u8_(0x80); mem(7, base, d); u8_(imm); }
   auto shift_imm(u8 digit, u8 dst, u8 sa) -> void { u8_(0xC1); modrm(3, digit, dst); u8_(sa); }
   auto shift_cl(u8 digit, u8 dst) -> void { u8_(0xD3); modrm(3, digit, dst); }
   auto not32(u8 dst) -> void { u8_(0xF7); modrm(3, 2, dst); }
@@ -149,10 +159,16 @@ struct E {
   auto add64_rr(u8 dst, u8 src) -> void { u8_(0x48); u8_(0x03); modrm(3, dst, src); }
   auto mov_imm64(u8 dst, u64 imm) -> void { u8_(0x48); u8_((u8)(0xB8 + dst)); u64_(imm); }
   auto call_r(u8 r) -> void { u8_(0xFF); modrm(3, 2, r); }
+  auto jmp_r(u8 r) -> void { u8_(0xFF); modrm(3, 4, r); }
   auto push(u8 r) -> void { u8_((u8)(0x50 + r)); }
   auto pop(u8 r)  -> void { u8_((u8)(0x58 + r)); }
-  auto sub_rsp(u8 n) -> void { u8_(0x48); u8_(0x83); modrm(3, 5, rSPx); u8_(n); }
-  auto add_rsp(u8 n) -> void { u8_(0x48); u8_(0x83); modrm(3, 0, rSPx); u8_(n); }
+  auto rsp_imm(u8 digit, u32 n) -> void {
+    u8_(0x48);
+    if(n <= 127) { u8_(0x83); modrm(3, digit, rSPx); u8_((u8)n); }
+    else         { u8_(0x81); modrm(3, digit, rSPx); u32_(n); }
+  }
+  auto sub_rsp(u32 n) -> void { rsp_imm(5, n); }
+  auto add_rsp(u32 n) -> void { rsp_imm(0, n); }
   auto ret() -> void { u8_(0xC3); }
 
   // --- SSE (128 bits) ---------------------------------------------------------
@@ -173,18 +189,32 @@ struct E {
   }
   // movdqa entre xmm y [rsp+disp8]. RSP como base exige SIB, que el resto del emisor
   // no necesita: aqui es solo para salvar/restaurar xmm6..xmm8 en el prologo.
-  auto xmmSpill(u8 reg, u8 disp, bool store) -> void {
+  auto xmmSpill(u8 reg, s32 disp, bool store) -> void {
     u8_(0x66);
     if(reg & 8) u8_(0x44);
     u8_(0x0F); u8_(store ? 0x7F : 0x6F);
-    modrm(1, (u8)(reg & 7), rSPx); u8_(0x24); u8_(disp);
+    if(disp >= -128 && disp <= 127) { modrm(1, (u8)(reg & 7), rSPx); u8_(0x24); u8_((u8)disp); }
+    else                            { modrm(2, (u8)(reg & 7), rSPx); u8_(0x24); u32_((u32)disp); }
   }
   auto sse38(u8 opc, u8 dst, u8 src) -> void {
-    u8_(0x66); u8_(0x0F); u8_(0x38); u8_(opc); modrm(3, dst, src);
+    u8_(0x66);
+    if((dst | src) & 8) u8_((u8)(0x40 | ((dst & 8) >> 1) | ((src & 8) >> 3)));
+    u8_(0x0F); u8_(0x38); u8_(opc); modrm(3, (u8)(dst & 7), (u8)(src & 7));
+  }
+  // Desplazamiento por inmediato: el registro va en el r/m, asi que lleva REX.B.
+  auto sse_i(u8 opc, u8 digit, u8 dst, u8 n) -> void {
+    u8_(0x66);
+    if(dst & 8) u8_(0x41);
+    u8_(0x0F); u8_(opc); modrm(3, digit, (u8)(dst & 7)); u8_(n);
   }
   auto ldx (u8 dst, u8 base, s32 d) -> void { sse_m(0x66, 0x6F, dst, base, d); }   // movdqa x,[b+d]
   auto stx (u8 src, u8 base, s32 d) -> void { sse_m(0x66, 0x7F, src, base, d); }   // movdqa [b+d],x
   auto ldxu(u8 dst, u8 base, s32 d) -> void { sse_m(0xF3, 0x6F, dst, base, d); }   // movdqu x,[b+d]
+  auto stxu(u8 src, u8 base, s32 d) -> void { sse_m(0xF3, 0x7F, src, base, d); }   // movdqu [b+d],x
+  auto ldq (u8 dst, u8 base, s32 d) -> void { sse_m(0xF3, 0x7E, dst, base, d); }   // movq x,[b+d]
+  auto stq (u8 src, u8 base, s32 d) -> void { sse_m(0x66, 0xD6, src, base, d); }   // movq [b+d],x
+  auto ldd (u8 dst, u8 base, s32 d) -> void { sse_m(0x66, 0x6E, dst, base, d); }   // movd x,[b+d]
+  auto std_(u8 src, u8 base, s32 d) -> void { sse_m(0x66, 0x7E, src, base, d); }   // movd [b+d],x
   // pextrw r32, xmm, imm8 -- saca una banda de 16 bits a un registro entero (SSE2).
   auto pextrw(u8 dst, u8 src, u8 lane) -> void {
     u8_(0x66);
@@ -195,14 +225,36 @@ struct E {
   auto pshufb_x(u8 dst, u8 src) -> void { sse38(0x00, dst, src); }
   auto pmovsxwd(u8 dst, u8 src) -> void { sse38(0x23, dst, src); }
   auto pmovzxwd(u8 dst, u8 src) -> void { sse38(0x33, dst, src); }
-  auto psrld_i (u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x72); modrm(3, 2, dst); u8_(n); }
-  auto psrldq_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x73); modrm(3, 3, dst); u8_(n); }
-  auto psraw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 4, dst); u8_(n); }
-  auto psrlw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 2, dst); u8_(n); }
-  auto psllw_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x71); modrm(3, 6, dst); u8_(n); }
-  auto pslld_i(u8 dst, u8 n) -> void { u8_(0x66); u8_(0x0F); u8_(0x72); modrm(3, 6, dst); u8_(n); }
+  auto psrld_i (u8 dst, u8 n) -> void { sse_i(0x72, 2, dst, n); }
+  auto psrldq_i(u8 dst, u8 n) -> void { sse_i(0x73, 3, dst, n); }
+  auto psraw_i (u8 dst, u8 n) -> void { sse_i(0x71, 4, dst, n); }
+  auto psrlw_i (u8 dst, u8 n) -> void { sse_i(0x71, 2, dst, n); }
+  auto psllw_i (u8 dst, u8 n) -> void { sse_i(0x71, 6, dst, n); }
+  auto pslld_i (u8 dst, u8 n) -> void { sse_i(0x72, 6, dst, n); }
   auto zerox(u8 r) -> void { sse_rr(0xEF, r, r); }            // pxor x,x
   auto onesx(u8 r) -> void { sse_rr(0x76, r, r); }            // pcmpeqd x,x  -> todo unos
+  auto packsswb(u8 dst, u8 src) -> void { sse_rr(0x63, dst, src); }
+  // movd xmm, r32 (no la forma con memoria: aqui la fuente es un registro entero)
+  auto movd_xr(u8 dst, u8 src) -> void {
+    u8_(0x66);
+    if((dst | src) & 8) u8_((u8)(0x40 | ((dst & 8) >> 1) | ((src & 8) >> 3)));
+    u8_(0x0F); u8_(0x6E); modrm(3, (u8)(dst & 7), (u8)(src & 7));
+  }
+  // pmovmskb r32, xmm -- el destino es entero, el origen vectorial
+  auto pmovmskb(u8 dst, u8 src) -> void {
+    u8_(0x66);
+    if((dst | src) & 8) u8_((u8)(0x40 | ((dst & 8) >> 1) | ((src & 8) >> 3)));
+    u8_(0x0F); u8_(0xD7); modrm(3, (u8)(dst & 7), (u8)(src & 7));
+  }
+  auto shuf(u8 p0, u8 dst, u8 src, u8 imm) -> void {
+    u8_(p0);
+    if((dst | src) & 8) u8_((u8)(0x40 | ((dst & 8) >> 1) | ((src & 8) >> 3)));
+    u8_(0x0F); u8_(0x70); modrm(3, (u8)(dst & 7), (u8)(src & 7)); u8_(imm);
+  }
+  auto pshuflw(u8 dst, u8 src, u8 imm) -> void { shuf(0xF2, dst, src, imm); }
+  auto pshufd (u8 dst, u8 src, u8 imm) -> void { shuf(0x66, dst, src, imm); }
+  auto pand_m   (u8 dst, u8 base, s32 d) -> void { sse_m(0x66, 0xDB, dst, base, d); }
+  auto pcmpeqw_m(u8 dst, u8 base, s32 d) -> void { sse_m(0x66, 0x75, dst, base, d); }
 };
 
 // opcodes de la forma "r32, r/m32" de las ALU que se usan
@@ -268,6 +320,10 @@ struct Ctx {
   s32 ccOff[2] = {};   // vcch / vccl
   s32 ceOff = 0;       // vce
   s32 divInOff = 0, divOutOff = 0, divDpOff = 0;   // estado de la familia del reciproco
+  s32 recipOff = 0, isqrtOff = 0;                 // las dos tablas de 512 entradas
+  s32 bitLaneOff = 0;                             // {1,2,4,...,128} por banda, para CTC2
+  s32 byteHalfOff = 0;                            // {0,0,1,1,...,7,7}, para la mascara de LPV/LUV
+  s32 laneIdxOff = 0;                             // {1,0,3,2,...}, para la mascara de LRV
   // Acumulador de 48 bits residente en xmm6/7/8 (acch/accm/accl) mientras dure el bloque.
   bool accReg = false;      // el prologo los salvo: se puede cachear
   u8   accValid = 0;        // bit i: xmm(6+i) tiene la rebanada i
@@ -324,7 +380,14 @@ enum : u8 { X_PMULLW = 0xD5, X_PMULHW = 0xE5, X_PCMPGTW = 0x65,
             X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
             X_PADDW = 0xFD, X_PSUBW = 0xF9, X_PADDD = 0xFE, X_PSUBD = 0xFA,
             X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B,
-            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75, X_PSUBSW = 0xE9 };
+            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75, X_PSUBSW = 0xE9, X_PADDB = 0xFC, X_PSUBB = 0xF8, X_PCMPGTB = 0x64 };
+
+// VCL/VCH/VCR: las tres unicas en linea que no caben en xmm2..xmm5. El bloque que lleve
+// una salva xmm9..xmm13 en el prologo (callee-saved en Win64) y ahi tienen sitio.
+auto vuClip(u32 op) -> bool {
+  const u32 fn = op & 0x3f;
+  return (op >> 21 & 0x1f) >= 0x10 && fn >= 0x24 && fn <= 0x26;
+}
 
 auto vuInline(const Rsp& rsp, u32 op) -> bool {
 #if KESTREL_VUSTAT
@@ -344,9 +407,11 @@ auto vuInline(const Rsp& rsp, u32 op) -> bool {
   case 0x13:                                     // VABS
   case 0x1d:                                     // VSAR
   case 0x20: case 0x21: case 0x22: case 0x23:    // VLT / VEQ / VNE / VGE
+  case 0x24: case 0x25: case 0x26:               // VCL / VCH / VCR
   case 0x27:                                     // VMRG
   case 0x28: case 0x29: case 0x2a: case 0x2b:    // VAND / VNAND / VOR / VNOR
   case 0x2c: case 0x2d:                          // VXOR / VNXOR
+  case 0x30: case 0x31: case 0x34: case 0x35:    // VRCP / VRCPL / VRSQ / VRSQL
   case 0x32: case 0x33: case 0x36:               // VRCPH / VMOV / VRSQH
     return true;
   default: return false;
@@ -442,6 +507,17 @@ auto emitSelectST(E& e, u8 dst, u8 cm, u8 tmp) -> void {
   e.sse_rr(X_POR, dst, tmp);
 }
 
+// dst = (b & m) | (a & ~m), o sea blendv(a, b, m) sin blendv. Los cinco registros tienen
+// que ser distintos: no hay forma corta con menos.
+auto emitBlendM(E& e, u8 dst, u8 a, u8 b, u8 m, u8 tmp) -> void {
+  e.movx(tmp, m); e.sse_rr(X_PAND, tmp, b);
+  e.movx(dst, m); e.sse_rr(X_PANDN, dst, a);
+  e.sse_rr(X_POR, dst, tmp);
+}
+
+// Niega una mascara de todo-unos/todo-ceros.
+auto emitNotM(E& e, u8 r, u8 tmp) -> void { e.onesx(tmp); e.sse_rr(X_PXOR, r, tmp); }
+
 // Una bandera del RSP guarda 0/1 por banda; la mascara de seleccion es cmpgt contra cero.
 auto emitFlagMask(E& e, u8 dst, u8 tmpZero, s32 off) -> void {
   e.ldx(dst, rBX, off);
@@ -475,6 +551,76 @@ auto emitVu(Ctx& c, u32 op) -> void {
     e.ldxu(2, rAX, 0);              // la fila de mascaras no esta alineada: movdqu
     e.pshufb_x(1, 2);
   }
+  // --- VRCP / VRCPL / VRSQ / VRSQL: el reciproco, en linea -------------------
+  // No es SSE: mira UNA banda, la normaliza, entra en una tabla de 512 entradas y devuelve
+  // una banda. Pero pagaba CALL, redecodificado y el volcado del acumulador cacheado, y es
+  // el 3.84 % de las COP2 que ejecuta SM64. Es la cuenta de execCop2Div con enteros:
+  // eax = dividendo, edx = mascara de signo, ecx = magnitud y despues el desplazamiento de
+  // normalizado. La mascara pasa por la pila mientras ecx hace de contador, porque shl/shr
+  // solo saben leer CL.
+  if(fn == 0x30 || fn == 0x31 || fn == 0x34 || fn == 0x35) {
+    const u32 de = op >> 11 & 7;
+    const bool L    = (fn == 0x31 || fn == 0x35);   // la variante que consume divin
+    const bool sqrt = (fn >= 0x34);
+    usize jHave = 0;
+    e.pextrw(rAX, 1, (u8)(el & 7));                 // banda de T, ya extendida con ceros
+    if(L) {
+      e.cmp8_m_imm(rBX, c.divDpOff, 0);             // hay mitad alta pendiente de un VRCPH?
+      usize jShort = e.jcc8(CC_E);
+      e.ld16z(rCX, rBX, c.divInOff);
+      e.shift_imm(D_SHL, rCX, 16);
+      e.alu_rr(OP_OR, rAX, rCX);
+      jHave = e.jmp8();
+      if(!e.patch8(jShort)) { c.ok = false; return; }
+    }
+    e.movsx16(rAX, rAX);                            // sin doble precision el dividendo es s16
+    if(L && !e.patch8(jHave)) { c.ok = false; return; }
+    e.mov_rr(rDX, rAX); e.shift_imm(D_SAR, rDX, 31);          // edx = mascara de signo
+    e.mov_rr(rCX, rAX); e.alu_rr(OP_XOR, rCX, rDX);
+    e.alu_imm(D_CMP, rAX, 0xffff8000u);
+    usize jNoAbs = e.jcc8(CC_LE);
+    e.alu_rr(OP_SUB, rCX, rDX);                     // ecx = magnitud (en -32768 se queda en ~x)
+    if(!e.patch8(jNoAbs)) { c.ok = false; return; }
+    e.test_rr(rCX, rCX);
+    usize jNz = e.jcc8(CC_NE);
+    e.mov_imm32(rAX, 0x7fffffffu);                  // dividir por cero satura
+    usize jEnd0 = e.jmp8();
+    if(!e.patch8(jNz)) { c.ok = false; return; }
+    e.alu_imm(D_CMP, rAX, 0xffff8000u);
+    usize jNoMin = e.jcc8(CC_NE);
+    e.mov_imm32(rAX, 0xffff0000u);                  // -32768 tiene resultado propio
+    usize jEnd1 = e.jmp8();
+    if(!e.patch8(jNoMin)) { c.ok = false; return; }
+    e.push(rDX);                                    // aparca la mascara: ecx tiene que ser CL
+    e.bsr(rDX, rCX);                                // edx = posicion del bit alto
+    e.mov_rr(rAX, rCX);
+    e.mov_imm32(rCX, 31); e.alu_rr(OP_SUB, rCX, rDX);         // ecx = desplazamiento
+    e.shift_cl(D_SHL, rAX);
+    e.alu_imm(D_AND, rAX, 0x7fc00000u);
+    e.shift_imm(D_SHR, rAX, 22);                    // eax = indice de 9 bits
+    if(sqrt) {                                      // la raiz parte la tabla por paridad
+      e.alu_imm(D_AND, rAX, 0x1feu);
+      e.alu_imm(D_AND, rCX, 1u);
+      e.alu_rr(OP_OR, rAX, rCX);
+    }
+    e.mov_rr(rCX, rDX);                             // ecx = 31 - desplazamiento
+    if(sqrt) e.shift_imm(D_SHR, rCX, 1);
+    e.add64_rr(rAX, rAX); e.add64_rr(rAX, rBX);     // las tablas viven dentro del propio Rsp
+    e.ld16z(rAX, rAX, sqrt ? c.isqrtOff : c.recipOff);
+    e.alu_imm(D_OR, rAX, 0x10000u);
+    e.shift_imm(D_SHL, rAX, 14);
+    e.shift_cl(D_SHR, rAX);
+    e.pop(rDX);
+    e.alu_rr(OP_XOR, rAX, rDX);                     // le devuelve el signo
+    if(!e.patch8(jEnd0) || !e.patch8(jEnd1)) { c.ok = false; return; }
+    e.mov_rr(rCX, rAX); e.shift_imm(D_SHR, rCX, 16);
+    e.st16(rCX, rBX, c.divOutOff);                  // la mitad alta espera al proximo VRCPH
+    e.mov_imm32(rCX, 0); e.st8(rCX, rBX, c.divDpOff);
+    accPut(c, 1, 2);                                // accl = T barajado
+    e.st16(rAX, rBX, c.VR(vd) + (s32)(2 * de));
+    return;
+  }
+
   // --- VMOV / VRCPH / VRSQH: no miran S, y su unica salida vectorial es UNA banda ---
   // El acumulador bajo se lleva T entero (barajado); del resultado solo cambia la banda
   // `de` de vd, asi que se escribe con un store de 16 bits en vez de leer, mezclar y
@@ -532,6 +678,100 @@ auto emitVu(Ctx& c, u32 op) -> void {
     emitFlagStore(e, 2, 4, c.ccOff[1]);
     e.zerox(5);
     e.stx(5, rBX, c.ccOff[0]); e.stx(5, rBX, c.coOff[0]); e.stx(5, rBX, c.coOff[1]);
+  } break;
+
+  // --- VCH: abre el clip. Dos ramas por carril y las CINCO banderas ----------
+  // Con S y T de signos distintos la cuenta es S+T y decide `<=0`; con el mismo signo es
+  // S-T y decide `>=0`. Se calculan las dos y se mezcla con la mascara de "signos
+  // distintos": es la misma formula del interprete carril a carril, en paralelo. Las
+  // mezclas van con and/andn/or porque `pblendvb` usa xmm0 implicito, y xmm0 es S.
+  // Registros: los seis de siempre mas xmm9..xmm11, que el prologo salva por ser esto
+  // una operacion de clip.
+  case 0x25: {
+    e.zerox(2); e.movx(3, 0); e.sse_rr(X_PXOR, 3, 1); e.sse_rr(X_PCMPGTW, 2, 3);  // 2 = signos distintos
+    e.movx(4, 0); e.sse_rr(X_PADDW, 4, 1);                                        // 4 = S+T
+    e.movx(5, 0); e.sse_rr(X_PSUBW, 5, 1);                                        // 5 = S-T
+    emitBlendM(e, 9, 5, 4, 2, 3);                                                 // 9 = resultado de la rama
+    e.zerox(3); e.sse_rr(X_PCMPGTW, 3, 1);                                        // 3 = T<0
+    e.zerox(5); e.movx(4, 9); e.sse_rr(X_PCMPGTW, 4, 5); emitNotM(e, 4, 5);       // 4 = resultado<=0
+    e.zerox(10); e.sse_rr(X_PCMPGTW, 10, 9); emitNotM(e, 10, 5);                  // 10 = resultado>=0
+    emitBlendM(e, 5, 3, 4, 2, 11); emitFlagStore(e, 5, 11, c.ccOff[1]);           // VCC.low
+    emitBlendM(e, 5, 10, 3, 2, 11); emitFlagStore(e, 5, 11, c.ccOff[0]);          // VCC.high
+    emitFlagStore(e, 2, 5, c.coOff[1]);                                           // VCO.low = signos distintos
+    // VCO.high es la misma expresion en las dos ramas: resultado != 0 y S != ~T.
+    e.zerox(5); e.movx(3, 9); e.sse_rr(X_PCMPEQW, 3, 5); e.onesx(11); e.sse_rr(X_PXOR, 3, 11);
+    e.movx(5, 1); e.sse_rr(X_PXOR, 5, 11);
+    e.sse_rr(X_PCMPEQW, 5, 0); e.sse_rr(X_PXOR, 5, 11);
+    e.sse_rr(X_PAND, 3, 5); emitFlagStore(e, 3, 5, c.coOff[0]);
+    e.onesx(3); e.sse_rr(X_PCMPEQW, 3, 9); e.sse_rr(X_PAND, 3, 2);                // VCE: rama distinta y resultado -1
+    emitFlagStore(e, 3, 5, c.ceOff);
+    e.zerox(3); e.sse_rr(X_PSUBW, 3, 1);                                          // -T
+    emitBlendM(e, 5, 0, 3, 4, 11);                                                // rama de signos distintos
+    emitBlendM(e, 9, 0, 1, 10, 11);                                               // rama del mismo signo
+    emitBlendM(e, 3, 9, 5, 2, 11);
+    accPut(c, 3, 2); e.stx(3, rBX, c.VR(vd));
+  } break;
+
+  // --- VCR: como VCH pero sin VCE ni VCO, y con los umbrales corridos ---------
+  // El interprete compara `S+T+1 <= 0`, o sea `S+T < 0`, en 32 bits; pero la rama solo
+  // corre donde los signos DIFIEREN, y ahi S+T cabe siempre en 16 bits con signo, asi que
+  // el signo de la suma envuelta ya es el bueno. Lo mismo con S-T en la otra rama, donde
+  // los signos coinciden. Los carriles en que se desbordaria son justo los que la mezcla
+  // descarta.
+  case 0x26: {
+    e.zerox(2); e.movx(3, 0); e.sse_rr(X_PXOR, 3, 1); e.sse_rr(X_PCMPGTW, 2, 3);  // 2 = signos distintos
+    e.zerox(3); e.sse_rr(X_PCMPGTW, 3, 1);                                        // 3 = T<0
+    e.zerox(4); e.movx(9, 0); e.sse_rr(X_PADDW, 9, 1); e.sse_rr(X_PCMPGTW, 4, 9); // 4 = (S+T)<0
+    e.zerox(5); e.movx(9, 0); e.sse_rr(X_PSUBW, 9, 1); e.sse_rr(X_PCMPGTW, 5, 9);
+    emitNotM(e, 5, 10);                                                           // 5 = (S-T)>=0
+    emitBlendM(e, 9, 3, 4, 2, 10); emitFlagStore(e, 9, 10, c.ccOff[1]);           // VCC.low
+    emitBlendM(e, 9, 5, 3, 2, 10); emitFlagStore(e, 9, 10, c.ccOff[0]);           // VCC.high
+    e.onesx(9); e.sse_rr(X_PXOR, 9, 1);                                           // ~T
+    emitBlendM(e, 10, 0, 9, 4, 11);                                               // rama de signos distintos
+    emitBlendM(e, 11, 0, 1, 5, 12);                                               // rama del mismo signo
+    emitBlendM(e, 9, 11, 10, 2, 12);
+    accPut(c, 9, 2); e.stx(9, rBX, c.VR(vd));
+    e.zerox(9); e.stx(9, rBX, c.coOff[0]); e.stx(9, rBX, c.coOff[1]); e.stx(9, rBX, c.ceOff);
+  } break;
+
+  // --- VCL: cierra el clip que VCH abrio. Cuatro ramas por carril -------------
+  // Las cuatro son la misma seleccion -- accl = mascara ? X : S -- con distinta mascara y
+  // con X = -T en las dos ramas de VCO.low y X = T en las otras dos, asi que en vez de
+  // mezclar cuatro resultados se mezclan las MASCARAS y se hace una sola seleccion. Las
+  // banderas viejas se conservan en los carriles cuya rama no las escribe, que es lo que
+  // pide el hardware. Registros: hasta xmm13.
+  case 0x24: {
+    emitFlagMask(e, 2, 5, c.coOff[1]);                    // 2 = VCO.low (el acarreo que dejo VCH)
+    emitFlagMask(e, 3, 5, c.coOff[0]);                    // 3 = VCO.high
+    e.movx(4, 0); e.sse_rr(X_PADDW, 4, 1);                // 4 = S+T envuelto a 16 bits
+    e.onesx(5); e.psllw_i(5, 15);                         // 5 = 0x8000, el sesgo para comparar sin signo
+    e.movx(9, 0);  e.sse_rr(X_PXOR, 9, 5);
+    e.movx(10, 4); e.sse_rr(X_PXOR, 10, 5);
+    e.sse_rr(X_PCMPGTW, 9, 10);                           // S >u suma == hubo acarreo
+    emitNotM(e, 9, 10);                                   // 9 = sin acarreo
+    e.zerox(10); e.sse_rr(X_PCMPEQW, 10, 4);              // 10 = suma == 0
+    emitFlagMask(e, 4, 11, c.ceOff);                      // 4 = VCE
+    e.movx(11, 10); e.sse_rr(X_PAND, 11, 9);              // sin VCE: !suma && !acarreo
+    e.sse_rr(X_POR, 10, 9);                               // con VCE: !suma || !acarreo
+    emitBlendM(e, 5, 11, 10, 4, 9);                       // 5 = VCC.low nueva
+    e.onesx(4); e.psllw_i(4, 15);
+    e.movx(9, 1);  e.sse_rr(X_PXOR, 9, 4);
+    e.movx(10, 0); e.sse_rr(X_PXOR, 10, 4);
+    e.sse_rr(X_PCMPGTW, 9, 10); emitNotM(e, 9, 10);       // 9 = VCC.high nueva: S >= T sin signo
+    emitFlagMask(e, 4, 10, c.ccOff[1]);                   // 4 = VCC.low vieja
+    emitFlagMask(e, 10, 11, c.ccOff[0]);                  // 10 = VCC.high vieja
+    e.movx(11, 3); e.sse_rr(X_PANDN, 11, 2);              // acarreo y no alto: la rama que escribe VCC.low
+    emitBlendM(e, 12, 4, 5, 11, 13); emitFlagStore(e, 12, 13, c.ccOff[1]);
+    e.movx(11, 2); e.sse_rr(X_POR, 11, 3); emitNotM(e, 11, 12);   // ni acarreo ni alto: la que escribe VCC.high
+    emitBlendM(e, 12, 10, 9, 11, 13); emitFlagStore(e, 12, 13, c.ccOff[0]);
+    emitBlendM(e, 11, 5, 4, 3, 12);                       // bandera de las dos ramas con acarreo
+    emitBlendM(e, 12, 9, 10, 3, 13);                      // bandera de las dos ramas sin acarreo
+    emitBlendM(e, 13, 12, 11, 2, 3);                      // 13 = la mascara que manda en la seleccion
+    e.zerox(5); e.sse_rr(X_PSUBW, 5, 1);                  // -T
+    emitBlendM(e, 4, 1, 5, 2, 9);                         // con acarreo -T, sin acarreo T
+    emitBlendM(e, 5, 0, 4, 13, 9);
+    accPut(c, 5, 2); e.stx(5, rBX, c.VR(vd));
+    e.zerox(9); e.stx(9, rBX, c.coOff[0]); e.stx(9, rBX, c.coOff[1]); e.stx(9, rBX, c.ceOff);
   } break;
 
   // --- VMRG: selecciona por VCC.low sin tocarla; solo borra VCO --------------
@@ -879,9 +1119,271 @@ auto emitMem(Ctx& c, u32 op) -> void {
   if(!e.patch8(done)) c.ok = false;
 }
 
+// LWC2 / SWC2 en linea: LSV/LLV/LDV/LQV y SSV/SLV/SDV/SQV.
+//
+// Son el 19 % de las instrucciones del microcodigo (censo `KESTREL_VUSTAT`, SM64: SSV 4.6,
+// SDV 3.7, LDV 3.7, LSV 2.9, LLV 1.8, LQV 1.3, SQV 0.8, SLV 0.5) y hasta ahora TODAS salian
+// por el CALL a la entrada especializada. Lo que se emite aqui es exactamente el camino
+// rapido del interprete (`vecFast` + `dmemToVec`/`vecToDmem`), con una diferencia: alli la
+// condicion se comprueba en tiempo de ejecucion y aqui el elemento y la longitud son
+// constantes del opcode, asi que de la condicion solo queda el trozo que depende de la
+// direccion.
+//
+// La conversion es la de siempre: el byte k del registro vectorial vive en el byte (k^1)
+// de `R128::el` porque DMEM guarda cada banda de 16 bits en big-endian. Para un tramo que
+// empieza en elemento PAR y mide un numero PAR de bytes, eso es intercambiar los dos bytes
+// de cada banda — `psllw 8` / `psrlw 8` / `por`, que es el mismo shuffle que el `pshufb`
+// con `kLaneSwap` del interprete sin necesitar la constante en memoria.
+//
+// Lo que NO se emite en linea (elemento impar, longitud impar, el registro desbordado en
+// una tienda, y el cuarteto no alineado a 16) se manda a la MISMA entrada de siempre, asi
+// que el caso raro no tiene una segunda copia de las reglas.
+// LPV / LUV en linea. El interprete hace ocho lecturas de byte con su enmascarado; aqui es
+// una carga de 128 bits y un `pshufb`, porque los ocho bytes que quiere la instruccion salen
+// SIEMPRE de la misma ventana de 16 que empieza en la direccion alineada a 8:
+//
+//   a = (base + imm*8) & ~7;  index = (a & 7) - e;  V.u(o) = dmem[a + ((index + o) & 15)] << 8
+//
+// (LUV es identica con << 7). O sea: el byte que va a la banda `o` esta en la posicion
+// (index + o) mod 16 de esa ventana -- exactamente lo que hace un `pshufb` con una mascara
+// que se arma en tiempo de ejecucion, porque `index` depende de la direccion.
+//
+// La mascara: el byte 2o+1 del destino (la mitad ALTA de la banda o, que es donde va el dato
+// porque el valor es byte<<8) tiene que valer (index + o) & 15, y el byte 2o da igual porque
+// se borra despues. Se arma difundiendo `index` a los dieciseis bytes y sumandole la tabla
+// {0,0,1,1,...,7,7} de `Rsp::byteHalf`. No hace falta el AND con 15: `pshufb` ya se queda
+// con los cuatro bits bajos, y basta con que el bit 7 quede a cero -- por eso `index` se
+// sesga con +16 antes de difundirlo, para que la suma nunca sea negativa (index va de -15 a 7).
+//
+// Se sale al helper de siempre cuando la ventana de 16 cruzaria el final de DMEM, que es el
+// unico caso en que el `& 0xfff` de cada lectura del interprete se nota.
+auto emitVecPack(Ctx& c, u32 op) -> void {
+  E& e = c.e;
+  const u32 sub = op >> 11 & 0x1f, base = op >> 21 & 31, vt = op >> 16 & 31;
+  const u32 el = op >> 7 & 0xf;
+  s32 imm = (s32)(op & 0x7f); if(imm & 0x40) imm -= 0x80;
+
+  accFlush(c);                              // igual que en emitVecMem: el CALL lento lo exige
+
+  e.ld32(rAX, rBX, c.RG(base));
+  if(imm) e.alu_imm(D_ADD, rAX, (u32)(imm * 8));
+  e.mov_rr(rCX, rAX);
+  e.alu_imm(D_AND, rCX, 7);                 // a & 7
+  e.alu_imm(D_ADD, rCX, 16u - el);          // index + 16, siempre en 1..23 (bit 7 a cero)
+  e.alu_imm(D_AND, rAX, 0xff8);             // la ventana empieza alineada a 8, dentro de DMEM
+  e.alu_imm(D_CMP, rAX, 0xff0);
+  const usize slow = e.jcc8(CC_A);          // los 16 bytes se saldrian: al helper
+  e.add64_rr(rAX, rDI);
+
+  e.movd_xr(1, rCX);                        // index+16 en el byte 0
+  e.zerox(2); e.pshufb_x(1, 2);             // ... difundido a los dieciseis
+  e.ldx(2, rBX, c.byteHalfOff);
+  e.sse_rr(X_PADDB, 1, 2);                  // mascara: byte 2o y 2o+1 = index + o (+16)
+  e.ldxu(0, rAX, 0);
+  e.pshufb_x(0, 1);
+  e.onesx(1); e.psllw_i(1, 8);              // 0xff00 por banda: deja el dato en la mitad alta
+  e.sse_rr(X_PAND, 0, 1);                   // ... y borra la basura de la mitad baja
+  if(sub == 7) e.psrlw_i(0, 1);             // LUV desplaza 7, no 8
+  e.stx(0, rBX, c.VR(vt));
+
+  const usize done = e.jmp8();
+  if(!e.patch8(slow)) { c.ok = false; return; }
+  emitCall(c, rspLwc2Entry(op), op);
+  if(!e.patch8(done)) c.ok = false;
+}
+
+// LRV en linea. Es la mitad de arriba de un cuarteto no alineado: rellena los bytes altos
+// del registro con los primeros bytes del cuarteto ALINEADO que sigue, y deja intactos los
+// de abajo.
+//
+//   a = (base + imm*16) & ~15;  start = 16 - ((base + imm*16) & 15) + e
+//   byte logico o del registro = dmem[a + (o - start)]   para o >= start; el resto no se toca
+//
+// Como `a` esta alineado a 16, la ventana leida son esos mismos 16 bytes y NUNCA cruza el
+// final de DMEM: no hay salida al helper, el camino en linea vale siempre.
+//
+// El byte logico o vive en el byte o^1 del anfitrion (`Rsp::laneIdx` es esa tabla), asi que
+// con L = laneIdx se saca todo con dos mascaras de bytes:
+//   indices del pshufb : L - start   (negativo -> bit 7 puesto -> `pshufb` escribe cero, y da
+//                                     igual porque esa banda la tapa la mezcla de despues)
+//   mascara de mezcla  : L > start-1  con `pcmpgtb`, comparacion CON signo pero todos los
+//                                     valores caen en 0..30, asi que se porta como sin signo.
+// `start` va de 1 a 31, nunca se sale de rango ni cuando (a & 15) < e (ahi sale > 16 y la
+// mascara queda a cero: la instruccion no escribe nada, igual que el bucle del interprete).
+auto emitVecRight(Ctx& c, u32 op) -> void {
+  E& e = c.e;
+  const u32 base = op >> 21 & 31, vt = op >> 16 & 31, el = op >> 7 & 0xf;
+  s32 imm = (s32)(op & 0x7f); if(imm & 0x40) imm -= 0x80;
+
+  accFlush(c);
+
+  e.ld32(rAX, rBX, c.RG(base));
+  if(imm) e.alu_imm(D_ADD, rAX, (u32)(imm * 16));
+  e.mov_rr(rCX, rAX);
+  e.alu_imm(D_AND, rCX, 15);
+  e.neg32(rCX);
+  e.alu_imm(D_ADD, rCX, 16u + el);          // start = 16 - ((a & 15) - e), entre 1 y 31
+  e.alu_imm(D_AND, rAX, 0xff0);             // cuarteto alineado: no cruza el final de DMEM
+  e.add64_rr(rAX, rDI);
+
+  e.ldx(1, rBX, c.laneIdxOff);              // L
+  e.movd_xr(2, rCX); e.zerox(3); e.pshufb_x(2, 3);       // start difundido a los 16 bytes
+  e.movx(3, 1); e.sse_rr(X_PSUBB, 3, 2);                 // indices = L - start
+  e.ldxu(0, rAX, 0); e.pshufb_x(0, 3);                   // los bytes ya colocados
+  e.onesx(4); e.sse_rr(X_PADDB, 2, 4);                   // start - 1
+  e.sse_rr(X_PCMPGTB, 1, 2);                             // mascara: bytes que SI se escriben
+  e.sse_rr(X_PAND, 0, 1);
+  e.ldx(4, rBX, c.VR(vt)); e.sse_rr(X_PANDN, 1, 4);      // ~mascara & lo que ya habia
+  e.sse_rr(X_POR, 0, 1);
+  e.stx(0, rBX, c.VR(vt));
+}
+
+auto emitVecMem(Ctx& c, u32 op, bool store) -> bool {
+  E& e = c.e;
+  // A/B: con KESTREL_RSPJIT_NOVECMEM todo vuelve al CALL de siempre. Se lee una vez, y en
+  // el camino de COMPILACION, no en el de ejecucion.
+  static const bool off = std::getenv("KESTREL_RSPJIT_NOVECMEM") != nullptr;
+  // A/B aparte para los barajados (LPV/LUV/LRV), que llevan su propio emisor.
+  static const bool offPack = std::getenv("KESTREL_RSPJIT_NOVECPACK") != nullptr;
+  if(off) return false;
+  const u32 sub = op >> 11 & 0x1f, base = op >> 21 & 31, vt = op >> 16 & 31;
+  const u32 el = op >> 7 & 0xf;
+  if(!offPack && !store && (sub == 6 || sub == 7)) { emitVecPack(c, op); return true; }
+  if(sub < 1 || sub > 4) return false;      // LBV y el resto de barajados (LHV/LFV/LTV)
+  if(el & 1) return false;                  // `vecFast` pide elemento par
+  s32 imm = (s32)(op & 0x7f); if(imm & 0x40) imm -= 0x80;
+  const u32 n = 2u << (sub - 1);            // 2, 4, 8 o 16 bytes
+
+  // Longitud del tramo, ya constante. En las cargas cortas el registro NO envuelve (el
+  // bucle del interprete corta en 16); en las tiendas cortas si lo haria, y ese caso se va
+  // al helper porque `vecFast` tampoco lo cubre. Del cuarteto solo entra el alineado: con
+  // `a & 15 == 0` la longitud del interprete es 16 - el, y en la tienda ademas exige el = 0.
+  u32 len;
+  if(sub == 4)   { if(store && el != 0) return false; len = 16 - el; }
+  else if(store) { if(el + n > 16) return false; len = n; }
+  else           { len = el + n > 16 ? 16 - el : n; }
+  if(len == 0 || (len & 1)) return false;
+
+  // El volcado del acumulador va ANTES de la bifurcacion, por lo mismo que en emitMem: el
+  // emitCall de la rama lenta apagaria accDirty en tiempo de compilacion y el camino rapido
+  // saldria del bloque con el acumulador vivo solo en xmm6..xmm8.
+  accFlush(c);
+
+  e.ld32(rAX, rBX, c.RG(base));
+  if(imm) e.alu_imm(D_ADD, rAX, (u32)(imm * (s32)n));
+  e.alu_imm(D_AND, rAX, 0xfff);
+  usize slow;
+  if(sub == 4) {                            // el cuarteto alineado no puede cruzar el final
+    e.mov_rr(rCX, rAX); e.alu_imm(D_AND, rCX, 15);   // el AND deja ZF
+    slow = e.jcc8(CC_NE);
+  } else {                                  // ... y aqui basta con que el tramo no envuelva
+    e.alu_imm(D_CMP, rAX, 0x1000u - len);
+    slow = e.jcc8(CC_A);
+  }
+  e.add64_rr(rAX, rDI);                     // el AND de 32 bits ya limpio la mitad alta
+
+  const s32 vb = c.VR(vt);
+  auto swap16 = [&]() {                     // intercambia los dos bytes de cada banda
+    e.movx(1, 0); e.psllw_i(0, 8); e.psrlw_i(1, 8); e.sse_rr(X_POR, 0, 1);
+  };
+  if(len == 16) {                           // registro entero: una sola operacion de 128 bits
+    if(store) { e.ldx(0, rBX, vb); swap16(); e.stxu(0, rAX, 0); }
+    else      { e.ldxu(0, rAX, 0); swap16(); e.stx(0, rBX, vb); }
+  } else {
+    u32 off = 0, rem = len;                 // mismos tramos que dmemToVec: 8, luego 4, luego 2
+    while(rem >= 8) {
+      if(store) { e.ldq(0, rBX, vb + (s32)(el + off)); swap16(); e.stq(0, rAX, (s32)off); }
+      else      { e.ldq(0, rAX, (s32)off); swap16(); e.stq(0, rBX, vb + (s32)(el + off)); }
+      off += 8; rem -= 8;
+    }
+    if(rem >= 4) {
+      if(store) { e.ldd(0, rBX, vb + (s32)(el + off)); swap16(); e.std_(0, rAX, (s32)off); }
+      else      { e.ldd(0, rAX, (s32)off); swap16(); e.std_(0, rBX, vb + (s32)(el + off)); }
+      off += 4; rem -= 4;
+    }
+    if(rem >= 2) {                          // dos bytes: sale mas corto por el banco entero
+      if(store) { e.ld16z(rCX, rBX, vb + (s32)(el + off)); e.rol16(rCX, 8); e.st16(rCX, rAX, (s32)off); }
+      else      { e.ld16z(rCX, rAX, (s32)off); e.rol16(rCX, 8); e.st16(rCX, rBX, vb + (s32)(el + off)); }
+    }
+  }
+
+  const usize done = e.jmp8();
+  if(!e.patch8(slow)) { c.ok = false; return true; }
+  emitCall(c, store ? rspSwc2Entry(op) : rspLwc2Entry(op), op);
+  if(!e.patch8(done)) c.ok = false;
+  return true;
+}
+
+// --- los movimientos escalar<->vector (MFC2 / CFC2 / MTC2 / CTC2) --------------
+// Es lo ultimo de COP2 que salia por el puente generico `kestrel_rspjit_cop2`, que ademas
+// de la llamada tiene que volver a decodificar el sub. En el censo pesan poco (bastante
+// menos del 1 % de las instrucciones del RSP), pero son cuatro cuerpos cortos y sin ningun
+// caso que se escape: se emiten enteros, sin envoltura de respaldo.
+auto moveInline(const Rsp& rsp, u32 op) -> bool {
+#if KESTREL_VUSTAT
+  (void)rsp; (void)op;
+  return false;
+#else
+  static const bool off = std::getenv("KESTREL_RSPJIT_NOVECMOVE") != nullptr;
+  if(off || !rsp.sse) return false;
+  const u32 sub = op >> 21 & 0x1f;
+  return sub == 0x00 || sub == 0x02 || sub == 0x04 || sub == 0x06;
+#endif
+}
+
+auto emitVecMove(Ctx& c, u32 op) -> void {
+  E& e = c.e;
+  const u32 sub = op >> 21 & 0x1f, rt = op >> 16 & 31, vs = op >> 11 & 31;
+  const u32 el = op >> 7 & 0xf, cr = op >> 11 & 3;
+  // Las dos mitades de la bandera. VCE no tiene mitad alta: el byte alto sale cero.
+  const s32 loOff = cr == 0 ? c.coOff[1] : cr == 1 ? c.ccOff[1] : c.ceOff;
+  const s32 hiOff = cr == 0 ? c.coOff[0] : cr == 1 ? c.ccOff[0] : -1;
+  // Byte logico k del vector = byte k^1 del anfitrion (las bandas van en orden N64).
+  const s32 vb = c.VR(vs);
+  const s32 b0 = vb + (s32)(el ^ 1), b1 = vb + (s32)(((el + 1) & 15) ^ 1);
+
+  switch(sub) {
+  case 0x00:                                     // MFC2: dos bytes -> mitad baja con signo
+    if(rt == 0) break;                           // setR ignora r0
+    e.movzx8_m(rAX, rBX, b0);
+    e.movzx8_m(rCX, rBX, b1);
+    e.shift_imm(D_SHL, rAX, 8); e.alu_rr(OP_OR, rAX, rCX);
+    e.movsx16(rAX, rAX); e.st32(rAX, rBX, c.RG(rt));
+    break;
+  case 0x02:                                     // CFC2: bit 0 de cada banda -> 16 bits
+    if(rt == 0) break;
+    e.ldx(0, rBX, loOff); e.psllw_i(0, 15);      // el bit util al de signo de la banda
+    if(hiOff >= 0) { e.ldx(1, rBX, hiOff); e.psllw_i(1, 15); } else e.zerox(1);
+    e.packsswb(0, 1);                            // satura: 0x8000 -> 0x80, 0 -> 0
+    e.pmovmskb(rAX, 0);                          // bit n = banda baja n, bit 8+n = alta n
+    e.movsx16(rAX, rAX); e.st32(rAX, rBX, c.RG(rt));
+    break;
+  case 0x04:                                     // MTC2: byte alto y byte bajo del escalar
+    e.ld32(rAX, rBX, c.RG(rt));
+    e.mov_rr(rCX, rAX); e.shift_imm(D_SHR, rCX, 8);
+    e.st8(rCX, rBX, b0);
+    if(el != 15) e.st8(rAX, rBX, b1);            // el ultimo byte del registro no envuelve
+    break;
+  case 0x06: {                                   // CTC2: un bit del escalar por banda
+    e.ld32(rAX, rBX, c.RG(rt));
+    auto spread = [&](u8 x, s32 dst) {           // difunde los 8 bits bajos de eax a 8 bandas
+      e.movd_xr(x, rAX);
+      e.pshuflw(x, x, 0); e.pshufd(x, x, 0);
+      e.pand_m(x, rBX, c.bitLaneOff);            // deja el bit n solo en la banda n
+      e.pcmpeqw_m(x, rBX, c.bitLaneOff);         // ... y lo convierte en mascara
+      e.psrlw_i(x, 15);                          // las banderas se guardan como 0/1
+      e.stx(x, rBX, dst);
+    };
+    spread(0, loOff);
+    if(hiOff >= 0) { e.shift_imm(D_SHR, rAX, 8); spread(1, hiOff); }
+  } break;
+  }
+}
+
 // Salto (condicional o no) con su delay-slot ABSORBIDO en el bloque. Es lo ultimo que
 // emite un bloque: escribe Rsp::pc con el PC que toca DESPUES del delay-slot y el llamante
-// no vuelve a tocarlo (Block::setsPc). El delay-slot se emite justo detras con el camino
+// no vuelve a tocarlo (el epilogo solo escribe el PC cuando el bloque NO cierra en salto).
+// El delay-slot se emite justo detras con el camino
 // normal, que es exactamente el orden del hardware: la condicion y el enlace se resuelven
 // con los registros de ANTES del delay-slot, y el delay-slot corre igual salte o no.
 //
@@ -983,7 +1485,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   // producto, la suma de 48 bits con sus tres acarreos y la saturacion, ~290 bytes. Quedarse
   // corto no corrompe nada -- el emisor detecta el desbordamiento y tira el bloque -- pero
   // lo tira DESPUES de compilarlo, y eso es trabajo perdido cada vez.
-  const usize worst = 96 + n * 400;
+  const usize worst = 256 + n * 448;   // el peor cuerpo en linea es VCL, y el prologo salva hasta 8 xmm
   if(c.buf.used + worst > c.buf.cap) c.clear();
   if(c.buf.used + worst > c.buf.cap) return;   // no cabe ni en un buffer vacio
 
@@ -993,12 +1495,17 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   // en push rbx / mov rbx,rcx, y el epilogo en pop rbx / ret.
   bool needsDmem = false, needsCall = false;
   u32 vuOps = 0;                         // COP2 en linea: deciden si vale cachear el acumulador
+  u32 clipOps = 0;                       // VCL/VCH/VCR: necesitan mas temporales que xmm0..5
   for(u32 i = 0; i < n; i++) {
     u32 op = at((pc0 + 4 * i) & 0xffc), maj = op >> 26;
     switch(classify(op)) {
     case Kind::Cop2:
-      if(vuInline(rsp, op)) vuOps++; else needsCall = true; break;   // la VU en linea no llama a nadie
-    case Kind::Lwc2: case Kind::Swc2: case Kind::ExecMem:
+      if(vuInline(rsp, op)) { vuOps++; if(vuClip(op)) clipOps++; }
+      else if(!moveInline(rsp, op)) needsCall = true;
+      break;   // ni la VU en linea ni los movimientos llaman a nadie
+    case Kind::Lwc2: case Kind::Swc2:     // camino en linea (usa RDI) + envoltura al helper
+      needsCall = true; needsDmem = true; break;
+    case Kind::ExecMem:
       needsCall = true; break;
     case Kind::Mem:                        // camino rapido en DMEM + envoltura al helper
       needsCall = true; needsDmem = true; break;
@@ -1024,7 +1531,13 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   ctx.divInOff  = (s32)((const u8*)&rsp.divin  - (const u8*)&rsp);
   ctx.divOutOff = (s32)((const u8*)&rsp.divout - (const u8*)&rsp);
   ctx.divDpOff  = (s32)((const u8*)&rsp.divdp  - (const u8*)&rsp);
+  ctx.recipOff  = (s32)((const u8*)&rsp.reciprocals[0] - (const u8*)&rsp);
+  ctx.isqrtOff  = (s32)((const u8*)&rsp.invSqrts[0]    - (const u8*)&rsp);
+  ctx.bitLaneOff= (s32)((const u8*)&rsp.bitLane[0]     - (const u8*)&rsp);
+  ctx.byteHalfOff=(s32)((const u8*)&rsp.byteHalf[0]    - (const u8*)&rsp);
+  ctx.laneIdxOff =(s32)((const u8*)&rsp.laneIdx[0]     - (const u8*)&rsp);
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
+  const s32 budOff = (s32)((const u8*)&rsp.jitBudget - (const u8*)&rsp);
   E& e = ctx.e;
 
   // Prologo. RBX = Rsp*, RDI = DMEM (solo si hace falta). Los dos son callee-saved en Win64,
@@ -1032,12 +1545,14 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   // hueco depende de cuantos push hubo -- 40 con dos, 32 con uno; sin CALL no hace falta.
   // Con dos o mas COP2 en linea el acumulador se queda en xmm6/7/8, que son callee-saved:
   // hay que salvarlos, y su hueco va DETRAS del de sombra y alineado a 16.
-  const bool accReg = vuOps >= 2;
+  const bool accReg  = vuOps >= 2;
+  const bool wideTmp = clipOps > 0;      // VCL/VCH/VCR gastan hasta xmm13
   const u8 pushes = (u8)(1 + (needsDmem ? 1 : 0));
-  u8 frame = 0, accBase = 0;
-  if(needsCall || accReg) {
+  u8 frame = 0, accBase = 0, wideBase = 0;
+  if(needsCall || accReg || wideTmp) {
     u8 base = needsCall ? 32 : 0;
-    if(accReg) { accBase = base; base = (u8)(base + 48); }
+    if(accReg)  { accBase  = base; base = (u8)(base + 48); }
+    if(wideTmp) { wideBase = base; base = (u8)(base + 80); }
     frame = (u8)(base + ((pushes & 1) ? 0 : 8));
   }
   ctx.accReg = accReg;
@@ -1046,7 +1561,8 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   e.mov64_rr(rBX, rCX);
   if(needsDmem) e.ld64(rDI, rBX, dmpOff);
   if(frame) e.sub_rsp(frame);
-  if(accReg) for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (u8)(accBase + 16 * k), true);
+  if(accReg)  for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (s32)(accBase  + 16 * k), true);
+  if(wideTmp) for(u8 k = 0; k < 5; k++) e.xmmSpill((u8)(9 + k), (s32)(wideBase + 16 * k), true);
 
   for(u32 i = 0; i < n; i++) {
     const u32 a = (pc0 + 4 * i) & 0xffc;
@@ -1061,10 +1577,15 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     // (sub<0x10) siguen por el puente generico, que es donde se decide.
     case Kind::Cop2:
       if(vuInline(rsp, op)) { emitVu(ctx, op); break; }
+      if(moveInline(rsp, op)) { emitVecMove(ctx, op); break; }
       emitCall(ctx, ((op >> 21 & 0x1f) < 0x10) ? (void*)&kestrel_rspjit_cop2
                                                : rspCop2Entry(op), op); break;
-    case Kind::Lwc2:    emitCall(ctx, rspLwc2Entry(op), op); break;   // ya especializadas
-    case Kind::Swc2:    emitCall(ctx, rspSwc2Entry(op), op); break;   // por sub, como COP2
+    // Los tramos pares sobre DMEM van en linea; el resto sigue por la entrada ya
+    // especializada por sub (mismo helper que llama el interprete).
+    case Kind::Lwc2:
+      if(!emitVecMem(ctx, op, false)) emitCall(ctx, rspLwc2Entry(op), op); break;
+    case Kind::Swc2:
+      if(!emitVecMem(ctx, op, true)) emitCall(ctx, rspSwc2Entry(op), op); break;
     case Kind::ExecMem: emitCall(ctx, (void*)&kestrel_rspjit_exec,  op); break;
     case Kind::Mem:     emitMem(ctx, op); break;
     case Kind::Stop:    break;                 // no puede pasar: el conteo paro antes
@@ -1072,15 +1593,109 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   }
 
   accFlush(ctx);
-  if(accReg) for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (u8)(accBase + 16 * k), false);
-  if(frame) e.add_rsp(frame);
-  if(needsDmem) e.pop(rDI);
-  e.pop(rBX); e.ret();
+
+  // El PC de salida lo deja puesto SIEMPRE el bloque. El que cierra en salto ya lo escribio
+  // dentro del salto (y detras corrio su delay-slot); el que cae por el final lo escribe aqui
+  // con una constante. Asi el llamante -- el bucle en C o el bloque anterior de la cadena --
+  // no necesita saber como termino este.
+  if(!endsBranch) {
+    e.mov_imm32(rAX, (pc0 + 4 * n) & 0xffc);
+    e.st32(rAX, rBX, ctx.pcOff);
+  }
+
+  // Donde sigue la ejecucion, si se sabe ya al compilar. Un bloque que cae por el final
+  // sigue en la instruccion siguiente, y uno que cierra en J/JAL tiene el destino en el
+  // propio opcode: en los dos casos la ranura de la tabla es una constante y el sondeo se
+  // ahorra releer el PC y calcular el indice. Los condicionales (dos destinos) y los saltos
+  // a registro se resuelven leyendo el PC que el bloque acaba de escribir.
+  bool staticTgt = !endsBranch;
+  u32  tgtPc = (pc0 + 4 * n) & 0xffc;
+  if(endsBranch) {
+    const u32 bop = at((pc0 + 4 * (n - 2)) & 0xffc), bmaj = bop >> 26;
+    if(bmaj == 0x02 || bmaj == 0x03) { staticTgt = true; tgtPc = ((bop & 0x3ffffff) << 2) & 0xffc; }
+  }
+
+  auto emitRestore = [&]() {
+    if(wideTmp) for(u8 k = 0; k < 5; k++) e.xmmSpill((u8)(9 + k), (s32)(wideBase + 16 * k), false);
+    if(accReg)  for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (s32)(accBase  + 16 * k), false);
+    if(frame) e.add_rsp(frame);
+    if(needsDmem) e.pop(rDI);
+    e.pop(rBX);
+  };
+
+  // --- sondeo de enlace ------------------------------------------------------------------
+  // Mira la tabla en el PC de salida y, si hay bloque vivo que cabe en el saldo, se salta a
+  // el con una COLA (jmp, no call) una vez desmontado el marco: la pila queda exactamente
+  // como al entrar, con la direccion de retorno del bucle en C encima, asi que el ultimo
+  // bloque de la cadena vuelve alli con su propio `ret`. La cadena no consume pila.
+  //
+  // La comparacion del saldo va CON SIGNO: si una invalidacion simultanea desde el hilo del
+  // CPU deja un par (fn, nOps) incoherente, lo peor que puede pasar es pasarse de tanda una
+  // vez; con el saldo ya negativo, `jg` corta la cadena en el acto.
+  //
+  // Se lee `blocks` de ESTA tabla, con la base cableada como inmediato: un bloque pertenece a
+  // la imagen de IMEM con la que se compilo, y cambiar de imagen (jitSelectImage) solo pasa
+  // entre instrucciones interpretadas, nunca dentro de un bloque.
+  if(!rsp.jitLink) {
+    emitRestore();
+    e.ret();
+  } else {
+    // rcx = &blocks[destino]
+    if(staticTgt) {
+      e.mov_imm64(rCX, (u64)(std::uintptr_t)&c.blocks[(tgtPc >> 2) & 1023]);
+    } else {
+      e.ld32(rAX, rBX, ctx.pcOff);                    // pc de salida, alineado a palabra
+      e.shift_imm(5, rAX, 2);                         // shr eax,2  -> indice 0..1023
+      e.shift_imm(4, rAX, 4);                         // shl eax,4  -> * sizeof(Block)
+      e.mov_imm64(rCX, (u64)(std::uintptr_t)&c.blocks[0]);
+      e.add64_rr(rCX, rAX);
+    }
+    e.ld64(rAX, rCX, 0);                              // Block::fn
+    e.test64_rr(rAX, rAX);
+    const usize noLink = e.jcc8(CC_E);
+    e.ld16z(rCX, rCX, 8);                             // Block::nOps
+    // El saldo lo debita QUIEN SALTA, y solo por el bloque al que salta. Cobrarselo cada
+    // bloque en su prologo costaba una lectura-modificacion-escritura en TODOS -- enlacen o
+    // no -- y encima encadenaba la tienda con la lectura de aqui: medido ~1% peor que sin
+    // enlazar. Asi el que no enlaza paga una lectura y nada mas, y el que enlaza paga la
+    // resta que de todas formas habria que hacer. Al bloque de entrada lo debita el bucle en C.
+    e.ld32(rDX, rBX, budOff);
+    e.alu_rr(OP_CMP, rCX, rDX);
+    const usize tooBig = e.jcc8(CC_G);                // nOps > saldo (con signo): no cabe
+    e.alu_rr(OP_SUB, rDX, rCX);
+    e.st32(rDX, rBX, budOff);
+    // Con el marco vacio -- ni hueco de sombra ni xmm salvados, que es la forma de casi todo
+    // bloque de solo ALU -- desmontarlo son uno o dos POP: sale mas barato duplicarlo en las
+    // dos salidas que llevar la decision en un registro hasta despues del epilogo.
+    if(!wideTmp && !accReg && !frame) {
+      e.mov64_rr(rCX, rBX);                           // el destino espera Rsp* en RCX
+      emitRestore();
+      e.jmp_r(rAX);
+      if(!e.patch8(noLink) || !e.patch8(tooBig)) ctx.ok = false;
+      emitRestore();
+      e.ret();
+    } else {
+      // Marco grande: una sola copia del epilogo y la decision viaja en RDX, que ni los
+      // POP ni los restores de xmm tocan.
+      e.mov64_rr(rDX, rAX);
+      const usize go = e.jmp8();
+      if(!e.patch8(noLink) || !e.patch8(tooBig)) ctx.ok = false;
+      e.alu_rr(OP_XOR, rDX, rDX);                     // sin enlace
+      if(!e.patch8(go)) ctx.ok = false;
+      e.mov64_rr(rCX, rBX);
+      emitRestore();
+      e.test64_rr(rDX, rDX);
+      const usize out = e.jcc8(CC_E);
+      e.jmp_r(rDX);
+      if(!e.patch8(out)) ctx.ok = false;
+      e.ret();
+    }
+  }
 
   if(c.buf.overflowed()) { c.clear(); return; }
   if(!ctx.ok) return;                          // emision incompleta: no se registra
   c.buf.finalize(entry);
-  c.blocks[idx] = Block{ (BlockFn)entry, (u16)n, endsBranch };
+  c.blocks[idx] = Block{ (BlockFn)entry, (u16)n };
   c.state[idx]  = State::Compiled;
   c.compiles++;
 }

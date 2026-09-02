@@ -80,6 +80,13 @@ struct Rsp {
   // --- scalar unit -----------------------------------------------------------
   u32 r[32] = {};          // GPRs; r[0] is hardwired zero (enforced on write)
   u32 pc = 0;              // 12-bit program counter into IMEM
+  // Instrucciones que le quedan a la tanda actual del dynarec. Lo pone el bucle de step()
+  // antes de entrar en un bloque y lo baja el PROPIO codigo emitido: cada bloque se resta sus
+  // instrucciones en el prologo, y el sondeo de enlace del epilogo solo encadena si el
+  // siguiente bloque cabe en lo que queda. Con signo a proposito: si alguna vez se pasara
+  // (lectura rota de la tabla por una invalidacion simultanea), el saldo se vuelve negativo y
+  // la cadena corta sola en vez de dar la vuelta y correr sin freno.
+  s32 jitBudget = 0;
 
   // Per-IMEM-instruction hotpath sampler (opt-in via MCP prof.*). El interruptor vive
   // aqui, junto a los registros que se tocan por instruccion; los 4 KB de contadores
@@ -96,6 +103,15 @@ struct Rsp {
   // --- reciprocal ROMs (generated at construction) ---------------------------
   u16 reciprocals[512];
   u16 invSqrts[512];
+  // Constante, no estado: un bit por banda. La usa el CTC2 en linea del dynarec, que solo
+  // sabe direccionar cosas dentro del propio Rsp (rbx + desplazamiento).
+  alignas(16) u16 bitLane[8] = { 1, 2, 4, 8, 16, 32, 64, 128 };
+  // {0,0,1,1,...,7,7}: el indice de banda repetido en los dos bytes de cada banda. Lo usa el
+  // dynarec para armar en tiempo de ejecucion la mascara del `pshufb` de LPV/LUV.
+  alignas(16) u8 byteHalf[16] = { 0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7 };
+  // {1,0,3,2,...,15,14}: byte logico que vive en cada byte del anfitrion (k <-> k^1). Lo usa
+  // el dynarec para LRV, que mueve bytes sueltos en orden logico.
+  alignas(16) u8 laneIdx[16] = { 1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14 };
 
   // Estos dos los LEE el hilo CPU (el chequeo de reentrada del JIT mira `running` en cada
   // entrada de bloque, ~cada 3 instrucciones guest) y los escribe casi nunca: `running` solo
@@ -134,6 +150,7 @@ struct Rsp {
   // Interruptor y tabla de bloques. La tabla vive en el heap y detras de un puntero para
   // que rsp.hpp no tenga que arrastrar el emisor x86 a todo el que incluya el RSP.
   bool jitOn = false;
+  bool jitLink = true;   // KESTREL_RSPJIT_LINK=0: bloques sin encadenar (A/B)
   rspjit::Cache* jc = nullptr;
   // Cache de IMAGENES de microcodigo. El juego alterna tareas (graficos, audio, overlays) y
   // cada cambio de tarea reemplaza los 4 KB de IMEM enteros: con una sola tabla eso es un
@@ -141,10 +158,24 @@ struct Rsp {
   // vaciados, 1.28 M bloques compilados y ~50% del hilo del RSP dentro del compilador
   // (emitCall+compile+classify en el perfilador de host). Guardando N tablas, cada una con
   // su sombra de los 4 KB, volver a una imagen ya vista cuesta un memcmp y un puntero.
-  static constexpr u32 kJitWaysMax = 16;
+  static constexpr u32 kJitWaysMax = 32;
   static constexpr u32 kJitWayBytes = 2u << 20;
-  static constexpr u32 kJitNewWay = 64;   // trozos de 8 B que justifican estrenar ranura
-  u32 kJitWays = 4;                // KESTREL_RSPJIT_WAYS, <= kJitWaysMax
+  u32 kJitNewWay = 8;              // KESTREL_RSPJIT_NEWWAY: trozos de 8 B para estrenar ranura
+  // Por defecto 16 ranuras y umbral 8. Medido en SM64 (500 intercambios,
+  // `KESTREL_RSPJIT_STATS`), bloques compilados en toda la corrida:
+  //   ranuras=4  umbral=64 -> 241162   (lo que habia)
+  //   ranuras=6  umbral=64 -> 105066   (con 4 el juego se queda sin ranura y parchea)
+  //   ranuras=16 umbral=8  ->   3948   (27x menos compilacion, repetible +-1%)
+  // Las dos perillas van juntas: con umbral 64 el juego solo llega a estrenar 6 imagenes
+  // porque casi toda diferencia se considera "parecida" y se parchea la ranura viva; bajando
+  // el umbral cada overlay se queda con su propia tabla y volver a el es un memcmp. Bajarlo
+  // MAS es peor (umbral 4 -> 50389 bloques): se estrenan ranuras por diferencias de 32 B y
+  // los casi-duplicados echan a las plantillas grandes. Pedir mas de 16 ranuras no cambia
+  // nada (con 32 disponibles SM64 usa 17 y compila los mismos 3983 bloques).
+  // En `bench` el reloj sube de 505% a ~620% de tiempo real, pero la mayor parte de eso ya
+  // la da subir las ranuras: el umbral se cobra en CPU del hilo del RSP, que en SM64 va
+  // holgado. Donde importa es en un microcodigo pesado (PD) y en anfitriones flojos.
+  u32 kJitWays = 16;               // KESTREL_RSPJIT_WAYS, <= kJitWaysMax
   rspjit::Cache* jcWay[kJitWaysMax] = {};
   u64 jcUse[kJitWaysMax] = {};        // sello de uso (LRU)
   u32 jcCur = 0;                   // ranura activa (jc == jcWay[jcCur])

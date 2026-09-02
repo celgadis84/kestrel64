@@ -43,9 +43,27 @@
 // BLEZ/BGTZ, los cuatro REGIMM, J/JAL, JR/JALR). El par salto+delay era el 2x mas caro del
 // interprete -- dos vueltas del despachador mas el pestillo `inDelay` -- y ademas cortaba
 // el bloque en cada bucle del microcodigo, que es justo donde se pasa el tiempo. El bloque
-// escribe Rsp::pc y marca Block::setsPc; siguen fuera BREAK, COP0 y todo lo no reconocido.
+// escribe Rsp::pc el mismo; siguen fuera BREAK, COP0 y todo lo no reconocido.
+//
+// Etapa 3: ENLACE DE BLOQUES. Hasta aqui cada bloque volvia al bucle en C de Rsp::step, que
+// releia el PC, indexaba la tabla y volvia a llamar: medidos ~6.2 M de idas y vueltas por
+// campo con bloques de ~10 instrucciones. Ahora el epilogo mira la tabla EL MISMO y, si en
+// el PC de salida hay un bloque vivo que cabe en lo que queda de tanda, salta a el con una
+// cola (`jmp`, no `call`): la pila queda igual que a la entrada, asi que el ultimo bloque de
+// la cadena vuelve directamente al bucle en C. La pila NO crece por larga que sea la cadena.
+//
+// El enlace es INDIRECTO, por tabla, nunca un `jmp rel32` cableado al destino: en el RSP la
+// IMEM se reescribe constantemente (overlays), y un enlace directo obligaria a mantener
+// retroenlaces por bloque para poder desengancharlos al invalidar. Con la tabla, poner
+// nullptr en la ranura ya desengancha a todo el que apuntara ahi, gratis. Cubre igual los
+// saltos a registro (JR/JALR), cuyo destino no se conoce hasta ejecutarlo.
+//
+// El presupuesto de la tanda (Rsp::jitBudget) baja dentro del codigo emitido: cada bloque se
+// resta sus propias instrucciones en el prologo y la cadena solo continua si el siguiente
+// cabe. Asi la cadena termina siempre, y el bucle en C recupera el saldo al volver.
 //
 // El oraculo es el propio interprete: mismo md5 de framebuffer con KESTREL_RSPJIT=0 y =1.
+#include <cstddef>
 #include "../core/types.hpp"
 #include "../cpu/jit.hpp"
 
@@ -61,13 +79,19 @@ using BlockFn = void (*)(Rsp*);
 
 enum class State : u8 { Unknown = 0, Compiled = 1, NoComp = 2 };
 
+// TODO bloque deja Rsp::pc escrito al salir -- el que cierra en salto lo hace en el propio
+// salto, y el que cae por el final lo hace con una constante en el epilogo. El llamante no
+// avanza el PC nunca. Sale gratis (una tienda por bloque) y es lo que permite el enlace:
+// el epilogo puede saltar a CUALQUIER bloque sin saber como termina.
+//
+// El campo `nOps` lo lee TAMBIEN el codigo emitido, en el sondeo de enlace: el desplazamiento
+// esta cableado en el emisor, de ahi los static_assert.
 struct Block {
   BlockFn fn = nullptr;
   u16     nOps = 0;
-  // El bloque termina en un salto con su delay-slot absorbido y ya ha dejado Rsp::pc
-  // puesto: el llamante NO debe avanzarlo el mismo. Ver rspjit.cpp emitBranch().
-  bool    setsPc = false;
 };
+static_assert(sizeof(Block) == 16 && alignof(Block) == 8, "el sondeo de enlace escala por 16");
+static_assert(offsetof(Block, fn) == 0 && offsetof(Block, nOps) == 8, "offsets cableados en compile()");
 
 struct Cache {
   jit::CodeBuffer buf;

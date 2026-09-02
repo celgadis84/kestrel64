@@ -159,6 +159,12 @@ Rsp::Rsp() {
       u32 n = (u32)std::strtoul(w, nullptr, 0);
       kJitWays = n < 1 ? 1 : (n > kJitWaysMax ? kJitWaysMax : n);
     }
+    if(const char* w = std::getenv("KESTREL_RSPJIT_NEWWAY")) {
+      u32 n = (u32)std::strtoul(w, nullptr, 0);
+      kJitNewWay = n < 1 ? 1 : n;
+    }
+    jitLink = !std::getenv("KESTREL_RSPJIT_LINK") ||
+              std::getenv("KESTREL_RSPJIT_LINK")[0] != '0';   // A/B; por defecto puesto
     statsOn = std::getenv("KESTREL_RSPJIT_STATS") != nullptr;
     if(jitOn) {
       // Solo la primera imagen al arrancar; las demas ranuras se crean cuando aparece un
@@ -391,13 +397,22 @@ auto Rsp::accSat(int n, bool slice, u16 neg, u16 pos) const -> u16 {
 // --- COP0 register access (SP + DPC) ----------------------------------------
 auto Rsp::mfc0(int rt, int rd) -> void {
   if((rd & 0xf) == 10) mem->rcp.dpcCurReads.fetch_add(1, std::memory_order_relaxed);  // DPC_CURRENT
-  u32 data = (rd & 8) ? mem->read32(PHYS_DPC + ((rd & 7) << 2))
-                      : mem->read32(PHYS_SP  + ((rd & 7) << 2));
+  // Directo al decodificador de MMIO. `Memory::read32` empieza por cart, dominio de save
+  // y `resolve`, y `resolve` recorre la lista de regiones entera antes de rendirse -- y
+  // estas dos bases SIEMPRE caen fuera de todas ellas, asi que el valor es el mismo. El
+  // microcodigo sondea SP_DMA_BUSY/SP_STATUS en bucle, asi que ese recorrido salia el
+  // 32 % del hilo del RSP en el perfil.
+  u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
+                                      : PHYS_SP  + ((rd & 7) << 2));
   setR(rt, data);
 }
 auto Rsp::mtc0(int rd, u32 v) -> void {
-  if(rd & 8) { mem->write32(PHYS_DPC + ((rd & 7) << 2), v); return; }
-  mem->write32(PHYS_SP + ((rd & 7) << 2), v);
+  // Directo al decodificador de MMIO, por lo mismo que `mfc0` (ver alli). El microcodigo
+  // programa cada DMA con cuatro MTC0 seguidos, asi que el prologo de `Memory::write32`
+  // -- IS-Viewer, cart, dominio de save y el recorrido entero de regiones de `resolve`,
+  // que aqui NO puede acertar nunca -- salia el 23 % del hilo del RSP en el perfil.
+  if(rd & 8) { mem->rcpRegWrite32(PHYS_DPC + ((rd & 7) << 2), v); return; }
+  mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
   // without a BREAK — so Status.broke is NOT set (unlike the BREAK instruction).
   if((rd & 7) == 4 && (mem->rcp.sp_status.load(std::memory_order_acquire) & 1u)) halt = true;
@@ -1417,9 +1432,9 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
   static const u32 fns[] = { 0x00, 0x01, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
                              0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x13, 0x14, 0x15, 0x1d,
                              0x20, 0x21, 0x22, 0x23,
-                             // VCL/VCH/VCR NO estan en linea: entran a proposito para que el
-                             // bloque mezcle CALL con VU en linea y se pruebe el volcado del
-                             // acumulador cacheado antes de la llamada.
+                             // VCL/VCH/VCR leen y escriben las cinco banderas, y VCL ademas
+                             // conserva las viejas en los carriles cuya rama no las toca: el
+                             // estado inicial aleatorio de arriba es lo que lo comprueba.
                              0x24, 0x25, 0x26, 0x27,
                              0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
                              // Familia del reciproco. VRCPH/VMOV/VRSQH estan en linea;
@@ -1436,8 +1451,10 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
   u32 st = 0xc0ffee11u;
   auto rnd = [&]() -> u32 { st ^= st << 13; st ^= st >> 17; st ^= st << 5; return st; };
 
+  // El estado comparado incluye el banco escalar y DMEM enteros: las LWC2/SWC2 en linea
+  // escriben en DMEM y leen de r[], y un fallo de direccion solo asoma comparando los 4 KB.
   struct VState { R128 vpr[32], acch, accm, accl, vcoh, vcol, vcch, vccl, vce;
-                  u16 divin, divout; u8 divdp, pad[3]; };
+                  u16 divin, divout; u8 divdp, pad[3]; u32 r[32]; u8 dmem[4096]; };
   VState in{}, outInterp{}, outJit{};
   auto save = [&](VState& z) {
     std::memcpy(z.vpr, vpr, sizeof vpr);
@@ -1445,12 +1462,16 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
     z.vcoh = vcoh; z.vcol = vcol; z.vcch = vcch; z.vccl = vccl; z.vce = vce;
     z.divin = divin; z.divout = divout; z.divdp = divdp ? 1 : 0;
     z.pad[0] = z.pad[1] = z.pad[2] = 0;   // el memcmp compara la estructura entera
+    std::memcpy(z.r, r, sizeof z.r);
+    std::memcpy(z.dmem, dmp, sizeof z.dmem);
   };
   auto load = [&](const VState& z) {
     std::memcpy(vpr, z.vpr, sizeof vpr);
     acch = z.acch; accm = z.accm; accl = z.accl;
     vcoh = z.vcoh; vcol = z.vcol; vcch = z.vcch; vccl = z.vccl; vce = z.vce;
     divin = z.divin; divout = z.divout; divdp = z.divdp != 0;
+    std::memcpy(r, z.r, sizeof z.r);
+    std::memcpy(dmp, z.dmem, sizeof z.dmem);
   };
 
   u64 fails = 0, checked = 0;
@@ -1462,13 +1483,37 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
       vcch.el[n] = rnd() & 1; vccl.el[n] = rnd() & 1; vce.el[n] = rnd() & 1;
     }
     divin = (u16)rnd(); divout = (u16)rnd(); divdp = (rnd() & 1) != 0;
+    // Direcciones repartidas por todo DMEM, incluidas las de la ultima linea: ahi es donde
+    // el tramo envuelve y el camino en linea tiene que ceder al helper.
+    for(int k = 1; k < 32; k++) r[k] = rnd() & 0xfff;
+    r[0] = 0;
+    for(u32 k = 0; k < 4096; k += 4) { u32 w = rnd(); std::memcpy(dmp + k, &w, 4); }
     save(in);
 
     u32 ops[8];
     for(u32 i = 0; i < nOps; i++) {
-      u32 fn = fns[rnd() % nf], e = rnd() & 15;
-      u32 vt = rnd() & 7, vs = rnd() & 7, vd = rnd() & 7;   // pocos registros: fuerza solapes
-      ops[i] = (0x12u << 26) | (1u << 25) | (e << 21) | (vt << 16) | (vs << 11) | (vd << 6) | fn;
+      // Una de cada tres es una carga/tienda vectorial: van intercaladas con la aritmetica
+      // a proposito, porque el emisor de la memoria vuelca el acumulador cacheado y hay que
+      // ver que la racha MAC que venga detras lo recupera.
+      u32 pick = rnd() % 6;
+      if(pick < 3) {
+        u32 fn = fns[rnd() % nf], e = rnd() & 15;
+        u32 vt = rnd() & 7, vs = rnd() & 7, vd = rnd() & 7; // pocos registros: fuerza solapes
+        ops[i] = (0x12u << 26) | (1u << 25) | (e << 21) | (vt << 16) | (vs << 11) | (vd << 6) | fn;
+      } else if(pick < 5) {
+        // Todos los sub, no solo los que van en linea: asi se comprueba tambien que la
+        // vuelta al helper sigue viva.
+        u32 maj = (rnd() & 1) ? 0x32u : 0x3au;
+        u32 sub = rnd() % 12, e = rnd() & 15;
+        u32 vt = rnd() & 7, bs = 1 + (rnd() & 7);
+        u32 imm = rnd() & 0x7f;
+        ops[i] = (maj << 26) | (bs << 21) | (vt << 16) | (sub << 11) | (e << 7) | imm;
+      } else {
+        // Movimientos escalar<->vector (sub 0/2/4/6). rt=0 sale a proposito -- MFC2 y CFC2
+        // no deben escribir r0 -- y vs recorre los cuatro valores de cr, incluido el VCE.
+        u32 sub = 2 * (rnd() & 3), rt = rnd() & 7, vs = rnd() & 7, e = rnd() & 15;
+        ops[i] = (0x12u << 26) | (sub << 21) | (rt << 16) | (vs << 11) | (e << 7);
+      }
     }
     // El bloque se pone en una direccion distinta cada vez para no reusar compilaciones.
     u32 pc0 = (u32)((it * 4 * (nOps + 1)) % (4096 - 4 * (nOps + 1))) & 0xffc;
@@ -1478,7 +1523,12 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
     u32 brk = bswap32(0x0000000du);   // BREAK: corta el bloque justo detras
     std::memcpy(imp + ((pc0 + 4 * nOps) & 0xffc), &brk, 4);
 
-    for(u32 i = 0; i < nOps; i++) execCop2(ops[i]);
+    for(u32 i = 0; i < nOps; i++) {
+      u32 maj = ops[i] >> 26;
+      if(maj == 0x32) execLoad(ops[i]);
+      else if(maj == 0x3a) execStore(ops[i]);
+      else execCop2(ops[i]);
+    }
     save(outInterp);
 
     load(in);
@@ -1497,9 +1547,16 @@ auto Rsp::fuzzVuJit(u64 iters) -> u64 {
     if(std::memcmp(&outInterp, &outJit, sizeof(VState)) != 0) {
       if(fails < 12) {
         std::fprintf(stderr, "[rspjitfuzz] MISMATCH pc=0x%03x ops:", pc0);
-        for(u32 i = 0; i < nOps; i++)
-          std::fprintf(stderr, " fn=0x%02x e=%u vs=%u vt=%u vd=%u |", ops[i] & 0x3f, ops[i] >> 21 & 0xf,
-                       ops[i] >> 11 & 31, ops[i] >> 16 & 31, ops[i] >> 6 & 31);
+        for(u32 i = 0; i < nOps; i++) {
+          u32 maj = ops[i] >> 26;
+          if(maj == 0x32 || maj == 0x3a)
+            std::fprintf(stderr, " %s sub=0x%02x e=%u vt=%u base=%u imm=0x%02x |",
+                         maj == 0x32 ? "LWC2" : "SWC2", ops[i] >> 11 & 31, ops[i] >> 7 & 0xf,
+                         ops[i] >> 16 & 31, ops[i] >> 21 & 31, ops[i] & 0x7f);
+          else
+            std::fprintf(stderr, " fn=0x%02x e=%u vs=%u vt=%u vd=%u |", ops[i] & 0x3f, ops[i] >> 21 & 0xf,
+                         ops[i] >> 11 & 31, ops[i] >> 16 & 31, ops[i] >> 6 & 31);
+        }
         std::fprintf(stderr, "\n");
       }
       fails++;
@@ -1709,7 +1766,14 @@ auto Rsp::step(u64 maxInsns) -> void {
       // ejecuta entero y el bucle se salta sus instrucciones. Nunca dentro de un delay-slot
       // (ahi el destino ya esta decidido y el bloque no lo sabe) ni con el muestreador
       // puesto (contaria por bloque en vez de por instruccion).
-      if(useJit && !inDelay) {
+      // `c >= kMinOps`: no se mira la tabla -- y sobre todo no se COMPILA -- lo que no cabe
+      // en lo que queda de tanda. En Lockstep el bucle del sistema llama a step(1), una
+      // instruccion por vuelta, asi que ningun bloque (kMinOps = 2) llega a ejecutarse
+      // jamas: sin esta guarda se pagaba el compilador entero a cambio de nada. Medido en
+      // `bench --mode jit`: 24.1 s con el dynarec del RSP contra 22.3 s con el interprete,
+      // o sea el dynarec costaba un 8% en vez de ahorrar. En Threaded la tanda es la tarea
+      // entera y la guarda no descarta nada.
+      if(useJit && !inDelay && c >= rspjit::kMinOps) {
         const u32 bi = (pc >> 2) & 1023;
         if(jitStats) jc->entries++;
         if(jc->state[bi] == rspjit::State::Unknown) { rspjit::compile(*this, *jc, pc & 0xffc); continue; }
@@ -1718,12 +1782,17 @@ auto Rsp::step(u64 maxInsns) -> void {
         // par incoherente (fn valido con nOps=0 = avance de pc nulo = bucle infinito).
         const rspjit::Block blk = jc->blocks[bi];
         if(blk.fn && blk.nOps && blk.nOps <= c) {
+          // El saldo de la tanda pasa al codigo emitido: cada bloque se resta sus
+          // instrucciones y el epilogo encadena con el siguiente mientras quepa, sin volver
+          // aqui. Al regresar, lo que falte del saldo es lo que consumio la cadena ENTERA,
+          // que puede ser mucho mas que este primer bloque.
+          jitBudget = (s32)c - (s32)blk.nOps;
           blk.fn(this);
-          // Si el bloque cerraba en un salto ya se llevo el delay-slot dentro y dejo el PC
-          // final escrito; avanzarlo aqui lo tiraria. Y no queda pestillo de delay pendiente.
-          if(!blk.setsPc) pc = (pc + 4u * blk.nOps) & 0xfff;
-          c -= blk.nOps;
-          if(jitStats) jc->jitOps += blk.nOps;
+          // El PC final lo deja puesto el bloque, cierre en salto o caiga por el final, asi
+          // que aqui no se avanza nada. Tampoco queda pestillo de delay pendiente.
+          const s32 left = jitBudget;
+          if(jitStats) jc->jitOps += (u64)(c - (left > 0 ? (u64)left : 0));
+          c = left > 0 ? (u64)left : 0;
           continue;
         }
       }

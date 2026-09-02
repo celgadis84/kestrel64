@@ -148,9 +148,11 @@ xmm0..xmm5 — volatiles en Win64, o sea cero derrames.
 Cubiertas hoy (`vuInline`): VAND/VNAND/VOR/VNOR/VXOR/VNXOR, VSAR, VABS, VADD,
 VSUB, VADDC, VSUBC, **la familia MAC entera** — VMULF/VMULU, VMUDL/VMUDM/VMUDN/
 VMUDH, VMACF/VMACU y VMADL/VMADM/VMADN/VMADH — y las **comparaciones simples**
-VLT/VEQ/VNE/VGE mas VMRG. Es el grueso de las COP2 que ejecuta SM64. Lo que sigue
-saliendo por el CALL a la entrada especializada son las comparaciones de recorte
-(VCH/VCL/VCR), la familia del reciproco y los movimientos escalar↔vector.
+VLT/VEQ/VNE/VGE mas VMRG, **las de recorte** VCH/VCL/VCR y **la familia del
+reciproco** entera (VRCP/VRCPL/VRCPH, VRSQ/VRSQL/VRSQH, VMOV). Es practicamente
+toda la COP2 que ejecuta SM64: por el CALL a la entrada especializada solo siguen
+saliendo los movimientos escalar↔vector (sub < 0x10) y los raros sin camino SSE
+(VRNDP/VRNDN, VMULQ, VMACQ, VNOP y las reservadas), que juntos no llegan al 0.1 %.
 
 Los productos se arman igual que en `vprodSS/SU/US`: `pmullw` da el limbo bajo,
 `pmulhw`/`pmulhuw` el medio y `psraw 15` del medio el alto; la correccion de
@@ -285,13 +287,363 @@ mixtos con memoria: sus bloques son solo COP2, asi que el fallo de `emitMem` de 
 paso limpio por el fuzz y lo cazo el md5 de sm64 en threaded. El fuzz es un oraculo de
 semantica de la VU, no de gestion de registros a lo largo del bloque.
 
+## Las de recorte (VCH / VCL / VCR)
+
+Son las tres unicas que no caben en seis registros volatiles: VCL sola necesita
+hasta ocho mascaras vivas a la vez. El bloque que lleve alguna salva **xmm9..xmm13**
+en el prologo (callee-saved en Win64, mismo mecanismo que el acumulador en
+xmm6..xmm8, con su hueco propio de 80 bytes detras del de la ABI y alineado a 16).
+El prescan las cuenta aparte con `vuClip`, asi que un bloque que no las tenga no
+paga ni un derrame.
+
+Ni una de las tres tiene rama emitida: las dos o cuatro ramas del interprete se
+calculan **todas** y se mezclan con una mascara.
+
+* **VCH** decide por "los signos de S y T difieren". Con signos distintos la cuenta
+  es `S+T` y el umbral `<= 0`; con el mismo signo es `S-T` y el umbral `>= 0`. Se
+  emiten las dos y se mezcla. Escribe las cinco banderas; VCO.high resulta ser la
+  misma expresion en las dos ramas (`resultado != 0 && S != ~T`), asi que sale una
+  sola vez.
+* **VCR** es VCH sin VCE ni VCO. El interprete compara `S+T+1 <= 0` en 32 bits, pero
+  esa rama solo corre donde los signos DIFIEREN, y ahi `S+T` cabe siempre en 16 bits
+  con signo: el signo de la suma envuelta ya es el bueno. Igual con `S-T` en la otra
+  rama, donde los signos coinciden. Los carriles que se desbordarian son justo los
+  que la mezcla descarta — lo que ahorra los `pmovsxwd` + suma en dobles.
+* **VCL** tiene cuatro ramas por carril, pero las cuatro son la misma seleccion
+  `accl = mascara ? X : S`, con distinta mascara y con `X = -T` en las dos de
+  VCO.low y `X = T` en las otras dos. Asi que en vez de mezclar cuatro resultados se
+  mezclan las **mascaras** y se hace una sola seleccion. Las banderas viejas se
+  conservan en los carriles cuya rama no las escribe, que es lo que pide el
+  hardware, y eso es exactamente lo que comprueba el fuzz: el estado inicial trae
+  VCO/VCC/VCE al azar.
+* El acarreo sin signo de VCL se saca sesgando los dos operandos con 0x8000 y
+  comparando con `pcmpgtw` con signo: no hay `pmaxuw` sin SSE4.1 y el sesgo cuesta
+  dos instrucciones.
+
+Al meter xmm9..xmm15 en juego salieron dos limites del emisor que nunca se habian
+tocado: las formas de desplazamiento por inmediato (`psllw`/`psrlw`/...) y las
+`0F 38` no emitian REX, asi que xmm13 se habria codificado como xmm5 — un fallo
+silencioso. Van todas por `sse_i`/`sse38` con REX. Y el marco crecio hasta 168
+bytes, que no cabe en el `imm8` de `sub rsp` ni en el `disp8` de `xmmSpill`: las dos
+formas admiten ya 32 bits.
+
+## La familia del reciproco
+
+VRCP/VRCPL/VRSQ/VRSQL no son SSE: miran UNA banda, la normalizan, entran en una
+tabla de 512 entradas y devuelven una banda. Pero pagaban el CALL, el redecodificado
+y — lo caro — el `accSpill` del acumulador cacheado. En linea son enteros puros:
+`eax` el dividendo, `edx` la mascara de signo (`sar 31`), `ecx` la magnitud y luego
+el desplazamiento de normalizado. Tres detalles:
+
+* `clz` no existe en Nehalem (LZCNT es BMI1/ABM), asi que la normalizacion sale de
+  `bsr` + `31 - bsr`.
+* `shl`/`shr` variables solo leen CL, y ecx es justo donde esta la magnitud: la
+  mascara de signo pasa por la pila (`push rdx` / `pop rdx`) mientras ecx hace de
+  contador. No hay CALL en medio, asi que la alineacion no se toca.
+* Las dos tablas son miembros del propio `Rsp`, o sea que la direccion sale de
+  `rbx + offset` sin ninguna constante de 64 bits: `add rax,rax` + `add rax,rbx` +
+  `movzx`.
+
+Las tres bifurcaciones (magnitud cero, `-32768`, y el `divdp` de las variantes L)
+son `jcc8` con hueco a rellenar, como las de `emitMem`; el cuerpo entero se queda
+en ~110 bytes, muy por debajo del alcance del rel8.
+
+VMOV/VRCPH/VRSQH ya estaban en linea desde antes (`pextrw` + store de 16 bits).
+
+## Los tramos de DMEM en linea (LWC2 / SWC2)
+
+Con la COP2 ya casi entera en linea, el censo (`-DKESTREL_VUSTAT=1`, y **con
+`KESTREL_RSPJIT=0`**, que si no las cuentas se mezclan con las entradas que llama el
+propio dynarec) deja claro quien es el siguiente bloque grande: LWC2+SWC2 son el
+**19.8 %** de las instrucciones RSP ejecutadas en SM64, y de eso el **19.2 %** cae en
+solo cuatro subcodigos:
+
+| sub | op | % |
+|-----|----|---|
+| 0x04 | SSV | 4.6 |
+| 0x03 | SDV | 3.7 |
+| 0x03 | LDV | 3.7 |
+| 0x02 | LSV | 2.9 |
+| 0x02 | LLV | 1.8 |
+| 0x04 | LQV | 1.3 |
+| 0x04 | SQV | 0.8 |
+| 0x02 | SLV | 0.5 |
+
+Todas pagaban un CALL a la entrada ya especializada por sub. `emitVecMem` se las
+queda cuando el tramo se puede resolver **con longitud constante en tiempo de
+compilacion**, que es exactamente la condicion del camino rapido del interprete
+(`vecFast`: elemento par, longitud par, ni el registro ni DMEM envuelven):
+
+- **elemento impar → fuera** (el barajado byte a byte no vale la pena en linea).
+- **carga corta** (LSV/LLV/LDV): la longitud se recorta a `16 - e`; el registro no
+  envuelve, asi que sale constante.
+- **guardado corto** (SSV/SLV/SDV): si `e + n > 16` se cae al helper, porque ahi el
+  interprete envuelve el elemento y `vecFast` no lo cubre.
+- **LQV**: solo si la direccion es multiplo de 16; longitud `16 - e`.
+- **SQV**: solo si es multiplo de 16 **y** `e == 0`; longitud 16.
+- **LBV/SBV y los barajados** (LRV/LPV/LUV/LHV/LFV/LTV): siempre al helper.
+
+Lo que no entra no duplica reglas en ninguna parte: cae al **mismo** helper que
+llama el interprete, colgado de un `jcc8` que comprueba en ejecucion lo unico que
+no se sabe al compilar — que la direccion no envuelva (`cmp eax, 0x1000-len` +
+`ja`) o que este alineada a 16 en el caso del cuarteto (`and ecx,15`, que ya deja
+ZF, + `jne`).
+
+El vaiven de orden de bytes (byte logico `k` vive en el byte `k^1` del anfitrion)
+se hace **sin constante en memoria**: para elemento y longitud pares es un
+intercambio dentro de cada banda de 16 bits, o sea
+
+```
+movdqa t, x ; psllw x, 8 ; psrlw t, 8 ; por x, t
+```
+
+en vez del `pshufb` + `kLaneSwap` del interprete, que obligaria a tener 16 bytes
+direccionables desde el codigo emitido. Los tramos son los mismos que en
+`dmemToVec`: 16 de golpe, o 8 → 4 → 2; el de 2 sale mas corto por el banco entero
+(`movzx` + `rol r16, 8` + store).
+
+El oraculo tuvo que crecer con el codigo: `--rspjitfuzz` ahora sortea **1 de cada 3
+instrucciones** como LWC2/SWC2 sobre los 12 subcodigos, randomiza el banco escalar
+y los 4 KB de DMEM, y compara ambos ademas del estado de la VU — un fallo de
+direccion solo asoma comparando DMEM entero. Que la red pesca de verdad se
+comprobo rompiendo `swap16` a proposito (`psllw 7`): 31 diferencias en 300
+bloques; con el codigo bueno, **500 000 bloques y 0 diferencias**.
+
+Medida honesta (SM64, `bench`, minimo de 2 pasadas), con el interruptor de A/B
+`KESTREL_RSPJIT_NOVECMEM=1`:
+
+| modo | en linea | por CALL |
+|------|----------|----------|
+| `threaded-jit` (200 intercambios) | 5.37 s | 5.38 s |
+| `jit` lockstep (100 intercambios) | 8.76 s | 8.83 s |
+
+En threaded es ruido, y era lo esperado: el hilo del RSP va sobrado y lo que se le
+ahorra no lo espera nadie. En lockstep, donde el RSP si esta en el camino critico,
+es un **0.8 %** consistente. Se queda porque el ahorro es real y el coste en
+codigo es un camino rapido con su vuelta al helper de siempre.
+
+## Los movimientos escalar↔vector (MFC2 / CFC2 / MTC2 / CTC2)
+
+Lo ultimo de COP2 que salia por el puente generico `kestrel_rspjit_cop2` — que ademas
+del CALL vuelve a decodificar el sub. Son cuatro cuerpos cortos y **sin ningun caso
+que se escape**, asi que se emiten enteros: no hay envoltura de respaldo.
+
+- **MFC2**: el byte logico `k` vive en el `k^1` del anfitrion, asi que son dos
+  `movzx` de byte en `e^1` y `((e+1)&15)^1`, `shl 8`, `or` y `movsx` de 16 bits.
+  Con `rt == 0` no se emite nada (`setR` ignora r0).
+- **MTC2**: los dos `mov` de byte simetricos. El segundo se salta cuando `e == 15`,
+  que es donde el interprete NO envuelve.
+- **CFC2**: las banderas se guardan como 0/1 por banda. `psllw 15` lleva ese bit al
+  de signo, `packsswb` de (baja, alta) satura `0x8000` a `0x80` y el `pmovmskb`
+  entrega justo el entero que quiere el HW: bit `n` = banda baja `n`, bit `8+n` =
+  alta `n`. Un `movsx` de 16 bits y listo. VCE no tiene mitad alta: ahi va un
+  `pxor` y el byte alto sale cero solo.
+- **CTC2**: la inversa. `movd` + `pshuflw`/`pshufd` difunde los 8 bits bajos a las
+  ocho bandas, un `pand` contra `{1,2,4,…,128}` deja el bit `n` solo en la banda
+  `n`, `pcmpeqw` contra la misma tabla lo vuelve mascara y `psrlw 15` lo deja en
+  0/1. Para la mitad alta, `shr eax, 8` y otra vez.
+
+La tabla de bits es lo unico que hubo que anadir: el codigo emitido solo sabe
+direccionar cosas dentro del propio `Rsp` (`rbx + desplazamiento`), asi que
+`bitLane[8]` vive ahi al lado de las tablas del reciproco. Es constante, no
+estado: la savestate no la toca.
+
+El fuzz tambien tuvo que crecer — hasta ahora **jamas generaba un sub < 0x10**
+(ponia el bit 25 a uno siempre). Ahora una de cada seis instrucciones es un
+movimiento, con `rt = 0` entre los posibles y `vs` recorriendo los cuatro valores
+de `cr`, VCE incluido. Coberura comprobada rompiendo los cuatro cuerpos de uno en
+uno: MFC2 52, CFC2 53, MTC2 52 y CTC2 49 diferencias en 400 bloques; con el codigo
+bueno, **500 000 bloques y 0 diferencias**.
+
+Medida (`bench` SM64, `jit` lockstep, 100 intercambios, minimo de 2), con el
+interruptor `KESTREL_RSPJIT_NOVECMOVE=1`: **8.55 s en linea contra 8.64 s por
+CALL**, un **1.0 %**. Pesan poco en el censo pero cada uno costaba un CALL con su
+prologo y su re-decodificacion, y ahora COP2 entera — aritmetica, recorte,
+reciproco y movimientos — esta en linea salvo VRNDP/VRNDN, VMULQ, VMACQ y VNOP.
+
+## Etapa 3 — enlace de bloques (cola directa entre bloques)
+
+Hasta aqui cada bloque volvia al bucle en C de `Rsp::step`, que releia el PC,
+indexaba la tabla y volvia a llamar. Medido en SM64 (200 intercambios,
+`threaded-jit`): **7 369 631 idas y vueltas** para 71,5 M de instrucciones, o sea
+un bloque de ~10 instrucciones por vuelta de despachador.
+
+Ahora el epilogo mira la tabla **el mismo** y, si en el PC de salida hay un bloque
+vivo que cabe en lo que queda de tanda, salta a el con una **cola** (`jmp`, no
+`call`) una vez desmontado el marco. La pila queda exactamente como a la entrada
+—con la direccion de retorno del bucle en C encima—, asi que el ultimo bloque de
+la cadena vuelve alli con su propio `ret` y **la pila no crece** por larga que sea
+la cadena. Mismas 200 vueltas: **1 245 702 entradas, un 83 % menos**.
+
+Tres decisiones que son la diferencia entre que funcione y que no:
+
+- **El enlace es INDIRECTO, por tabla, nunca un `jmp rel32` cableado al destino.**
+  En el RSP la IMEM se reescribe todo el rato (overlays por DMA), y un enlace
+  directo obligaria a mantener retroenlaces por bloque para poder desengancharlos
+  al invalidar. Con la tabla, poner `nullptr` en la ranura ya desengancha a todo
+  el que apuntara ahi, gratis. Y cubre igual los saltos a registro (JR/JALR),
+  cuyo destino no se conoce hasta ejecutarlo.
+- **Todo bloque deja `Rsp::pc` escrito al salir.** El que cierra en salto ya lo
+  hacia; el que cae por el final lo escribe ahora con una constante en el epilogo.
+  Cuesta una tienda por bloque y a cambio el epilogo puede saltar a CUALQUIER
+  bloque sin saber como termina, y el bucle en C deja de tener que avanzar el PC
+  (desaparece `Block::setsPc`).
+- **Destino estatico cuando se sabe al compilar.** Un bloque que cae por el final
+  sigue en la instruccion siguiente, y uno que cierra en `J`/`JAL` tiene el
+  destino en el opcode: en los dos casos la ranura es una constante y el sondeo se
+  ahorra releer el PC, desplazar y sumar. Solo los condicionales (dos destinos) y
+  los saltos a registro leen el PC recien escrito.
+
+**El presupuesto lo debita quien salta.** La primera version se lo cobraba cada
+bloque en su prologo (`sub dword [rbx+budOff], n`): una lectura-modificacion-
+escritura en TODOS los bloques, enlacen o no, y encima encadenada con la lectura
+del sondeo. Medida: **1 % peor que sin enlazar**. Ahora el que no enlaza paga una
+lectura y nada mas, y el que enlaza paga la resta que habria que hacer de todas
+formas. Al bloque de entrada lo debita el bucle en C.
+
+La comparacion del saldo va **con signo**: si una invalidacion simultanea desde el
+hilo del CPU deja un par `(fn, nOps)` incoherente, lo peor que puede pasar es
+pasarse de tanda una vez; con el saldo ya negativo, `jg` corta la cadena en el
+acto. El codigo de los bloques muertos sigue siendo valido hasta el reciclado del
+buffer, que solo ocurre dentro de `compile()` y por tanto nunca bajo una cadena.
+
+Medida con el RSP como cuello de botella (`--rspbench 300000000`, tres pares):
+**230,8 Mips con enlace contra 225,5 sin el, +2,4 %** — y eso con bloques de 64
+instrucciones (`kMaxOps`), que es el caso PEOR para enlazar porque el despachador
+ya estaba amortizado entre 64 operaciones. En `bench` de SM64 no se ve en el reloj
+porque el hilo del RSP tiene holgura de sobra (570 % de tiempo real): lo que baja
+es el trabajo por instruccion de RSP, no el tiempo de pared de ese juego.
+
+Interruptor de biseccion: `KESTREL_RSPJIT_LINK=0`, y modo `rspnolink` en
+`validate.py` (dentro de `gate_all.sh`).
+
+## El dynarec del RSP no se usa en Lockstep — y antes se PAGABA igual
+
+Encontrado midiendo lo anterior: en `bench --mode jit` el emulador iba **mas
+rapido con `KESTREL_RSPJIT=0`** (22,3 s) que con el dynarec puesto (24,1 s).
+
+La razon esta en `system.cpp`: en Lockstep el bucle del sistema intercala
+`memory.rsp.step(1)` — **una instruccion de RSP por vuelta**. La tanda vale 1, y
+un bloque necesita al menos `kMinOps` = 2 para existir, asi que **ningun bloque
+llega a ejecutarse jamas** en ese modo. Lo que si ocurria era compilarlos: cada PC
+nuevo entraba por `State::Unknown`, se compilaba entero... y acto seguido no cabia
+en la tanda y salia por el interprete. Se pagaba el compilador completo a cambio
+de exactamente nada.
+
+El arreglo es una guarda en el despachador, `c >= rspjit::kMinOps`: no se mira la
+tabla —y sobre todo no se compila— lo que no cabe en lo que queda de tanda. Es
+semantica general, no un parche para Lockstep: compilar lo que no se puede
+ejecutar nunca es trabajo perdido en cualquier modo. En Threaded la tanda es la
+tarea entera y la guarda no descarta absolutamente nada.
+
+**`bench --mode jit`: 24,10 s -> 22,60 s, un 6,2 %.** `threaded-jit` sin cambio
+(5,37 s), md5 identico en los catorce pasos de `gate_all`.
+
+## La cache de imagenes estaba mal calibrada: 27x menos compilacion
+
+La cache de IMAGENES de microcodigo (N tablas de bloques, cada una con su sombra de
+los 4 KB de IMEM) ya existia, pero con dos numeros puestos a ojo: **4 ranuras** y
+**umbral 64** trozos de 8 B para decidir que una imagen es "nueva" en vez de una
+variante de la que hay puesta. Censando `KESTREL_RSPJIT_STATS` en SM64 (500
+intercambios de buffer) se ve lo que hacian de verdad — bloques compilados en toda
+la corrida:
+
+| ranuras | umbral | bloques compilados | aciertos / fallos de imagen |
+|---------|--------|--------------------|------------------------------|
+| 4  | 64 | 241162 | 1155 / 15862 |
+| 6  | 64 | 105066 | 2617 / 14902 |
+| 16 | 64 | ~107000 | 2776 / 14997 |
+| 16 | 16 | 52739 | 6847 / 10861 |
+| 16 | 4  | 50389 | 6199 / 11489 |
+| **16** | **8** | **3948** | **9403 / 8265** |
+| 32 | 8  | 3983 (usa 17 ranuras) | 10140 / 7651 |
+
+Las dos perillas van juntas y ninguna sirve sola:
+
+- Con **4 ranuras** el juego se queda sin sitio enseguida y cada tarea parchea la
+  ranura mas parecida, que es media recompilacion. Subir a 6-8 ya baja de 241 k a
+  105 k bloques.
+- Con **umbral 64** casi toda diferencia se considera "parecida", asi que aunque
+  haya ranuras libres no se estrenan: SM64 solo llega a usar 6 de 16. Bajando el
+  umbral a 8, cada overlay se queda con su propia tabla y volver a el cuesta un
+  `memcmp` de 4 KB y un puntero.
+- Bajarlo **mas** es peor (umbral 4 -> 50389): se estrena ranura por diferencias de
+  32 B, los casi-duplicados llenan las 16 y echan a las plantillas grandes.
+- Pedir mas de 16 ranuras no aporta: con 32 disponibles SM64 usa 17 y compila los
+  mismos bloques. `kJitWaysMax` sube a 32 igualmente para poder medir otros
+  microcodigos sin recompilar.
+
+Nada de esto cambia la semantica: la correctitud la sigue dando `syncImem`, que
+invalida por palabra de 64 bits exactamente los bloques que cubren algo que cambio.
+La cache solo elige QUE tabla se parchea.
+
+**Medida limpia** (heartbeat, SM64, 1200 intercambios): el rendimiento del emulador
+de RSP sube de **144,9 a 186,9 Mips ocupado (+29 %)** con la misma ocupacion de
+worker (69 %), y el freno de la CPU (`pace`) baja del 18 % al 9 % de pared. En el
+reloj de `bench` se nota poco (5,4 s en los dos casos, ~575 % -> ~620 % de tiempo
+real) porque en SM64 con SoftRDP **el palo largo es el RDP** (94-95 % de ocupacion)
+y el hilo del RSP va holgado: lo que se gana es CPU del anfitrion, que es justo lo
+que hace falta en microcodigos pesados (PD) y en maquinas flojas.
+
+Perillas: `KESTREL_RSPJIT_WAYS=<n>` (por defecto 16) y `KESTREL_RSPJIT_NEWWAY=<n>`
+(por defecto 8).
+
+## LPV / LUV / LRV en linea: un `pshufb` con la mascara armada al vuelo
+
+Los tres barajados que si pesan en SM64 (LRV 0,60 %, LUV 0,55 %, LPV 0,40 % de las
+instrucciones de microcodigo) salian por CALL a `lwc2Thunk<N>`, que hace ocho o
+dieciseis lecturas de byte con su enmascarado. Los tres son la MISMA figura: los
+bytes que quiere la instruccion estan todos dentro de una ventana de 16 bytes que
+empieza en una direccion alineada, solo cambia que byte va a que sitio — y ese
+reparto depende de la direccion, no del opcode. O sea, un `pshufb` con la mascara
+armada en tiempo de ejecucion.
+
+- **LPV/LUV** (`emitVecPack`): `V.u(o) = dmem[a + ((index + o) & 15)] << 8` (LUV
+  desplaza 7). La mascara sale de difundir `index` a los dieciseis bytes y sumarle
+  la tabla `{0,0,1,1,...,7,7}` de `Rsp::byteHalf`; no hace falta el AND con 15
+  porque `pshufb` ya se queda con los cuatro bits bajos, solo hay que evitar que el
+  bit 7 se encienda — de ahi el sesgo `+16` sobre `index`, que va de -15 a 7.
+  Despues un AND con `0xff00` por banda deja el byte en la mitad alta y borra la
+  basura de la baja. Se cede al helper si la ventana cruzara el final de DMEM.
+- **LRV** (`emitVecRight`): rellena los bytes logicos `>= start` con el cuarteto
+  alineado y deja los de abajo intactos. Como el byte logico `k` vive en el byte
+  `k^1` del anfitrion, con la tabla `Rsp::laneIdx` = `{1,0,3,2,...}` sale todo con
+  dos mascaras de bytes: los indices del `pshufb` son `laneIdx - start` (negativo
+  -> bit 7 -> cero, y esa banda la tapa la mezcla) y la mascara de mezcla es
+  `pcmpgtb(laneIdx, start-1)`. **No tiene salida al helper**: la direccion se alinea
+  a 16, asi que la ventana nunca cruza el final de DMEM.
+
+**Verificado** con `--rspjitfuzz 300000` (oraculo = interprete, compara el banco
+vectorial, el escalar y los 4 KB de DMEM enteros; el fuzz ya sorteaba los doce
+subcodigos, incluidos estos) y `--rspldfuzz 300000`: 0 diferencias. Gates 14/14 +
+prdp 3/3, regress=0, md5 sin cambio.
+
+**Medido**: en SM64 no se nota (`rsp Mips busy` 188,0 -> 187,7, dentro del ruido;
+bench 537 % -> 542 % de tiempo real, tambien ruido). Es lo esperable con 1,55 % de
+las instrucciones y el RSP al 58 % de ocupacion: el hilo del RSP va sobrado y el
+palo largo es el RDP. Se queda porque es correcto, no cuesta nada en el camino
+caliente y en un microcodigo que use estas cargas de verdad (los de audio y los
+que empaquetan normales) el CALL si se paga. A/B: `KESTREL_RSPJIT_NOVECPACK=1`.
+
 ## Siguiente
 
-1. **VCH / VCL / VCR.** No caben en seis registros volatiles, pero ahora que el
-   prologo ya salva xmm6..xmm8 hay sitio: los bloques sin racha MAC pueden usarlos de
-   temporales. 0.84 % de las instrucciones del RSP.
-2. **La familia del reciproco** (VRCP/VRCPL/VRCPH/VMOV, 3.84 %). No es SSE — operan
-   sobre UNA banda — pero siguen pagando el CALL y el redecodificado; en linea serian
-   un `pextrw` + tabla + `pinsrw`.
+0. **Enlace directo con retroenlaces** (`jmp rel32` cableado en vez del sondeo por
+   tabla) es lo unico que queda por probar del enlace: quita la lectura de la
+   tabla y el salto indirecto, pero obliga a mantener por bloque la lista de quien
+   le apunta para poder despatchar al invalidar. Con el hilo del RSP tan holgado
+   como esta ahora no hay donde cobrarlo; tiene sentido cuando el RSP sea el palo
+   largo (microcodigos mas pesados que el de SM64).
+1. **Lo que sigue saliendo por CALL** ya no es COP2 ni los tres barajados
+   gordos: quedan LHV/LFV/LTV y las tiendas barajadas (SPV/SUV/SRV/STV), mas los
+   tramos impares o que envuelven. **Censo** (`KESTREL_VUSTAT=1` con
+   `KESTREL_RSPJIT=0`, SM64, 166,4 M instrucciones de microcodigo): LRV 0,60 %,
+   LUV 0,55 %, LPV 0,40 % — **los tres ya van en linea** (ver mas abajo) — y
+   LTV/SPV/SUV/STV entre 0,01 y 0,07 % cada uno, que no pagan el emisor.
+   (La nota anterior decia que en SM64 no aparecian: era falsa, nunca se habia
+   corrido el censo.)
+2. **COP0 del RSP** (MFC0/MTC0 a los registros de SP y DP) — tambien por CALL, y
+   ahi la llamada es lo de menos: la semantica toca el bus y los semaforos.
 3. **El mix de `--rspbench` esta sesgado** y no sirve para elegir donde tocar; el
-   censo bueno es `KESTREL_VUSTAT=1`.
+   censo bueno es `KESTREL_VUSTAT=1` (y hay que correrlo con `KESTREL_RSPJIT=0`,
+   que si no las cuentas mezclan lo que despacha el interprete con lo que llama el
+   dynarec).
