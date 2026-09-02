@@ -41,3 +41,6 @@ tools/launcher/pad1.cfg
 dist/
 kestrel64-*-win64.zip
 kestrel64-*-setup.exe
+
+# marcas de tiempo de los gates
+/.gate_t*

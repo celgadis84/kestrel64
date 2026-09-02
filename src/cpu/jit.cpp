@@ -15,6 +15,18 @@
 
 namespace kestrel::jit {
 
+// DIAGNOSTICO (KESTREL_JIT_STATS): por donde sale cada terminador de bloque. El incremento se
+// emite en linea SOLO cuando las estadisticas estan puestas, asi que el codigo de produccion
+// no lo paga. Contestan a por que una cadena solo encadena ~14 bloques: enlace estatico
+// acertado / ITC acertada / salida lenta al driver (con destino estatico o sin el).
+u32 g_xLink = 0, g_xItc = 0, g_xSlowDir = 0, g_xSlowInd = 0;
+// Y por el otro lado: como TERMINA el bloque que devuelve el control al driver. Un bloque
+// puede salir por su terminador de salto (los cuatro contadores de arriba) o por el
+// epilogo: agotar sus ops sin salto (secuencial), abortar en una mem-op o ceder en una op
+// interpretada que cambio el control.
+u64 g_retBranch = 0, g_retFull = 0, g_retShort = 0;
+static const int g_xStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
+
 CodeBuffer::~CodeBuffer() {
   if(!base) return;
 #if defined(_WIN32)
@@ -155,6 +167,13 @@ auto CodeCache::init() -> bool {
   mask = cap - 1;
   blocks.reserve(8192);
   noComp.assign(kNoCompSlots, NoComp{});
+  {
+    const char* e = std::getenv("KESTREL_JIT_ITCBITS");
+    u32 bits = e ? (u32)std::strtoul(e, nullptr, 0) : kItcBitsDefault;
+    if(bits < 8 || bits > 20) bits = kItcBitsDefault;
+    itcMask = (1u << bits) - 1;
+    itc.assign((usize)itcMask + 1, ItcEnt{});
+  }
   ready = true;
   return true;
 }
@@ -193,6 +212,7 @@ auto CodeCache::clear() -> void {
   // punteros de `links` apuntarían a bytes reciclados por el bump-allocator.
   links.clear();
   byTarget.clear();
+  itcClear();     // sus puntos de entrada son bytes reciclados igual que los de `links`
 }
 
 // ---- block-linking: (des)enlace, siempre por escritura de DATOS ---------------
@@ -228,13 +248,25 @@ auto CodeCache::linkTo(u32 phys, u8* entry) -> void {
 }
 
 auto CodeCache::unlinkTo(u32 phys) -> void {
+  // La cache de destinos indirectos se indexa por VA y no sabe a que bloque pertenece cada
+  // entrada, asi que un bloque muerto obliga a vaciarla entera. Solo pasa en SMC/recompilacion,
+  // que es raro; guardar el phys en cada entrada para barrer selectivamente costaria en el
+  // sondeo, que es lo caliente.
+  itcClear();
   auto it = byTarget.find(phys);
   if(it == byTarget.end()) return;
   for(u32 i : it->second) { *links[i].vaImm = kNoLink; nUnlinked++; }
 }
 
 auto CodeCache::unlinkAll() -> void {
+  // La invalidacion de I-cache mata tambien la cache indirecta: sus entradas apuntan a codigo
+  // compilado de bytes que el guest acaba de declarar obsoletos. Va fuera de la guarda
+  // `anyLinked`, que solo habla de los sitios de enlace estatico.
+  nInvalAll++;
+  if(itcAny) nItcClear++;
+  itcClear();
   if(!anyLinked) return;      // ya está todo desenlazado: nada que recorrer (ver jit.hpp)
+  nInvalAllEff++;
   anyLinked = false;
   for(LinkSite& L : links) *L.vaImm = kNoLink;
   nUnlinked += links.size();
@@ -602,6 +634,9 @@ static u32 g_diffBad = 0;
 // Con KX=1 eso hacia que translate() cortocircuitara a fisico 0 y los `sd` del prologo
 // machacaran el vector de excepciones. El bloque ahora limpia el pestillo como hace step().
 
+// Bisector A/B: 1 = el bloque nunca se pasa de su pagina de entrada (comportamiento previo).
+static const int g_noXPage = std::getenv("KESTREL_JIT_NOXPAGE") ? 1 : 0;
+
 static const int g_trapAlu = std::getenv("KESTREL_JIT_NOTRAPALU")
                            ? (int)std::strtol(std::getenv("KESTREL_JIT_NOTRAPALU"), nullptr, 0) : 0;
 
@@ -630,6 +665,60 @@ static auto emitTrapAlu(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSna
   return true;
 }
 
+// ALU de 64 bits (DADDU/DSUBU/DADDIU y la familia de desplazamientos dobles). El VR4300 las
+// reserva (RI, ExcCode 10) en usuario/supervisor sin UX/SX; en modo KERNEL estan permitidas
+// siempre (CPU::reserved64). El modo es estado de runtime, asi que se emite la misma guardia
+// que usa el resto del JIT -- KSU==0 en Status[4:3] -- y cualquier otro caso sale por el bail
+// SIN haber tocado nada, para que el interprete levante la RI exacta si toca. Antes cortaban
+// el bloque en seco y eran las lideres no compilables mas caras de SM64 despues de COP0:
+// DSLL32 y DSRA32 sumaban 27k entradas al interprete cada una en 300 fotogramas (el idioma
+// del compilador de SGI para extraer la mitad alta de un doble: dsll32 + dsra32).
+//
+// Los desplazamientos de x86 en 64 bits enmascaran la cuenta a &63, igual que MIPS, asi que
+// DSLLV/DSRLV/DSRAV no necesitan mascara explicita. DADD/DSUB (con trampa de desbordamiento)
+// NO entran: ademas de la guardia necesitarian el bail de overflow.
+static auto emitAlu64(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& snap) -> bool {
+  static const int off = std::getenv("KESTREL_JIT_NOALU64") ? 1 : 0;   // bisector A/B
+  if(off) return false;
+  u32 OP = op >> 26, funct = op & 63;
+  u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31, sa = (op >> 6) & 31;
+  s32 simm = (s32)(s16)(op & 0xFFFF);
+  u32 dst;
+  bool isImm = (OP == 0x19);                                   // DADDIU
+  if(!isImm && OP != 0x00) return false;
+  if(isImm) dst = rt;
+  else {
+    switch(funct) {
+      case 0x14: case 0x16: case 0x17:                         // DSLLV / DSRLV / DSRAV
+      case 0x2d: case 0x2f:                                    // DADDU / DSUBU
+      case 0x38: case 0x3a: case 0x3b:                         // DSLL / DSRL / DSRA
+      case 0x3c: case 0x3e: case 0x3f: break;                  // DSLL32 / DSRL32 / DSRA32
+      default: return false;
+    }
+    dst = rd;
+  }
+  const s32 stOff = (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status);
+  e.test_m8_imm(RBX, stOff, 0x18);                             // Status[4:3] = KSU
+  bailSite = e.jne_rel32_placeholder();                        // no-kernel -> lo resuelve el interprete
+  snap = rc.snap();
+  if(!dst) return true;                                        // destino $0: la op no deja rastro
+  if(isImm) { rc.ld64(RAX, rs); e.alu64_imm(0, RAX, (u32)simm); }
+  else switch(funct) {
+    case 0x2d: rc.ld64(RAX, rs); rc.alu64(0x03, RAX, rt); break;                    // DADDU
+    case 0x2f: rc.ld64(RAX, rs); rc.alu64(0x2B, RAX, rt); break;                    // DSUBU
+    case 0x14: case 0x16: case 0x17:                                                 // DSLLV/DSRLV/DSRAV
+      rc.ld32(RCX, rs); rc.ld64(RAX, rt);
+      e.shift64_cl(funct == 0x14 ? 4 : funct == 0x16 ? 5 : 7, RAX); break;
+    default: {                                                                       // DSLL/DSRL/DSRA(+32)
+      u8 digit = (funct == 0x38 || funct == 0x3c) ? 4 : (funct == 0x3a || funct == 0x3e) ? 5 : 7;
+      u8 cnt = (u8)(sa + (funct >= 0x3c ? 32 : 0));
+      rc.ld64(RAX, rt); if(cnt) e.shift64_imm(digit, RAX, cnt); break;
+    }
+  }
+  rc.st64(RAX, dst);
+  return true;
+}
+
 // MFC0: leer un registro COP0 dentro del bloque. Es la mitad del idioma de libultra para
 // tocar interrupciones (mfc0 Status / and / mtc0 Status), y hasta ahora cortaba el bloque en
 // seco: en SM64 era la op lider de 106k compilaciones fallidas.
@@ -643,12 +732,20 @@ static auto emitTrapAlu(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSna
 //    (ExcCode 11). Se emite la guardia de modo kernel (KSU==0, que es donde vive todo el
 //    codigo de N64) y cualquier otro caso -- incluido el legitimo de usuario CON CU0 -- sale
 //    por el bail, correcto siempre porque aun no se ha escrito nada.
-static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& snap) -> bool {
+static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& snap,
+                     u32 idx) -> bool {
   static const int off = std::getenv("KESTREL_JIT_NOCOP0") ? 1 : 0;   // bisector
   if(off || (op >> 26) != 0x10) return false;
   u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
   if(rs != 0x00) return false;                       // solo MFC0; MTC0 cambia estado (ver notas)
-  if(rd == CPU::C0_Random || rd == CPU::C0_Count || rd == CPU::C0_Cause) return false;
+  if(rd == CPU::C0_Random || rd == CPU::C0_Cause) return false;
+  // Count SI se puede leer dentro del bloque, pero no como esta guardado: el bloque lo
+  // adelanta de golpe al salir (Count += ops retiradas), asi que a mitad va atrasado
+  // exactamente por las ops ya ejecutadas. El interprete lo sube UNA vez al final de cada
+  // step, luego durante la op numero `idx` del bloque el valor visible es entrada+idx.
+  // Con eso el valor emitido es el mismo bit que daria el interprete, no una aproximacion.
+  // La frontera Count==Compare no puede caer dentro del bloque (guarda DR_TIMER), asi que
+  // no hay latch de IP7 que se pierda por el camino.
   // readCop0 no devuelve cop0[rd] para estos: PRId es una constante y el resto no tiene
   // almacenamiento (leen el ultimo dato latcheado en el bus). Residuales -> al interprete.
   if(rd == CPU::C0_PRId || rd == 7 || (rd >= 21 && rd <= 25) || rd == 31) return false;
@@ -661,6 +758,7 @@ static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& 
   // de arriba queda, solo desaparece el store.
   if(rt) {
     e.mov_r_m(RAX, RBX, (s32)(offsetof(CPU, cop0) + 8u * rd));
+    if(rd == CPU::C0_Count && idx) e.alu32_imm(0, RAX, idx);   // + ops ya retiradas del bloque
     e.movsxd(RAX, RAX);                              // MFC0 = sext32 de la palabra baja
     rc.st64(RAX, rt);
   }
@@ -688,11 +786,18 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 // Excluidos a propósito: COP0 (0x10, cambia TLB/Status → puede vectorizar), CACHE, LL/SC,
 // SYSCALL/BREAK/TRAP y todo lo que salte. Si la op falla o vectoriza, el thunk devuelve 0 y
 // el bloque sale con la bandera de control (pc/nextPc ya los dejó bien el intérprete).
+//
+// `cop0Term` abre la puerta a MTC0 (y SOLO a MTC0) con la condicion de que el llamante CIERRE
+// el bloque justo despues: escribir Status/Cause puede dejar una interrupcion lista, y el
+// bloque no vuelve a mirarlas hasta salir, asi que seguir emitiendo ops detras retrasaria la
+// entrega. El llamante excluye ademas Count y Compare (ver compileBlock).
 static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite,
-                         RcSnap& snap, bool delay = false) -> bool {
+                         RcSnap& snap, bool delay = false, bool cop0Term = false) -> bool {
   u32 OP = op >> 26;
   bool ok = false;
   switch(OP) {
+    // MTC0 y las de funcion COP0 (ERET / TLBR / TLBWI / TLBP), todas TERMINALES.
+    case 0x10: ok = cop0Term && (((op >> 21) & 31) == 4 || ((op >> 21) & 31) == 0x10); break;
     case 0x11: ok = ((op >> 21) & 31) != 8; break;                   // COP1 salvo BC1x
     case 0x31: case 0x35: case 0x39: case 0x3d: ok = true; break;    // LWC1/LDC1/SWC1/SDC1
     case 0x22: case 0x26: case 0x2a: case 0x2e: ok = true; break;    // LWL/LWR/SWL/SWR
@@ -901,6 +1006,10 @@ auto opSelfTest(u32 op, u64 rsVal, u64 rtVal, u32 dst) -> u64 {
 // Diagnóstico: histograma del opcode del LEADER cuando el bloque no compila (nOps==0).
 // Dice si el compile-fail steady lo dominan branches vs mult/div/cop/etc → decide el diseño.
 u64 g_compFailOp[64] = {0};
+// Cuando el LIDER no compilable es un salto, lo que suele fallar es su RANURA DE RETARDO:
+// el salto se absorbe con ella o no se absorbe. Censo por opcode de la ranura (solo stats).
+u64 g_compFailDelay[64] = {0};
+u64 g_compFailDelaySpec[64] = {0};
 // Histograma de la op que TERMINA el bloque (no la líder): dice qué falta por cubrir para
 // alargar los bloques, que es la palanca directa sobre avgK.
 u64 g_endOp[64] = {0}, g_endSpecial[64] = {0}, g_endRegimm[32] = {0};
@@ -922,6 +1031,9 @@ static const int g_compFailOn = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 // el coste dominante, así que saltar directo al sucesor es la palanca principal.
 // KESTREL_JIT_NOLINK lo apaga para bisecar.
 static const int g_jitLink = std::getenv("KESTREL_JIT_NOLINK") ? 0 : 1;
+// A/B de la cache de destinos indirectos (JR/JALR). Apagarla deja el resto del enlace intacto,
+// asi que mide exactamente lo que aporta el sondeo.
+static const int g_noItc = std::getenv("KESTREL_JIT_NOITC") ? 1 : 0;
 // Camino rápido en línea del prólogo re-validable (ver más abajo). KESTREL_JIT_NOFAST=1 lo
 // apaga y deja la llamada al trampolín en cada entrada de bloque (bisección).
 static const int g_jitFast = std::getenv("KESTREL_JIT_NOFAST") ? 0 : 1;
@@ -1089,6 +1201,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   const bool ck0Entry = ((entryVA & 0xFFFF'FFFF'E000'0000ull) == 0xFFFF'FFFF'8000'0000ull)
                         && (((u32)entryVA & 0x1FFF'FFFFu) == phys);
   // ¿Es `va` un destino enlazable? (ckseg0 ⇒ phys arquitectónica y cacheable, dentro de RDRAM)
+  // Mismas condiciones que `linkable`, pero sin un destino concreto que comprobar: el sondeo
+  // indirecto compara la VA en tiempo de ejecucion contra la que guardo el driver.
+  const bool useItc = g_jitLink && !g_jitDiffAny && ck0Entry && !g_noItc;
   auto linkable = [&](u64 va, u32& outPhys) -> bool {
     if(!g_jitLink || g_jitDiffAny || !ck0Entry) return false;
     if((va & 0xFFFF'FFFF'E000'0000ull) != 0xFFFF'FFFF'8000'0000ull) return false;
@@ -1104,6 +1219,32 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   auto compileDelay = [&](u32 dop, u32 idx) -> bool {
     usize dBefore = c.jitCache->buf.used;
     if(emitSafeOp(e, rc, dop)) return true;
+    c.jitCache->buf.used = dBefore;
+    // ALU-con-trampa / MFC0 en la ranura: los dos emiten su bail ANTES de tocar el destino,
+    // asi que el rollback es limpio y el bail puede apuntar al SALTO (idx): el interprete
+    // re-ejecuta salto+ranura y aplica la semantica de excepcion en delay slot (EPC=salto,
+    // Cause.BD=1). El enlace de JAL/JALR ya emitido se reescribe con el mismo valor, que es
+    // idempotente. Sin esto un ADDI/DADDI/ADD/SUB en la ranura tiraba la absorcion del salto
+    // entera y, si el salto era el lider, el bloque no compilaba: ~31k lideres BEQ/BNE
+    // fallidos medidos en SM64 (ADDI 23k + DADDI 7.8k en la ranura).
+    usize tsite; RcSnap tsnap;
+    if(emitTrapAlu(e, rc, dop, tsite, tsnap)) {
+      bailSites.push_back(tsite); bailIdx.push_back(idx); bailSnap.push_back(tsnap);
+      b.hasTrap = true;
+      return true;
+    }
+    c.jitCache->buf.used = dBefore;
+    usize asite; RcSnap asnap;
+    if(emitAlu64(e, rc, dop, asite, asnap)) {
+      bailSites.push_back(asite); bailIdx.push_back(idx); bailSnap.push_back(asnap);
+      return true;
+    }
+    c.jitCache->buf.used = dBefore;
+    usize csite; RcSnap csnap;
+    if(emitCop0(e, rc, dop, csite, csnap, idx + 1)) {   // la ranura va una op detras del salto
+      bailSites.push_back(csite); bailIdx.push_back(idx); bailSnap.push_back(csnap);
+      return true;
+    }
     c.jitCache->buf.used = dBefore;
     usize dsite; bool dStore; RcSnap dsnap;
     if(emitMemOp(e, rc, dop, dsite, dStore, dsnap)) {
@@ -1165,11 +1306,45 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       prevJne = e.jne_rel32_placeholder(); havePrev = true;
       // Enlazado: acumula las ops de ESTE bloque en jitPending (el prólogo del sucesor las
       // commitea) y salta a su punto de entrada sin pasar por el driver.
+      // RDX ya esta muerto aqui (era la guarda comparada) y add_m32_imm32 no emite REX,
+      // asi que la base tiene que ser un registro bajo.
+      if(g_xStats) { e.mov_r_imm64(RDX, (u64)(std::uintptr_t)&g_xLink);
+                     e.add_m32_imm32(RDX, 0, 1); }
       e.add_m32_imm32(RBX, pendOff, nops);
       usize dispAt = e.jmp_rip_mem_placeholder();
       pending.push_back(Pending{ dispAt, immAt, cands[k], tp });
     }
+    // Cache de destinos INDIRECTOS. Un JR/JALR no tiene destino estatico (`nc == 0`), asi que
+    // hasta ahora TODO retorno de funcion salia al driver por la ruta lenta: con avgK~13 eso
+    // es el viaje mas caro que queda en el camino del JIT. El sondeo es una tabla directa
+    // VA -> punto de entrada que rellena el driver; si acierta se salta al MISMO `linkEntry`
+    // del enlace estatico, que re-chequea interrupciones, borde de timer y presupuesto de
+    // cadena, o sea no se salta ninguna comprobacion, solo el viaje.
+    if(nc == 0 && useItc) {
+      constexpr s32 kEntSize = (s32)sizeof(CodeCache::ItcEnt);
+      e.mov_r_imm64(RDX, (u64)(std::uintptr_t)c.jitCache->itc.data());
+      e.mov_r_r(RAX, RCX);
+      e.shift64_imm(5, RAX, 12);                       // shr rax, 12
+      e.xor_r_r(RAX, RCX);                             // rax = va ^ (va>>12)
+      e.shift64_imm(5, RAX, 2);                        // shr rax, 2  (ops alineadas)
+      e.alu64_imm(4, RAX, c.jitCache->itcMask);        // and rax, mascara
+      e.shift64_imm(4, RAX, 4);                        // shl rax, 4  (x sizeof(ItcEnt))
+      e.add_r_r(RDX, RAX);                             // rdx = &itc[idx]
+      e.mov_r_m(RAX, RDX, 0);                          // rax = va guardada
+      e.cmp_r_r(RCX, RAX);                             // �es este el destino?
+      usize miss = e.jne_rel32_placeholder();
+      // Aqui RDX es el puntero a la entrada (lo usa el jmp de abajo): el scratch es RAX,
+      // muerto tras la comparacion.
+      if(g_xStats) { e.mov_r_imm64(RAX, (u64)(std::uintptr_t)&g_xItc);
+                     e.add_m32_imm32(RAX, 0, 1); }
+      e.add_m32_imm32(RBX, pendOff, nops);             // ops de ESTE bloque, al diferido
+      e.jmp_m(RDX, 8);                                 // salta al linkEntry guardado
+      e.patchRel32(miss);
+      static_assert(kEntSize == 16, "el shl de arriba asume entradas de 16 bytes");
+    }
     if(havePrev) e.patchRel32(prevJne);
+    if(g_xStats) { e.mov_r_imm64(RDX, (u64)(std::uintptr_t)(nc == 0 ? &g_xSlowInd : &g_xSlowDir));
+                   e.add_m32_imm32(RDX, 0, 1); }
     e.mov_r_imm32(RAX, 0x80000000u | nops);
     branchExits.push_back(e.jmp_rel32_placeholder());
   };
@@ -1180,7 +1355,13 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // No cruzar la página 4K de entrada: en código TLB-mapeado los VA contiguos NO son
     // phys contiguos al cambiar de página, así que phys+4*i dejaría de corresponder a la
     // instrucción real. El bloque termina en el borde de página (se recompila en la sig.).
-    if((a & ~0xFFFu) != (phys & ~0xFFFu)) break;
+    // Cruzar la pagina 4K de entrada solo vale desde ckseg0: ahi VA->phys es un
+    // desplazamiento fijo, asi que phys+4*i sigue siendo la instruccion real al pasar de
+    // pagina. En codigo TLB-mapeado no lo es y el bloque termina en el borde (se recompila
+    // en la siguiente). Cortar SIEMPRE salia caro: un salto en la ultima palabra de la
+    // pagina dejaba su ranura de retardo fuera, la absorcion se caia y con el salto de
+    // lider el bloque entero no compilaba -- 465k entradas al interprete medidas en SM64.
+    if((a & ~0xFFFu) != (phys & ~0xFFFu)) { if(!ck0Entry || g_noXPage) break; b.crossPage = true; }
     u32 op = c.jitFetchWord(a);
     usize before = c.jitCache->buf.used;
     if(g_jitDump) b.opOff.push_back((u32)(before - (usize)(entry - c.jitCache->buf.base)));
@@ -1194,8 +1375,14 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       continue;
     }
     c.jitCache->buf.used = before;
+    usize asite; RcSnap asnap;
+    if(emitAlu64(e, rc, op, asite, asnap)) {
+      bailSites.push_back(asite); bailIdx.push_back(b.nOps); bailSnap.push_back(asnap);
+      b.src.push_back(op); b.nOps++; continue;
+    }
+    c.jitCache->buf.used = before;
     usize csite; RcSnap csnap;
-    if(emitCop0(e, rc, op, csite, csnap)) {
+    if(emitCop0(e, rc, op, csite, csnap, i)) {
       bailSites.push_back(csite); bailIdx.push_back(b.nOps); bailSnap.push_back(csnap);
       b.src.push_back(op); b.nOps++; continue;
     }
@@ -1215,6 +1402,38 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
+    // MTC0 TERMINAL. Escribir un registro COP0 no se puede absorber a media faena (Status o
+    // Cause pueden dejar una interrupcion lista y el bloque no las mira hasta salir), pero SI
+    // se puede ejecutar como ULTIMA op: el bloque se cierra detras y el conductor vuelve a
+    // muestrear interrupciones antes del siguiente. Lo que se gana no es la op en si sino que
+    // el MTC0 deje de ser LIDER de bloque: hasta ahora el bloque cortaba ANTES de el, la
+    // siguiente entrada aterrizaba justo encima y no compilaba nunca -- 205k entradas al
+    // interprete solo con MTC0 Status en 300 fotogramas de SM64.
+    //   Fuera quedan los registros que el propio bloque adelanta de golpe al salir, porque ese
+    //   sumando machacaria el valor recien escrito: Count (Count += ops retiradas) y Random
+    //   (decrementa por op), y con Random su Wired, que lo reinicia. Compare tambien: la guarda
+    //   de frontera del timer se calculo con el Compare de la ENTRADA al bloque. Sin excluir
+    //   Wired, n64-systemtest cazaba el desfase exacto: "Random, 1 instruction after setting
+    //   Wired = 0" esperaba 0x1f y salia 0x1e.
+    //   Con la misma regla entran las ops de FUNCION de COP0: ERET (pone pc=EPC y limpia EXL,
+    //   asi que el thunk devuelve 0 y el bloque sale por la via de control con el pc ya bueno),
+    //   TLBR, TLBWI y TLBP. TLBWR no: indexa por Random, que dentro del bloque va atrasado.
+    if((op >> 26) == 0x10 && (((op >> 21) & 31) == 4 || ((op >> 21) & 31) == 0x10)) {
+      u32 c0rd = (op >> 11) & 31;
+      bool c0fn = ((op >> 21) & 31) == 0x10;
+      if((c0fn ? (op & 63) != 0x06
+               : (c0rd != CPU::C0_Count && c0rd != CPU::C0_Compare
+               && c0rd != CPU::C0_Random && c0rd != CPU::C0_Wired))) {
+        usize msite; RcSnap msnap;
+        if(emitInterpOp(e, rc, op, 4 * i, msite, msnap, false, true)) {
+          interpSites.push_back(msite); interpIdx.push_back(b.nOps + 1); interpSnap.push_back(msnap);
+          b.hasMem = true; b.hasStore = true;
+          b.src.push_back(op); b.nOps++;
+          break;                                  // cierra el bloque: el conductor re-muestrea
+        }
+        c.jitCache->buf.used = before;
+      }
+    }
     // Salto/branch-en-bloque: absorber el salto + su delay slot y cerrar el bloque
     // escribiendo el control de flujo (pc/nextPc) directamente. Es la palanca de cobertura:
     // el bucle caliente de PD está dominado por BEQ + llamadas (JAL) + returns (JR $ra), y
@@ -1280,7 +1499,8 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     if(!noBranch && (isBeq || isJmp || isJr || isBcondZ || isLikely || isBc1)) {
       u32 ad = a + 4;                              // delay slot
       bool delayOk = (ad + 4 <= c.mem->rdram.size()) &&
-                     ((ad & ~0xFFFu) == (phys & ~0xFFFu));
+                     (((ad & ~0xFFFu) == (phys & ~0xFFFu)) || (ck0Entry && !g_noXPage));
+      if(delayOk && (ad & ~0xFFFu) != (phys & ~0xFFFu)) b.crossPage = true;
       if(delayOk) {
         u32 dop = c.jitFetchWord(ad);
         u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
@@ -1454,6 +1674,20 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       else if(LO == 1) g_compFailRegimm[(lop >> 16) & 31]++;
       else if(LO == 0x10 || LO == 0x11) g_compFailCop[LO - 0x10][(lop >> 21) & 31]++;
       if(LO == 0x10) { u32 rsF = (lop >> 21) & 31; if(rsF == 0 || rsF == 4) g_compFailC0Rd[rsF ? 1 : 0][(lop >> 11) & 31]++; }
+      // Diagnostico puntual (KESTREL_BRFAIL): primeros lideres de salto que no absorben.
+      { static const bool brf = std::getenv("KESTREL_BRFAIL") != nullptr; static int nbr = 0;
+        if(brf && nbr < 200 && (LO == 0x04 || LO == 0x05)) { nbr++;
+          u32 dw = c.jitFetchWord(phys + 4);
+          std::fprintf(stderr, "[brfail] phys=%08x op=%08x delay=%08x samepage=%d\n",
+                       phys, lop, dw, (int)(((phys + 4) & ~0xFFFu) == (phys & ~0xFFFu)));
+        } }
+      // Lider de salto: el motivo casi seguro es la ranura de retardo, asi que se censa esa.
+      if(LO == 0x01 || LO == 0x04 || LO == 0x05 || LO == 0x06 || LO == 0x07
+      || (LO >= 0x14 && LO <= 0x17) || (LO == 0x11 && ((lop >> 21) & 31) == 8)) {
+        u32 dw = c.jitFetchWord(phys + 4); u32 DO = dw >> 26;
+        g_compFailDelay[DO]++;
+        if(DO == 0) g_compFailDelaySpec[dw & 63]++;
+      }
     }
     c.jitCache->buf.used = (usize)(entry - c.jitCache->buf.base); return b;
   }
@@ -1463,11 +1697,31 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // control (con pc/nextPc escritos y flag 0x80000000) → no hay caída secuencial.
   usize toDoneMain = 0; bool haveMain = false;
   if(!endedInBranch) {
+    // ENLACE SECUENCIAL: PROBADO Y DESCARTADO (2026-09-02). Un bloque que se acaba sin salto
+    // -- por el tope de kMaxOps o porque la siguiente op no compila -- devuelve el control al
+    // driver para que avance pc y vuelva a entrar. Es el 84 % de los despachos del driver en
+    // SM64 (contadores [retorno] salto/completo/corto = 86 k / 2,25 M / 346 k), asi que parecia
+    // LA razon de que una cadena solo encadenase una docena de bloques. Se implemento: emitir
+    // aqui la misma cola de salida de control que un salto absorbido, con el destino constante
+    // entryVA + 4*nOps como unico candidato de enlace.
+    //
+    // Funciono como se esperaba -- las entradas al driver en SM64 bajaron de 2,88 M a 328 k
+    // (8,8x) y las ops por entrada subieron de 580 a 4902 -- y aun asi MIDIO PEOR:
+    //   n64-systemtest (unica carga que es de verdad CPU-bound aqui): 13,27 s -> 14,84 s
+    //   solo con nOps==kMaxOps (codigo recto largo, sin los finales por op no compilable):
+    //                                                                 13,58 s -> 13,80 s
+    //   SM64 800 intercambios: 8,536 s -> 8,531 s (empate: ahi el palo largo es el RSP)
+    // O sea: el viaje de vuelta al driver es BARATO (revalidar la linea de I-cache es un par
+    // de comparaciones) y sale mas caro pagar en CADA final de bloque los cuatro stores de
+    // control (pc, nextPc, inDelay, justBranched) mas la guarda de enlace que ahorrarselo.
+    // Se deja escrito para que nadie lo vuelva a intentar a ciegas: el cuello del hilo de CPU
+    // no es el despacho (jitTryBlock ~5,8 % de las muestras), es el codigo generado.
     rc.writeback();                          // el driver lee cpu->gpr tras el bloque
     e.mov_r_imm32(RAX, b.nOps);
     toDoneMain = e.jmp_rel32_placeholder();
     haveMain = true;
   }
+
   // Stubs de bail: cada je de mem-op aterriza aquí → eax = índice (ops retiradas) y al epílogo.
   std::vector<usize> toDone;
   for(usize k = 0; k < bailSites.size(); k++) {
@@ -1539,6 +1793,16 @@ static u64 g_jitCalls = 0, g_jitBlocks = 0, g_jitOps = 0;
 // bloque de la cadena, asi que por si solo no dice si el enlace esta funcionando.
 static u64 g_chainOps = 0, g_chainLinks = 0;
 static const int g_jitStats = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
+// Periodo del volcado, en despachos. Por defecto 4 M, que era el unico valor posible y
+// dejo de imprimir NADA en cuanto el enlace de bloques + la ITC bajaron los despachos:
+// una tanda entera de SM64 no llega a 4 M. `KESTREL_JIT_STATS=<n>` fija el periodo.
+static const u64 g_jitStatsMask = [] {
+  const char* e = std::getenv("KESTREL_JIT_STATS");
+  u64 n = (e && e[0] >= '1' && e[0] <= '9') ? std::strtoull(e, nullptr, 0) : 0;
+  if(n < 1024) return (u64)0x3FFFFF;
+  u64 m = 1; while(m < n) m <<= 1;                 // a la potencia de dos mas cercana
+  return m - 1;
+}();
 // KESTREL_JIT_DUMP=<fichero>: al terminar el proceso, vuelca los bloques mas ejecutados con
 // sus opcodes MIPS y los bytes x86-64 que emitio el compilador. Sin esto, la mitad del tiempo
 // de pared del hilo de CPU (medido: 48.6% en jit/anon) es una caja negra y cualquier idea de
@@ -1605,10 +1869,17 @@ struct DumpAtExit { ~DumpAtExit() { dumpBlocks(); } };
 static DumpAtExit g_dumpAtExit;
 }  // namespace jit
 extern u64 g_trampWhy[5];
+extern u64 g_trampBail;
+// Diagnostico: QUIEN acota el permiso de cadena. Los tres candidatos se arreglan de forma
+// distinta (el borde de timer no se toca, la ventana del bucle de sistema es politica de
+// campo, el regulador es calibracion), asi que saber cual manda es lo unico accionable.
+static u64 g_guardWhy[4] = {};   // 0=borde de timer 1=ventana de campo 2=regulador 3=tope
+namespace jit { extern u64 g_compFailDelay[64], g_compFailDelaySpec[64]; }
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
                 extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32];
                 extern u64 g_compFailCop[2][32]; extern u64 g_compFailC0Rd[2][32]; }
 namespace jit { extern u64 g_rcReg, g_rcMem, g_rcSpill; }
+namespace jit { extern u64 g_retBranch, g_retFull, g_retShort; }
 // Diagnóstico: razón de decline (por qué jitTryBlock devuelve 0). Solo bajo stats.
 enum { DR_RSP=0, DR_CTRL, DR_INT, DR_UNCACHED, DR_COMPILE, DR_TIMER, DR_SMC, DR_MISC, DR_N };
 static u64 g_decl[DR_N] = {0};
@@ -1699,9 +1970,14 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
     // y vuelve aqui justo cuando toca frenar otra vez — misma regulacion que la guarda
     // rsp.running, pero sin una llamada por bloque.
     if(mem && mem->rcpMode == Memory::RcpMode::Threaded) {
-      mem->rcpPace(retired);
-      u32 pa = mem->paceAllowance(retired);
+      u32 pa = mem->rcpPace(retired);
       if(pa < g) g = pa;
+      if(g_jitStats && pa <= g) g_guardWhy[2]++;
+    }
+    if(g_jitStats) {
+      if(g >= kGuardMaxOps)   g_guardWhy[3]++;
+      else if(g == slack)     g_guardWhy[0]++;
+      else if(g == budg)      g_guardWhy[1]++;
     }
     jitGuard  = g < kGuardMaxOps ? g : kGuardMaxOps;
   }
@@ -1713,6 +1989,10 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
 // numero de llamadas por si solo no dice nada accionable. Se reconstruyen los mismos
 // predicados que evaluo el prologo (jitGuard aun conserva el valor no consumido).
 u64 g_trampWhy[5] = {0};   // 0=permiso agotado 1=MI 2=latch timer 3=rsp corriendo 4=otro
+// Cuantas veces el trampolin dice NO y por tanto ROMPE la cadena (vuelta al driver). Es la
+// mitad de la respuesta a "por que solo se encadenan 12 bloques"; la otra mitad son las
+// salidas que no resuelven destino (ni enlace estatico ni acierto en la ITC).
+u64 g_trampBail = 0;
 extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
   CPU* c = reinterpret_cast<CPU*>(cpu);
   if(g_jitStats) {
@@ -1722,7 +2002,9 @@ extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
     else if(c->mem && c->mem->rsp.running)                       g_trampWhy[3]++;
     else                                                         g_trampWhy[4]++;
   }
-  return c->jitReenterProceed(K);
+  u32 r = c->jitReenterProceed(K);
+  if(g_jitStats && r == 0) g_trampBail++;
+  return r;
 }
 
 auto CPU::jitTryBlock() -> u32 {
@@ -1741,7 +2023,7 @@ auto CPU::jitTryBlock() -> u32 {
   }
   if(g_jitStats) {
     g_jitCalls++;
-    if((g_jitCalls & 0x3FFFFF) == 0) {
+    if((g_jitCalls & g_jitStatsMask) == 0) {
       std::fprintf(stderr, "[jitstats] calls=%llu blocksRun=%llu opsJIT=%llu cover=%.1f%% avgK=%.2f\n",
                    (unsigned long long)g_jitCalls, (unsigned long long)g_jitBlocks,
                    (unsigned long long)g_jitOps,
@@ -1756,10 +2038,25 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)jit::g_rcReg, (unsigned long long)jit::g_rcMem,
                    (unsigned long long)jit::g_rcSpill,
                    100.0 * jit::g_rcReg / (double)(jit::g_rcReg + jit::g_rcMem + 1));
+      std::fprintf(stderr, "[permiso] timer=%llu campo=%llu pace=%llu tope=%llu\n",
+                   (unsigned long long)g_guardWhy[0], (unsigned long long)g_guardWhy[1],
+                   (unsigned long long)g_guardWhy[2], (unsigned long long)g_guardWhy[3]);
       std::fprintf(stderr, "[tramp] guard=%lluM mi=%lluM timer=%lluM rsp=%lluM otro=%lluM\n",
                    (unsigned long long)(g_trampWhy[0]/1000000), (unsigned long long)(g_trampWhy[1]/1000000),
                    (unsigned long long)(g_trampWhy[2]/1000000), (unsigned long long)(g_trampWhy[3]/1000000),
                    (unsigned long long)(g_trampWhy[4]/1000000));
+      std::fprintf(stderr, "[retorno] salto=%llu completo=%llu corto=%llu\n",
+                   (unsigned long long)jit::g_retBranch, (unsigned long long)jit::g_retFull,
+                   (unsigned long long)jit::g_retShort);
+      std::fprintf(stderr, "[salidas] enlace=%u itc=%u lentaDirecta=%u lentaIndirecta=%u\n",
+                   jit::g_xLink, jit::g_xItc, jit::g_xSlowDir, jit::g_xSlowInd);
+      std::fprintf(stderr, "[cadena] rotasPorTramp=%llu (%.2f por entrada al driver)\n",
+                   (unsigned long long)g_trampBail, (double)g_trampBail / (double)g_jitCalls);
+      if(jitCache) std::fprintf(stderr,
+                   "[icache] barridos=%llu efectivos=%llu vaciadosITC=%llu\n",
+                   (unsigned long long)jitCache->nInvalAll,
+                   (unsigned long long)jitCache->nInvalAllEff,
+                   (unsigned long long)jitCache->nItcClear);
       if(jitCache) std::fprintf(stderr,
                    "[link] sitios=%zu armados=%llu desarmados=%llu | eslabones/entrada=%.2f ops/entrada=%.2f\n",
                    jitCache->links.size(), (unsigned long long)jitCache->nLinked,
@@ -1778,10 +2075,15 @@ auto CPU::jitTryBlock() -> u32 {
       for(int o = 0; o < 32; o++) if(jit::g_endRegimm[o] > 50)
         std::fprintf(stderr, " RI%02x=%llu", o, (unsigned long long)jit::g_endRegimm[o]);
       std::fprintf(stderr, " |");
-      for(int f = 0; f < 64; f++) if(jit::g_compFailSpecial[f] > 10000)
+      for(int f = 0; f < 64; f++) if(jit::g_compFailSpecial[f] > 1000)
         std::fprintf(stderr, " SP%02x=%llu", f, (unsigned long long)jit::g_compFailSpecial[f]);
       for(int r = 0; r < 32; r++) if(jit::g_compFailRegimm[r] > 10000)
         std::fprintf(stderr, " RI%02x=%llu", r, (unsigned long long)jit::g_compFailRegimm[r]);
+      std::fprintf(stderr, "\n[compfaildelay]");
+      for(int o = 0; o < 64; o++) if(jit::g_compFailDelay[o] > 5000)
+        std::fprintf(stderr, " OP%02x=%llu", o, (unsigned long long)jit::g_compFailDelay[o]);
+      for(int o = 0; o < 64; o++) if(jit::g_compFailDelaySpec[o] > 5000)
+        std::fprintf(stderr, " SPEC%02x=%llu", o, (unsigned long long)jit::g_compFailDelaySpec[o]);
       std::fprintf(stderr, "\n[compfailcop]");
       for(int k = 0; k < 2; k++) for(int r = 0; r < 32; r++) if(jit::g_compFailCop[k][r] > 10000)
         std::fprintf(stderr, " COP%d.rs%02x=%llu", k, r, (unsigned long long)jit::g_compFailCop[k][r]);
@@ -1822,6 +2124,7 @@ auto CPU::jitTryBlock() -> u32 {
   //    Pre-limpio xlatCacheable: si translate toma un segmento directo-uncached (kseg1/
   //    ckseg1) no lo pone → declinamos; los segmentos mapeados/xkphys sí lo fijan.
   u32 phys;
+  bool ck0Route = false;   // ruta directa: VA->phys contiguo (permite bloques que cruzan pagina)
   if((pc & 0xFFFF'FFFF'E000'0000ull) == 0xFFFF'FFFF'8000'0000ull) {
     // ckseg0 solo existe en modo kernel. En usuario o supervisor esa direccion no esta
     // traducida: el VR4300 levanta AdEL en el propio fetch. Atajar aqui a phys = pc & 0x1FFFFFFF
@@ -1830,6 +2133,7 @@ auto CPU::jitTryBlock() -> u32 {
     u32 st = (u32)cop0[C0_Status];
     if(((st >> 3) & 3) != 0 && !(st & 0x6)) { JDECL(DR_MISC); return 0; }  // interprete vectoriza el AdEL
     phys = (u32)pc & 0x1FFF'FFFF;
+    ck0Route = true;
   } else {
     // softTLB: la traducción TLB de la PC es cara (scan lineal de 32 entradas). Cachea la
     // última página resuelta; un hit del mismo (vpn,asid) salta el scan por completo.
@@ -1864,25 +2168,35 @@ auto CPU::jitTryBlock() -> u32 {
   // (compileBlock corta ahí y devuelve nOps==0), así que validarla basta y cuesta un icFetch
   // frente a una compilación entera.
   jit::CodeCache::NoComp& nc = cc->noComp[(phys >> 2) & (jit::CodeCache::kNoCompSlots - 1)];
-  if(nc.phys == phys) {
+  if(nc.phys == phys && nc.ck0 == (u8)ck0Route) {
     if(jitFetchWord(phys) == nc.word) {
       if(jit::g_compFailOn) { u32 LO = nc.word >> 26; jit::g_compFailOp[LO]++;
         if(LO == 0) jit::g_compFailSpecial[nc.word & 63]++;
         else if(LO == 1) jit::g_compFailRegimm[(nc.word >> 16) & 31]++;
         else if(LO == 0x10 || LO == 0x11) jit::g_compFailCop[LO - 0x10][(nc.word >> 21) & 31]++;
-        if(LO == 0x10) { u32 rsF = (nc.word >> 21) & 31; if(rsF == 0 || rsF == 4) jit::g_compFailC0Rd[rsF ? 1 : 0][(nc.word >> 11) & 31]++; } }
+        if(LO == 0x10) { u32 rsF = (nc.word >> 21) & 31; if(rsF == 0 || rsF == 4) jit::g_compFailC0Rd[rsF ? 1 : 0][(nc.word >> 11) & 31]++; }
+        if(LO == 0x01 || LO == 0x04 || LO == 0x05 || LO == 0x06 || LO == 0x07
+        || (LO >= 0x14 && LO <= 0x17) || (LO == 0x11 && ((nc.word >> 21) & 31) == 8)) {
+          u32 dw = jitFetchWord(phys + 4); u32 DO = dw >> 26;
+          jit::g_compFailDelay[DO]++;
+          if(DO == 0) jit::g_compFailDelaySpec[dw & 63]++;
+        } }
       JDECL(DR_COMPILE); return 0; }
     nc.phys = ~0u;                              // el código cambió bajo el PC → reintentar
   }
 
   s32 bi = cc->find(phys);
-  if(bi >= 0 && cc->blocks[bi].dead) bi = -1;   // Step2: bloque invalidado por SMC → recompila (insert lo sobrescribe in-place)
+  if(bi >= 0 && cc->blocks[bi].dead) bi = -1;
+  // Un bloque que se pasa de su pagina de entrada asume contiguidad VA->phys: solo es
+  // valido por la ruta directa con la que se compilo. Alcanzado el mismo phys por TLB,
+  // la pagina siguiente puede mapear a otro sitio -> lo ejecuta el interprete.
+  if(bi >= 0 && cc->blocks[bi].crossPage && !ck0Route) { JDECL(DR_MISC); return 0; }   // Step2: bloque invalidado por SMC → recompila (insert lo sobrescribe in-place)
   if(bi < 0) {
     // Reclamo de buffer: si el buf ejecutable desbordó (fugas por dead-mark en SMC pesado),
     // clear global recupera memoria antes de recompilar. Sin esto el JIT quedaría muerto.
     if(cc->buf.overflowed()) cc->clear();
     jit::Block b = jit::compileBlock(*this, phys);
-    if(b.nOps == 0) { nc.phys = phys; nc.word = jitFetchWord(phys); JDECL(DR_COMPILE); return 0; }
+    if(b.nOps == 0) { nc.phys = phys; nc.word = jitFetchWord(phys); nc.ck0 = (u8)ck0Route; JDECL(DR_COMPILE); return 0; }
     bi = cc->insert(phys, std::move(b));
     if(bi < 0) { cc->clear(); jit::Block b2 = jit::compileBlock(*this, phys); if(b2.nOps==0) return 0; bi = cc->insert(phys, std::move(b2)); if(bi < 0) return 0; }
     // Block-linking Step 3: registra los sitios de enlace que este bloque emitió (se resuelven
@@ -1960,6 +2274,18 @@ auto CPU::jitTryBlock() -> u32 {
   if(blk.linkedEpoch != cc->linkEpoch) {
     cc->linkTo(phys, blk.linkEntry);
     blk.linkedEpoch = cc->linkEpoch;
+  }
+
+  // Cache de destinos INDIRECTOS: este bloque acaba de pasar TODA la validacion del driver
+  // (SMC contra la linea de I-cache, borde de timer, ventana del bucle) para ESTA VA, asi que
+  // es el destino legitimo de cualquier JR/JALR que apunte aqui. Se guarda la VA completa, no
+  // el phys: el sitio del JR compara contra el registro, y solo ckseg0 -- donde VA->phys es un
+  // desplazamiento fijo, sin TLB de por medio -- puede prometer que esa VA sigue siendo este
+  // codigo. Se reescribe en cada despacho: la entrada mas reciente es la que mas vale.
+  if(ck0Route && blk.linkEntry && !cc->itc.empty()) {
+    jit::CodeCache::ItcEnt& ie = cc->itc[cc->itcIndex(pc)];
+    ie.va = pc; ie.code = (u64)(std::uintptr_t)blk.linkEntry;
+    cc->itcAny = true;
   }
 
   // Modo diff (solo bloques SIN memoria): ejecuta el bloque sobre una copia y el intérprete
@@ -2102,6 +2428,11 @@ auto CPU::jitTryBlock() -> u32 {
   memAbort = false;
   if(jit::g_jitDump) { blk.runs++; jit::g_dumpCache = cc; }
   u32 Rraw = blk.fn(gpr, this);
+  if(g_jitStats) {
+    if(Rraw & 0x80000000u)        jit::g_retBranch++;   // salio por un terminador de salto
+    else if((Rraw & 0x7fffffff) >= K) jit::g_retFull++;  // agoto el bloque sin salto
+    else                          jit::g_retShort++;    // aborto/cesion a media altura
+  }
   gpr[0] = 0;
   // Bit alto = el bloque terminó en un branch absorbido: ya escribió pc/nextPc/inDelay/
   // justBranched por sí mismo. Sólo avanzamos contadores; NO tocamos el control de flujo.

@@ -33,6 +33,14 @@ inline auto prep(u32 rc) -> void {
   if(w != v) _mm_setcsr(w);
 }
 inline auto flags() -> u32 { return _mm_getcsr() & EX; }
+// Solo el modo de redondeo, sin tocar las banderas. Para el camino de ADD/SUB/MUL en
+// simple, que deduce el Inexact de la aritmetica y por tanto no necesita el MXCSR limpio:
+// asi el `ldmxcsr` -- que serializa el pipe -- solo se paga cuando el guest cambia de modo,
+// no en cada operacion por culpa de una bandera pegajosa que se quedo puesta.
+inline auto prepRc(u32 rc) -> void {
+  u32 v = _mm_getcsr();
+  if((v & RC) != rc) _mm_setcsr((v & ~RC) | rc);
+}
 }  // namespace mx
 
 // Interruptores de entorno leídos UNA vez al arranque. Antes vivían como `static` locales
@@ -1441,11 +1449,76 @@ auto CPU::jitCop1Alu(u32 op, u32 off) -> u8 {
     auto plain = [](u32 x) { u32 e = x & 0x7f80'0000u;
                              return (e != 0 || (x & 0x007f'ffffu) == 0) && e != 0x7f80'0000u; };
     if(__builtin_expect(!(plain(ab) && plain(bb)), 0)) return jitInterpOp(op, off);
-    mx::prep(rc);
     float a = std::bit_cast<float>(ab), b = std::bit_cast<float>(bb);
-    float r = (FN == 0) ? a + b : (FN == 1) ? a - b : (FN == 2) ? a * b : a / b;
-    u32 rb = std::bit_cast<u32>(r);
-    u32 ex = mx::flags();
+    u32 rb, ex;
+    if constexpr(FN == 2) {
+      // El producto de dos `float` NORMALES O CERO es EXACTO en `double`: la mantisa cabe
+      // (24+24 = 48 bits contra 53) y el exponente tambien (2^-252 .. 2^256 dentro del rango
+      // normal del doble). Asi que multiplicar en doble y redondear UNA sola vez a simple da
+      // exactamente el mismo bit que multiplicar en simple -- no hay doble redondeo posible --
+      // y el Inexact sale de comparar: si el `float` redondeado vuelto a doble no es el
+      // producto exacto, es que se perdio algo.
+      //
+      // Lo que se gana es no tocar el MXCSR. Antes cada operacion pagaba getcsr+setcsr+getcsr,
+      // y el setcsr NO se ahorraba nunca porque la bandera PE es pegajosa: en cuanto habia una
+      // operacion inexacta todas las siguientes escribian el registro para limpiarla, y
+      // `ldmxcsr` serializa el pipeline del anfitrion.
+      //
+      // Suma y resta NO entran: el resultado exacto de a+b necesita hasta ~277 bits de rango
+      // (exponentes muy separados), el doble tambien redondea y entonces la comparacion diria
+      // "exacto" cuando en simple no lo es. Medido: pasa en ~1 de cada 3 pares al azar.
+      // La division tampoco: a/b en doble y luego a simple si sufre doble redondeo.
+      mx::prepRc(rc);
+      double d = (double)a * (double)b;
+      float r = (float)d;                      // unico redondeo, con el modo del guest puesto
+      rb = std::bit_cast<u32>(r);
+      // Fuera del rango normal del simple hay que rendirse: por arriba, con redondeo hacia cero
+      // o al infinito contrario, un producto que desborda NO da inf sino el maximo finito -- que
+      // a ojos de `plain` es un numero cualquiera -- y lleva Overflow ademas de Inexact; por
+      // abajo pasa lo mismo con Underflow y el cero. Y de aqui solo sabemos deducir el Inexact.
+      // Se mira el producto EXACTO en doble (que no desborda nunca) contra [2^-126, maxfloat].
+      u64 db = std::bit_cast<u64>(d) & 0x7fff'ffff'ffff'ffffull;
+      if(__builtin_expect(db != 0 && (db < 0x3810'0000'0000'0000ull
+                                   || db > 0x47EF'FFFF'E000'0000ull), 0))
+        return jitInterpOp(op, off);
+      ex = ((double)r != d) ? mx::INEXACT : 0u;
+    } else if constexpr(FN != 3) {
+      // Suma y resta: el mismo truco que el producto, pero condicionado. a+b en doble es
+      // EXACTO cuando los dos exponentes estan cerca -- el resultado exacto ocupa
+      // (ea-eb)+25 bits de mantisa, asi que con |ea-eb| <= 28 cabe en los 53 del doble --
+      // y entonces redondear UNA vez a simple da el bit del guest y el Inexact sale de
+      // comparar. Un cero cuenta como "cerca" de cualquier cosa: sumar cero es exacto
+      // siempre (y `plain` ya garantiza que un exponente nulo es un cero, no un subnormal).
+      // Cuando los exponentes se separan mucho el doble TAMBIEN redondea, la comparacion
+      // diria "exacto" cuando no lo es, y hay que volver al MXCSR. Es el caso raro: el
+      // codigo de juego suma magnitudes parecidas.
+      u32 ea = (ab >> 23) & 0xffu, eb = (bb >> 23) & 0xffu;
+      s32 de = (s32)ea - (s32)eb;
+      if(__builtin_expect(ea != 0 && eb != 0 && (de > 28 || de < -28), 0)) {
+        mx::prep(rc);
+        float r = (FN == 0) ? a + b : a - b;
+        rb = std::bit_cast<u32>(r);
+        ex = mx::flags();
+      } else {
+        mx::prepRc(rc);
+        double d = (FN == 0) ? (double)a + (double)b : (double)a - (double)b;
+        float r = (float)d;                    // unico redondeo, con el modo del guest puesto
+        rb = std::bit_cast<u32>(r);
+        // Mismo cierre que el producto: fuera del rango normal del simple no sabemos deducir
+        // Overflow/Underflow (y con redondeo hacia cero un desbordamiento da el maximo finito,
+        // que `plain` no distingue de un numero cualquiera). El doble no desborda nunca aqui.
+        u64 db = std::bit_cast<u64>(d) & 0x7fff'ffff'ffff'ffffull;
+        if(__builtin_expect(db != 0 && (db < 0x3810'0000'0000'0000ull
+                                     || db > 0x47EF'FFFF'E000'0000ull), 0))
+          return jitInterpOp(op, off);
+        ex = ((double)r != d) ? mx::INEXACT : 0u;
+      }
+    } else {
+      mx::prep(rc);
+      float r = a / b;
+      rb = std::bit_cast<u32>(r);
+      ex = mx::flags();
+    }
     if(__builtin_expect(!plain(rb) || (ex & ~mx::INEXACT), 0)) return jitInterpOp(op, off);
     u32 cause = (ex & mx::INEXACT) ? (1u << 12) : 0;
     if(__builtin_expect(cause != 0 && ((fcr31 >> 7) & 1) != 0, 0)) return jitInterpOp(op, off);
@@ -1693,9 +1766,39 @@ extern "C" u8 kestrel_jitCMPS(void* c, u32 op, u32 off) {
 extern "C" u8 kestrel_jitCMPD(void* c, u32 op, u32 off) {
   return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CmpChk<0x11>(op, off); }
 
+// Oraculo diferencial (KESTREL_FPORACLE), igual que conversiones y comparaciones: el camino
+// rapido calcula, se rebobina fd y fcr31, y el interprete ejecuta la MISMA op. La aritmetica
+// es idempotente -- el resultado solo depende de fs, ft y el modo de redondeo, y fd es lo
+// unico que escribe, asi que rebobinarlo basta aunque fd aliasee a fs o a ft.
+template<u32 FN, u32 FMT>
+auto CPU::jitCop1AluChk(u32 op, u32 off) -> u8 {
+  static const bool on = std::getenv("KESTREL_FPORACLE") != nullptr;
+  if(__builtin_expect(!on, 1)) return jitCop1Alu<FN, FMT>(op, off);
+  u32 fd = (op >> 6) & 31;
+  u64 fdPre = fpr[fd]; u32 fcrPre = fcr31;
+  static u64 seen = 0;
+  if((++seen & 0xFFFFF) == 0)
+    std::fprintf(stderr, "[fporacle] comprobadas %llu operaciones aritmeticas sin discrepancia\n",
+                 (unsigned long long)seen);
+
+  u8 fast = jitCop1Alu<FN, FMT>(op, off);
+  u64 fdFast = fpr[fd]; u32 fcrFast = fcr31;
+  fpr[fd] = fdPre; fcr31 = fcrPre;                    // rebobinar y repetir por el interprete
+  u8 slow = jitInterpOp(op, off);
+  if(fast != slow || fpr[fd] != fdFast || fcr31 != fcrFast) {
+    static u32 n = 0;
+    if(n++ < 40)
+      std::fprintf(stderr, "[fporacle] alu fn=%u fmt=%02x op=%08x  fast fd=%016llx fcr=%08x r=%u"
+                           " | interp fd=%016llx fcr=%08x r=%u\n",
+                   FN, FMT, op, (unsigned long long)fdFast, fcrFast, fast,
+                   (unsigned long long)fpr[fd], fcr31, slow);
+  }
+  return slow;
+}
+
 #define KC1A(name, fn, fmt) \
   extern "C" u8 name(void* c, u32 op, u32 off) { \
-    return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Alu<fn, fmt>(op, off); }
+    return reinterpret_cast<kestrel::CPU*>(c)->jitCop1AluChk<fn, fmt>(op, off); }
 KC1A(kestrel_jitADDS, 0, 0x10) KC1A(kestrel_jitSUBS, 1, 0x10) KC1A(kestrel_jitMULS, 2, 0x10)
 KC1A(kestrel_jitADDD, 0, 0x11) KC1A(kestrel_jitSUBD, 1, 0x11) KC1A(kestrel_jitMULD, 2, 0x11)
 KC1A(kestrel_jitDIVS, 3, 0x10) KC1A(kestrel_jitDIVD, 3, 0x11)

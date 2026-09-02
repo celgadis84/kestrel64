@@ -85,6 +85,9 @@ public:
   auto add_r_r(Reg dst, Reg src) -> void {             // add dst, src
     rex(true, src, 0, dst); buf.emit(0x01); modrm(3, src, dst);
   }
+  auto xor_r_r(Reg dst, Reg src) -> void {             // xor dst, src
+    rex(true, src, 0, dst); buf.emit(0x31); modrm(3, src, dst);
+  }
   auto add_r_imm32(Reg dst, s32 imm) -> void {         // add dst, imm32 (sign-ext)
     rex(true, 0, 0, dst); buf.emit(0x81); modrm(3, 0, dst); imm32((u32)imm);
   }
@@ -226,6 +229,12 @@ public:
   auto jmp_rip_mem_placeholder() -> usize {
     buf.emit(0xFF); buf.emit(0x25); usize at = buf.used; imm32(0); return at;
   }
+  // jmp qword [base+disp]:  FF /4. Salto indirecto a traves de una entrada de tabla (la cache
+  // de destinos indirectos), donde la direccion no se conoce al compilar.
+  auto jmp_m(Reg base, s32 disp) -> void { 
+    if(base & 8) rex(false, 0, 0, base);
+    buf.emit(0xFF); memOperand(4, base, disp);
+  }
   // ---- camino rapido del prologo re-validable (Etapa 3b) ---------------------
   // mov r32, [base+disp]  (8B /r sin REX.W)
   auto mov_r32_m(Reg dst, Reg base, s32 disp) -> void {
@@ -364,6 +373,11 @@ struct Block {
   bool hasStore = false;  // contiene al menos un store (muta memoria)
   bool hasBranch = false; // termina en un branch absorbido (escribe pc/nextPc; salida de control)
   bool hasTrap = false;   // contiene ALU con trampa de desbordamiento (puede bailar sin efectos)
+  // El bloque contiene ops MAS ALLA de su pagina 4K de entrada. Solo se compila asi desde
+  // ckseg0, donde VA->phys es un desplazamiento fijo y la contiguidad esta garantizada;
+  // por eso el bloque NO es reutilizable si el mismo phys se alcanza por TLB (ahi la
+  // pagina siguiente puede mapear a otro sitio). El despacho lo comprueba.
+  bool crossPage = false;
   bool dead = false;      // SMC invalidó este bloque: find() lo trata como miss → recompila in-place
   std::vector<u32> src;   // opcodes originales, para validación
   // Sello de I-cache por linea cubierta (<=9: 64 ops = 256 B desde un offset cualquiera).
@@ -410,17 +424,61 @@ struct CodeCache {
   // Directa por índice; la validez se comprueba contra la palabra líder leída de la línea
   // de I-cache, así que SMC/DMA que cambie el código invalida la entrada sola.
   static constexpr u32 kNoCompSlots = 8192;
-  struct NoComp { u32 phys = ~0u; u32 word = 0; };
+  // `ck0` = ruta de traduccion con la que se registro el fallo (1 ckseg0, 0 TLB). El
+  // veredicto depende de la ruta (solo ckseg0 puede cruzar de pagina), asi que un fallo
+  // anotado por una ruta no vale para la otra.
+  struct NoComp { u32 phys = ~0u; u32 word = 0; u8 ck0 = 2; };
   std::vector<NoComp> noComp;   // dimensionada en init()
 
   u64 linkEpoch = 0;      // sube en cada desenlace global (invalidación de I-cache)
   u64 nLinked = 0, nUnlinked = 0;   // estadística
+  // Barridos de I-cache: llamadas totales, las que de verdad desenlazaron algo, y las que
+  // de verdad vaciaron la ITC. La distancia entre la primera y las otras dos es el coste que
+  // se ahorra el guardar ambas tablas tras una bandera.
+  u64 nInvalAll = 0, nInvalAllEff = 0, nItcClear = 0;
   // ¿Hay algún sitio de enlace ARMADO ahora mismo? unlinkAll() recorre todos los sitios y
   // todos los bloques; el guest invalida la I-cache línea a línea (512 CACHE seguidos por
   // barrido completo), y sin esta guarda cada uno de esos 512 paga el barrido entero — con
   // decenas de miles de bloques el emulador se para en seco. Tras el primer desenlace no
   // queda nada que desenlazar hasta que alguien vuelva a armar un sitio.
   bool anyLinked = false;
+
+  // --- cache de destinos INDIRECTOS (JR/JALR) ---
+  // El enlace estatico se indexa por el destino de COMPILACION, y un JR no tiene: `jr $ra` va
+  // a donde diga el registro, asi que TODO retorno se salia al driver por la ruta lenta. Esta
+  // tabla directa VA->punto de entrada la rellena el driver cada vez que despacha un bloque
+  // por ckseg0, y el sitio del JR la sondea en linea: si la VA de destino coincide, salta al
+  // mismo `linkEntry` que usaria un enlace estatico (con su re-chequeo de interrupciones,
+  // timer y presupuesto de cadena), y si no, cae a la salida lenta de siempre.
+  // Directa (sin asociatividad) porque el caso que importa -- un retorno que vuelve al mismo
+  // sitio miles de veces -- acierta igual, y una entrada mas ancha costaria mas sondeo.
+  // Tamano por defecto: 16384 entradas x 16 B = 256 KB. Es un compromiso entre cobertura (cuantos
+  // destinos distintos caben sin echarse) y localidad (la tabla compite con los datos del guest
+  // en la cache del anfitrion), asi que se puede mover con KESTREL_JIT_ITCBITS para medirlo.
+  // A/B en SM64 (200 intercambios, minimo de 3-4 pasadas): 12 bits 2,439 s / 13 bits 2,451 s /
+  // 14 bits 2,418 s / 16 bits 2,515 s. Entre 12 y 14 la diferencia es ~1 % (casi ruido) pero 14
+  // gano las dos tandas y en despachos es claro (605 -> 646 ops por entrada al driver); 16 bits
+  // ya pierde: 1 MB de tabla desaloja los datos del guest de la cache del anfitrion.
+  static constexpr u32 kItcBitsDefault = 14;
+  struct ItcEnt { u64 va = 0; u64 code = 0; };        // va=0 nunca es un destino valido
+  std::vector<ItcEnt> itc;                            // dimensionada en init()
+  u32 itcMask = (1u << kItcBitsDefault) - 1;          // fijada en init() (potencia de dos - 1)
+  // Misma guarda que `anyLinked`, y por la misma razon: el guest invalida la I-cache LINEA A
+  // LINEA (cientos de CACHE seguidos por barrido), y cada uno pasa por aqui. Sin la bandera,
+  // un barrido de 4 KB pagaba 128 memset de 64 KB -- 8 MB de escrituras por barrido, que es
+  // mas trabajo que todo lo que la tabla ahorra. Con ella el barrido la vacia UNA vez.
+  bool itcAny = false;                                // hay alguna entrada viva
+  auto itcClear() -> void {
+    if(!itcAny) return;
+    for(ItcEnt& e : itc) { e.va = 0; e.code = 0; }
+    itcAny = false;
+  }
+  // Indice: los bits 2..13 de la VA MEZCLADOS con los 12 de encima. Directo sobre bits 2..13
+  // la tabla aliasa cada 16 KB de espacio virtual, y el codigo de un juego ocupa cientos de KB:
+  // dos rutinas calientes separadas por un multiplo de 16 KB se echaban la una a la otra sin
+  // parar. El pliegue `va ^ (va>>12)` reparte esos bits altos por el indice y cuesta dos
+  // instrucciones en el sondeo.
+  auto itcIndex(u64 va) const -> u32 { return (u32)(((va ^ (va >> 12)) >> 2) & itcMask); }
 
   auto init() -> bool;
   auto find(u32 phys) -> s32;               // idx o -1
