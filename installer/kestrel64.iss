@@ -5,14 +5,20 @@
 ; que se pueda quedar desincronizada.
 ;
 ;   sh scripts/dist.sh
-;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\kestrel64.iss
+;   "C:\Program Files\Inno Setup 7\ISCC.exe" installer\kestrel64.iss
+; (o de una vez:  sh scripts/pack.sh)
 ;
 ; NOTA sobre Vulkan: vulkan-1.dll NO se instala. La pone el driver de la GPU, y sobrescribir
 ; la del sistema con una copia ajena rompe otras aplicaciones. Si falta, el arreglo es
 ; actualizar el driver de video, no copiar la DLL.
 
 #define AppName    "kestrel64"
-#define AppVer     "0.0.1-M1"
+; La version la pasa scripts/pack.sh con /DAppVer=... leyendola de src/core/system.hpp, para
+; que no haya una segunda copia aqui que se quede vieja. El valor de abajo es solo el respaldo
+; de quien invoque ISCC a mano.
+#ifndef AppVer
+  #define AppVer   "0.0.1-M1"
+#endif
 #define AppExe     "kestrel64.exe"
 ; Lo que abre el usuario es el lanzador grafico; el emulador se ejecuta directo solo
 ; desde la asociacion de ROM del Explorador.

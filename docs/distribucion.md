@@ -86,14 +86,34 @@ de siempre y lo dice en el `LEEME.txt`.
 
 ## Instalador
 
-`installer/kestrel64.iss` (Inno Setup 6) se compila **sobre `dist/`**, no sobre el arbol de
-build, para que el instalador y el zip lleven exactamente los mismos bytes y no exista una
-segunda lista de DLL que se pueda desincronizar.
+`installer/kestrel64.iss` se compila **sobre `dist/`**, no sobre el arbol de build, para que el
+instalador y el zip lleven exactamente los mismos bytes y no exista una segunda lista de DLL que
+se pueda desincronizar.
 
 ```sh
-sh scripts/dist.sh
-"C:/Program Files (x86)/Inno Setup 6/ISCC.exe" installer/kestrel64.iss
+sh scripts/pack.sh            # compila estatico + dist/ + zip + instalador
 ```
+
+La version del instalador sale de `kVersion` (`src/core/system.hpp`) y se le pasa a ISCC con
+`/DAppVer=`; el literal del `.iss` es solo el respaldo de quien lo invoque a mano. Dos detalles
+de entorno:
+
+- Inno Setup esta instalado como **7** (`C:\Program Files\Inno Setup 7\ISCC.exe`), no como 6.
+  `pack.sh` lo **busca** en vez de fijar la ruta, porque ya cambio una vez.
+- MSYS2 traduce a ruta de Windows cualquier argumento que empiece por `/`, asi que `/DAppVer=...`
+  le llegaba a ISCC como un segundo nombre de script (`You may not specify more than one script
+  filename`). Se excluye con `MSYS2_ARG_CONV_EXCL="/D"`.
+
+## Por que hace falta `pack.sh` y no basta con `dist.sh`
+
+Las baterias (`gate_all.sh`, `gate_prdp.sh`) recompilan `build/` y `build-prdp/` antes de correr.
+El arbol **estatico** no lo recompila nadie, y es el unico `.exe` que arranca fuera de MSYS2. Sin
+un paso explicito, `dist/` y el instalador se quedan clavados en la fecha del ultimo empaquetado
+mientras el codigo avanza — y lo que se prueba desde el lanzador no es el codigo actual. Paso en
+esta misma linea de trabajo: `dist/` del 28-08 contra fuentes del 02-09.
+
+`pack.sh` es ese paso, y ademas mata cualquier `kestrel64.exe`/`kestrel64-gui.exe` vivo antes de
+enlazar (Windows no deja reescribir un fichero abierto).
 
 Asocia opcionalmente `.z64` / `.n64` / `.v64`, y el verbo de apertura lleva `--run` puesto:
 abrir una ROM desde el Explorador tiene que **ejecutarla**, no dejar una ventana negra.

@@ -51,20 +51,27 @@ OUT = ROOT / "out"
 VI_FIELD_HZ = 59.94
 
 # Los conmutadores llevan valor explicito ("0" apaga) porque hilos+JIT van ON por
-# defecto en el binario: sin el "0" el modo oraculo `interp` no seria interp.
+# defecto en el binario: sin el "0" el modo oraculo `interp` no seria interp. Lo mismo
+# vale ahora para el RDP: el backend de GPU va ON por defecto, asi que TODO modo software
+# lleva KESTREL_PRDP="0". Sin eso, correr un modo software contra el exe de build-prdp
+# rasterizaria en GPU y el md5 no seria el del oraculo determinista.
+SOFT = {"KESTREL_PRDP": "0"}
 MODES = {
-    "interp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0"},
-    "jit":           {"KESTREL_JIT": "1", "KESTREL_THREADS": "0"},
+    "interp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", **SOFT},
+    "jit":           {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", **SOFT},
     # El enlace de bloques va ACTIVO por defecto dentro del JIT; este modo lo apaga
     # para poder bisecar "el enlace rompe algo" contra el JIT sin enlazar.
-    "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", "KESTREL_JIT_NOLINK": "1"},
-    "threaded":      {"KESTREL_THREADS": "1", "KESTREL_JIT": "0"},
-    "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1"},
+    "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", "KESTREL_JIT_NOLINK": "1", **SOFT},
+    "threaded":      {"KESTREL_THREADS": "1", "KESTREL_JIT": "0", **SOFT},
+    "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", **SOFT},
     # Oraculo del dynarec del RSP: mismo modo que threaded-jit pero con el RSP
     # interpretado. El md5 tiene que salir identico o el JIT del RSP diverge.
-    "rspinterp":     {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_RSPJIT": "0"},
-    "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1"},
-    "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1"},
+    "rspinterp":     {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_RSPJIT": "0", **SOFT},
+    # Igual que threaded-jit pero sin encadenar bloques dentro del dynarec del RSP: bisecta
+    # "el enlace del RSP rompe algo" sin tener que apagar el dynarec entero.
+    "rspnolink":     {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_RSPJIT_LINK": "0", **SOFT},
+    "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1", **SOFT},
+    "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1", **SOFT},
     # Backend RDP en GPU (parallel-rdp). Necesitan un exe de `build-prdp/`, que se
     # elige con KESTREL_EXE; el toggle solo dice al exe cual de los dos RDP usar.
     # `prdp` es el oraculo lento (interp lockstep), `prdp-jit` la configuracion real.
@@ -448,7 +455,7 @@ def gate_sm64(mode, args):
     # unico sm64.txt hacia que congelar la referencia de PRDP pisara la de SoftRDP y
     # los cinco modos normales salieran DIVERGE. Fichero por backend, y el de SoftRDP
     # conserva el nombre historico.
-    bl = BASELINES / ("sm64-prdp.txt" if MODES[mode].get("KESTREL_PRDP") else "sm64.txt")
+    bl = BASELINES / ("sm64-prdp.txt" if MODES[mode].get("KESTREL_PRDP") == "1" else "sm64.txt")
     want = bl.read_text(encoding="utf-8").split()[0] if bl.exists() else None
     if args.update_baseline:
         BASELINES.mkdir(parents=True, exist_ok=True)

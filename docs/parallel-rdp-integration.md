@@ -5,8 +5,15 @@ GPU compute). Fixes SM64 title/effect corruption (SoftRDP accuracy gaps) AND off
 the RDP raster from the CPU to the idle GPU (RX570), moving toward realtime — the
 prerequisite for audible audio (waveOut underruns below realtime).
 
-Toggle: `-DKESTREL_PRDP=ON` at configure; runtime `KESTREL_PRDP=1`. Default OFF so the
-deterministic core (systemtest / lockstep md5) never depends on it.
+Toggle: `-DKESTREL_PRDP=ON` at configure (**ON by default desde 2026-09-01**); en ejecución
+el backend de GPU es **el camino por defecto** cuando está compilado. `KESTREL_PRDP=0` fuerza
+SoftRDP, y si Vulkan no arranca el emulador se cae a SoftRDP solo, sin configuración.
+
+El árbol `build/` de los gates se configura a mano con `-DKESTREL_PRDP=OFF`: `gate_all` es el
+oráculo determinista (systemtest / md5 en lockstep) y no puede depender de que haya GPU. Por
+lo mismo, **todo modo software de `scripts/validate.py` lleva `KESTREL_PRDP="0"` explícito**
+(diccionario `SOFT`): sin eso, correr un modo software contra el exe de `build-prdp` acabaría
+rasterizando en GPU y el md5 no sería el del oráculo.
 
 ## Status (2026-08-20) — VENDORED, BYTE ORDER FIXED, SM64 CORRECT ✅
 
