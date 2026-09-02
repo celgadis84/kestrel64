@@ -1,6 +1,8 @@
 #include "present.hpp"
 #include "../core/memory.hpp"
 #include "../vrdp/vrdp.hpp"
+#include "../core/runtime.hpp"
+#include "../ui/menu.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,17 +21,38 @@
 #include <GLFW/glfw3.h>
 #endif
 
+#ifdef _WIN32
+// El HWND de la ventana de GLFW, que es lo unico que necesita la barra de menu. Va al final
+// del bloque de includes y con NOMINMAX porque glfw3native.h arrastra <windows.h>, y sus
+// macros (min/max/near/far) pisan a las cabeceras de la biblioteca estandar si van antes.
+#define GLFW_EXPOSE_NATIVE_WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <GLFW/glfw3native.h>
+#endif
+
 namespace kestrel {
 
 // N64 VI output is nominally 320x240; VI_WIDTH gives the real line stride.
 static constexpr u32 kSrcW = 320;
 static constexpr u32 kSrcH = 240;
+// Cota de cordura para la imagen fuente. El VI no saca mas que 640 pixeles activos de ancho
+// y 576 lineas (PAL entrelazado); con el backend de GPU el scanout ya llega a esa
+// resolucion. Solo esta para que un VI_WIDTH basura (registro a medio escribir) no intente
+// reservar una imagen absurda.
+static constexpr u32 kMaxSrcW = 1024;
+static constexpr u32 kMaxSrcH = 1024;
 static constexpr int kScale = 2;   // window = 640x480
 
 // All Vulkan state for the presenter lives here; torn down in reverse order.
 // Named (not anonymous) so present.hpp can hold an opaque Vk* pimpl.
 struct Vk {
   GLFWwindow* win = nullptr;
+  bool fullscreen = false;   // la ventana cubre el monitor: el menu no la agranda
   VkInstance instance = VK_NULL_HANDLE;
   VkSurfaceKHR surface = VK_NULL_HANDLE;
   VkPhysicalDevice phys = VK_NULL_HANDLE;
@@ -163,6 +186,66 @@ struct QueueGuard {
   ~QueueGuard() { if(on) vrdp::queueUnlock(); }
 };
 
+// La imagen fuente es del tamano EXACTO del cuadro del invitado, y se rehace cuando ese
+// tamano cambia. Antes era fija de 320x240 y el cuadro se recortaba contra ella: con el
+// backend de GPU, que entrega el scanout del VI ya a 640x480, se veia el cuarto superior
+// izquierdo de la imagen y nada mas. Un juego de alta resolucion por SoftRDP (VI_WIDTH 640)
+// perdia la mitad derecha por lo mismo.
+static auto destroySrcImage(Vk& v) -> void {
+  if(v.srcMapped) { vkUnmapMemory(v.dev, v.srcMem); v.srcMapped = nullptr; }
+  if(v.srcImage) { vkDestroyImage(v.dev, v.srcImage, nullptr); v.srcImage = VK_NULL_HANDLE; }
+  if(v.srcMem)   { vkFreeMemory(v.dev, v.srcMem, nullptr);     v.srcMem = VK_NULL_HANDLE; }
+}
+
+static auto createSrcImage(Vk& v, u32 w, u32 h) -> bool {
+  if(w == 0) w = kSrcW;
+  if(h == 0) h = kSrcH;
+  if(w > kMaxSrcW) w = kMaxSrcW;
+  if(h > kMaxSrcH) h = kMaxSrcH;
+  destroySrcImage(v);
+  v.srcW = w; v.srcH = h;
+
+  // Host-visible linear source image we write the N64 frame into and blit from.
+  VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+  ii.imageType = VK_IMAGE_TYPE_2D;
+  ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ii.extent = { v.srcW, v.srcH, 1 };
+  ii.mipLevels = 1; ii.arrayLayers = 1;
+  ii.samples = VK_SAMPLE_COUNT_1_BIT;
+  ii.tiling = VK_IMAGE_TILING_LINEAR;
+  ii.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  if(vkCreateImage(v.dev, &ii, nullptr, &v.srcImage) != VK_SUCCESS) return false;
+  VkMemoryRequirements mr; vkGetImageMemoryRequirements(v.dev, v.srcImage, &mr);
+  u32 mt = findMemType(v.phys, mr.memoryTypeBits,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if(mt == ~0u) { std::fprintf(stderr, "[video] no host-visible memory\n"); return false; }
+  VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+  ai.allocationSize = mr.size; ai.memoryTypeIndex = mt;
+  if(vkAllocateMemory(v.dev, &ai, nullptr, &v.srcMem) != VK_SUCCESS) return false;
+  vkBindImageMemory(v.dev, v.srcImage, v.srcMem, 0);
+  vkMapMemory(v.dev, v.srcMem, 0, mr.size, 0, &v.srcMapped);
+  VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+  VkSubresourceLayout sl; vkGetImageSubresourceLayout(v.dev, v.srcImage, &sub, &sl);
+  v.srcRowPitch = sl.rowPitch;
+
+  // Move the source image into GENERAL once; it stays there (host writes + blit src).
+  VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(v.cmd, &bi);
+  barrier(v.cmd, v.srcImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+          0, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+  vkEndCommandBuffer(v.cmd);
+  VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+  si.commandBufferCount = 1; si.pCommandBuffers = &v.cmd;
+  {
+    QueueGuard qg(v.shared);
+    vkQueueSubmit(v.queue, 1, &si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(v.queue);
+  }
+  return true;
+}
+
 auto initVulkan(Vk& v) -> bool {
   // Con parallel-rdp activo hay que COMPARTIR su contexto Vulkan en vez de crear uno propio:
   // volk resuelve todos los vk* en UNA tabla global de punteros, asi que el segundo contexto
@@ -236,6 +319,7 @@ auto initVulkan(Vk& v) -> bool {
   }
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
   std::fprintf(stderr, "[video] ventana %ux%u%s\n", winW, winH, mon ? " (pantalla completa)" : "");
+  v.fullscreen = mon != nullptr;
   v.win = glfwCreateWindow((int)winW, (int)winH, "kestrel64", mon, nullptr);
   if(!v.win) { std::fprintf(stderr, "[video] glfwCreateWindow failed\n"); return false; }
 
@@ -245,6 +329,16 @@ auto initVulkan(Vk& v) -> bool {
   // Give the window manager a beat to map/composite the window before we query
   // surface caps — some drivers return VK_ERROR_UNKNOWN on an un-composited surface.
   glfwShowWindow(v.win);
+  // Y ademas al frente y con el foco del teclado. No es cosmetico: el teclado se lee con
+  // `glfwGetKey`, que solo ve las teclas de la ventana ENFOCADA, asi que una ventana que se
+  // abre detras (o delante pero sin foco) da un emulador que corre y no responde a nada --
+  // exactamente el sintoma "le doy a ENTER y no pasa nada". Windows ademas bloquea que un
+  // proceso robe el primer plano si no ha recibido entrada del usuario; por eso el lanzador
+  // le cede el derecho con AllowSetForegroundWindow antes de arrancarlo, y aqui se pide.
+  // `requestAttention` es el respaldo cuando el sistema deniega el foco: al menos parpadea
+  // en la barra de tareas en vez de quedarse escondida en silencio.
+  glfwFocusWindow(v.win);
+  glfwRequestWindowAttention(v.win);
   for(int i = 0; i < 20; i++) { glfwPollEvents(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
 
   if(v.shared) {
@@ -306,30 +400,6 @@ auto initVulkan(Vk& v) -> bool {
   v.presentable = createSwapchain(v);
   if(!v.presentable) return true;   // compose-only; no per-frame present
 
-  // Host-visible linear source image we write the N64 frame into and blit from.
-  VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-  ii.imageType = VK_IMAGE_TYPE_2D;
-  ii.format = VK_FORMAT_R8G8B8A8_UNORM;
-  ii.extent = { v.srcW, v.srcH, 1 };
-  ii.mipLevels = 1; ii.arrayLayers = 1;
-  ii.samples = VK_SAMPLE_COUNT_1_BIT;
-  ii.tiling = VK_IMAGE_TILING_LINEAR;
-  ii.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-  ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  if(vkCreateImage(v.dev, &ii, nullptr, &v.srcImage) != VK_SUCCESS) return false;
-  VkMemoryRequirements mr; vkGetImageMemoryRequirements(v.dev, v.srcImage, &mr);
-  u32 mt = findMemType(v.phys, mr.memoryTypeBits,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  if(mt == ~0u) { std::fprintf(stderr, "[video] no host-visible memory\n"); return false; }
-  VkMemoryAllocateInfo ai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-  ai.allocationSize = mr.size; ai.memoryTypeIndex = mt;
-  if(vkAllocateMemory(v.dev, &ai, nullptr, &v.srcMem) != VK_SUCCESS) return false;
-  vkBindImageMemory(v.dev, v.srcImage, v.srcMem, 0);
-  vkMapMemory(v.dev, v.srcMem, 0, mr.size, 0, &v.srcMapped);
-  VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
-  VkSubresourceLayout sl; vkGetImageSubresourceLayout(v.dev, v.srcImage, &sub, &sl);
-  v.srcRowPitch = sl.rowPitch;
-
   VkCommandPoolCreateInfo pci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
   pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   pci.queueFamilyIndex = v.qfamily;
@@ -343,25 +413,20 @@ auto initVulkan(Vk& v) -> bool {
   VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
   vkCreateFence(v.dev, &fci, nullptr, &v.fence);
 
-  // Move the source image into GENERAL once; it stays there (host writes + blit src).
-  VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  vkBeginCommandBuffer(v.cmd, &bi);
-  barrier(v.cmd, v.srcImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-          0, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
-  vkEndCommandBuffer(v.cmd);
-  VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-  si.commandBufferCount = 1; si.pCommandBuffers = &v.cmd;
-  {
-    QueueGuard qg(v.shared);
-    vkQueueSubmit(v.queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(v.queue);
-  }
-  return true;
+  return createSrcImage(v, kSrcW, kSrcH);
 }
 
 
 auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
+  // El cuadro del invitado cambia de tamano en caliente: VI_WIDTH y Y_SCALE los reescribe el
+  // juego (menu 320x240 -> juego 640x480, demos a media altura), y el backend de GPU entrega
+  // el scanout ya a la resolucion de salida del VI. La imagen fuente tiene que seguirlo o el
+  // cuadro se recorta contra ella.
+  if((w && w != v.srcW) || (h && h != v.srcH)) {
+    { QueueGuard qg(v.shared); vkQueueWaitIdle(v.queue); }   // puede haber un blit en vuelo
+    if(!createSrcImage(v, w, h)) return;
+  }
+
   // Upload the frame into the mapped source image, honoring its row pitch.
   for(u32 y = 0; y < h && y < v.srcH; y++) {
     u8* dst = (u8*)v.srcMapped + y * v.srcRowPitch;
@@ -399,9 +464,14 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   // Destino centrado que conserva la relacion de aspecto del guest. Estirar a la ventana
   // entera deforma la imagen en cuanto la ventana deja de ser 4:3 (maximizar, pantalla
   // completa en un monitor ancho), que es lo que hacia antes.
+  //
+  // La relacion es 4:3 SIEMPRE, no la del framebuffer: el VI escala su ventana activa a la
+  // salida de television pase lo que pase la resolucion de origen. Sacarla de srcW/srcH
+  // estiraba las resoluciones no-4:3 (un framebuffer 320x120 con Y_SCALE a la mitad salia
+  // aplastado al doble de ancho).
   const u32 ew = v.extent.width, eh = v.extent.height;
-  u32 dw = ew, dh = (u32)((u64)ew * v.srcH / v.srcW);
-  if(dh > eh) { dh = eh; dw = (u32)((u64)eh * v.srcW / v.srcH); }
+  u32 dw = ew, dh = (u32)((u64)ew * 3 / 4);
+  if(dh > eh) { dh = eh; dw = (u32)((u64)eh * 4 / 3); }
   const s32 dx = (s32)(ew - dw) / 2, dy = (s32)(eh - dh) / 2;
 
   // Las bandas laterales quedarian con basura del frame anterior: el blit solo cubre el
@@ -455,9 +525,7 @@ auto destroyVulkan(Vk& v) -> void {
   if(v.semRender) vkDestroySemaphore(v.dev, v.semRender, nullptr);
   if(v.semAcquire) vkDestroySemaphore(v.dev, v.semAcquire, nullptr);
   if(v.pool) vkDestroyCommandPool(v.dev, v.pool, nullptr);
-  if(v.srcMapped) vkUnmapMemory(v.dev, v.srcMem);
-  if(v.srcImage) vkDestroyImage(v.dev, v.srcImage, nullptr);
-  if(v.srcMem) vkFreeMemory(v.dev, v.srcMem, nullptr);
+  destroySrcImage(v);
   if(v.swap) vkDestroySwapchainKHR(v.dev, v.swap, nullptr);
   // El dispositivo y la instancia prestados son de parallel-rdp: los destruye su Context.
   // La superficie si es nuestra aunque la instancia no lo sea.
@@ -509,15 +577,22 @@ auto glyphFor(char c) -> const u8* {
 }
 
 // Blit `s` into `frame` at (x0,y0), color `rgba`, 5x7 glyphs, 1px gap. Bounds-safe.
-auto drawText(u32* frame, u32 w, u32 h, int x0, int y0, const char* s, u32 rgba) -> void {
+// `sx`/`sy` son la escala del glifo en pixeles de ORIGEN, y van por separado a proposito: el
+// cuadro se presenta siempre en 4:3, asi que un framebuffer de 640 columnas mete dos pixeles
+// de origen en cada pixel horizontal de television. Escalando cada eje por su propio factor el
+// texto sale del mismo tamano en pantalla mida lo que mida el framebuffer.
+auto drawText(u32* frame, u32 w, u32 h, int x0, int y0, const char* s, u32 rgba,
+              int sx = 1, int sy = 1) -> void {
+  if(sx < 1) sx = 1;
+  if(sy < 1) sy = 1;
   int x = x0;
-  for(; *s; s++, x += 6) {
+  for(; *s; s++, x += 6 * sx) {
     const u8* g = glyphFor(*s);
     if(!g) continue;
-    for(int ry = 0; ry < 7; ry++) {
+    for(int ry = 0; ry < 7 * sy; ry++) {
       int py = y0 + ry; if(py < 0 || (u32)py >= h) continue;
-      for(int rx = 0; rx < 5; rx++) {
-        if(!(g[ry] & (0x10 >> rx))) continue;
+      for(int rx = 0; rx < 5 * sx; rx++) {
+        if(!(g[ry / sy] & (0x10 >> (rx / sx)))) continue;
         int px = x + rx; if(px < 0 || (u32)px >= w) continue;
         frame[(u32)py * w + (u32)px] = rgba;
       }
@@ -528,7 +603,12 @@ auto drawText(u32* frame, u32 w, u32 h, int x0, int y0, const char* s, u32 rgba)
 // Paint the speed-gauge footer over the bottom rows of the composed frame.
 auto drawHud(u32* frame, u32 w, u32 h, double cpu, double rsp, double ram) -> void {
   if(h < 12 || w < 40) return;
-  const u32 kBand = 10;                      // footer height in source pixels
+  // La barra se mide en pixeles de origen, y el origen ya no es siempre 320x240: se escala
+  // por el tamano del framebuffer para ocupar lo mismo en pantalla en cualquier resolucion.
+  const int sx = (int)(w / kSrcW) > 0 ? (int)(w / kSrcW) : 1;
+  const int sy = (int)(h / kSrcH) > 0 ? (int)(h / kSrcH) : 1;
+  const u32 kBand = 10 * (u32)sy;             // footer height in source pixels
+  if(h <= kBand) return;
   u32 y0 = h - kBand;
   for(u32 y = y0; y < h; y++)                // dark translucent-looking bar (solid)
     for(u32 x = 0; x < w; x++) frame[y * w + x] = 0xff141414u;
@@ -536,7 +616,7 @@ auto drawHud(u32* frame, u32 w, u32 h, double cpu, double rsp, double ram) -> vo
   char buf[64];
   std::snprintf(buf, sizeof buf, "CPU%d%% RSP%d%% RAM%d%%",
                 clampi(cpu), clampi(rsp), clampi(ram));
-  drawText(frame, w, h, 3, (int)y0 + 1, buf, 0xffffffffu);   // white on the bar
+  drawText(frame, w, h, 3 * sx, (int)y0 + sy, buf, 0xffffffffu, sx, sy);   // white on the bar
 }
 
 
@@ -551,8 +631,15 @@ struct PadMap {
   static constexpr int kN = 18;
   int  key[kN];
   int  gpb[kN];
-  bool loaded = false;
-  PadMap() { for(int i = 0; i < kN; i++) { key[i] = -1; gpb[i] = -1; } }
+  // Que controles trae REDEFINIDOS el fichero. El mapa del lanzador se SUPERPONE al de
+  // fabrica en vez de sustituirlo: antes bastaba con que una sola linea del fichero
+  // parsease (`loaded = n > 0`) para que el teclado de fabrica entero dejase de existir, y
+  // un mapa parcial -- o con un nombre de tecla que no esta en la tabla -- dejaba el
+  // emulador sin START sin decir una palabra. Ahora lo que el fichero no nombra sigue
+  // valiendo, y una linea con "-" desasigna a proposito.
+  bool setKey[kN] = {};
+  bool setGp[kN]  = {};
+  PadMap();
 };
 
 struct NamedKey { const char* n; int v; };
@@ -623,11 +710,41 @@ static const u32 kPadBits[14] = {
   0x0020, 0x0010, 0x0008, 0x0004, 0x0002, 0x0001,
 };
 
+// El mapa se relee cuando `rt::padGen` cambia: el menu de la ventana escribe el fichero y
+// sube la generacion, y el mando queda reasignado sin salir del juego.
+// Teclado y mando de fabrica, en el orden de kPadIds. Es la misma tabla que ensena el
+// lanzador (tools/launcher/options.py: PAD_BUTTONS/PAD_AXES); si cambia una, cambia la otra.
+PadMap::PadMap() {
+  static const struct { int key; int gpb; } kFactory[kN] = {
+    {GLFW_KEY_X,     GLFW_GAMEPAD_BUTTON_A},             // A
+    {GLFW_KEY_C,     GLFW_GAMEPAD_BUTTON_B},             // B
+    {GLFW_KEY_SPACE, GLFW_GAMEPAD_BUTTON_X},             // Z
+    {GLFW_KEY_ENTER, GLFW_GAMEPAD_BUTTON_START},         // START
+    {GLFW_KEY_UP,    GLFW_GAMEPAD_BUTTON_DPAD_UP},
+    {GLFW_KEY_DOWN,  GLFW_GAMEPAD_BUTTON_DPAD_DOWN},
+    {GLFW_KEY_LEFT,  GLFW_GAMEPAD_BUTTON_DPAD_LEFT},
+    {GLFW_KEY_RIGHT, GLFW_GAMEPAD_BUTTON_DPAD_RIGHT},
+    {GLFW_KEY_Q,     GLFW_GAMEPAD_BUTTON_LEFT_BUMPER},   // L
+    {GLFW_KEY_E,     GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER},  // R
+    {GLFW_KEY_I,     -1},                                // C-arriba (el stick derecho aparte)
+    {GLFW_KEY_K,     -1},                                // C-abajo
+    {GLFW_KEY_J,     -1},                                // C-izquierda
+    {GLFW_KEY_L,     -1},                                // C-derecha
+    {GLFW_KEY_D,     -1},                                // stick +X
+    {GLFW_KEY_A,     -1},                                // stick -X
+    {GLFW_KEY_W,     -1},                                // stick +Y
+    {GLFW_KEY_S,     -1},                                // stick -Y
+  };
+  for(int i = 0; i < kN; i++) { key[i] = kFactory[i].key; gpb[i] = kFactory[i].gpb; }
+}
+
 static auto loadPadMap() -> const PadMap& {
   static PadMap m;
-  static bool once = false;
-  if(once) return m;
-  once = true;
+  static u32 seen = 0xffffffffu;
+  u32 gen = rt::padGen.load(std::memory_order_acquire);
+  if(seen == gen) return m;
+  seen = gen;
+  m = PadMap();
   const char* path = std::getenv("KESTREL_PAD1");
   if(!path || !*path) return m;
   std::FILE* f = std::fopen(path, "r");
@@ -640,14 +757,15 @@ static auto loadPadMap() -> const PadMap& {
     for(int i = 0; i < PadMap::kN; i++) {
       if(std::strcmp(kPadIds[i], id)) continue;
       m.key[i] = lookupKey(std::strcmp(k, "-") ? k : nullptr);
-      m.gpb[i] = lookupGamepad(std::strcmp(g, "-") ? g : nullptr);
+      m.setKey[i] = true;
+      if(*g) { m.gpb[i] = lookupGamepad(std::strcmp(g, "-") ? g : nullptr); m.setGp[i] = true; }
       n++;
       break;
     }
   }
   std::fclose(f);
-  m.loaded = n > 0;
-  std::fprintf(stderr, "[input] mapa de mando: %d controles desde %s\n", n, path);
+  std::fprintf(stderr, "[input] mapa de mando: %d controles desde %s (el resto, de fabrica)\n",
+               n, path);
   return m;
 }
 
@@ -662,6 +780,23 @@ auto Presenter::open() -> bool {
   vk = new Vk();
   if(!initVulkan(*vk)) { destroyVulkan(*vk); delete vk; vk = nullptr; return false; }
   if(vk->win) glfwSetWindowTitle(vk->win, windowTitle.c_str());   // ROM name in the titlebar
+#ifdef _WIN32
+  // La ventana de juego ES la aplicacion: barra de menu con el catalogo entero de opciones
+  // (resolucion, mando, audio...), el mismo que ensena el lanzador. Lo que se puede cambiar
+  // en caliente va por core/runtime.hpp; lo demas se guarda y el emulador se relanza solo.
+  if(vk->win) {
+    ui::Hooks hk;
+    hk.paused = menuPaused;
+    hk.shutdown = shutdown;
+    hk.stSave = stSave;
+    hk.stLoad = stLoad;
+    hk.stSlot = stSlot;
+    hk.rom = menuRom;
+    hk.resizeForMenu = !vk->fullscreen;
+    ui::attach(glfwGetWin32Window(vk->win), hk);
+    vk->needRecreate = true;   // la barra ha encogido el area de cliente
+  }
+#endif
   std::fprintf(stderr, "[video] Vulkan presenter up (%ux%u -> %ux%u)\n",
                vk->srcW, vk->srcH, vk->extent.width, vk->extent.height);
   return true;
@@ -673,6 +808,36 @@ auto Presenter::pumpFrame() -> bool {
   Vk& v = *vk;
   if(glfwWindowShouldClose(v.win)) return false;
   glfwPollEvents();
+
+  // --- cambios de ventana pedidos desde el menu -------------------------------
+  // Escala, tamano exacto y pantalla completa se aplican aqui, en el hilo que es dueno de la
+  // ventana (GLFW no admite tocarla desde otro), y despues se rehace la cadena de
+  // intercambio porque su extension ya no cuadra con la superficie.
+  if(rt::winReq.exchange(0, std::memory_order_acquire)) {
+    int full = rt::winFull.exchange(-1, std::memory_order_relaxed);
+    int w = rt::winW.load(std::memory_order_relaxed);
+    int h = rt::winH.load(std::memory_order_relaxed);
+    if(full == 1) {
+      if(GLFWmonitor* mon = glfwGetPrimaryMonitor())
+        if(const GLFWvidmode* vm = glfwGetVideoMode(mon))
+          glfwSetWindowMonitor(v.win, mon, 0, 0, vm->width, vm->height, vm->refreshRate);
+    } else if(full == 0) {
+      if(w < 64 || h < 64) { w = (int)kSrcW * kScale; h = (int)kSrcH * kScale; }
+      // Al volver de pantalla completa hay que dar posicion: se centra en el monitor.
+      int px = 60, py = 60;
+      if(GLFWmonitor* mon = glfwGetPrimaryMonitor())
+        if(const GLFWvidmode* vm = glfwGetVideoMode(mon)) {
+          px = (vm->width - w) / 2; py = (vm->height - h) / 2;
+          if(px < 0) px = 0;
+          if(py < 0) py = 0;
+        }
+      glfwSetWindowMonitor(v.win, nullptr, px, py, w, h, 0);
+    } else if(w >= 64 && h >= 64) {
+      glfwSetWindowSize(v.win, w, h);
+    }
+    v.needRecreate = true;
+  }
+  if(v.needRecreate) { v.needRecreate = false; recreateSwapchain(v); }
 
   // --- teclas de estado guardado ---------------------------------------------
   // F5 guarda, F7 carga, F6 pasa a la siguiente ranura (0..9). Por FLANCO: glfwGetKey
@@ -700,32 +865,11 @@ auto Presenter::pumpFrame() -> bool {
     auto down = [&](int key) { return key >= 0 && glfwGetKey(v.win, key) == GLFW_PRESS; };
     const PadMap& pm = loadPadMap();
     u32 b = 0;
-    int sxm = 0, sym = 0;
-    if(pm.loaded) {
-      // Mapa del lanzador: sustituye por completo al teclado de fabrica. Debajo queda el
-      // camino de siempre para el caso sin fichero, identico a como estaba.
-      for(int i = 0; i < 14; i++) if(down(pm.key[i])) b |= kPadBits[i];
-      sxm = (down(pm.key[14]) ? 80 : 0) - (down(pm.key[15]) ? 80 : 0);
-      sym = (down(pm.key[16]) ? 80 : 0) - (down(pm.key[17]) ? 80 : 0);
-    }
-    if(!pm.loaded) {
-    if(down(GLFW_KEY_X))     b |= 0x8000;   // A
-    if(down(GLFW_KEY_C))     b |= 0x4000;   // B
-    if(down(GLFW_KEY_SPACE)) b |= 0x2000;   // Z
-    if(down(GLFW_KEY_ENTER)) b |= 0x1000;   // START
-    if(down(GLFW_KEY_UP))    b |= 0x0800;   // D-Up
-    if(down(GLFW_KEY_DOWN))  b |= 0x0400;   // D-Down
-    if(down(GLFW_KEY_LEFT))  b |= 0x0200;   // D-Left
-    if(down(GLFW_KEY_RIGHT)) b |= 0x0100;   // D-Right
-    if(down(GLFW_KEY_Q))     b |= 0x0020;   // L
-    if(down(GLFW_KEY_E))     b |= 0x0010;   // R
-    if(down(GLFW_KEY_I))     b |= 0x0008;   // C-Up
-    if(down(GLFW_KEY_K))     b |= 0x0004;   // C-Down
-    if(down(GLFW_KEY_J))     b |= 0x0002;   // C-Left
-    if(down(GLFW_KEY_L))     b |= 0x0001;   // C-Right
-    }
-    int sx = pm.loaded ? sxm : ((down(GLFW_KEY_D) ? 80 : 0) - (down(GLFW_KEY_A) ? 80 : 0));
-    int sy = pm.loaded ? sym : ((down(GLFW_KEY_W) ? 80 : 0) - (down(GLFW_KEY_S) ? 80 : 0));
+    // Un solo camino: el mapa YA trae los valores de fabrica dentro y el fichero, si lo hay,
+    // solo ha pisado los controles que nombra.
+    for(int i = 0; i < 14; i++) if(down(pm.key[i])) b |= kPadBits[i];
+    int sx = (down(pm.key[14]) ? 80 : 0) - (down(pm.key[15]) ? 80 : 0);
+    int sy = (down(pm.key[16]) ? 80 : 0) - (down(pm.key[17]) ? 80 : 0);
 
     // --- optional physical gamepad (player 1), OR'd on top of the keyboard ------
     // GLFW's gamepad mapping DB gives every pad the same button/axis layout, so
@@ -741,29 +885,22 @@ auto Presenter::pumpFrame() -> bool {
         if(i == -3) return gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f;
         return bt(i);
       };
-      if(pm.loaded) for(int i = 0; i < 14; i++) if(btm(pm.gpb[i])) b |= kPadBits[i];
-      if(!pm.loaded) {
-      if(bt(GLFW_GAMEPAD_BUTTON_A))            b |= 0x8000;  // A
-      if(bt(GLFW_GAMEPAD_BUTTON_B))            b |= 0x4000;  // B
-      if(bt(GLFW_GAMEPAD_BUTTON_X))            b |= 0x2000;  // Z
-      if(bt(GLFW_GAMEPAD_BUTTON_START))        b |= 0x1000;  // START
-      if(bt(GLFW_GAMEPAD_BUTTON_BACK))         b |= 0x1000;  // START (alt)
-      if(bt(GLFW_GAMEPAD_BUTTON_DPAD_UP))      b |= 0x0800;
-      if(bt(GLFW_GAMEPAD_BUTTON_DPAD_DOWN))    b |= 0x0400;
-      if(bt(GLFW_GAMEPAD_BUTTON_DPAD_LEFT))    b |= 0x0200;
-      if(bt(GLFW_GAMEPAD_BUTTON_DPAD_RIGHT))   b |= 0x0100;
-      if(bt(GLFW_GAMEPAD_BUTTON_LEFT_BUMPER))  b |= 0x0020;  // L
-      if(bt(GLFW_GAMEPAD_BUTTON_RIGHT_BUMPER)) b |= 0x0010;  // R
-      if(bt(GLFW_GAMEPAD_BUTTON_Y))            b |= 0x0010;  // R (alt)
-      // Triggers (analog) → Z / R when pressed past half.
-      if(gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f) b |= 0x2000;  // Z
-      if(gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f) b |= 0x0010;  // R
-      // Right stick → C-buttons (digital past a deadzone).
-      float rx = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], ry = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y];
-      if(ry < -0.5f) b |= 0x0008;  // C-Up
-      if(ry >  0.5f) b |= 0x0004;  // C-Down
-      if(rx < -0.5f) b |= 0x0002;  // C-Left
-      if(rx >  0.5f) b |= 0x0001;  // C-Right
+      for(int i = 0; i < 14; i++) if(btm(pm.gpb[i])) b |= kPadBits[i];
+      // Alias de fabrica del mando: solo para los controles que el fichero NO redefine, o
+      // remapear un boton dejaria puesto ademas el de antes.
+      auto freeGp = [&](int i) { return !pm.setGp[i]; };
+      if(freeGp(3) && bt(GLFW_GAMEPAD_BUTTON_BACK)) b |= 0x1000;   // START (alt)
+      if(freeGp(9) && bt(GLFW_GAMEPAD_BUTTON_Y))    b |= 0x0010;   // R (alt)
+      if(freeGp(2) && gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f) b |= 0x2000;  // Z
+      if(freeGp(9) && gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f) b |= 0x0010;  // R
+      // Stick derecho -> botones C (digital, con zona muerta). Los C no traen boton de
+      // mando de fabrica, asi que esta es su unica via salvo que el usuario asigne uno.
+      {
+        float rx = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], ry = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y];
+        if(freeGp(10) && ry < -0.5f) b |= 0x0008;  // C-arriba
+        if(freeGp(11) && ry >  0.5f) b |= 0x0004;  // C-abajo
+        if(freeGp(12) && rx < -0.5f) b |= 0x0002;  // C-izquierda
+        if(freeGp(13) && rx >  0.5f) b |= 0x0001;  // C-derecha
       }
       // Left stick → analog. Deadzone, then scale to the N64's ±80 range.
       float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X], ly = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
@@ -793,8 +930,16 @@ auto Presenter::pumpFrame() -> bool {
   u32 origin = mem->rcp.vi_origin & 0x1fff'ffff;
   u32 width  = mem->rcp.vi_width ? mem->rcp.vi_width : kSrcW;
   u32 type   = mem->rcp.vi_ctrl & 3;   // 0 blank, 2 = 16bpp, 3 = 32bpp
-  if(width > kSrcW) width = kSrcW;      // srcImage is kSrcW wide
-  u32 height = kSrcH;
+  if(width > kMaxSrcW) width = kMaxSrcW;
+  // La altura del framebuffer NO es 240 fija: la fija Y_SCALE (2.10, lineas de origen por
+  // linea de pantalla) sobre las lineas activas del campo (NTSC 240, PAL 288, que se sacan
+  // del total de V_SYNC). Es la misma derivacion que usa el volcado de framebuffer; tenerla
+  // clavada a 240 dejaba la mitad de abajo en negro en las resoluciones altas y estiraba las
+  // bajas.
+  u32 ysc   = mem->rcp.vi_yscale & 0xfff;
+  u32 baseH = (mem->rcp.viHalflines() >= 550) ? 288 : 240;
+  u32 height = ysc ? ((baseH * ysc) >> 10) : baseH;
+  if(height == 0 || height > kMaxSrcH) height = baseH;
 
   frame.assign((usize)width * height, 0xff000000u);   // bytes 0,0,0,255 → black
   const auto& ram = mem->rdram;
@@ -807,8 +952,8 @@ auto Presenter::pumpFrame() -> bool {
     u32 sw = 0, sh = 0;
     const u8* rgba = vrdp::scanout(sw, sh);
     if(rgba && sw && sh) {
-      width = sw > kSrcW ? kSrcW : sw;
-      height = sh;
+      width  = sw > kMaxSrcW ? kMaxSrcW : sw;
+      height = sh > kMaxSrcH ? kMaxSrcH : sh;
       frame.assign((usize)width * height, 0xff000000u);
       for(u32 y = 0; y < height; y++)
         std::memcpy(&frame[y * width], rgba + (usize)y * sw * 4, (usize)width * 4);
@@ -844,7 +989,7 @@ auto Presenter::pumpFrame() -> bool {
   }
 
   // Speed-gauge footer (CPU / RSP / RDRAM % of realtime). On unless disabled.
-  if(!std::getenv("KESTREL_HUD_OFF")) {
+  if(rt::hud.load(std::memory_order_relaxed)) {
     double c = cpuPct   ? cpuPct->load(std::memory_order_relaxed)   : 0.0;
     double r = rspPct   ? rspPct->load(std::memory_order_relaxed)   : 0.0;
     double m = rdramPct ? rdramPct->load(std::memory_order_relaxed) : 0.0;

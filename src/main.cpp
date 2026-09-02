@@ -5,6 +5,8 @@
 #include "cpu/jit.hpp"
 #include "rsp/rsp.hpp"
 #include "audio/audio.hpp"
+#include "core/runtime.hpp"
+#include "ui/menu.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -194,6 +196,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Siembra desde el entorno los ajustes que el menu de la ventana podra cambiar en
+  // caliente. Antes de arrancar nada: a partir de aqui manda el atomico, no getenv().
+  kestrel::rt::initFromEnv();
+
   kestrel::System system;
   g_system = &system;
   std::signal(SIGINT, onSignal);
@@ -216,12 +222,25 @@ int main(int argc, char** argv) {
   system.exitOnHalt = batch;      // lote headless: halt = fin de sesión, no punto de inspección
   system.startTelemetry(port);
   system.startVideo(batch);     // --run = lote: sin ventana salvo KESTREL_VIDEO
-  std::printf("[system] running (M1: CPU interpreter, %s). Ctrl-C to quit.\n",
-              !freeRun ? "paused — step over MCP" : (play ? "free-run + video" : "free-run"));
+  // El cartel decia siempre "CPU interpreter", que dejo de ser verdad cuando el dynarec
+  // paso a ir puesto por defecto: quien mirase la consola creia estar midiendo el
+  // interprete. Ahora dice lo que de verdad esta armado.
+  std::printf("[system] running (CPU %s, %s). Ctrl-C to quit.\n",
+              kestrel::envFlag("KESTREL_JIT", true) ? "dynarec" : "interprete",
+              !freeRun ? "paused � step over MCP" : (play ? "free-run + video" : "free-run"));
   std::fflush(stdout);
 
   system.runLoop();
   kestrel::audio::shutdown();
   std::printf("[system] shutdown.\n");
+  std::fflush(stdout);
+  // El relanzado va AQUI, con el audio ya cerrado: el proceso nuevo abre waveOut nada
+  // mas arrancar, y encontrarselo ocupado por el viejo lo dejaria mudo. El servidor de
+  // telemetria se cierra igual y por lo mismo: si no, el proceso nuevo se encuentra el
+  // puerto cogido por este, que todavia no ha muerto.
+  if(kestrel::ui::relaunchPending()) {
+    system.stopTelemetry();
+    kestrel::ui::doRelaunch();
+  }
   return 0;
 }

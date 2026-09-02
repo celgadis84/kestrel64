@@ -33,6 +33,62 @@ tenia por que cambiar eso. Lo que hay es:
 
 El perfil vive en `tools/launcher/profile.json` y se guarda solo, sin boton de guardar.
 
+## El mismo catalogo DENTRO de la ventana del emulador
+
+La ventana de juego no es un visor: es la aplicacion. Lleva barra de menu nativa (Win32) con
+**las mismas opciones que el lanzador**, porque las dos leen el mismo catalogo.
+
+```
+tools/launcher/options.py      esquema unico (fuente de la verdad)
+        |
+        +-- OPT.to_env()               -> lanzador (Python)
+        +-- tools/gen_optdefs.py       -> src/ui/optdefs.cpp  (GENERADO, no editar a mano)
+                                          src/ui/profile.cpp  lee/escribe el MISMO profile.json
+                                          src/ui/menu_win32.cpp barra de menu + dos dialogos
+```
+
+**Al tocar `options.py` hay que regenerar**:
+
+```bash
+python tools/gen_optdefs.py      # reescribe src/ui/optdefs.cpp
+```
+
+### Que se aplica en caliente y que no
+
+`src/core/runtime.hpp` es un punado de atomicos que se **siembran desde el entorno al
+arrancar** (`rt::initFromEnv()` en `main()`), asi que el modo lote y los gates se comportan
+bit a bit igual que antes; a partir de ahi manda quien los escriba, o sea el menu.
+
+| En caliente (`rt::`) | Exige relanzar |
+|---|---|
+| escala / tamano / pantalla completa | backend RDP, hilos, dynarec |
+| HUD de telemetria | overclock por dominio |
+| sonido y volumen | tipo de guardado, puerto |
+| limitador de velocidad | todo lo demas |
+| mapa de mando (`rt::padGen`) | |
+
+Lo que no se puede cambiar en marcha se guarda en el perfil y el emulador **se relanza a si
+mismo**: reconstruye entorno y linea de ordenes con `ui::toEnv()`, borra antes toda variable
+`KESTREL_*` heredada (si no, una opcion recien apagada seguiria encendida por herencia) y
+hace `CreateProcess`. El relanzado ocurre en `main()` **despues** de `audio::shutdown()`,
+porque el proceso nuevo abre waveOut nada mas arrancar. Las opciones marcadas `(*)` en el
+dialogo son justo esas.
+
+### Detalles que no son cosmeticos
+
+- Los dialogos corren en **su propio hilo** con su propio bucle `IsDialogMessage`. El hilo
+  principal esta presentando cuadros y no puede meterse en un bucle modal sin congelar la
+  imagen.
+- La subclase del `WndProc` de GLFW se engancha con `SetWindowLongPtrW`/`CallWindowProcW`:
+  con las versiones `A` la ventana pasaria a ANSI y GLFW recibiria `WM_CHAR` mutilado.
+- Los atajos (F11, F12, Ctrl+O, Ctrl+P) se atienden y **se dejan pasar**: el teclado del
+  juego se lee con `glfwGetKey`, que se alimenta de esos mismos mensajes, y tragarse el
+  `WM_KEYDOWN` sin el `WM_KEYUP` dejaria la tecla clavada.
+- Poner la barra encoge el area de cliente: se agranda la ventana `SM_CYMENU` para que la
+  imagen no pierda una franja (en pantalla completa no, ahi ya cubre el monitor).
+- El dialogo de mando escribe `pad1.cfg` y sube `rt::padGen`; `loadPadMap()` relee el fichero
+  y lo **superpone** al mapa de fabrica, en vez de sustituirlo.
+
 ## Arquitectura
 
 ```

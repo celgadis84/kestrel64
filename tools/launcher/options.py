@@ -145,6 +145,8 @@ CATEGORIES = [
   dict(id="audio", label="Audio", icon="audio", desc="Salida de sonido del anfitrion.",
        options=[
     O("audio", "KESTREL_AUDIO", "Audio activado", "bool", True, tri=True),
+    O("volume", "KESTREL_VOLUME", "Volumen (%)", "int", 100, min=0, max=100,
+      help="Atenuacion aplicada a las muestras antes de mandarlas al anfitrion. No toca el modelo del AI: el juego sigue viendo el mismo audio."),
     O("audio_trace", "KESTREL_AUDIO_TRACE", "Traza de audio", "bool", False, adv=True),
     O("audiohook", "KESTREL_AUDIOHOOK", "Enganche de audio", "bool", False, adv=True),
   ]),
@@ -358,11 +360,13 @@ def to_env(profile):
     if str(p.get("throttle", "auto")) == "auto":
         env.pop("KESTREL_THROTTLE", None)
 
-    # El plugin grafico decide EJECUTABLE (compilacion), no solo variable.
+    # El plugin grafico decide EJECUTABLE (compilacion), no solo variable. "auto" no dice
+    # nada y deja el defecto del binario, que es la GPU cuando el backend esta compilado;
+    # "soft" tiene que decir "0" EXPLICITO, porque quitar la variable ya no apaga nada.
     if str(p.get("plugin", "auto")) == "prdp":
         env["KESTREL_PRDP"] = "1"
     elif str(p.get("plugin", "auto")) == "soft":
-        env.pop("KESTREL_PRDP", None)
+        env["KESTREL_PRDP"] = "0"
 
     # KESTREL_VIDEO / --run: sin --run el emulador arranca en pausa esperando al MCP.
     if not p.get("paused", False):

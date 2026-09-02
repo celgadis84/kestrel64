@@ -45,6 +45,13 @@ struct Presenter {
     stSave = save; stLoad = load; stSlot = slot;
   }
 
+  // Ata la barra de menu de la ventana (Win32) al estado del emulador: pausa, cierre
+  // ordenado y la ROM en marcha para poder relanzarse con ella. Sin atar, la ventana sale
+  // sin menu y el emulador se comporta exactamente como antes.
+  auto bindMenu(std::atomic<bool>* pausedFlag, const std::string& rom) -> void {
+    menuPaused = pausedFlag; menuRom = rom;
+  }
+
 private:
   Memory* mem = nullptr;
   std::atomic<bool>* shutdown = nullptr;
@@ -58,6 +65,8 @@ private:
   std::atomic<int>* stLoad = nullptr;
   std::atomic<int>* stSlot = nullptr;
   bool stPrev[3] = {};      // flanco de F5/F7/F6: la tecla se sondea, no llega como evento
+  std::atomic<bool>* menuPaused = nullptr;   // ver bindMenu
+  std::string menuRom;
 };
 
 }  // namespace kestrel

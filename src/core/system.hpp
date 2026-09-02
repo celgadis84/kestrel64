@@ -112,6 +112,10 @@ struct System {
 
   // Start the telemetry server on its own thread (non-blocking).
   auto startTelemetry(u16 port) -> bool;
+  // Cierra el servidor y LIBERA EL PUERTO antes de que se destruya el System. Hace falta
+  // para relanzarse desde el menu: el proceso nuevo se levanta mientras este sigue vivo, y
+  // se encontraria el 9128 ocupado. Idempotente.
+  auto stopTelemetry() -> void;
 
   // Arm the VI presentation window (M3.1). No-op if disabled (KESTREL_VIDEO).
   // The window loop itself runs on the main thread inside runLoop().

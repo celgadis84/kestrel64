@@ -5,6 +5,8 @@
 #endif
 #include "../telemetry/server.hpp"
 #include "../telemetry/hostprof.hpp"
+#include "../audio/audio.hpp"
+#include "runtime.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -17,6 +19,10 @@ System::~System() {
   requestShutdown();
   memory.flushSaveFile();   // persist battery/flash save to disk on exit
   memory.stopRcpThreads();
+  stopTelemetry();
+}
+
+auto System::stopTelemetry() -> void {
   if(tele) tele->stop();
   if(teleThread.joinable()) teleThread.join();
 }
@@ -71,6 +77,9 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   // Un solo reloj de video para todo el emulador: el mismo numero de instrucciones
   // por campo que usa el bucle de System (stepCpu) lo usa la lectura de VI_V_CURRENT.
   memory.viFieldInsns = clocks.fieldInsns();
+  // ...y la frecuencia de campo en mili-hercios, que es lo que el drenaje del AI necesita
+  // para convertir instrucciones retiradas en segundos de guest sin coma flotante.
+  memory.viFieldHzMilli = (u32)(clocks.viFieldHz * 1000.0 + 0.5);
   // ...y un solo modelo de CPI: el mismo ratio CPU:RSP para el interleave de Lockstep
   // (aqui) y para el regulador de Threaded (Memory::rcpPace).
   rspStepNum = (u64)(clocks.rspInsnsPerCpuInsn() * 65536.0 + 0.5);
@@ -208,6 +217,7 @@ auto System::startVideo(bool batch) -> void {
   videoOn = presenter.start(&memory, &shutdown, &n64SpeedPct, &rspSpeedPct, &rdramSpeedPct,
                             rom.valid() ? rom.header.name.c_str() : nullptr);
   presenter.bindState(&stateSaveReq, &stateLoadReq, &stateSlot);
+  presenter.bindMenu(&paused, romPath);
   if(videoOn) std::printf("[video] VI presentation armed (window opens on main thread)\n");
 }
 
@@ -248,7 +258,7 @@ auto System::runLoop() -> void {
   // hilos del RCP) y aqui solo se espera a que el hilo del RDP lo tenga listo.
   std::thread cpuThread([this] { run(); });
   const char* pe = std::getenv("KESTREL_PRDP");
-  bool prdpWanted = pe && pe[0] != '0';
+  bool prdpWanted = !pe || pe[0] != '0';
   bool prdpReady  = memory.vrdpWaitReady(15000);
   if(prdpWanted && !prdpReady)
     std::printf("[video] parallel-rdp no arranco a tiempo; sin ventana\n");
@@ -474,8 +484,8 @@ auto System::run() -> void {
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
 
   // Limitador de velocidad, ver mas abajo. Armado cuando hay ventana; KESTREL_THROTTLE=0/1 manda.
-  const char* thEnv = std::getenv("KESTREL_THROTTLE");
-  bool  throttleOn = thEnv ? (thEnv[0] != '0') : videoOn;
+  // El valor vive en rt::throttle porque el menu de la ventana lo cambia en caliente; -1 es
+  // "automatico" y sigue significando lo de siempre: limitar solo si hay ventana.
   const double throttleFieldNs = 1e9 / clocks.viFieldHz;
   auto  throttleT0 = winT0;
   u64   throttleField = 0;
@@ -591,6 +601,8 @@ auto System::run() -> void {
     //
     // Apagado cuando no hay ventana: gates, bench y krom corren headless y deben ir a tope, o
     // medirian 30 fps siempre. KESTREL_THROTTLE=0/1 fuerza cualquiera de los dos.
+    const int thWant = rt::throttle.load(std::memory_order_relaxed);
+    const bool throttleOn = thWant < 0 ? videoOn : thWant != 0;
     if(throttleOn && fieldClosed) {
       throttleField++;
       auto due = throttleT0 + std::chrono::nanoseconds(
@@ -728,6 +740,19 @@ auto System::run() -> void {
       std::fprintf(stderr, "[hb] jobs/s: rsp=%.0f rdp=%.0f\n",
                    memory.rspJobsRun.load(std::memory_order_relaxed) / s,
                    memory.rdpJobsRun.load(std::memory_order_relaxed) / s);
+      // Hambre del sumidero de audio EN VIVO. `KESTREL_AUDIOSTAT` solo habla al cerrar, y
+      // con ventana el emulador no cierra solo: sin esta linea un "se oye entrecortado" no
+      // se puede localizar mientras pasa. `min` es el colchon minimo DE ESTA VENTANA de 5 s,
+      // que es lo que delata un corte; el acumulado de silencio dice si ya se oyo.
+      {
+        u64 apull = 0, asil = 0, adrop = 0; u32 alvl = 0, alow = 0, acap = 0;
+        if(audio::statSnapshot(apull, asil, adrop, alvl, alow, acap)) {
+          double sil = (apull + asil) ? 100.0 * (double)asil / (double)(apull + asil) : 0.0;
+          std::fprintf(stderr, "[hb] audio: silencio %.2f%% descartadas=%llu anillo %u"
+                               " (min %u de esta ventana) de %u\n",
+                       sil, (unsigned long long)adrop, alvl, alow, acap);
+        }
+      }
       hbLast = now;
     }
   }

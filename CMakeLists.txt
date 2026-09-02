@@ -11,9 +11,14 @@ endif()
 # Tune for this host by default (weak Nehalem i7-870, SSE4.2). Toggle off for portable builds.
 option(KESTREL_BUILD_LOCAL "Tune for the build host (-march=native)" ON)
 
-# GPU RDP via Themaister's paraLLEl-RDP. OFF by default: the deterministic core
-# (systemtest / lockstep md5) must not depend on it. See cmake/parallel_rdp.cmake.
-option(KESTREL_PRDP "Build the paraLLEl-RDP GPU rasterizer backend" OFF)
+# GPU RDP via Themaister's paraLLEl-RDP. ON by default: el rasterizado en GPU es EL camino
+# del emulador (ver docs/parallel-rdp-integration.md). El arbol esta vendorizado bajo
+# third_party/, asi que esto no pide red ni compilador de shaders; lo unico que hace falta en
+# ejecucion es un vulkan-1.dll utilizable, y si no lo hay el backend se cae solo a SoftRDP.
+#
+# El arbol `build/` de los gates se configura a mano con -DKESTREL_PRDP=OFF: gate_all es el
+# oraculo DETERMINISTA (systemtest / md5 en lockstep) y no puede depender de que haya GPU.
+option(KESTREL_PRDP "Build the paraLLEl-RDP GPU rasterizer backend" ON)
 if(KESTREL_PRDP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/parallel_rdp.cmake)
 endif()
@@ -39,6 +44,9 @@ add_executable(kestrel64
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/ui/optdefs.cpp
+  src/ui/profile.cpp
+  src/ui/menu_win32.cpp
 )
 
 target_include_directories(kestrel64 PRIVATE src)
@@ -54,6 +62,8 @@ endif()
 # RSP core unit test (hand-assembled microcode; no windowing deps).
 add_executable(rsp_test EXCLUDE_FROM_ALL
   test/rsp_test.cpp
+  src/telemetry/hostprof.cpp
+  src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/core/memory.cpp
   src/rdp/rdp.cpp
@@ -69,6 +79,8 @@ endif()
 # Cartridge save-device unit test (SRAM + FlashRAM state machine; no windowing deps).
 add_executable(save_test EXCLUDE_FROM_ALL
   test/save_test.cpp
+  src/telemetry/hostprof.cpp
+  src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/core/memory.cpp
   src/rdp/rdp.cpp
@@ -80,6 +92,18 @@ target_include_directories(save_test PRIVATE src)
 if(WIN32)
   target_link_libraries(save_test PRIVATE winmm)
 endif()
+
+# Los tests compilan rsp.cpp, que usa SSSE3 en el difusor de banda: sin el mismo juego de
+# instrucciones que el binario principal no enlaza.
+foreach(t rsp_test save_test)
+  if(NOT MSVC)
+    if(KESTREL_BUILD_LOCAL)
+      target_compile_options(${t} PRIVATE -march=native)
+    else()
+      target_compile_options(${t} PRIVATE -march=x86-64-v2)
+    endif()
+  endif()
+endforeach()
 
 if(MSVC)
   target_compile_options(kestrel64 PRIVATE /O2 /W3)

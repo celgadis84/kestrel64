@@ -378,9 +378,25 @@ class Emu:
             self.lines = []
             self.cmd = cmd
             self.started = time.time()
+        # Windows no deja que un proceso cualquiera se ponga en primer plano: el emulador
+        # abriria su ventana DETRAS del navegador y, como el teclado se lee de la ventana
+        # enfocada, correria sin responder a ninguna tecla. AllowSetForegroundWindow cede
+        # ese derecho; ASFW_ANY (-1) vale para el hijo que aun no existe. Si el sistema lo
+        # deniega (el lanzador no es la ventana activa) no pasa nada: la ventana parpadea
+        # en la barra de tareas y basta un clic.
+        try:
+            import ctypes
+            ctypes.windll.user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
         self.proc = subprocess.Popen(
             cmd, cwd=cwd, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             bufsize=1, universal_newlines=True, errors="replace")
+        try:
+            import ctypes
+            ctypes.windll.user32.AllowSetForegroundWindow(self.proc.pid)
+        except Exception:
+            pass
         threading.Thread(target=self._pump, daemon=True).start()
         return cmd
 
@@ -611,11 +627,14 @@ class H(BaseHTTPRequestHandler):
         if not rom or not os.path.isfile(rom):
             return dict(ok=False, error="ROM no encontrada: %s" % rom)
         env, argv = OPT.to_env(prof)
+        # El emulador lleva el mismo catalogo de opciones dentro de su ventana y escribe en
+        # ESTE perfil, no en otro: en arbol de desarrollo STATE no es %LOCALAPPDATA%.
+        env["KESTREL_PROFILE"] = PROFILE
         bl = pick_exe(prof.get("plugin", "auto"))
         if not bl:
             return dict(ok=False, error="no hay ningun kestrel64.exe compilado")
         if bl["id"] != "prdp":
-            env.pop("KESTREL_PRDP", None)
+            env["KESTREL_PRDP"] = "0"   # ese exe no lleva backend GPU; que quede dicho
         # El mapeo del mando va en fichero, no en variables: son 18 asignaciones.
         pad = prof.get("pad")
         if pad:
