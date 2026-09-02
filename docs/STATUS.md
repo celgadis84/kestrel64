@@ -1489,7 +1489,8 @@ junto al ROM. Estructura destino (raíz p.ej. `~/.kestrel64/<game-id>/` o carpet
 - **`save/`** — battery/flash saves (`.eep/.sra/.fla`). HOY viven junto al ROM (attachSaveFile);
   migrar a `save/<game-id>.<ext>`.
 - **`pak/`** — Controller Pak (Memory Pak, 32 KB por pak, 4 controladores). Backing joybus +
-  fichero `.mpk` por slot. AÚN NO implementado (device joybus pendiente).
+  fichero `.mpk` por slot. HECHO 2026-08-28 para el mando 1 (ver entrada al final); vive junto
+  al ROM, migrar a `pak/<game-id>.mpk` cuando se haga este layout, y falta el resto de mandos.
 - **`textures/`** — **export** de las texturas de un juego a `textures/<game-id>/` (dump al vuelo
   desde loads RDP: hash de tile+TLUT+fmt → PNG). Objetivo: **custom textures / texture packs**
   (HD, cell-shading, upgrades vía IA, etc.) — cargar override desde el mismo subdir por hash.
@@ -2900,3 +2901,572 @@ programa no es escribible. `dist.sh` lo mete en `dist/` y deja `kestrel64.build`
 backend con el que se compilo el emulador (desde fuera del binario no se ve). El
 instalador ya apunta el icono del escritorio y del menu al lanzador; la asociacion de ROM
 sigue yendo a `kestrel64.exe --run "%1"`. Multi-SO queda para la ultima fase.
+
+## 2026-08-28 — Controller Pak (Memory Pak) por joybus, `.mpk` al lado del ROM
+
+El pak es del **mando**, no del cartucho: 32 KiB de SRAM con pila dentro de la ranura del
+mando, que se leen y escriben por joybus en bloques de 32 bytes. Va aparte del save de la
+cartuchera y existe aunque el juego no tenga bateria, asi que tiene su propio fichero
+`.mpk` (convencion mupen/ares) y su propio marcador de sucio.
+
+**Protocolo** (`Memory::pifProcessJoybus`, canal 0). La direccion no viaja cruda: son
+`(bloque << 5) | CRC5(bloque)`, con el bloque en unidades de 32 bytes — 11 bits, o sea
+64 KiB de espacio de direcciones para 32 KiB de pak. La respuesta lleva ademas un CRC de
+datos de 8 bits.
+
+| Orden | tx | rx | Contenido |
+|---|---|---|---|
+| `0x00` / `0xFF` estado | 1 | 3 | tipo `0x0005` + byte de estado (`CONT_CARD_ON` = 0x01 si hay pak) |
+| `0x02` leer  | 3  | 33 | 32 bytes del bloque + CRC de datos |
+| `0x03` escribir | 35 | 1 | CRC de datos **de lo que mando el juego** |
+
+Los dos CRC estan portados tal cual de `__osContAddressCrc` / `__osContDataCrc` del SDK
+(`libreultra/src/io/crc.c`), incluida la vuelta numero 33 del de datos, que no lee dato: mete
+un byte de ceros por la derecha y es lo que deja el resto en su sitio. No es cosmetico —
+`__osContRamRead` compara el CRC de CADA bloque, reintenta tres veces y luego va a preguntar
+el estado del canal, asi que devolverlo mal equivale a un pak roto.
+
+Detalles que hay que acertar o el SDK se planta:
+
+- **`CONT_CARD_PULL` (0x02) se deja a cero.** Con `CONT_CARD_ON` y `CONT_CARD_PULL` puestos a
+  la vez `__osPfsGetStatus` devuelve `PFS_ERR_NEW_PACK` ("pak recien cambiado"), que el juego
+  ensena como error. Es un estado de HW real, pero solo tras un cambio en caliente.
+- **Sin pak, el CRC de datos sale INVERTIDO.** Es asi como el SDK nota la ausencia antes de ir
+  a mirar el estado del canal; devolver el CRC bueno con datos a cero haria que el juego se
+  creyera un pak vacio y utilizable. `KESTREL_MEMPAK=0` desenchufa el pak.
+- **Por encima de 32 KiB no hay nada.** El bloque 0x400 (byte 0x8000) es la ventana del Rumble
+  Pak; un Controller Pak devuelve ceros ahi, que es justo lo que separa un accesorio del otro.
+
+**El pak sale FORMATEADO de fabrica** (`mempakFormat`). Sin eso `osPfsInitPak` lo da por
+inservible: la suma del bloque de ID no cuadra, `__osCheckPackId` devuelve `PFS_ERR_ID_FATAL`
+y el juego pide formatear en el primer arranque. Se construye el mismo contenido que deja
+`osPfsReFormat`: bloque de ID por cuadruplicado en los bloques 1/3/4/6 (con `deviceid` impar
+— `__osGetId` lo exige — `banks=1` y las dos sumas de `__osIdCheckSum`), tabla de inodos en el
+bloque 8 con su copia de respaldo en el 16 (cinco paginas de sistema a 0, el resto a 3 =
+`PFS_PAGE_NOT_USED`, y la suma de `__osSumcalc` en la entrada 0) y directorio a cero.
+
+**El pak entra en el savestate** (`kVersion` 1 → 2): es RAM viva, y rebobinar un estado sin
+rebobinarlo dejaria el sistema de ficheros del pak adelantado respecto al juego.
+
+**Test** (`test/save_test.cpp`, seccion nueva). Conduce el camino real — bloque de ordenes en
+RDRAM, SI DMA a PIF RAM, `pifProcessJoybus`, SI DMA de vuelta — igual que `__osContRamRead`, y
+**recalcula los dos CRC a partir del codigo del SDK en vez de reusar los del emulador**: si
+ambos estuvieran mal a la vez el test no valdria nada. Comprueba el formato de fabrica (sumas
+del ID en los cuatro bloques, `deviceid` impar, suma de inodos, copia identica), estado con
+pak, escritura + relectura + los dos CRC, la ventana del Rumble a ceros, el CRC invertido sin
+pak, y el viaje de ida y vuelta al `.mpk`.
+
+De paso, `save_test` y `rsp_test` **volvian a compilar pero no a arrancar**: les faltaban
+`src/cpu/cpu.cpp` y `src/telemetry/hostprof.cpp` y el `-march` del binario principal (rsp.cpp
+usa SSSE3), y `Memory` ha crecido tanto que tres en la pila revientan el megabyte de Windows
+— ahora van al monton. `rsp_test` sigue sin compilar por otra cosa (copia de un `std::atomic`
+en su linea 71), anotado y aparte.
+
+## 2026-08-28 — RSP JIT etapa 3: enlace de bloques, y el dynarec que no se usaba en Lockstep
+
+Dos cosas, la segunda encontrada midiendo la primera.
+
+**Enlace de bloques.** El epilogo de cada bloque mira el ya la tabla de 1024 ranuras
+en el PC de salida y, si hay bloque vivo que cabe en lo que queda de tanda, salta a
+el con una cola (`jmp` tras desmontar el marco, no `call`). La pila queda como a la
+entrada, asi que el ultimo de la cadena vuelve al bucle en C con su propio `ret` y la
+pila no crece. SM64, 200 intercambios: **7 369 631 -> 1 245 702 entradas al
+despachador, -83 %**. Con el RSP como cuello (`--rspbench`): **230,8 vs 225,5 Mips,
++2,4 %**, y eso con bloques de 64 instrucciones, que es el caso peor. Detalle de
+diseno —enlace indirecto por tabla (no `jmp rel32`, la IMEM se reescribe con
+overlays), PC escrito siempre por el bloque, destino estatico en caida y en J/JAL,
+saldo debitado por quien salta— en `docs/RSP-JIT.md`.
+
+**El dynarec del RSP no se ejecutaba en Lockstep, pero se compilaba.** `bench --mode
+jit` iba mas rapido con `KESTREL_RSPJIT=0` (22,3 s) que con el dynarec (24,1 s). En
+Lockstep el bucle del sistema llama a `memory.rsp.step(1)`: la tanda vale 1 y un
+bloque necesita `kMinOps` = 2, asi que ningun bloque llega a ejecutarse — pero cada
+PC nuevo si se compilaba entero antes de caer al interprete. Guarda `c >= kMinOps` en
+el despachador (no se mira la tabla ni se compila lo que no cabe en la tanda):
+**`bench --mode jit` 24,10 -> 22,60 s, -6,2 %**. `threaded-jit` sin cambio.
+
+Interruptores y validacion: `KESTREL_RSPJIT_LINK=0` para bisecar, modo `rspnolink`
+anadido a `validate.py` y a `gate_all.sh` (ahora 14 pasos). gate_all 14/14 y
+gate_prdp 3/3 con `regress=0` en las dos suites krom y los md5 de sm64 sin cambio
+(`466282775dbd0ac084946558a1c30771` SoftRDP, `b5521b24d8fc280fbf102df22d7d30cb` PRDP).
+
+## 2026-09-01 — El presentador recortaba el cuadro: media imagen con parallel-rdp
+
+Bug de VISUALIZACION, no de emulacion: las puertas nunca lo vieron porque el volcado de
+framebuffer (`dumpFramebufferBmp`, `KESTREL_FBDUMP`) sale del RDRAM y no pasa por el
+presentador. Solo se ve en la ventana.
+
+**Sintoma.** Con `KESTREL_PRDP=1` la ventana ensenaba la mitad izquierda del cuadro.
+
+**Raiz.** `src/video/present.cpp` tenia la imagen fuente de Vulkan creada UNA vez a
+320x240 (`kSrcW`/`kSrcH`) y todo lo demas recortado contra ella:
+
+- `width = sw > kSrcW ? kSrcW : sw` en el camino de GPU. parallel-rdp entrega el scanout
+  del VI ya a la resolucion de salida — en SM64 son **640x240** — asi que se copiaban las
+  320 primeras columnas y se tiraba la mitad derecha.
+- El mismo recorte en el camino de RDRAM (SoftRDP): un juego de alta resolucion con
+  `VI_WIDTH` 640 perdia igual la mitad derecha.
+- La altura estaba clavada a `kSrcH` = 240 en el camino de RDRAM, ignorando `Y_SCALE`.
+- `presentFrame` volvia a recortar al subir los pixeles (`y < v.srcH`, `min(w, v.srcW)`).
+
+**Arreglo.** La imagen fuente pasa a ser del tamano EXACTO del cuadro y se rehace cuando ese
+tamano cambia (`createSrcImage`/`destroySrcImage`, con `vkQueueWaitIdle` bajo `QueueGuard`
+porque puede haber un blit en vuelo). Los tres sitios que recortaban usan ahora una cota de
+cordura (`kMaxSrcW/H` = 1024, para que un registro VI a medio escribir no reserve una imagen
+absurda) en vez de la resolucion nominal. La altura del camino de RDRAM sale de `Y_SCALE`
+sobre las lineas activas del campo (NTSC 240 / PAL 288 segun `V_SYNC`), que es la misma
+derivacion que ya usaba el volcado.
+
+Dos cosas que se caen de ahi:
+
+- **El aspecto de presentacion es 4:3 SIEMPRE**, no el del framebuffer. El VI escala su
+  ventana activa a la salida de television pase lo que pase la resolucion de origen; sacarlo
+  de `srcW/srcH` aplastaba las resoluciones no-4:3 (un framebuffer 320x120 con `Y_SCALE` a la
+  mitad salia al doble de ancho).
+- **El HUD se escala con el framebuffer**, y con un factor por eje (`sx = w/320`,
+  `sy = h/240`): a 640x240 el texto necesita ir al doble de ancho en pixeles de origen para
+  salir del mismo tamano en pantalla.
+
+Verificado con `KESTREL_VIDEO_DUMP` (vuelca lo que compone el presentador, no el RDRAM):
+antes 320x240 con PRDP, ahora **640x240 con contenido en las dos mitades** (85.9 % / 86.2 %
+de pixeles no negros). SoftRDP sigue en 320x240. Puertas verdes en las dos suites.
+
+## 2026-09-01 — La cache de imagenes del RSP JIT estaba mal calibrada (27x menos compilacion)
+
+Empezando la fase de optimizacion se midio primero, con `KESTREL_RSPJIT_STATS=1` sobre SM64
+(500 intercambios de buffer): **241162 bloques de RSP compilados** en la corrida y 15862
+fallos de imagen contra 1155 aciertos. La cache de imagenes de microcodigo (una tabla de
+bloques por imagen de IMEM, con su sombra de 4 KB) existia desde la etapa 2, pero con dos
+constantes puestas a ojo: 4 ranuras y umbral 64 trozos de 8 B para estrenar ranura.
+
+Barrido de las dos perillas (detalle y tabla completa en `docs/RSP-JIT.md`):
+
+- 4 ranuras -> el juego se queda sin sitio y parchea la ranura mas parecida (media
+  recompilacion por cambio de tarea).
+- umbral 64 -> casi toda diferencia se considera "parecida", asi que aunque sobren ranuras
+  no se estrenan: SM64 usa solo 6 de 16.
+- **16 ranuras + umbral 8 -> 3948 bloques** (repetible +-1 %), 9403 aciertos / 8265 fallos.
+- Umbral 4 es PEOR (50389): se estrenan ranuras por diferencias de 32 B y los casi-duplicados
+  echan a las plantillas grandes. Mas de 16 ranuras no aporta (con 32, SM64 usa 17 y compila
+  los mismos bloques); `kJitWaysMax` sube a 32 solo para poder medir otros microcodigos.
+
+Semantica intacta: la correctitud la da `syncImem` (invalidacion exacta por palabra de 64
+bits), no el umbral; la cache solo decide QUE tabla se parchea.
+
+Medida limpia con el heartbeat (SM64, 1200 intercambios, SoftRDP threaded-jit):
+
+| | rsp Mips ocupado | ocupacion rsp | ocupacion rdp | pace |
+|---|---|---|---|---|
+| antes (4/64) | 144,9 | 69 % | 94 % | 18 % |
+| ahora (16/8) | **186,9 (+29 %)** | 69 % | 95 % | **9 %** |
+
+El reloj de `bench` se mueve poco (5,4 s, ~575 % -> ~620 % de tiempo real) porque en SM64 con
+SoftRDP **el palo largo es el RDP** (94-95 % de ocupacion) y el hilo del RSP va holgado: lo
+que se gana es CPU del anfitrion, que es lo que hace falta en microcodigos pesados (PD) y en
+maquinas flojas.
+
+Perillas nuevas: `KESTREL_RSPJIT_WAYS` (por defecto 16) y `KESTREL_RSPJIT_NEWWAY` (8).
+Gates: gate_all 14/14 (334 s), gate_prdp 3/3 (297 s), krom regress=0 en los dos, md5 sin
+cambio.
+
+De paso queda corregida una nota falsa de `docs/RSP-JIT.md`: decia que los subcodigos
+barajados de LWC2/SWC2 "en SM64 no aparecen". El censo `KESTREL_VUSTAT` (166,4 M
+instrucciones de microcodigo) los ve: LRV 0,60 %, LUV 0,55 %, LPV 0,40 %, ~1,65 % con las
+tiendas. Nunca se habia corrido el censo.
+
+## 2026-09-01 — MUL.S sin MXCSR y los tres barajados del RSP en linea
+
+Dos cosas, las dos con oraculo propio antes de tocar los gates.
+
+**MUL.S sin MXCSR.** El perfilador de host del hilo de CPU con parallel-rdp ponia
+`jitADDS` 14,7 % y `jitMULS` 11,6 % de las muestras dentro de la imagen, y el coste
+era `mx::prep`: la bandera PE del MXCSR es pegajosa, asi que despues de la primera
+operacion inexacta TODAS escriben el registro para limpiarla, y `ldmxcsr` serializa
+el pipe. El producto de dos `float` normales o cero es exacto en `double`, asi que se
+hace en doble, se redondea una sola vez a simple con el modo del guest puesto y el
+Inexact sale de comparar. Suma, resta y division NO entran, y lo dijo el fuzz, no la
+intuicion: en add/sub el doble tambien redondea (la suma exacta necesita ~277 bits de
+rango) y la comparacion mentiria en ~1 de cada 3 pares al azar. Del producto se ceden
+al interprete los que se salen de `[2^-126, maxfloat]`, porque con redondeo hacia cero
+un desbordamiento da el maximo finito — que parece un numero normal — y lleva Overflow
+ademas de Inexact. Fuzz diferencial con exponentes sesgados a los extremos, los cuatro
+modos de redondeo: 0 discrepancias. Detalle en `docs/PERF-CPU.md` §14.
+
+**LPV/LUV/LRV en linea** (`emitVecPack`, `emitVecRight` en `src/rsp/rspjit.cpp`). Eran
+los tres barajados que pesan en SM64 (0,60 / 0,55 / 0,40 % de las instrucciones de
+microcodigo) y salian por CALL a `lwc2Thunk<N>`, con ocho o dieciseis lecturas de byte.
+Los tres son la misma figura — una ventana de 16 bytes alineada y un reparto que depende
+de la DIRECCION — o sea un `pshufb` con la mascara armada en tiempo de ejecucion, a
+partir de dos tablas nuevas dentro de `Rsp` (`byteHalf`, `laneIdx`). LRV ademas no
+necesita salida al helper: la direccion se alinea a 16 y la ventana nunca cruza el final
+de DMEM. `--rspjitfuzz 300000` y `--rspldfuzz 300000`: 0 diferencias. En SM64 no se nota
+(`rsp Mips busy` 188,0 -> 187,7, ruido) porque el hilo del RSP va al 58 % y el palo largo
+es el RDP; se queda porque es correcto y gratis en el camino caliente, y en un microcodigo
+que use estas cargas de verdad el CALL si se paga. A/B `KESTREL_RSPJIT_NOVECPACK=1`.
+Detalle en `docs/RSP-JIT.md`.
+
+Gates de las dos: 14/14 + prdp 3/3, regress=0, md5 sin cambio (335 s / 310 s).
+
+## 2026-09-01 — El regulador de ritmo estaba mal calibrado: +16 % de fotogramas con parallel-rdp
+
+`kPaceSlack` (`KESTREL_PACESLACK`, `src/core/memory.cpp`) llevaba en 256 K desde el
+2026-08-26, y su propio comentario avisa de que «el óptimo se MUEVE con la velocidad del
+hilo de CPU». Este ciclo lo aceleró tres veces (fetch fast-path, MUL.S sin MXCSR, los
+barajados del RSP en línea), así que tocaba rebarrer.
+
+**Trampa de medida encontrada de paso** (y documentada en `PERF-CPU.md`): el «% de tiempo
+real» NO sirve para calibrar esto. Su numerador son campos VI emitidos, y aflojar el freno
+los infla sin hacer más trabajo — el guest quema ciclos emulados girando a la espera del
+RCP. Con SoftRDP, 256 K → 1 M sube el «%» de 537 % a 647 % mientras la pared por 300
+intercambios se queda en 8,06 → 7,93 s, o sea nada. El primer barrido de esta sesión se
+tragó ese +20 % fantasma antes de cazarlo.
+
+Con la métrica sana (pared por 300 intercambios de buffer = fotogramas de juego, min de 3
+pasadas):
+
+| holgura | prdp-jit | int/s | campos/int | threaded-jit |
+|---------|----------|-------|------------|--------------|
+| 256 K   | 4,40 s   | 68,2  | 2,73 | 8,06 s |
+| 384 K   | 4,09 s   | 73,3  | 2,80 | — |
+| 512 K   | 3,89 s   | 77,1  | 3,12 | 8,03 s |
+| 768 K   | 3,85 s   | 77,9  | 3,20 | — |
+| 1 M     | 3,80 s   | 78,9  | 3,24 | 7,93 s |
+
+Codo en 512 K, y la ganancia real es **de parallel-rdp: +16 % de fotogramas de juego por
+segundo**; SoftRDP sale plano dentro del ruido. El despeñadero de 512 K que motivó el
+default viejo ha desaparecido, porque entonces el hilo de CPU competía por el núcleo del
+worker y desde el arreglo de `rdpSubmit` (38 K despertares/s) ya no.
+
+Y la fidelidad va en la misma dirección, no en contra: campos VI por intercambio con
+**lockstep de oráculo (4,09)**, prdp-jit da 2,73 → 3,24 al aflojar, o sea todos por debajo
+del oráculo y la holgura larga es la que más se le acerca. Sin canje. Default nuevo **1 M**,
+con meseta ancha a ambos lados.
+
+Gates: 14/14 + prdp 3/3, `regress=0`, md5 sin cambio (el regulador solo decide *cuándo*
+duerme el hilo de CPU; el estado del guest no lo toca).
+
+
+## 2026-09-01 — JIT de CPU: fin del «líder no compilable» (614 k → 25 k entradas/ventana)
+
+Un bloque JIT corta en la primera op que no sabe emitir. Si esa op es la PRIMERA, el bloque
+sale con `nOps == 0`, el fallo se memoiza y **ese PC cae al intérprete para siempre**. Con
+`KESTREL_JIT_STATS=1` se cuenta por opcode: en SM64 (300 intercambios, ventana de 4,19 M de
+entradas al conductor) eran ~614 k — BEQ 322 k, COP0 179 k, SPECIAL 82 k, BNE 31 k.
+
+Cinco arreglos, todos semántica de HW genuina (detalle en `PERF-CPU.md` §15):
+
+1. **Ranura de retardo con ALU-que-atrapa o MFC0.** `compileDelay` no probaba `emitTrapAlu`
+   ni `emitCop0`. Ambas emiten su bail ANTES de escribir el destino, así que el bail puede
+   apuntar al SALTO y el intérprete re-ejecuta salto + ranura con la semántica de excepción
+   en ranura (EPC = el salto, `Cause.BD` = 1). El enlace de JAL/JALR es idempotente.
+2. **Cruzar la página 4K, solo desde ckseg0**, donde VA→PA es un desplazamiento fijo y la
+   contigüidad está garantizada. El bloque se marca `crossPage` y el despacho lo **rechaza si
+   el mismo phys llega por TLB**; la caché negativa guarda también la ruta. Esto era la causa
+   real de los 353 k de BEQ/BNE: salto en la última palabra de la página. `KESTREL_JIT_NOXPAGE`.
+3. **MTC0/ERET/TLBR/TLBWI/TLBP como op TERMINAL** (cierran el bloque, el conductor re-muestrea
+   interrupciones). Fuera **Count, Compare, Random, Wired y TLBWR**: el bloque adelanta Count y
+   Random de golpe al salir, y ese sumando machacaría el valor recién escrito. n64-systemtest
+   cazó el desfase exacto al no excluir Wired: *«Random, 1 instruction after setting Wired = 0»*,
+   esperaba `0x1f`, salía `0x1e`.
+4. **MFC0 Count dentro del bloque**: el atraso es exacto y conocido — durante la op `idx` el
+   valor visible es `entrada + idx`, así que se emite `cop0[Count] + idx`, bit a bit lo del
+   intérprete. La frontera `Count == Compare` no cabe dentro del bloque (guarda `DR_TIMER`).
+   **Cause sigue fuera**: sus IP2/IP7 solo se refrescan al entrar, leerlo dentro expondría el
+   sesgo de muestreo del JIT al guest.
+5. **ALU de 64 bits (`emitAlu64`)** — DADDU/DSUBU/DADDIU y los desplazamientos dobles — bajo
+   guardia de modo kernel en runtime (`KSU == 0`), que reproduce `CPU::reserved64` exacto:
+   fuera de kernel sale por el bail sin tocar nada y el intérprete levanta la RI. El idioma de
+   SGI para la mitad alta de un doble (`dsll32` + `dsra32`) valía él solo 54 k entradas.
+   `KESTREL_JIT_NOALU64`.
+
+Resultado en la misma ventana: **`[compfail] OP10=25301`** y nada más — solo MFC0 Cause, dejado
+a propósito. `ops/entrada` 333 → **445**, `avgK` 10,25, `cover` 1000,8 %.
+
+En pared **SM64 no se mueve** (threaded-jit 7,96 → 7,89 s; prdp-jit 3,84 → 3,81 s por 300
+intercambios): con SoftRDP o parallel-rdp el palo largo es el RCP, no el hilo de CPU. En carga
+CPU-pura sí: n64-systemtest a 1500 M de instrucciones, 8,95–9,04 → 8,83–8,94 s (≈ 2 %) sumando
+los dos bisectores. Lo que importa no es ese 2 %, es que el intérprete deje de comerse 590 k
+entradas por ventana — que es justo lo que estrangula a un juego CPU-bound como PD.
+
+Gates: 14/14 + prdp 3/3, `regress=0`, md5 sin cambio (sm64 `466282775dbd0ac084946558a1c30771`,
+prdp `b5521b24d8fc280fbf102df22d7d30cb`). `gate_all` 339 s, `gate_prdp` 289 s.
+
+## 2026-09-01 — SoftRDP: el palo largo del build por defecto, −28 % de pared
+
+`KESTREL_HEARTBEAT=1` deja claro quién manda sin parallel-rdp: **rdp 89 % de ocupación, rsp 58 %,
+cpuWait 0 %**. Cinco pasos sobre el rasterizador software, medidos con pared para 300 intercambios de
+buffer (SM64, `threaded-jit`, mínimo de 3 pasadas — el "% de tiempo real" no sirve, sube cuando el
+emulador va peor):
+
+1. **`getenv` y `lround` fuera del camino caliente (17,3 % del hilo).** `if(std::getenv("KESTREL_TRIDBG"))`
+   se evaluaba **por triángulo** (8,2 %); `std::lround` no se puede alinear porque devuelve `long` y
+   arrastra errno/dominio de la CRT (6,7 %) — sustituida por `ceil/floor` (que sí bajan a `roundsd`),
+   bit a bit idéntica en el rango del rasterizador. **7,89 → 6,50 s.**
+2. **Pliegue del tile una vez, no por toma.** `foldOf(tile) -> TexFold` + `texelAt(fold, s, t)`:
+   shift/máscara/clamp/mirror/base/paleta dejan de recalcularse en cada una de las 3-4 tomas del
+   filtro. **6,50 → 6,40 s.**
+3. **Formato especializado.** `template<u32 K> texelK/filterK` con lista-macro `KEST_TEXKINDS`; el
+   `switch` de formato sale del bucle de tomas. Trampa medida: clang **no alineaba** `texelK<5>`
+   (RGBA16, 35 % del perfil) hasta ponerle `[[gnu::always_inline]]`. **6,40 → 6,30 s.**
+4. **Invariantes de primitiva fuera del bucle de píxeles**: tile, tipo de ciclo y bit de
+   alpha-compare no cambian dentro de un triángulo. **6,30 → 6,20 s.**
+5. **Plan del combinador.** Los ocho selectores son constantes hasta el siguiente `SET_COMBINE`:
+   `buildCombPlan()` los traduce una vez a filas de tabla y el camino por píxel materializa sólo las
+   filas que hacen falta. El 13 % del hilo era `switch` de despacho puro. **6,20 → 5,68 s.**
+
+Dos decisiones de corrección dentro del punto 5, no de velocidad: la llave del plan es
+`(combine_hi, combine_lo, cycleType())` —no una bandera de suciedad, que un savestate o una escritura
+por MCP dejarían rancia—, y si un ciclo **que se ejecuta** selecciona NOISE se cae a
+`combineColorSlow`, porque NOISE consume `std::rand()` y el orden de consumo es observable.
+
+**Gates:** 14/14 + prdp 3/3, `regress=0 improve=0 new=0`, krom `mean_exact` 88,71 / 89,26 idénticos al
+baseline, md5 de SM64 sin cambio. Detalle completo en `docs/PERF-CPU.md` § 16.
+
+Perfil resultante (ya sin desperdicio puro): `run` 25,6 % · `sampleTexFold` 23,1 % ·
+`combineColor` 23,8 % · `putPixel` 9,3 % · `blendPixel` 7,0 % · `loadTile` 7,0 %.
+
+## 2026-09-01 — SoftRDP tanda 2: combinador en SSE4.1, −37,5 % acumulado
+
+Sigue al apunte anterior, mismo método de medida (pared para 300 intercambios de buffer, SM64,
+`threaded-jit`, mínimo de 3):
+
+- **Plan del blender.** Los muxes P/A/M/B, IM_RD, FORCE_BLEND, AA_EN y el modo de dither se
+  redescodificaban por píxel desde `other_lo`/`other_hi`, y `blendPixel` llamaba a `cycleType()` tres
+  veces. Plan con llave `(other_hi, other_lo)`, como el del combinador.
+- **El test de scissor iba tres veces por píxel** (`coverPixel → blendPixel → putPixel`). `storePixel`
+  (escritura sola, `always_inline`) para los que ya entraron por el test; de paso se alinea dentro de
+  `blendPixel`.
+- **`loadTile` copiaba byte a byte con dos comprobaciones de límite por byte** (7 % del hilo). Las filas
+  son contiguas en origen y destino → `memcpy`, recortando la cuenta una vez: mismo prefijo exacto,
+  porque los dos límites son monótonos.
+- **Combinador en SSE4.1.** Era el 38 % del hilo. Los cuatro canales corren la misma ecuación entera →
+  un vector de 4×int32; el carril de alpha se trae de su propia fila con `_mm_blend_epi16(...,0xC0)`.
+  Aritmética entera pura, valores idénticos; el escalar queda como referencia y como camino de NOISE.
+  **−9,9 %**, y el combinador baja al 19 %.
+- **La división del blender a multiplicador mágico.** `sum` ∈ 1..15 y numerador de 11 bits por
+  construcción, así que `n/d == (n * ceil(2^16/d)) >> 16` exacto (comprobado exhaustivamente).
+  Neutro en SM64 —sus píxeles se van por los atajos— pero paga en las roms que usan el divisor.
+- **Lectura de framebuffer elidida.** El blender llegaba a sus dos atajos *después* de leer el
+  framebuffer, y esos atajos no usan el color de memoria salvo que P sea CLR_MEM. **−2,5 %**.
+
+Pared 7,89 → **4,93 s** entre las dos tandas (**−37,5 %**), md5 de SM64 sin cambio en cada paso.
+Detalle en `docs/PERF-CPU.md` § 17.
+
+### SoftRDP tanda 3: interpolación en SSE y el pliegue de coordenadas compartido (−43,5 % acumulado)
+
+- **Sombra y S/T por escanlínea en SSE.** Ocho interpolaciones `double` escalares por píxel (RGBA +
+  S/T) pasan a tres multiplicaciones vectoriales `__m128d`. Anfitrión sin FMA → mismo bit. El primer
+  intento perdió tiempo por rebotar el vector en memoria; empaquetando con `_mm_shuffle_epi8`,
+  **−1,4 %**.
+- **Filtro de 3 tomas en SSE.** Los cuatro canales comparten pesos, `>>5` y clamp → un `__m128i`.
+  **−1,7 %**.
+- **Pliegue/lectura separados.** `texelK` se parte en `foldCoord` (SHIFT + clamp/mirror/mask) y
+  `fetchK<K>` (lectura + decodificación). El filtro de 3 tomas sólo toca cuatro coordenadas
+  distintas (`s0`, `s0+1`, `t0`, `t0+1`), así que pliega cuatro veces en vez de seis. El pliegue es
+  puro → compartirlo no puede cambiar un texel. **−6,5 %**, el mayor salto de la tanda.
+
+Pared 7,89 → **4,46 s** en tres tandas (**−43,5 %**), md5 de SM64 idéntico en cada paso.
+`sampleTexFold` vuelve a ser el líder (39 %) por trabajo real, no por desperdicio.
+Detalle en `docs/PERF-CPU.md` § 18.
+
+### SoftRDP tanda 4: el techo del hilo del RDP (pared sin cambio, y por qué)
+
+Primera tanda que **no mueve la pared**, y el resultado negativo es el hallazgo. Matriz de
+sensibilidad (SM64 / 300 intercambios, hilos + JIT, mínimo de tres):
+
+| configuración | pared |
+|---|---|
+| línea base | **4,46 s** |
+| `KESTREL_NORASTER=1` | 3,11 s |
+| `KESTREL_JIT=0` | 24,34 s |
+| `KESTREL_NOVIDEO=1` | sin cambio |
+
+Ocupación: `rdp 82 % · rsp 57 % · cpuWait 0 % · pace 0 %`. O sea: el rasterizado son ~1,35 s de
+los 4,46 y el hilo del RDP es **el único en el camino crítico**; CPU y RSP tienen holgura, así que
+el trabajo que se les quite no se ve. Con un suelo de ruido de ±1,5 %, cualquier mejora que valga
+el 1-2 % del hilo del RDP es inmedible de una en una.
+
+Se quedan cuatro cambios exactos y estrictamente menos trabajo, todos dentro del ruido:
+`stFixed` (las dos coordenadas a punto fijo en un `cvttpd2dq`), filtro de textura a carriles de
+16 bits (`pmullw` = 1 µop vs 6 de `pmulld`, mismo entero por rango acotado), pliegue rápido por
+tile (sin SHIFT + con mask + sin clamp/mirror → un AND) y `MFC0` del RSP directo al decodificador
+de MMIO (`Memory::rcpReg32`, saltando el recorrido completo de regiones de `resolve` — era el 32 %
+del hilo del RSP).
+
+Se revierte uno: la granularidad de `rcpPace`. Neutro con y sin rasterizado, y cambiaba la
+heurística de un regulador a cambio de nada.
+
+Siguientes palancas reales, por tamaño: `parallel-rdp` por defecto (se lleva los 1,35 s enteros,
+pero es política de build), enlace directo de bloques del JIT (14,4 % del hilo de CPU) y FPU del
+JIT en línea (13 %). Detalle en `docs/PERF-CPU.md` § 19.
+
+## 2026-09-02 — el audio entrecortado era el DAC del AI, no el sumidero del host
+
+Sintoma del usuario: "noto el audio entrecortado". Lo primero fue medirlo, porque "se oye mal"
+no distingue entre el emulador que produce de menos (hueco = silencio) y el que produce de mas
+(descarte = latencia). `KESTREL_AUDIOSTAT=1` imprime al cerrar cuantas muestras se empujaron,
+cuantas se sirvieron, cuantas salieron de relleno y cuantas se tiraron, mas el minimo y el
+maximo del anillo.
+
+SM64, 600 intercambios de buffer con el limitador puesto (`KESTREL_THROTTLE=1`, que es como lo
+oye el usuario), antes:
+
+```
+[audio] rate=32006 empujadas=1072864 servidas=1072704 silencio=350656 (24.63%) descartadas=0
+[audio] recargas=1390 cortas=394 anillo min=0 max=4864 de 22050 muestras
+```
+
+Una de cada cuatro muestras que sonaban era relleno. Y el anillo nunca pasaba de 4864 de 22050:
+no es que el sumidero fuera lento, es que **no le llegaba audio**. Las cuentas lo cierran: 22.4 s
+de tiempo de guest (1340 campos a 59.94 Hz) produjeron 16.76 s de audio, o sea el 75%.
+
+Raiz: `Memory::aiTick` drenaba la FIFO del AI **por campos de video**, un bufer como mucho por
+campo, y tiraba el credito sobrante. El AI real no funciona asi: es un DAC que consume 4 bytes
+(16 bits estereo) cada 1/rate segundos, continuamente, con rate = vid_clock/(dacrate+1). Si el
+juego encola bufers mas cortos que un campo caben VARIOS por campo; si los encola largos, uno
+tarda varios campos. SM64 los encola a ~0.75 campos, asi que el limite de "uno por campo" le
+drenaba la FIFO al 75% del ritmo real, el driver de audio se quedaba bloqueado en FIFO_FULL y
+generaba justo ese 75% del audio. El emulador iba al 100%; el que iba al 75% era el reloj del
+audio del guest.
+
+Arreglo (semantica de HW, no ajuste): el credito se acumula en el mismo reloj que todo lo demas
+del emulador -- instrucciones retiradas -- y se drenan tantos bufers como quepan en el tiempo
+transcurrido:
+
+```cpp
+u64 delta = retiredNow - rcp.aiLastRetired;          // tiempo de guest desde la ultima vez
+if(delta > viFieldInsns * 4) delta = viFieldInsns * 4;   // arranque/savestate no vacian la FIFO
+u32 rate = rcp.ai_dacrate ? (48'681'812u / (rcp.ai_dacrate + 1)) : 32'000u;
+u64 den  = viFieldInsns * (u64)viFieldHzMilli;       // instrucciones por segundo x1000
+rcp.aiAcc += delta * ((u64)rate * 4ull * 1000ull);
+u64 bytes = rcp.aiAcc / den;  rcp.aiAcc -= bytes * den;   // el resto NO se tira
+while(bytes && rcp.ai_fifo_count) { ... pop, raiseIntr(MI_AI), siguiente ... }
+```
+
+`aiTick` sale ademas de dentro del `if(fieldClose)`: se llama en cada subtramo, que es donde
+`viTick` ya recibe el contador de instrucciones. El acumulador es entero (unidades de
+byte*instruccion) para que el resultado sea bit-identico entre lockstep y threaded, y entra en
+el savestate (version 2 -> 3).
+
+Con eso, la misma medida:
+
+```
+[audio] rate=32006 empujadas=1416192 servidas=1414880 silencio=5408 (0.38%) descartadas=0
+[audio] recargas=1387 cortas=6 anillo min=0 max=4192 de 22050 muestras
+```
+
+24.63% de relleno -> 0.38%, y las 1416192 muestras empujadas son 22.1 s de audio para 22.4 s de
+guest, o sea el reloj del audio ya va a la par del de video.
+
+Dos remates en el sumidero (`src/audio/audio.cpp`), que valen para cualquier juego:
+- **Cebado**: el hilo alimentador no manda el primer bufer hasta que el anillo tiene dos bufers
+  de dispositivo. Arrancar con el anillo vacio regala el arranque en silencio y esa desventaja
+  no se recupera nunca, porque el hueco se rellena con ceros en vez de esperar. Tras un hueco se
+  vuelve a cebar, para reconstruir el colchon en lugar de encadenar hipidos.
+- **Histeresis de tasa**: `init()` reabria el dispositivo con CUALQUIER cambio de dacrate, y
+  reabrir corta el sonido. Por debajo del 1% de diferencia el tono no se distingue y el corte si,
+  asi que se sigue tocando con el dispositivo ya abierto.
+
+## 2026-09-02 — parallel-rdp pasa a ser el build por defecto, y el paquete deja de ir por detras
+
+### El rasterizador ya no es una opcion de compilacion escondida
+
+La tanda 4 del SoftRDP cerro con el hilo del RDP como unico palo largo (ocupacion 82 %, ~1,35 s
+de los 4,46 s de pared) y con la unica palanca capaz de llevarse esos 1,35 s enteros anotada como
+«politica de build»: `parallel-rdp`. Se ejecuta esa politica.
+
+- `CMakeLists.txt`: `KESTREL_PRDP` pasa a **ON** por defecto. `build/` sigue existiendo como
+  oraculo determinista compilandolo con `-DKESTREL_PRDP=OFF`, que es lo que hace `gate_all.sh`.
+- `src/vrdp/vrdp.cpp`: el valor por defecto en tiempo de ejecucion se invierte. `KESTREL_PRDP=0`
+  fuerza el rasterizador en CPU; si Vulkan no se puede usar (sin driver, sin cola, sin dispositivo)
+  se cae solo al SoftRDP en vez de morir. Un emulador que no arranca en una maquina sin Vulkan no
+  es un emulador mas rapido, es uno roto.
+- `scripts/validate.py`: los modos software pasan `KESTREL_PRDP=0` explicito en vez de confiar en
+  el valor por defecto, que ya no es el suyo. Con el arreglo del `== "1"` en la comparacion de
+  linea base, el oraculo sigue siendo bit a bit el mismo: md5 de SM64 `466282775dbd0ac084946558a1c30771`
+  en los siete modos software, `b5521b24d8fc280fbf102df22d7d30cb` con parallel-rdp.
+
+### El MMIO del RSP, por el decodificador y no por el mapa de regiones
+
+La tanda 4 metio `MFC0` del RSP directo a `Memory::rcpReg32`. Faltaba la mitad simetrica:
+`Rsp::mtc0` hacia el recorrido completo de `resolve` para cada escritura. Ahora va por
+`Memory::rcpRegWrite32`, el mismo decodificador. Era el 32 % del hilo del RSP entre las dos.
+
+### El freno y el permiso, de dos lecturas cruzadas a una
+
+`rcpPace` (frena la CPU si adelanta al RSP) y `paceAllowance` (cuantas ops de CPU quedan antes de
+volver a preguntar) salian de los **mismos dos valores**: `rspBusy` y `rsp.cyclesRun`. Los dos
+viven en lineas que el worker del RSP reescribe sin parar, asi que leerlos es un fallo de cache
+compartida, no una lectura local — y se pagaba **dos veces por vuelta al trampolin**. `rcpPace`
+devuelve ahora el permiso calculado con lo que ya tenia cargado; `paceAllowance` desaparece y en
+su sitio queda `paceGrant(ahead, allow)`, que no relee nada. Estrictamente menos trabajo cruzado,
+misma heuristica.
+
+### ADD.S / SUB.S sin MXCSR, cuando los exponentes estan cerca
+
+Mismo truco que MUL.S (§ 17), pero **condicionado**: `a+b` en `double` es exacto cuando los dos
+exponentes estan cerca — el resultado exacto ocupa `|ea-eb|+25` bits de mantisa, luego con
+`|ea-eb| <= 28` cabe en los 53 del doble — y entonces un unico redondeo a simple da el bit del
+guest y el Inexact sale de comparar. Un cero cuenta como «cerca» de cualquier cosa: sumar cero es
+exacto siempre. Cuando los exponentes se separan mas, el doble **tambien** redondea, la comparacion
+mentiria, y se vuelve al MXCSR. Es el caso raro: el codigo de juego suma magnitudes parecidas.
+
+Para poder afirmarlo se anade `jitCop1AluChk`, oraculo diferencial hermano de los de CVT y CMP:
+con `KESTREL_FPORACLE` puesto ejecuta el camino rapido, rebobina `fpr[fd]`/`fcr31` y repite por el
+interprete, comparando resultado, registro y banderas. **6,3 M comparaciones, cero discrepancias.**
+Pared SM64/300 intercambios con parallel-rdp: A/B en la misma sesion **3,852 s sin -> 3,820 s con**.
+
+### El paquete iba por detras del codigo (esto es lo que se rompio de verdad)
+
+Las dos baterias recompilan `build/` y `build-prdp/`. El arbol **estatico** — el unico `.exe` que
+arranca fuera de MSYS2, porque lleva libc++ y GLFW dentro — no lo recompila nadie. Resultado: el
+`dist/` y el instalador se quedaron en el 2026-08-28 mientras el codigo seguia, y lo que se probaba
+desde el lanzador no era el emulador actual.
+
+Se cierra con `scripts/pack.sh`, un solo comando: mata cualquier `kestrel64.exe` vivo (Windows no
+deja reenlazar un fichero abierto), configura `build-prdp-static` si falta, compila, llama a
+`scripts/dist.sh` (que ademas congela el lanzador con PyInstaller y hace el zip portable) y compila
+el instalador con Inno Setup. La version sale de `kVersion` en `src/core/system.hpp` y se le pasa a
+`ISCC` con `/DAppVer=`, para que no haya una segunda copia en el `.iss` que se quede vieja; el `.iss`
+la deja como respaldo para quien lo invoque a mano. Dos detalles de entorno que costaron un intento
+cada uno: Inno Setup esta instalado como **7**, no como 6 (por eso `pack.sh` busca en vez de fijar la
+ruta), y MSYS2 traduce a ruta de Windows cualquier argumento que empiece por `/`, asi que `/DAppVer=`
+llegaba a ISCC como un segundo nombre de script — se excluye con `MSYS2_ARG_CONV_EXCL="/D"`.
+
+## 2026-09-02 — ITC: los saltos indirectos ya no salen del código generado
+
+El enlace de bloques del JIT sólo sabe atar destinos **estáticos**. `JR`/`JALR` — o sea, el
+retorno de toda función del guest — salían siempre por el despachador, y el trampolín se llevaba
+el 14,4 % del hilo de CPU.
+
+Ahora hay una **caché de destinos indirectos** (ITC): tabla de correspondencia directa VA →
+`linkEntry`, 4096 entradas de 16 B (64 KB), índice `(va >> 2) & 4095`. La sonda va emitida dentro
+del bloque, justo antes de la salida lenta: índice, comparar el VA guardado, y si acierta
+`jmp qword [rdx+8]` sin desmontar el marco. Fallo = cuatro instrucciones y un salto no tomado.
+
+Sólo se arma con las mismas condiciones que el enlace (`g_jitLink && !g_jitDiffAny && ck0Entry`),
+es decir sólo ckseg0: sin TLB la traducción es fija, así que ninguna entrada puede quedar
+apuntando a otro código. Se limpia entera en `clear()`, en `unlinkTo(phys)` (SMC) y en
+`unlinkAll()` (invalidación de I-caché), esta última **antes** del corto-circuito por `anyLinked`.
+
+**Medido** (SM64, 200 intercambios, threaded-jit, mínimo de 3, tres tandas): **3,11–3,13 s** con
+ITC vs **3,19–3,20 s** con `KESTREL_JIT_NOITC=1` → **≈2,5 % de pared**, distribuciones sin
+solaparse. md5 de SM64 idéntico en jit y threaded-jit, `systemtest[jit]` 0/3721, los dos portones
+verdes. Detalle en `docs/PERF-CPU.md` §20.
+
+### Afinado de la ITC (2026-09-02, mismo día)
+
+Tres ajustes medidos encima de la ITC: índice mezclado `((va ^ (va>>12))>>2) & mask` contra los
+fallos por conflicto de una tabla directa (+2,5 % en despachos), bandera `itcAny` para no barrer
+la tabla en los 1549 barridos de I-caché por tanda, y tamaño ajustable `KESTREL_JIT_ITCBITS` con
+nuevo defecto **14 bits** (16384 entradas, 256 KB), elegido por A/B de pared: 12 → 2,439 s,
+13 → 2,451 s, **14 → 2,418 s**, 16 → 2,515 s. Retirado el atajo inseguro `KESTREL_JIT_NOINVAL`.
+
+Diagnóstico que queda anotado: el permiso de cadena concedido es **siempre** el tope de 4096 ops
+(`[permiso] tope=3,1 M`) pero sólo se ejecutan ~605 ops (12-13 bloques) por entrada al driver.
+Ni el desenlace por barrido de I-caché ni el aliasing de la tabla lo explican (los dos medidos,
++2 % cada uno). Candidato vivo: la ITC sólo la rellena el driver, así que un bloque al que sólo
+se llega por cadena nunca recibe entrada — es cobertura, no conflicto. Detalle en
+`docs/PERF-CPU.md` §20.4-20.5.
+
+Portones: gate_all 355 s, gate_prdp 298 s, ambos verdes, `nodump=0` en los dos krom.

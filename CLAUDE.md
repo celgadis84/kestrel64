@@ -37,6 +37,10 @@ cmake --build build -j
   (parallel-rdp GPU backend). Default OFF so deterministic core never depends on GPU.
 - `-DKESTREL_STATIC=ON` = self-contained `.exe` (libc++/GLFW inside, no DLLs) for the
   published package; `sh scripts/dist.sh` stages `dist/` + zip. See `docs/distribucion.md`.
+- **The gates rebuild `build/` and `build-prdp/` only** — never `build-prdp-static/`, which is
+  the exe the launcher/installer ship. Run `sh scripts/pack.sh` to refresh the package
+  (static build -> `dist/` -> zip -> Inno Setup installer) whenever it must be testable
+  from the GUI; otherwise `dist/` silently lags the source tree.
 - Double-clicking the exe implies `--play` (run + window + ROM picker); launching from a
   shell keeps the paused-for-MCP default, so gates and debugging are unaffected.
 
@@ -115,6 +119,14 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
 - `read_memory` inside a block-capture returns 0 — read `mem->rdram` directly instead.
 - Never declare "hung" from capped/truncated log output.
 
+### Editar fuente con python desde bash (trampas repetidas)
+- El heredoc `<<'PYEOF'` **se come las barras invertidas dobles**: un patron con `\\n`
+  NO casa con el `\n` del fichero. Construir siempre la barra con `chr(92)`.
+- Codificacion y finales de linea son **por fichero**: `src/cpu/jit.{hpp,cpp}` y `src/main.cpp`
+  son latin-1 con LF; `src/core/system.cpp` es UTF-8 con **CRLF**. Abrir con el `encoding`
+  correcto y `newline=''`, y no meter acentos escritos en UTF-8 dentro de un fichero latin-1
+  (anclas de busqueda: usarlas SIN acentos).
+
 ## Source layout (`src/`)
 
 `core/` (memory, system, rom, bus, DMA, MMIO, scheduler) · `cpu/` (R4300i interp + `jit.*`
@@ -131,21 +143,42 @@ correctitud, no configuraciones de uso. Las cifras viejas (33.9%/11.0%) salian d
 un intercambio de buffer como un campo de video, cuando SM64 gasta tres; ver
 `docs/PERF-CPU.md` §12-bis;
 block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` to bisect,
-`KESTREL_JIT_TRACE=1` superblocks = measured negative) ·
-`KESTREL_HEARTBEAT=1` · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=1` ·
+`KESTREL_JIT_TRACE=1` superblocks = measured negative; `KESTREL_JIT_NOITC=1` apaga la cache de
+destinos indirectos JR/JALR -- A/B medido ~2,5 % de pared en SM64, `KESTREL_JIT_ITCBITS=<8..20>`
+su tamano (por defecto 14 = 16384 entradas = 256 KB, elegido por A/B; 16 pierde), ver
+`docs/PERF-CPU.md` §20) ·
+`KESTREL_HEARTBEAT=1` (cada 5 s: Mips, % de velocidad N64, ocupacion de los workers, trabajos/s y **hambre de audio en vivo** -- silencio acumulado, descartes y colchon minimo DE ESA VENTANA; `KESTREL_AUDIOSTAT` solo habla al cerrar y con ventana el emulador no cierra solo) · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=<n>`
+(volcado cada n despachos, por defecto 4 M; con enlace+ITC una tanda entera de SM64 no llega
+a 4 M, asi que hay que bajarlo para ver nada; ademas de los contadores de siempre saca
+`[retorno] salto/completo/corto` = como termina el bloque que devuelve el control,
+`[salidas] enlace/itc/lentaDirecta/lentaIndirecta` = por donde sale cada terminador de salto
+--se emiten EN LINEA en el codigo generado, o sea que con STATS puesto el JIT emite codigo
+distinto-- y `[cadena] rotasPorTramp`; con ellos se mato la hipotesis del enlace secuencial,
+ver `docs/PERF-CPU.md` §20.5) ·
 `KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_FIELDHASH=1` /
 `KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n buffer swaps) ·
 `KESTREL_VITICKS=<n>` (VI ticks per field, default 16 — ver `docs/VI-CLOCK.md`) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
 `KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_SAVETYPE` ·
+`KESTREL_AUDIOSTAT=1` (al cerrar: muestras empujadas/servidas/de relleno/tiradas y nivel del anillo; con el se diagnostico el audio entrecortado) · `KESTREL_MEMPAK=0` (desenchufa el Controller Pak del mando 1; por defecto va puesto) ·
 `KESTREL_RSPJIT` (RSP dynarec, **default ON**, oracle=RSP interp; `=0` off) /
-`KESTREL_RSPJIT_STATS=1` (coverage, ver `docs/RSP-JIT.md`) / `KESTREL_RSPJIT_WAYS=<n>`
-(imagenes de microcodigo cacheadas, por defecto 4) · fuzz diferencial de la VU:
+`KESTREL_RSPJIT_STATS=1` (coverage, ver `docs/RSP-JIT.md`) / `KESTREL_RSPJIT_LINK=0`
+(A/B: bloques de RSP sin encadenar; modo `rspnolink`) / `KESTREL_RSPJIT_NOVECMEM=1`
+(A/B: LWC2/SWC2 vuelven al CALL) / `KESTREL_RSPJIT_NOVECMOVE=1` (A/B: MFC2/CFC2/MTC2/CTC2 igual) / `KESTREL_RSPJIT_NOVECPACK=1` (A/B: LPV/LUV/LRV vuelven al CALL) / `KESTREL_RSPJIT_WAYS=<n>`
+(imagenes de microcodigo cacheadas, por defecto 16) / `KESTREL_RSPJIT_NEWWAY=<n>`
+(trozos de 8 B de IMEM que justifican estrenar imagen, por defecto 8) · fuzz diferencial de la VU:
 `--rspfuzz N` (escalar vs SSE) y `--rspjitfuzz N` (VU en linea del dynarec vs interprete) · `KESTREL_NORSPSSE=1` (VU escalar en vez de SSE4.1) ·
 `KESTREL_VIDEO=1` · `KESTREL_VIDEO_TEST` · `KESTREL_FAULTSTOP=1` (halt on a guest fault with
 the RCP event ring intact) · `KESTREL_WATCHP=<phys>` (store watchpoint hooked in the D-cache;
 bus-level `KESTREL_WATCH` misses cacheable CPU stores) · `KESTREL_EVDUMP=<n>` ·
 `KESTREL_DPSYNCLOG=1` (address of every retired SYNC_FULL).
+
+La ventana del emulador lleva **barra de menu nativa con el catalogo entero de opciones**,
+el mismo que el lanzador (`docs/LAUNCHER.md`). Fuente unica = `tools/launcher/options.py`;
+al tocarla hay que **`python tools/gen_optdefs.py`** (regenera `src/ui/optdefs.cpp`, que NO
+se edita a mano). Lo que se puede cambiar en marcha vive en `src/core/runtime.hpp`, sembrado
+del entorno por `rt::initFromEnv()` para que lote y gates sean bit-identicos a antes; el
+resto se guarda en `profile.json` y el emulador se relanza a si mismo.
 
 Producto (ver `docs/LAUNCHER.md`): `KESTREL_OC` / `KESTREL_OC_CPU` / `KESTREL_OC_RSP` /
 `KESTREL_OC_RDRAM` (multiplicadores de reloj por dominio) · `KESTREL_WINSCALE=N` /
@@ -167,7 +200,7 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 ## Current frontier (see STATUS.md for live detail)
 
 systemtest 100%, SM64 boots+renders 3D, PD boots+renders+advances, lockstep==threaded.
-Save types complete (EEPROM/SRAM/FlashRAM). Dynarec Stage-2c (block-linking = ceiling).
+Save types complete (EEPROM/SRAM/FlashRAM + Controller Pak `.mpk`). Dynarec Stage-2c (block-linking = ceiling).
 parallel-rdp VENDORED under `third_party/` and correct on SM64 — the background rainbow was
 RDRAM byte order (kestrel keeps guest big-endian, parallel-rdp assumes ares' word swizzle),
 see `docs/parallel-rdp-integration.md`; shaders patched, SPIR-V bank regenerated with
@@ -178,7 +211,7 @@ coverage/AA subpixel (biggest, last).
 ### Queued work (autonomous order)
 1. RSP VU with **SSE4.2** intrinsics (8×s16 = 1 XMM; user asked for most-advanced host CPU
    instr — i7-870 Nehalem, SSE4.2 max, NO AVX). Oracle = current scalar interp, bit-exact.
-2. Savestates. 3. Dynarec block-linking. 4. Controller Pak `.mpk`. 5. PIF/CIC LLE.
+2. Savestates. 3. Dynarec block-linking. 4. ~~Controller Pak `.mpk`~~ DONE. 5. PIF/CIC LLE.
 
 Note: classic Zilmar video/audio plugin architecture = legacy that caused inaccuracy;
 but backend SELECTION (SoftRDP↔parallel-RDP, audio sink) is what we already build = good.
