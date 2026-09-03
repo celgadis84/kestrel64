@@ -360,6 +360,55 @@ auto System::run() -> void {
     });
   }
 
+  // Canario de INTEGRIDAD DE CODIGO (KESTREL_CODEWATCH=<ms>, opt-in). Cuando el guest se
+  // descarrila sin tomar ni una excepcion rara hay dos familias de causa, y desde fuera se
+  // ven igual: (a) la CPU salto donde no debia -- error del emulador en el flujo de control
+  // -- o (b) alguien que NO es la CPU (RDP, DMA del RSP o del PI) ha escrito encima del
+  // codigo. Esto vigila el rango fisico donde vive el codigo del juego y avisa del PRIMER
+  // bloque de 32 bytes que cambia, con el contexto de la CPU de ese instante. Rango por
+  // defecto: el que ocupa Perfect Dark mapeado por TLB en 0x70000000 (fisico 0x8000..0x50000);
+  // KESTREL_CODEWATCH_LO / _HI lo mueven.
+  std::thread cwTh;
+  if(const char* cw = std::getenv("KESTREL_CODEWATCH")) {
+    unsigned ms = (unsigned)std::strtoul(cw, nullptr, 0); if(!ms) ms = 50;
+    const char* eL = std::getenv("KESTREL_CODEWATCH_LO");
+    const char* eH = std::getenv("KESTREL_CODEWATCH_HI");
+    u32 lo = eL ? (u32)std::strtoul(eL, nullptr, 0) : 0x8000u;
+    u32 hi = eH ? (u32)std::strtoul(eH, nullptr, 0) : 0x50000u;
+    if((usize)hi > memory.rdram.size()) hi = (u32)memory.rdram.size();
+    // El arranque descomprime el codigo de ROM a RDRAM: eso son miles de cambios
+    // legitimos. La sombra se refresca en silencio hasta que el guest ha retirado
+    // KESTREL_CODEWATCH_AFTER ops (default 30 M, ya en juego).
+    const char* eA = std::getenv("KESTREL_CODEWATCH_AFTER");
+    u64 after = eA ? std::strtoull(eA, nullptr, 0) : 30000000ull;
+    if(lo < hi) cwTh = std::thread([this, ms, lo, hi, after]{
+      std::vector<u8> shadow(memory.rdram.begin() + lo, memory.rdram.begin() + hi);
+      u64 hits = 0;
+      while(!shutdown.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+        const u8* cur = memory.rdram.data() + lo;
+        for(u32 off = 0; off + 32 <= hi - lo; off += 32) {
+          if(std::memcmp(shadow.data() + off, cur + off, 32) == 0) continue;
+          if(hits < 64 && cpu.retired >= after) {
+            hits++;
+            std::fprintf(stderr, "[codewatch] #%llu phys=0x%08x retired=%llu pc=%08x\n",
+                         (unsigned long long)hits, lo + off,
+                         (unsigned long long)cpu.retired, (u32)cpu.pc);
+            std::fprintf(stderr, "[codewatch]   antes:");
+            for(u32 k = 0; k < 8; k++) { const u8* q = shadow.data() + off + 4 * k;
+              std::fprintf(stderr, " %08x", ((u32)q[0]<<24)|((u32)q[1]<<16)|((u32)q[2]<<8)|q[3]); }
+            std::fprintf(stderr, "\n[codewatch]   ahora:");
+            for(u32 k = 0; k < 8; k++) { const u8* q = cur + off + 4 * k;
+              std::fprintf(stderr, " %08x", ((u32)q[0]<<24)|((u32)q[1]<<16)|((u32)q[2]<<8)|q[3]); }
+            std::fprintf(stderr, "\n");
+            std::fflush(stderr);
+          }
+          std::memcpy(shadow.data() + off, cur + off, 32);
+        }
+      }
+    });
+  }
+
   // Watchdog opt-in (KESTREL_WATCHDOG=<segundos>): un livelock del guest y un hilo CPU
   // bloqueado en un handshake del RCP se ven IGUAL desde fuera. Esto los separa: si
   // retired avanza, gira el guest; si no avanza, la CPU esta parada esperando al RCP.
@@ -397,7 +446,11 @@ auto System::run() -> void {
                      (u32)cpu.cop0[9], (u32)cpu.cop0[11]);
         memory.miDump();
         {
-          u32 ph = (u32)cpu.pc & 0x1fff'ffff;
+          // La PC puede venir de un segmento TLB (Perfect Dark ejecuta desde 0x70000000):
+          // enmascarar a 0x1fffffff da una direccion fuera de la RDRAM y el volcado sale a
+          // ceros, que se lee como un colchon de NOPs inexistente. Traducir como la CPU.
+          u64 tpc = cpu.tlbProbePhys(cpu.pc);
+          u32 ph = (tpc == ~0ull) ? ((u32)cpu.pc & 0x1fff'ffffu) : (u32)tpc;
           std::fprintf(stderr, "[wdog] code @%08x:", (u32)cpu.pc - 8);
           for(int k = -2; k <= 2; k++) {
             u32 a = ph + 4 * k;
@@ -760,6 +813,7 @@ auto System::run() -> void {
   shutdown.store(true);
   if(wdog.joinable()) { shutdown.store(true); wdog.join(); }
   if(occTh.joinable()) occTh.join();
+  if(cwTh.joinable()) { shutdown.store(true); cwTh.join(); }
 }
 
 }  // namespace kestrel

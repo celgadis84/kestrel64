@@ -362,6 +362,14 @@ struct LinkSite {
   u64* slot = nullptr;      // ranura de 8 bytes del salto indirecto
   u64  targetVA = 0;        // VA de destino en tiempo de compilación
   u32  targetPhys = 0;      // phys de destino (clave para (des)enlazar)
+  // El destino se alcanza por TLB: su phys sale de una traduccion congelada al compilar.
+  // Un bloque `crossPage` NO vale como destino asi (asume contiguidad VA->phys, que solo
+  // garantiza ckseg0), de modo que (des)armar el sitio lo comprueba.
+  bool tlbTarget = false;
+  // Sigue valiendo el par (targetVA, targetPhys) congelado al compilar? linkTo() re-arma
+  // los sitios POR PHYS, sin volver a mirar el TLB, asi que tras un remapeo hay que
+  // re-sondear la VA una vez y marcar los que ya no casan; si el mapeo vuelve, vuelven.
+  bool tlbOk = true;
 };
 // VA imposible (impar: toda PC de N64 está alineada a 4) → la guarda nunca casa.
 static constexpr u64 kNoLink = 1;
@@ -431,6 +439,10 @@ struct CodeCache {
   std::vector<NoComp> noComp;   // dimensionada en init()
 
   u64 linkEpoch = 0;      // sube en cada desenlace global (invalidación de I-cache)
+  // Generacion del mapeo virtual con la que estan armados los sitios de enlace. El driver
+  // la compara con cpu.tlbGen y desenlaza todo cuando no casan.
+  u64 tlbGen = 0;
+  u64 nTlbUnlink = 0;     // desenlaces globales provocados por un cambio de mapeo
   u64 nLinked = 0, nUnlinked = 0;   // estadística
   // Barridos de I-cache: llamadas totales, las que de verdad desenlazaron algo, y las que
   // de verdad vaciaron la ITC. La distancia entre la primera y las otras dos es el coste que
@@ -460,7 +472,12 @@ struct CodeCache {
   // gano las dos tandas y en despachos es claro (605 -> 646 ops por entrada al driver); 16 bits
   // ya pierde: 1 MB de tabla desaloja los datos del guest de la cache del anfitrion.
   static constexpr u32 kItcBitsDefault = 14;
-  struct ItcEnt { u64 va = 0; u64 code = 0; };        // va=0 nunca es un destino valido
+  // La ranura vacia NO puede marcarse con va=0: cero es una VA que el guest SI puede pedir
+  // (un JR con el registro a cero, que en HW toma excepcion o ejecuta desde 0), y como el
+  // sondeo emitido solo compara `va` acabaria saltando al `code` de una entrada vacia --
+  // o sea al puntero host nulo. Se usa la misma VA imposible que los enlaces: impar, y
+  // por tanto nunca igual a un pc alineado a instruccion.
+  struct ItcEnt { u64 va = kNoLink; u64 code = 0; };
   std::vector<ItcEnt> itc;                            // dimensionada en init()
   u32 itcMask = (1u << kItcBitsDefault) - 1;          // fijada en init() (potencia de dos - 1)
   // Misma guarda que `anyLinked`, y por la misma razon: el guest invalida la I-cache LINEA A
@@ -470,7 +487,7 @@ struct CodeCache {
   bool itcAny = false;                                // hay alguna entrada viva
   auto itcClear() -> void {
     if(!itcAny) return;
-    for(ItcEnt& e : itc) { e.va = 0; e.code = 0; }
+    for(ItcEnt& e : itc) { e.va = kNoLink; e.code = 0; }
     itcAny = false;
   }
   // Indice: los bits 2..13 de la VA MEZCLADOS con los 12 de encima. Directo sobre bits 2..13
@@ -488,7 +505,7 @@ struct CodeCache {
   // Registra un sitio de enlace (desenlazado). Lo resuelve al vuelo si el destino ya existe.
   auto addLink(const LinkSite& s) -> void;
   // Activa todos los sitios que apuntan a `phys` para que salten a `entry`.
-  auto linkTo(u32 phys, u8* entry) -> void;
+  auto linkTo(u32 phys, u8* entry, bool xpage) -> void;
   // Desactiva todos los sitios que apuntan a `phys` (bloque muerto o recompilado).
   auto unlinkTo(u32 phys) -> void;
   // Desactiva TODOS los sitios: lo exige una invalidación de I-cache, que es la única vía por

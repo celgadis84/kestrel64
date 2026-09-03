@@ -226,7 +226,10 @@ auto CodeCache::addLink(const LinkSite& s) -> void {
   *s.slot  = 0;
   byTarget[s.targetPhys].push_back(idx);
   s32 bi = find(s.targetPhys);
-  if(bi >= 0 && !blocks[bi].dead && blocks[bi].linkEntry) {
+  // Un sitio con destino TLB no puede saltar a un bloque que se pasa de su pagina de entrada:
+  // ese bloque solo es correcto por la ruta directa con la que se compilo (ver Block::crossPage).
+  if(bi >= 0 && !blocks[bi].dead && blocks[bi].linkEntry
+     && !(s.tlbTarget && (blocks[bi].crossPage || !s.tlbOk))) {
     LinkSite& L = links[idx];
     *L.slot = (u64)(std::uintptr_t)blocks[bi].linkEntry;
     *L.vaImm = L.targetVA;
@@ -235,11 +238,13 @@ auto CodeCache::addLink(const LinkSite& s) -> void {
   }
 }
 
-auto CodeCache::linkTo(u32 phys, u8* entry) -> void {
+auto CodeCache::linkTo(u32 phys, u8* entry, bool xpage) -> void {
   auto it = byTarget.find(phys);
   if(it == byTarget.end() || !entry) return;
   for(u32 i : it->second) {
     LinkSite& L = links[i];
+    // Destino TLB: ni a un bloque crossPage (ver addLink) ni con la traduccion caducada.
+    if(L.tlbTarget && (xpage || !L.tlbOk)) continue;
     *L.slot = (u64)(std::uintptr_t)entry;
     *L.vaImm = L.targetVA;
     nLinked++;
@@ -624,6 +629,20 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
 // puesto el barrido sigue y saca TODOS los bloques malos de una pasada en vez de uno por run.
 static const bool g_diffGo = std::getenv("KESTREL_JIT_DIFFGO") != nullptr;
 static const bool g_pcChk = std::getenv("KESTREL_JIT_PCCHK") != nullptr;
+// DIAGNOSTICO (KESTREL_REGCHK): cordura del banco de registros en cada despacho del driver.
+// Cuando el guest se descarrila sin excepcion previa, el sintoma final (pc paseando por MMIO)
+// llega cientos de miles de ops despues del error real. Pero hay dos registros cuyo valor es
+// invariante en un juego sano de 32 bits: el puntero de pila y la direccion de retorno son
+// SIEMPRE la extension de signo de un KSEG0/KSEG1 (0x8.../0xA...) -- libultra no pone pilas
+// en ningun otro sitio. En cuanto uno de los dos deja de serlo, el error acaba de ocurrir.
+static const bool g_regChk = std::getenv("KESTREL_REGCHK") != nullptr;
+static auto regChkBad(u64 v) -> bool {
+  if(v == 0) return false;
+  if((u64)(s64)(s32)v != v) return true;          // no es una VA de 32 bits extendida
+  // PD ejecuta desde kuseg mapeado por TLB en 0x70000000, asi que `ra` vive ahi; las
+  // pilas de libultra viven en KSEG0. Por debajo de 0x70000000 no hay ni codigo ni pila.
+  return (u32)v < 0x80000000u;                    // las pilas de libultra viven en KSEG0
+}
 static u32 g_diffBad = 0;
 
 // Que ALU-con-trampa absorbe el bloque (KESTREL_JIT_NOTRAPALU):
@@ -1034,6 +1053,18 @@ static const int g_jitLink = std::getenv("KESTREL_JIT_NOLINK") ? 0 : 1;
 // A/B de la cache de destinos indirectos (JR/JALR). Apagarla deja el resto del enlace intacto,
 // asi que mide exactamente lo que aporta el sondeo.
 static const int g_noItc = std::getenv("KESTREL_JIT_NOITC") ? 1 : 0;
+// Enlace de codigo TLB-mapeado. Ver `linkable` en compileBlock: el destino se traduce al
+// compilar y cpu.tlbGen desarma todo cuando el mapeo cambia. KESTREL_JIT_NOTLBLINK lo apaga
+// para bisecar (con el apagado, un juego que corre desde el TLB no enlaza nada, que es el
+// comportamiento anterior).
+static const int g_jitTlbLink = std::getenv("KESTREL_JIT_NOTLBLINK") ? 0 : 1;
+// Permitir que un enlace TLB apunte FUERA de la pagina de entrada del bloque. Cruzar
+// pagina obliga a traducir el destino con una sonda del TLB en tiempo de compilacion, y
+// esa traduccion es independiente de la que valida el driver para la entrada. Dentro de
+// la pagina, en cambio, la phys del destino sale de la MISMA traduccion que ya trajo aqui.
+static const int g_jitTlbXPage = std::getenv("KESTREL_JIT_TLBXPAGE") ? 1 : 0;
+// DIAGNOSTICO: deja el ITC por ruta TLB pero desactiva el enlace ESTATICO TLB.
+static const int g_noTlbStatic = std::getenv("KESTREL_JIT_NOTLBSTATIC") ? 1 : 0;
 // Camino rápido en línea del prólogo re-validable (ver más abajo). KESTREL_JIT_NOFAST=1 lo
 // apaga y deja la llamada al trampolín en cada entrada de bloque (bisección).
 static const int g_jitFast = std::getenv("KESTREL_JIT_NOFAST") ? 0 : 1;
@@ -1148,13 +1179,26 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       // (ping-pong de lineas entre nucleos), asi que el RSP tarda 18x en la misma tarea.
       // No quitarla. Lo que falta para poder hacerlo no es un regulador, es que el guest
       // no gire: esperar por interrupcion en vez de sondear registros del RCP.
-      // En THREADED la guarda no hace falta: el trampolin no la mira (corta por rcpMode) y
-      // la regulacion CPU<->RSP viaja ahora dentro del propio permiso (jitGuard, ver
-      // jitReenterProceed), que el camino rapido ya descuenta. Asi se paga una llamada cada
-      // `allow` ops en vez de una por bloque mientras el RSP tenga trabajo.
-      // KESTREL_JIT_RSPGUARD=1 la fuerza en los dos modos para poder medir el A/B.
-      static const bool forceRspGuard = std::getenv("KESTREL_JIT_RSPGUARD") != nullptr;
-      if(forceRspGuard || (c.mem && c.mem->rcpMode == Memory::RcpMode::Lockstep)) {
+      // TAMBIEN EN THREADED, desde que el enlace de bloques alcanza al codigo TLB-mapeado.
+      // Se habia quitado de Threaded confiando en que la regulacion CPU<->RSP viajase dentro
+      // del permiso (jitGuard <- Memory::rcpPace): eso evaluaba el freno una vez cada `allow`
+      // ops en lugar de una por bloque. Medido en Perfect Dark, que si encadena de verdad, ese
+      // grano no regula NADA: de 8,05 M permisos concedidos solo 238 los recorto el regulador
+      // (el resto los fijaba el tope de 4096 ops), porque rcpPace no frena hasta que la CPU
+      // adelanta kPaceSlack instrucciones al RSP, que entonces era 1 M. Con esa holgura el hilo de
+      // CPU corria al ~1200% de la velocidad del N64 y el juego se descarrilaba (pc a datos, TLBL,
+      // ~1 de cada 3 arranques). Con la guarda puesta: 8/8 arranques limpios y sigue 3,2x por encima de la
+      // linea base sin enlace. La condicion es cualitativa -- hay tarea de RSP en vuelo o no --
+      // y lo unico que hace es devolver el control al trampolin, que es donde vive la
+      // regulacion; no cambia ni un bit del estado del guest.
+      // Revisado 2026-09-03, ya con kPaceSlack en 4096 (= kGuardMaxOps): la guarda SIGUE haciendo
+      // falta. Sin ella Perfect Dark se cuelga 1 de cada 16 arranques (con ella, 40 de 40 limpios)
+      // y SM64 se desvia del oraculo: 300 intercambios dan 1024 campos VI con guarda y 1804 sin
+      // ella (lockstep, el oraculo, da ~4,09 campos por intercambio; 3,41 con guarda, 6,01 sin).
+      // La pared "mejora" de 5,50s a 4,51s justo por eso: son campos girados, no trabajo hecho.
+      // KESTREL_JIT_NORSPGUARD=1 la quita para poder medir el A/B.
+      static const bool noRspGuard = std::getenv("KESTREL_JIT_NORSPGUARD") != nullptr;
+      if(!noRspGuard) {
         e.mov_r_imm64(RDX, (u64)&c.mem->rsp.running);
         e.cmp_m8_imm(RDX, 0, 0);
         fastToSlow[nSlow++] = e.jne_rel32_placeholder();
@@ -1195,7 +1239,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // disp32 rip-relativo. `entryVA` es la VA con la que se compiló: solo se puede predecir el
   // destino estático de un salto si la entrada está en ckseg0, donde VA→phys es la máscara
   // arquitectónica (segmento NO mapeado) y por tanto independiente del TLB.
-  struct Pending { usize dispAt; usize immAt; u64 targetVA; u32 targetPhys; };
+  struct Pending { usize dispAt; usize immAt; u64 targetVA; u32 targetPhys; bool tlbTarget; };
   std::vector<Pending> pending;
   const u64 entryVA = c.pc;
   const bool ck0Entry = ((entryVA & 0xFFFF'FFFF'E000'0000ull) == 0xFFFF'FFFF'8000'0000ull)
@@ -1203,14 +1247,42 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // ¿Es `va` un destino enlazable? (ckseg0 ⇒ phys arquitectónica y cacheable, dentro de RDRAM)
   // Mismas condiciones que `linkable`, pero sin un destino concreto que comprobar: el sondeo
   // indirecto compara la VA en tiempo de ejecucion contra la que guardo el driver.
-  const bool useItc = g_jitLink && !g_jitDiffAny && ck0Entry && !g_noItc;
-  auto linkable = [&](u64 va, u32& outPhys) -> bool {
-    if(!g_jitLink || g_jitDiffAny || !ck0Entry) return false;
-    if((va & 0xFFFF'FFFF'E000'0000ull) != 0xFFFF'FFFF'8000'0000ull) return false;
+  // Enlace desde codigo TLB-mapeado: el destino se traduce con el TLB de AHORA y la traduccion
+  // queda congelada en el sitio de enlace. Es sano porque cualquier cosa que remapee (TLBWI/
+  // TLBWR, cambio de ASID) sube cpu.tlbGen y el driver desenlaza todo antes del siguiente
+  // despacho. Sin esto, un juego que ejecuta desde el TLB no enlazaba NADA: Perfect Dark
+  // (codigo en 0x70000000) media 17,5 k salidas enlazadas frente a 2,05 G salidas lentas.
+  const bool tlbLink = g_jitTlbLink && !ck0Entry;
+  const bool useItc = g_jitLink && !g_jitDiffAny && (ck0Entry || tlbLink) && !g_noItc;
+  auto linkable = [&](u64 va, u32& outPhys, bool& outTlb) -> bool {
+    if(!g_jitLink || g_jitDiffAny) return false;
     if(va & 3) return false;
-    u32 p = (u32)va & 0x1FFF'FFFFu;
-    if((usize)p + 4 > c.mem->rdram.size()) return false;
-    outPhys = p; return true;
+    if((va & 0xFFFF'FFFF'E000'0000ull) == 0xFFFF'FFFF'8000'0000ull) {
+      // ckseg0: phys arquitectonica y cacheable, sin TLB de por medio; vale desde cualquier
+      // bloque, porque la guarda compara la VA de destino y esa VA solo se traduce de un modo.
+      u32 p = (u32)va & 0x1FFF'FFFFu;
+      if((usize)p + 4 > c.mem->rdram.size()) return false;
+      outPhys = p; outTlb = false; return true;
+    }
+    if(!tlbLink || g_noTlbStatic) return false;
+    if(!g_jitTlbXPage) {
+      // Mismo marco de 4 KB que la entrada: la phys se deriva de la traduccion con la que se
+      // entro al bloque, sin sondear el TLB ni congelar un mapeo ajeno.
+      if((va ^ entryVA) & ~0xFFFull) return false;
+      u32 p = (phys & ~0xFFFu) | ((u32)va & 0xFFFu);
+      if((usize)p + 4 > c.mem->rdram.size()) return false;
+      outPhys = p; outTlb = true; return true;
+    }
+    // Sonda sin efectos secundarios (probing): un destino sin mapear o no cacheable no se
+    // enlaza y cae a la salida lenta, que es donde el interprete levanta la excepcion.
+    bool sc = c.xlatCacheable;
+    c.xlatCacheable = false;
+    u64 p = c.tlbProbePhys(va);
+    bool cacheable = c.xlatCacheable;
+    c.xlatCacheable = sc;
+    if(p == ~0ull || !cacheable) return false;
+    if((usize)(u32)p + 4 > c.mem->rdram.size()) return false;
+    outPhys = (u32)p; outTlb = true; return true;
   };
 
   // Compila el delay slot (ALU o mem). Si es mem, registra su bail con índice = el del
@@ -1297,8 +1369,8 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // (alias por TLB del mismo phys), no casa y se cae a la salida lenta.
     usize prevJne = 0; bool havePrev = false;
     for(int k = 0; k < nc; k++) {
-      u32 tp;
-      if(!linkable(cands[k], tp)) continue;
+      u32 tp; bool ttlb = false;
+      if(!linkable(cands[k], tp, ttlb)) continue;
       if(havePrev) { e.patchRel32(prevJne); havePrev = false; }
       e.mov_r_imm64(RDX, kNoLink);                        // guarda (desactivada al nacer)
       usize immAt = c.jitCache->buf.used - 8;
@@ -1312,7 +1384,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
                      e.add_m32_imm32(RDX, 0, 1); }
       e.add_m32_imm32(RBX, pendOff, nops);
       usize dispAt = e.jmp_rip_mem_placeholder();
-      pending.push_back(Pending{ dispAt, immAt, cands[k], tp });
+      pending.push_back(Pending{ dispAt, immAt, cands[k], tp, ttlb });
     }
     // Cache de destinos INDIRECTOS. Un JR/JALR no tiene destino estatico (`nc == 0`), asi que
     // hasta ahora TODO retorno de funcion salia al driver por la ruta lenta: con avgK~13 eso
@@ -1770,6 +1842,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     s.slot       = (u64*)(c.jitCache->buf.base + slotOff);
     s.targetVA   = p.targetVA;
     s.targetPhys = p.targetPhys;
+    s.tlbTarget  = p.tlbTarget;
     b.sites.push_back(s);
   }
 
@@ -2021,6 +2094,20 @@ auto CPU::jitTryBlock() -> u32 {
     std::fflush(stderr);
     halt("pcchk");
   }
+  // Ver jit::regChkBad: sp/ra fuera de KSEG0/KSEG1 = el banco de registros ya esta podrido, y
+  // esto ocurre MUCHISIMO antes de que el pc lo note. Se vuelca todo el contexto y se para.
+  // Solo `sp`: `ra` no sirve de canario porque el compilador de Nintendo lo reutiliza como
+  // temporal en funciones hoja (visto con $31=1 en un arranque sano).
+  if(jit::g_regChk && jit::regChkBad(gpr[29])) {
+    std::fprintf(stderr, "[regchk] pc=%016llx sp=%016llx ra=%016llx retired=%llu status=%08x\n",
+                 (unsigned long long)pc, (unsigned long long)gpr[29], (unsigned long long)gpr[31],
+                 (unsigned long long)retired, (u32)cop0[C0_Status]);
+    for(int r = 1; r < 32; r++)
+      std::fprintf(stderr, "   $%-2d=%016llx%s", r, (unsigned long long)gpr[r], (r % 4) ? "" : "\n");
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    halt("regchk");
+  }
   if(g_jitStats) {
     g_jitCalls++;
     if((g_jitCalls & g_jitStatsMask) == 0) {
@@ -2053,10 +2140,11 @@ auto CPU::jitTryBlock() -> u32 {
       std::fprintf(stderr, "[cadena] rotasPorTramp=%llu (%.2f por entrada al driver)\n",
                    (unsigned long long)g_trampBail, (double)g_trampBail / (double)g_jitCalls);
       if(jitCache) std::fprintf(stderr,
-                   "[icache] barridos=%llu efectivos=%llu vaciadosITC=%llu\n",
+                   "[icache] barridos=%llu efectivos=%llu vaciadosITC=%llu desenlaceTLB=%llu\n",
                    (unsigned long long)jitCache->nInvalAll,
                    (unsigned long long)jitCache->nInvalAllEff,
-                   (unsigned long long)jitCache->nItcClear);
+                   (unsigned long long)jitCache->nItcClear,
+                   (unsigned long long)jitCache->nTlbUnlink);
       if(jitCache) std::fprintf(stderr,
                    "[link] sitios=%zu armados=%llu desarmados=%llu | eslabones/entrada=%.2f ops/entrada=%.2f\n",
                    jitCache->links.size(), (unsigned long long)jitCache->nLinked,
@@ -2163,6 +2251,29 @@ auto CPU::jitTryBlock() -> u32 {
   }
   jit::CodeCache* cc = jitCache;
 
+  // El mapeo virtual ha cambiado (TLBWI/TLBWR o ASID): los sitios de enlace y las entradas de
+  // la ITC guardan traducciones VA->bloque congeladas al compilar/despachar, y ya no valen.
+  // Desenlace global. Es barato: unlinkAll() se guarda tras `anyLinked`/`itcAny`, asi que una
+  // rafaga de TLBWI (un osMapTLB toca varias entradas seguidas) solo paga el primero.
+  if(cc->tlbGen != tlbGen) {
+    if(cc->anyLinked || cc->itcAny) cc->nTlbUnlink++;
+    cc->unlinkAll();
+    cc->tlbGen = tlbGen;
+    // Desarmar no basta. Un sitio con destino TLB guarda el par (VA, phys) que se tradujo al
+    // COMPILARLO, y linkTo() lo vuelve a armar buscando por PHYS, sin mirar el TLB: tras un
+    // remapeo ese par puede ser mentira y el salto enlazado entraria en el bloque equivocado
+    // -- medido en Perfect Dark, que acababa ejecutando datos en 0x70003a94. Se re-sondea la
+    // VA de cada sitio TLB una vez por cambio de mapeo; el que sigue casando vuelve a ser
+    // elegible y el que no se queda fuera hasta que el mapeo vuelva.
+    for(jit::LinkSite& L : cc->links) {
+      if(!L.tlbTarget) continue;
+      bool sc = xlatCacheable; xlatCacheable = false;
+      u64 tp = tlbProbePhys(L.targetVA);
+      bool ca = xlatCacheable; xlatCacheable = sc;
+      L.tlbOk = (tp != ~0ull) && ca && ((u32)tp == L.targetPhys);
+    }
+  }
+
   // Cache negativa: este PC ya falló al compilar y su op líder no ha cambiado → intérprete
   // directo, sin volver a emitir. Un fallo de compilación depende SOLO de la palabra líder
   // (compileBlock corta ahí y devuelve nOps==0), así que validarla basta y cuesta un icFetch
@@ -2206,7 +2317,7 @@ auto CPU::jitTryBlock() -> u32 {
     {
       jit::Block& nb = cc->blocks[bi];
       for(const jit::LinkSite& s : nb.sites) cc->addLink(s);
-      cc->linkTo(phys, nb.linkEntry);
+      cc->linkTo(phys, nb.linkEntry, nb.crossPage);
       nb.linkedEpoch = cc->linkEpoch;
     }
   }
@@ -2272,7 +2383,7 @@ auto CPU::jitTryBlock() -> u32 {
   // Re-enlace tras un desenlace global (invalidación de I-cache): este bloque acaba de pasar la
   // validación contra la línea de I-cache, así que vuelve a ser un destino legítimo.
   if(blk.linkedEpoch != cc->linkEpoch) {
-    cc->linkTo(phys, blk.linkEntry);
+    cc->linkTo(phys, blk.linkEntry, blk.crossPage);
     blk.linkedEpoch = cc->linkEpoch;
   }
 
@@ -2282,7 +2393,9 @@ auto CPU::jitTryBlock() -> u32 {
   // el phys: el sitio del JR compara contra el registro, y solo ckseg0 -- donde VA->phys es un
   // desplazamiento fijo, sin TLB de por medio -- puede prometer que esa VA sigue siendo este
   // codigo. Se reescribe en cada despacho: la entrada mas reciente es la que mas vale.
-  if(ck0Route && blk.linkEntry && !cc->itc.empty()) {
+  // Por la ruta TLB tambien: la traduccion que respalda esta VA la vigila cpu.tlbGen (arriba),
+  // y un bloque crossPage ya lo ha rechazado el driver antes de llegar aqui cuando !ck0Route.
+  if((ck0Route || jit::g_jitTlbLink) && blk.linkEntry && !cc->itc.empty()) {
     jit::CodeCache::ItcEnt& ie = cc->itc[cc->itcIndex(pc)];
     ie.va = pc; ie.code = (u64)(std::uintptr_t)blk.linkEntry;
     cc->itcAny = true;

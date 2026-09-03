@@ -1012,6 +1012,44 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
     std::fflush(stderr);
   }
 
+  // DIAGNOSTICO (KESTREL_EXCODD=<n>): un juego sano toma interrupciones, fallos de TLB y
+  // syscalls a millones, pero NUNCA una instruccion reservada, un coprocesador no usable
+  // ni un error de direccion. Cuando el guest se descarrila, la primera de esas dice
+  // DONDE empezo -- mucho antes de que el sintoma (pc paseando por memoria en blanco)
+  // sea visible. Se filtran los codigos normales y se imprime el contexto de llamada.
+  static const u64 kOddMax = []{
+    const char* v = std::getenv("KESTREL_EXCODD");
+    u64 n = v ? std::strtoull(v, nullptr, 0) : 0;
+    return (v && n < 1) ? 20ull : n;
+  }();
+  if(excCode > 3 && excCode != 8 && kOddMax && oddExc < kOddMax) {
+    oddExc++;
+    std::fprintf(stderr, "[excodd] #%llu code=%u epc=0x%llx badv=0x%llx curPc=0x%llx bd=%u "
+                         "ra=0x%llx sp=0x%llx status=0x%08x retired=%llu\n",
+                 (unsigned long long)oddExc, excCode, (unsigned long long)epc,
+                 (unsigned long long)cop0[C0_BadVAddr], (unsigned long long)curPc, (unsigned)bd,
+                 (unsigned long long)gpr[31], (unsigned long long)gpr[29], status,
+                 (unsigned long long)retired);
+    // Que hay REALMENTE en la direccion que fallo: si son instrucciones plausibles el
+    // fallo esta en la decodificacion; si son datos, el guest salto donde no debia o la
+    // pagina ya no contiene ese codigo.
+    u64 pp = tlbProbePhys(epc & ~0xFull);
+    if(pp != ~0ull && mem && (usize)(u32)pp + 32 <= mem->rdram.size()) {
+      std::fprintf(stderr, "[excodd]   phys=0x%08x:", (u32)pp);
+      for(u32 k = 0; k < 8; k++) {
+        u32 o = (u32)pp + 4 * k; const u8* q = mem->rdram.data() + o;
+        std::fprintf(stderr, " %08x", ((u32)q[0]<<24)|((u32)q[1]<<16)|((u32)q[2]<<8)|q[3]);
+      }
+      std::fprintf(stderr, "\n");
+    } else std::fprintf(stderr, "[excodd]   phys=SIN MAPEO\n");
+    // El banco entero: el registro que contiene badv identifica la instruccion exacta que
+    // fallo, y de donde salio el puntero podrido.
+    for(int r = 1; r < 32; r++)
+      std::fprintf(stderr, "   $%-2d=%016llx%s", r, (unsigned long long)gpr[r], (r % 4) ? "" : "\n");
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+  }
+
   u32 cause = (u32)cop0[C0_Cause];
   cause = (cause & ~0x7cu) | ((excCode & 0x1f) << 2);   // ExcCode (bits 2-6)
   cause &= ~0x3000'0000u;   // clear CE; the CU-unusable path re-sets it to the cop number
@@ -1282,6 +1320,7 @@ auto CPU::tlbWrite(u32 index) -> void {
   e.lo1 = cop0[C0_EntryLo1] & 0x03FF'FFFE;
   e.global = (cop0[C0_EntryLo0] & cop0[C0_EntryLo1] & 1) != 0;
   jitTlbValid = false;   // el mapeo cambió → invalida el softTLB de entrada del dynarec
+  ++tlbGen;              // ...y los enlaces del dynarec que congelaron una traduccion TLB
   bumpXlat();            // ...y el fetch fast-path del intérprete
 }
 
@@ -1600,7 +1639,7 @@ auto CPU::jitCTC1w(u32 op, u32 off) -> u8 {
   if(rd != 31) return 1;                     // FCR0 es de solo lectura; el resto no existe
   u32 v = (u32)gpr[(op >> 16) & 31] & 0x0183'FFFFu;
   // Una CTC1 que deja armado E (bit 17) o un Cause con su Enable puesto dispara la excepcion
-  // FP en el acto, y eso arrastra el apa�o de Cause.CE: al interprete.
+  // FP en el acto, y eso arrastra el apa�o de Cause.CE: al interprete.
   if(__builtin_expect(((v >> 17) & 1) || (((v >> 12) & 0x1f) & ((v >> 7) & 0x1f)), 0))
     return jitInterpOp(op, off);
   fcr31 = v;
@@ -2210,7 +2249,12 @@ auto CPU::writeCop0(u32 reg, u64 v) -> void {
     case C0_Wired:   cop0[reg] = (u32)v & 0x3F; randomReload = 2; return;  // reloads Random=31 one instr later
     case C0_EntryLo0:
     case C0_EntryLo1: cop0[reg] = v & 0x3FFF'FFFFull; return;   // PFN+C+D+V+G, bits [29:0]; upper read 0
-    case C0_EntryHi:  cop0[reg] = v & 0xC00000FF'FFFFE0FFull; bumpXlat(); return;  // R+VPN2+ASID; bits [12:8] read 0 (ASID cambia el match TLB → invalida fetch fast-path)
+    case C0_EntryHi: { u64 nv = v & 0xC00000FF'FFFFE0FFull;
+      // El ASID entra en el match del TLB: cambiarlo remapea el espacio virtual entero,
+      // asi que invalida los enlaces del dynarec igual que un TLBWI. El resto de EntryHi
+      // (VPN2) solo alimenta al proximo TLBWI/TLBP y por si mismo no remapea nada.
+      if((nv & 0xFF) != (cop0[reg] & 0xFF)) { ++tlbGen; jitTlbValid = false; }
+      cop0[reg] = nv; bumpXlat(); return; }  // R+VPN2+ASID; bits [12:8] read 0 (ASID cambia el match TLB → invalida fetch fast-path)
     case C0_PageMask: cop0[reg] = v & 0x01FFE000ull; return;    // MASK field, bits [24:13]
     case C0_BadVAddr: return;                      // read-only
     case C0_PRId:    return;                        // read-only constant

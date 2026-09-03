@@ -56,6 +56,14 @@ struct CPU {
   bool jitTlbCacheable = false;
   bool jitTlbValid = false;
 
+  // Generacion del MAPEO virtual: contenido del TLB + ASID. El dynarec enlaza bloques
+  // TLB-mapeados traduciendo el destino EN TIEMPO DE COMPILACION, y esa traduccion solo vale
+  // mientras el mapeo no cambie: cada TLBWI/TLBWR y cada cambio real de ASID sube la cuenta y
+  // el driver desenlaza todo antes del siguiente despacho. No sirve xlatEpoch, que sube ademas
+  // en cada excepcion/ERET (cambio de MODO, que no remapea nada): desenlazar en cada
+  // interrupcion dejaria el enlace muerto en la practica.
+  u64  tlbGen = 0;
+
   // Block-linking Step 3: contabilidad de la CADENA de bloques enlazados. Un bloque enlazado
   // salta directo al sucesor sin volver al driver, así que la contabilidad que el driver hace
   // al retornar (retired/Count/Random) la difiere al prólogo del sucesor:
@@ -219,6 +227,8 @@ struct CPU {
   auto wNote(u32 val) -> void { wRing[wIdx % 128] = WEnt{ retired, (u32)curPc, val }; wIdx++; }
   auto wDump(u32 n) -> void;
   bool excTrace = false;
+  // Cuenta de excepciones "imposibles" ya volcadas por KESTREL_EXCODD (ver takeException).
+  u64  oddExc = 0;
   bool fpDbg = false;
   bool fpTrace = false;
   int  fpTraceEret = 0;

@@ -3744,3 +3744,110 @@ El latido en PD dice `audio: silencio 14-17% descartadas=53550`. En SM64 el sile
 0,15-0,54 % y los descartes en 0, o sea que esto es de PD: produce audio a rafagas mas grandes
 que el colchon. No es el mismo fallo que se arreglo en el DAC del AI; es el sumidero del
 anfitrion quedandose corto con este juego.
+
+## 2026-09-03 — el cuelgue intermitente de Perfect Dark: dos fallos, ninguno de PD
+
+Desde que el enlace de bloques del dynarec alcanza al codigo mapeado por TLB (PD ejecuta desde
+`0x70000000`), Perfect Dark se descarrilaba en **~1 de cada 8 arranques**. Bisectado por
+configuraciones, con 1200 intercambios de buffer y clasificando por CODIGO DE SALIDA (0 = bien,
+124 = colgado, 139 = fallo del anfitrion), nunca por reloj de pared:
+
+| Configuracion | Resultado | Pared |
+|---|---|---|
+| por defecto (con enlace TLB) | 8 de 12 bien, 4 colgadas | 9-10 s |
+| `KESTREL_THROTTLE=1` | 8/8 | 26 s |
+| `KESTREL_THREADS=0` (lockstep) | 8/8 | 54 s |
+| `KESTREL_JIT_NOTLBLINK=1` | 15/15 | 38 s |
+| `KESTREL_JIT_NOTLBSTATIC=1` (solo ITC) | 10/10 | 40 s |
+| `KESTREL_JIT_NOFAST=1` | 6/6 | 15 s |
+| `KESTREL_JIT_CHAIN=8` | 2 de 6 bien | 10 s |
+
+O sea: **todo lo que estabiliza, frena al hilo de CPU o aprieta el acoplamiento CPU<->RSP.**
+Ningun diagnostico que cambie la planificacion de hilos lo reproduce (con el servidor de
+telemetria + `KESTREL_HEARTBEAT` salieron 12/12 limpias), asi que hubo que ir por canarios que
+no tocan el reparto de tiempo.
+
+### Fallo 1 — la ranura vacia de la ITC era una VA que el guest puede pedir
+
+`struct ItcEnt { u64 va = 0; ... }`. Pero 0 es un destino legitimo: un `jr` con el registro a
+cero. Y `itcIndex(0) == 0`, asi que la sonda emitida —- que solo compara `va` -— casaba con la
+ranura 0 vacia y ejecutaba `jmp [rdx+8]` con `code == 0`. Reproducido tal cual:
+
+```
+==== HOST EXCEPTION 0xc0000005 at host RIP 0000000000000000 ====
+  access violation: EXEC at host addr 0x0
+  guest pc=0x0000000000000000 nextPc=0x0000000000000004 halted=0
+```
+
+La ranura vacia lleva ahora la misma VA imposible que ya usaban las guardas de enlace estatico
+(`kNoLink = 1`: impar, y por tanto nunca igual a un pc alineado a instruccion). Semantica de HW:
+un `jr` a 0 tiene que buscar instruccion en la VA 0 y tomar la excepcion que toque, jamas saltar
+al host 0. Arreglado, pero **no era el cuelgue**: seguia colgandose.
+
+### El cuelgue no tenia corrupcion de memoria
+
+Con `KESTREL_CODEWATCH=20 KESTREL_DMAGUARD=0x1000:0x100000` armados, la corrida 6 de 20 se colgo
+y el canario de codigo **no salto ni una vez**: el codigo de PD estaba byte a byte igual todo el
+rato, y el guardian de DMA solo vio DMAs legitimos de salida de audio. Ni excepcion previa, ni
+presupuesto de RSP agotado. Livelock puro.
+
+El volcado del watchdog (`KESTREL_WATCHDOG=15`, elegido para que apenas dispare en una corrida
+sana de ~13 s pero vuelque dos veces dentro de un cuelgue) lo describio entero:
+
+```
+[wdog] retired=1366752580 (+1366752580) pc=70003590 sp_status=00000203 sp_pc=144
+       rspRun=0 rspBusy=0 rspKick=0 rdpBusy=0 rdpQ=0 mi_intr=2d mi_mask=3f
+[wdog] status=02008080 cause=1000042c epc=0000000070003678 count=51776788 compare=00000000
+[mi]   VI      1748       144   1603          0        <- raise / fundidas / clear
+...
+[wdog] retired=1605598303 (+238845723) pc=700035f0 ...
+[mi]   VI      2054       450   1603          0
+```
+
+Es decir: `retired` sube (la CPU **no** esta bloqueada), todo el RCP parado, las VI se levantan y
+se funden pero el contador de `clear` **congelado en 1603** -— nadie las atiende -— porque
+`status` trae **IE=0** y **CU1=0**, y `cause` dice excepcion 11 (Coprocessor Unusable) con
+`epc` DENTRO del bucle en el que gira la pc. Un hilo del invitado con el contexto mal, girando
+con las interrupciones cerradas: nada puede desalojarlo.
+
+### Fallo 2 — `kPaceSlack` llevaba calibrado contra un hilo de CPU cuatro veces mas lento
+
+La holgura del regulador CPU<->RSP estaba en **1 M instrucciones**. El propio codigo ya lo
+denunciaba: con esa holgura `rcpPace` no frena hasta que la CPU adelanta 1 M instrucciones al
+RSP, o sea el hilo de CPU corre al ~1200 % de la velocidad del N64 y deja a la CPU emulada
+~11 ms —- dos tercios de campo -— por delante de una tarea de RSP en vuelo. Con ese adelanto el
+juego puede reescribir la display list que el RSP todavia esta leyendo. **El hardware no da esa
+holgura**: en el N64 los dos relojes van acoplados por el bus.
+
+La unica holgura que justifica el EMULADOR es la granularidad del dynarec: una cadena de bloques
+enlazados retira hasta `jit::kGuardMaxOps` instrucciones sin volver al bucle del sistema, asi que
+por debajo de eso el freno no puede mandar. El 1 M se habia calibrado por rendimiento en
+2026-09-01, y el comentario que lo acompanaba avisaba: *"el optimo se MUEVE con la velocidad del
+hilo de CPU"*. El enlace de bloques sobre codigo TLB acelero ese hilo ~4x y nadie recalibro.
+
+Bajado a **4096 = `jit::kGuardMaxOps`**:
+
+- Perfect Dark: **40 arranques limpios de 40** (16 + 24). Antes fallaba ~1 de cada 8; la
+  probabilidad de 40 limpias por azar es ~0,5 %.
+- Coste (SM64, 300 intercambios, minimo de 3), 4096 vs 1 M:
+  `prdp-jit` 5,08 s vs 5,06 s -— ruido, y misma fidelidad (3,32 vs 3,31 campos VI por
+  intercambio); `threaded-jit` 5,18 s vs 5,06 s (-2,4 %).
+- El despenadero de las calibraciones anteriores **ha desaparecido**: la curva es plana de 4 K a
+  1 M. Lo que antes castigaba la holgura corta era el hilo de CPU comiendose el nucleo del
+  worker, y eso ya se arreglo por otro lado.
+
+### La guarda `rsp.running` del camino rapido SIGUE haciendo falta
+
+Con el regulador ya apretado se volvio a medir `KESTREL_JIT_NORSPGUARD=1`. Sin la guarda PD se
+cuelga **1 de cada 16** arranques, y SM64 emite **1804 campos VI por 300 intercambios** en vez de
+1024 (el oraculo lockstep da ~4,09 campos por intercambio; 3,41 con guarda, 6,01 sin). La pared
+"mejora" de 5,50 s a 4,51 s justo por eso: son campos girados, no trabajo hecho. Se queda.
+
+### Herramienta arreglada de paso
+
+El volcado `[wdog] code @` traducia la pc con `& 0x1fffffff`. Para una VA mapeada por TLB
+(`0x70003590`) eso da `0x10003590`, fuera de la RDRAM, y salian cinco ceros —- que se leen como
+un colchon de NOPs que no existe. Ahora traduce por `cpu.tlbProbePhys`, igual que la CPU.
+
+Puertas: `gate_all` 375 s, `gate_prdp` 307 s, 15/15 + prdp 3/3, `regress=0` y `nodump=0` en los
+dos krom (mean_exact interp 88,71 / prdp 89,26), md5 de sm64 sin cambio en los siete modos.

@@ -183,6 +183,26 @@ RSP: cabecera OSTask de DMEM 0xFC0, PC del BREAK, ciclos, ventana DPC) ·
 `KESTREL_RSPHANG=1` (si el RSP agota el presupuesto: OSTask, los 32 GPR y +-8 instrucciones
 de IMEM alrededor del PC).
 
+**Bisecar el enlace de bloques y el regulador** (todos A/B, sin efecto cuando no se ponen):
+`KESTREL_JIT_NOTLBLINK=1` (no enlazar bloques cuyo destino sale de una pagina mapeada por TLB
+-- Perfect Dark ejecuta desde `0x70000000`, y el enlace ahi vale ~4x) · `KESTREL_JIT_NOTLBSTATIC=1`
+(solo la ITC, sin destino estatico, en rutas TLB) · `KESTREL_JIT_TLBXPAGE=1` (permitir enlaces TLB
+que crucen pagina, resolviendo por `tlbProbePhys` en vez de exigir misma pagina) ·
+`KESTREL_JIT_NORSPGUARD=1` (quita del camino rapido la guarda "hay tarea de RSP en vuelo".
+MEDIDO 2026-09-03: sigue haciendo falta -- sin ella PD cuelga 1 de cada 16 arranques y SM64 emite
+1804 campos VI por 300 intercambios en vez de 1024, o sea la CPU gasta lo ganado girando) ·
+`KESTREL_PACESLACK=<n>` (holgura del regulador CPU<->RSP, por defecto **4096 = `jit::kGuardMaxOps`**;
+ver el comentario largo sobre `kPaceSlack` en `src/core/memory.cpp`: por encima de la granularidad
+del dynarec la holgura la tendria que justificar el hardware, y no la justifica) · `KESTREL_PACEGRAIN=<n>`.
+
+**Canarios de corrupcion** (caros, solo para depurar): `KESTREL_CODEWATCH=<n>` compara cada n
+campos el codigo del guest contra una copia de referencia y dice el primer byte que cambio
+(`_LO`/`_HI` acotan el rango fisico, `_AFTER` retrasa el armado) · `KESTREL_DMAGUARD=<lo>:<hi>`
+chiva cualquier DMA del SP que escriba dentro de ese rango fisico · `KESTREL_REGCHK=1` hace que
+el JIT compruebe los registros contra el interprete · `KESTREL_EXCODD=1` vuelca los 32 GPR al
+tomar una excepcion con PC no alineada · `KESTREL_GUESTTHREADS=1` anade el volcado de OSThread
+al latido del watchdog.
+
 La ventana del emulador lleva **barra de menu nativa con el catalogo entero de opciones**,
 el mismo que el lanzador (`docs/LAUNCHER.md`). Fuente unica = `tools/launcher/options.py`;
 al tocarla hay que **`python tools/gen_optdefs.py`** (regenera `src/ui/optdefs.cpp`, que NO

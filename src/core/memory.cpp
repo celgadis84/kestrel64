@@ -1251,6 +1251,32 @@ auto Memory::spDma(bool toRam) -> void {
   // los 4 KB (el direccionamiento del motor es de 12 bits) y el final de la RDRAM. El
   // resultado byte a byte es identico; lo que cambia es el numero de instrucciones que le
   // cuesta al anfitrion.
+  // GUARDIAN DE RANGO (KESTREL_DMAGUARD=<lo>:<hi>, opt-in). El motor de DMA del SP es el
+  // unico camino por el que el microcodigo escribe RDRAM, asi que si aparece contenido del
+  // RSP encima del codigo o de las estructuras del kernel, ha pasado por aqui. A diferencia
+  // de `watchAddr` esto NO cambia la copia a byte a byte: es una comprobacion de solape por
+  // transferencia, con coste nulo cuando esta apagado, para no mover el timing que provoca
+  // el fallo.
+  if(toRam) {
+    static const u32 gLo = []{ const char* v = std::getenv("KESTREL_DMAGUARD");
+      return v ? (u32)std::strtoul(v, nullptr, 0) : 0u; }();
+    static const u32 gHi = []{ const char* v = std::getenv("KESTREL_DMAGUARD");
+      const char* c = v ? std::strchr(v, ':') : nullptr;
+      return c ? (u32)std::strtoul(c + 1, nullptr, 0) : 0u; }();
+    if(gHi > gLo) {
+      u32 lo = dramAddr, hi = dramAddr + count * (length + skip);
+      if(hi > gLo && lo < gHi) {
+        static u64 nHit = 0;
+        if(nHit < 24) {
+          nHit++;
+          std::fprintf(stderr, "[dmaguard] #%llu %s->RDRAM dram=0x%06x len=%u count=%u skip=%u memOff=0x%03x pc=0x%08x\n",
+                       (unsigned long long)nHit, imem ? "IMEM" : "DMEM", dramAddr, length, count, skip,
+                       memOff, (u32)storePc);
+          std::fflush(stderr);
+        }
+      }
+    }
+  }
   const bool byByte = watchAddr != 0;
   for(u32 c = 0; c < count; c++) {
     if(byByte) {
@@ -1740,11 +1766,10 @@ auto Memory::rspAwaitIdle() -> void {
 // La holgura existe por la granularidad del dynarec: una cadena de bloques enlazados retira
 // hasta jit::kGuardMaxOps sin volver al bucle, asi que por debajo de eso el regulador no puede
 // mandar y solo generaria bloqueos inutiles.
-// Holgura por defecto: 1 M instrucciones de CPU. Con la holgura corta el freno entra tantas
-// veces por campo que la CPU pasa mas tiempo en el condvar que emulando, y el RSP se queda sin
-// trabajo encolado por delante; con la holgura larga el adelanto entre dominios crece hasta que
-// el hilo de CPU se come el nucleo que el worker necesita. El tope real lo sigue poniendo
-// kPaceMaxWait, que corta cualquier episodio.
+// Con la holgura corta el freno entra tantas veces por campo que la CPU puede pasar mas tiempo
+// en el condvar que emulando, y el RSP quedarse sin trabajo encolado por delante; con la holgura
+// larga el adelanto entre dominios crece hasta que el hilo de CPU se come el nucleo que el worker
+// necesita. El tope real lo sigue poniendo kPaceMaxWait, que corta cualquier episodio.
 //
 // El optimo se MUEVE con la velocidad del hilo de CPU, asi que hay que recalibrarlo cuando el
 // interprete/JIT se acelera. Primera calibracion (SM64, 400 campos, i7-870), cuando el hilo de
@@ -1773,11 +1798,32 @@ auto Memory::rspAwaitIdle() -> void {
 // Segundo eje, la fidelidad: campos VI por intercambio, con lockstep como oraculo (4.09,
 // deterministico y con md5 identico). prdp-jit da 2.73 / 2.80 / 3.12 / 3.20 / 3.24 en la
 // misma serie, o sea todos por DEBAJO del oraculo y la holgura larga es la que mas se le
-// acerca. No hay canje aqui: 1 M es a la vez lo mas rapido y lo mas parecido al oraculo.
+// acerca. No habia canje entonces: 1 M era a la vez lo mas rapido y lo mas parecido al oraculo.
 // (SoftRDP en hilos se va al otro lado, ~9-10 campos por intercambio, pero esa desviacion
-// es del backend, no del regulador: apenas se mueve con la holgura.) Default 1 M.
+// es del backend, no del regulador: apenas se mueve con la holgura.)
+//
+// SUPERADO 2026-09-03, y esta vez el motivo no es de rendimiento sino de correccion. Con la
+// holgura de 1 M el hilo de CPU corre al ~1200% de la velocidad del N64 respecto a un RSP en
+// marcha, o sea deja a la CPU emulada ~11 ms -- dos tercios de campo -- por delante de una
+// tarea de RSP en vuelo. Eso el hardware no lo permite: en el N64 los dos relojes van
+// rigidamente acoplados por el bus y la CPU no puede adelantar al RSP mas que unos ciclos.
+// Perfect Dark lo notaba: descarrilaba en ~1 de cada 8 arranques y acababa girando en un hilo
+// con IE=0 y CU1=0 tomando una excepcion de coprocesador por vuelta, con las VI apilandose sin
+// atender (visto con KESTREL_WATCHDOG: retired subiendo, todo el RCP parado, mi_intr con VI
+// pendiente y el contador de clear congelado). Con 4096 son 40 arranques limpios de 40.
+// El unico valor que justifica el EMULADOR es la granularidad del dynarec: una cadena de
+// bloques enlazados retira hasta jit::kGuardMaxOps instrucciones sin volver al bucle del
+// sistema, asi que por debajo de eso el freno no puede mandar y solo generaria bloqueos
+// inutiles. Por encima, la holgura la tendria que justificar el hardware, y no la justifica.
+// Coste medido (SM64, 300 intercambios, min de 3, i7-870), 4096 vs 1 M:
+//   prdp-jit:      5.08s vs 5.06s  (ruido; 3.32 vs 3.31 campos VI por intercambio)
+//   threaded-jit:  5.18s vs 5.06s  (-2.4%)
+// El despenadero de las calibraciones anteriores ha desaparecido con el enlace de bloques
+// sobre codigo TLB-mapeado: la curva es plana de 4 K a 1 M. Default = jit::kGuardMaxOps.
+// 4096 == jit::kGuardMaxOps. No se incluye jit.hpp aqui a proposito: el core no debe depender
+// del backend de CPU.
 static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
-                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 1048576;
+                            ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 4096;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
 // Grano del permiso del regulador (ver paceAllowance). Calibrable como la holgura.
 static const u64 kPaceGrain = std::getenv("KESTREL_PACEGRAIN")
