@@ -207,8 +207,22 @@ struct Memory {
   alignas(64) RcpMode rcpMode = RcpMode::Lockstep;
   char rcpModePad_[60] = {};
 
-  struct RdpJob { u32 current, end; bool xbus; };
+  // `gen` = generacion del buffer de comandos (ver rdpShadow). Cambia cuando el juego
+  // instala un START fresco, o sea otro FIFO.
+  struct RdpJob { u32 current, end; bool xbus; u8 gen; };
   std::deque<RdpJob>      rdpQueue;
+  // INSTANTANEA DEL FIFO. El command processor real lee los comandos del anillo mientras
+  // rasteriza, y el productor no los pisa porque mira DPC_CURRENT... dentro del MISMO
+  // buffer. Al instalar uno nuevo (START fresco) el juego ya no mira nada, y con el RDP en
+  // su hilo el worker todavia puede llevar tramos del anterior encolados: acababa leyendo
+  // comandos que el microcodigo ya habia reescrito (ver docs/PD-DERAIL.md). Al encolar
+  // copiamos los bytes del tramo -- que el productor YA escribio antes del kick, asi que es
+  // un instante de lectura legal para el hardware -- y el rasterizador consume la copia.
+  // Dos generaciones alternas bastan: dentro de una, el flow-control del propio juego
+  // (DPC_CURRENT, que publicamos honesto) impide que se pise lo no consumido; entre una y
+  // la siguiente, la copia vive en el otro buffer. Se reservan al vuelo (tamano RDRAM).
+  std::vector<u8>         rdpShadow[2];
+  u8                      rdpGen = 0;          // solo lo toca el productor
   std::mutex              rdpMx;
   std::condition_variable rdpCv;
   std::thread             rdpWorker;
@@ -259,7 +273,9 @@ struct Memory {
   auto stopRcpThreads()  -> void;   // join workers on shutdown
   auto rdpSubmit(u32 current, u32 end, bool xbus) -> void;  // enqueue (threaded)
   auto rdpDrain() -> void;          // block until the RDP queue is fully consumed
-  auto rdpRunJob(u32 current, u32 end, bool xbus) -> void;  // rasterize + DP bookkeeping
+  auto rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> void;
+  auto rdpSnapshot(u32 current, u32 end) -> void;   // copia el tramo a rdpShadow[rdpGen]
+  auto rdpPublishCurrent(u32 fallback) -> void;  // rasterize + DP bookkeeping
   auto rspAwaitIdle() -> void;      // block until the RSP worker has published its task result
   auto rspSubmitKick() -> void;     // wake the RSP worker to run the armed task (threaded)
 

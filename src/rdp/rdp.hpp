@@ -40,6 +40,10 @@ struct SoftRdp {
   // Donde publicar el puntero de lectura del FIFO (DPC_CURRENT). Opcional: en las
   // pruebas unitarias del RDP no hay registros que actualizar.
   std::atomic<u32>* curOut = nullptr;
+  // De donde se leen los COMANDOS (no los pixeles ni las texturas, que siguen yendo a la
+  // RDRAM viva). Normalmente es la instantanea que el productor dejo al encolar el tramo:
+  // ver Memory::rdpSnapshot. Nulo = leer la RDRAM directamente (lockstep, pruebas).
+  const u8* cmdSrc = nullptr;
   // Direccion donde se paro el consumo. Igual a `end` salvo cuando el ultimo comando del
   // span esta partido: el command processor no ejecuta comandos a medias, se para delante
   // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.

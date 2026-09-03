@@ -37,10 +37,16 @@ cmake --build build -j
   (parallel-rdp GPU backend). Default OFF so deterministic core never depends on GPU.
 - `-DKESTREL_STATIC=ON` = self-contained `.exe` (libc++/GLFW inside, no DLLs) for the
   published package; `sh scripts/dist.sh` stages `dist/` + zip. See `docs/distribucion.md`.
-- **The gates rebuild `build/` and `build-prdp/` only** — never `build-prdp-static/`, which is
-  the exe the launcher/installer ship. Run `sh scripts/pack.sh` to refresh the package
-  (static build -> `dist/` -> zip -> Inno Setup installer) whenever it must be testable
-  from the GUI; otherwise `dist/` silently lags the source tree.
+- **REGLA: cada generacion de .exe genera TODO** — los tres arboles, el lanzador grafico
+  congelado, el zip portable y el instalador. Un solo comando, `sh scripts/release.sh`
+  (`--gates` para pasar antes `gate_all` + `gate_prdp`, `--quick` para saltarse `build/` y
+  `build-prdp/` e iterar solo sobre el estatico, `NOISS=1` para omitir el instalador). Deja
+  `dist/VERSION.txt` con version, commit y md5 para que un zip suelto diga de donde salio.
+- Las puertas por si solas recompilan `build/` y `build-prdp/` y **nunca**
+  `build-prdp-static/`, que es el exe que viajan lanzador e instalador: por eso existe
+  `release.sh`. Sus piezas sueltas siguen ahi si hace falta una a mano: `scripts/pack.sh`
+  (estatico -> `dist/` -> zip -> Inno Setup), `scripts/dist.sh` (empaquetar un build ya
+  hecho), `scripts/gui.sh` (congelar solo el lanzador).
 - Double-clicking the exe implies `--play` (run + window + ROM picker); launching from a
   shell keeps the paused-for-MCP default, so gates and debugging are unaffected.
 
@@ -194,6 +200,33 @@ MEDIDO 2026-09-03: sigue haciendo falta -- sin ella PD cuelga 1 de cada 16 arran
 `KESTREL_PACESLACK=<n>` (holgura del regulador CPU<->RSP, por defecto **4096 = `jit::kGuardMaxOps`**;
 ver el comentario largo sobre `kPaceSlack` en `src/core/memory.cpp`: por encima de la granularidad
 del dynarec la holgura la tendria que justificar el hardware, y no la justifica) · `KESTREL_PACEGRAIN=<n>`.
+
+**Python**: `scripts/validate.py` pide numpy y el python de MSYS (`/c/msys64/clang64/bin/python`,
+el primero del PATH cuando se exporta clang64) NO lo tiene. Usar siempre el de Windows,
+`/c/Users/celga/AppData/Local/Programs/Python/Python311/python`, que es el que ya fijan
+`scripts/gate_all.sh` y `gate_prdp.sh` en su variable `PY`.
+
+**RCP enhebrado, semantica y biseccion**: el consumidor del FIFO del RDP NO lee los
+comandos de la RDRAM viva sino de una **instantanea** que el productor copia al encolar el
+tramo (`Memory::rdpSnapshot`, dos buffers alternos indexados por generacion de buffer de
+comandos). El productor ya habia escrito esos bytes antes del kick, o sea que leerlos en el
+kick es un instante de lectura que el hardware tambien puede elegir; dentro de una generacion
+protege el control de flujo del propio juego (DPC_CURRENT) y entre generaciones el buffer
+alterno. Solo se redirigen los COMANDOS: pixeles, texturas y TLUT siguen leyendo RDRAM viva.
+Sin esto Perfect Dark descarrila 3 de cada 4 tandas (ver `docs/PD-DERAIL.md`).
+`KESTREL_RDPDRAIN=1` recupera el drenado del RDP en cada START fresco, que fue la primera
+cura -- SOLO para bisecar: medido cuesta 13-15 % de pared y aleja la fidelidad del oraculo
+lockstep · `KESTREL_SYNCRDP=1` / `KESTREL_SYNCRSP=1` dejan uno de los dos
+workers en su hilo y el otro sincrono, para bisecar de quien es una corrupcion ·
+`KESTREL_PRDP_SYNCALL=1` espera a la GPU tras cada primitiva (solo `build-prdp`).
+
+**Quien escribio esto** (caros, solo para depurar): `KESTREL_WRTAG=1` mantiene un tag de
+ultimo escritor por bloque de 16 B de RDRAM (CPU-uncached / D-cache / SP-DMA / PI-DMA /
+SI-DMA / RDP) con el PC del guest, lo imprime en el volcado de fallo, y chiva (`[fifo!]`)
+cualquier escritura dentro del FIFO del RDP aun sin consumir · `KESTREL_RDPGUARD=<lo>:<hi>`
+chiva cualquier escritura del RDP a RDRAM en ese rango fisico · `KESTREL_CIFLOOR=<phys>`
+baja el suelo por debajo del cual un SET_COLOR_IMAGE se considera basura (por defecto los
+vectores de excepcion).
 
 **Canarios de corrupcion** (caros, solo para depurar): `KESTREL_CODEWATCH=<n>` compara cada n
 campos el codigo del guest contra una copia de referencia y dice el primer byte que cambio

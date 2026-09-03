@@ -311,8 +311,16 @@ auto runFifo(const u8* rdram, u32 rdramSize, const u8* dmem, u32 start, u32 end,
     if(op >= 8) g->proc->enqueue_command(len * 2, words);
 
     // Solo estos escriben en el color/z image; el resto es estado o carga de TMEM.
-    if((op >= 0x08 && op <= 0x0f) || op == 0x24 || op == 0x25 || op == 0x36)
+    if((op >= 0x08 && op <= 0x0f) || op == 0x24 || op == 0x25 || op == 0x36) {
       g->drawsSinceSync++;
+      // KESTREL_PRDP_SYNCALL=1: esperar a la GPU tras CADA primitiva. No es fiel al
+      // hardware (el RDP real dibuja en paralelo con la CPU) y cuesta un fence de ~1.6 ms
+      // por triangulo, pero deja la escritura de RDRAM por parte de la GPU completamente
+      // ordenada respecto al hilo de RDP. Solo para bisecar: si con esto desaparece una
+      // corrupcion, la corrupcion venia de escrituras de la GPU en vuelo.
+      static const bool syncAll = std::getenv("KESTREL_PRDP_SYNCALL") != nullptr;
+      if(syncAll) { g->proc->wait_for_timeline(g->proc->signal_timeline()); g->drawsSinceSync = 0; }
+    }
 
     if(::RDP::Op(op) == ::RDP::Op::SyncFull) {
       static const bool sfLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;

@@ -1,3 +1,4 @@
+#include "../core/wrtag.hpp"
 #include "cpu.hpp"
 #include "jit.hpp"          // CodeCache completo: cacheOp desenlaza las cadenas del dynarec
 #include "../core/memory.hpp"
@@ -375,6 +376,10 @@ auto CPU::dcFlush(u32 idx) -> void {
   DCacheLine& l = dcache[idx];
   if(!l.valid() || !l.dirty) return;
   u32 tag = l.ptag();
+  // El volcado de una linea sucia es la unica forma en que un store CACHEADO de la CPU
+  // llega a RDRAM, asi que sin esto KESTREL_WATCH no ve el 99% de lo que escribe el juego.
+  wrtag::mark(tag, wrtag::kDcache, (u32)pc);
+  if(mem->watchAddr) mem->watchHit(tag, 16, 0, false);
   if(tag + 16 <= mem->rdram.size()) std::memcpy(&mem->rdram[tag], l.data, 16);
   else for(u32 i = 0; i < 16; i++) if(tag + i < mem->rdram.size()) mem->rdram[tag + i] = l.data[i];
   l.dirty = 0;
@@ -1068,10 +1073,70 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
     if(faultN >= 0 && faultN < 24 && ec != 0 && ec != 11) {
       faultN++;
       const char* nm[] = {"Int","Mod","TLBL","TLBS","AdEL","AdES","IBE","DBE","Sys","Bp","RI","CpU","Ov","Tr","","FPE"};
-      std::fprintf(stderr, "[fault] %s(%u) epc=0x%08x badv=0x%08x cause=0x%08x ra=0x%08x retired=%llu\n",
-        ec<16?nm[ec]:"?", ec, (u32)epc, (u32)cop0[C0_BadVAddr], (u32)cop0[C0_Cause], (u32)gpr[31],
+      std::fprintf(stderr, "[fault] %s(%u) epc=0x%016llx badv=0x%016llx cause=0x%08x ra=0x%016llx sp=0x%016llx retired=%llu\n",
+        ec<16?nm[ec]:"?", ec, (unsigned long long)epc, (unsigned long long)cop0[C0_BadVAddr],
+        (u32)cop0[C0_Cause], (unsigned long long)gpr[31], (unsigned long long)gpr[29],
         (unsigned long long)retired);
       std::fflush(stderr);
+      // Los primeros fallos son la ventana del bug: el banco entero identifica de que
+      // registro salio el puntero podrido, y el codigo en EPC dice si el guest salto a
+      // tierra de nadie o fallo un load concreto. Traducir por TLB: PD ejecuta en
+      // 0x70000000 y enmascarar a 0x1fffffff daria ceros que parecen NOPs.
+      if(faultN <= 4) {
+        // translate() cortocircuita a 0 con memAbort puesto -- y aqui SIEMPRE lo esta,
+        // porque el fallo que se vectoriza acaba de ponerlo. Sin limpiarlo la sonda
+        // decia "phys 0" para cualquier VA y el volcado de codigo salia basura.
+        bool ab = memAbort; memAbort = false;
+        u64 pp = tlbProbePhys((epc - 48) & ~0x3ull);
+        if(pp != ~0ull && mem && (usize)(u32)pp + 64 <= mem->rdram.size()) {
+          std::fprintf(stderr, "[fault]   epc-48 phys=0x%08x:", (u32)pp);
+          for(u32 k = 0; k < 16; k++) {
+            const u8* q = mem->rdram.data() + (u32)pp + 4 * k;
+            std::fprintf(stderr, k == 12 ? " >%08x" : " %08x", ((u32)q[0]<<24)|((u32)q[1]<<16)|((u32)q[2]<<8)|q[3]);
+          }
+          std::fprintf(stderr, "\n");
+        } else std::fprintf(stderr, "[fault]   phys=SIN MAPEO\n");
+        u64 bp = tlbProbePhys(cop0[C0_BadVAddr] & ~0x3ull);
+        if(bp != ~0ull && mem && (usize)(u32)bp + 4 <= mem->rdram.size()) {
+          const u8* q = mem->rdram.data() + (u32)bp;
+          std::fprintf(stderr, "[fault]   badvPhys=0x%08x w=%08x\n", (u32)bp,
+                       ((u32)q[0]<<24)|((u32)q[1]<<16)|((u32)q[2]<<8)|q[3]);
+        }
+        // Volcado de la TLB. Perfect Dark ejecuta desde kuseg 0x70000000, o sea que
+        // TODO su codigo llega por una traduccion de la TLB: si la entrada que cubre el
+        // EPC apunta a una pagina fisica equivocada, la CPU ejecuta datos y el fallo que
+        // se ve aqui es una consecuencia, no la causa. Solo se imprimen las entradas
+        // validas, y se marca con '*' la que cubre el EPC.
+        {
+          u64 evpn = (u64)(u32)epc;
+          for(int t = 0; t < 32; t++) {
+            const TlbEntry& e = tlb[t];
+            if(!e.hi && !e.lo0 && !e.lo1) continue;
+            u64 msk = e.mask | 0x1fffull;
+            bool cov = ((evpn & ~msk) == (e.hi & ~msk & 0xffffffffull));
+            std::fprintf(stderr, "[fault]   %ctlb%02d hi=%016llx lo0=%016llx lo1=%016llx mask=%08x g=%d\n",
+                         cov ? '*' : ' ', t, (unsigned long long)e.hi,
+                         (unsigned long long)e.lo0, (unsigned long long)e.lo1,
+                         (u32)e.mask, (int)e.global);
+          }
+        }
+        // Quien escribio por ultima vez cada bloque de 16 B del codigo que se estaba ejecutando.
+      // Si el codigo esta pisado, esto dice el autor (KESTREL_WRTAG=1).
+      if(wrtag::tag) {
+        u32 base = (u32)pp & ~15u;
+        for(int b = 0; b < 5 && pp != ~0ull; b++) {
+          u32 blk = (base + (u32)b * 16) >> 4;
+          if(blk >= wrtag::blocks) continue;
+          std::fprintf(stderr, "[fault]   wrtag phys=0x%06x %-12s pc=0x%08x\n",
+                       base + (u32)b * 16, wrtag::name(wrtag::tag[blk]), wrtag::pcOf[blk]);
+        }
+      }
+      memAbort = ab;
+        for(int r = 1; r < 32; r++)
+          std::fprintf(stderr, "   $%-2d=%016llx%s", r, (unsigned long long)gpr[r], (r % 4) ? "" : "\n");
+        std::fprintf(stderr, "\n");
+        std::fflush(stderr);
+      }
       // KESTREL_FAULTSTOP=1: un fallo del guest (deref nulo, direccion mala) es la ventana
       // exacta del bug; parar AQUI conserva el anillo de eventos del RCP intacto.
       static const bool faultStop = std::getenv("KESTREL_FAULTSTOP") != nullptr;

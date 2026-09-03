@@ -444,6 +444,30 @@ auto System::run() -> void {
         std::fprintf(stderr, "[wdog] status=%08x cause=%08x epc=%016llx count=%08x compare=%08x\n",
                      (u32)cpu.cop0[12], (u32)cpu.cop0[13], (unsigned long long)cpu.cop0[14],
                      (u32)cpu.cop0[9], (u32)cpu.cop0[11]);
+        // Un TLBL/TLBS o un bucle de excepcion solo se explica con la MMU delante: que VA
+        // fallo, con que ASID, y que hay realmente en las 32 entradas. Wired/Random deciden
+        // ademas si un TLBWR pudo pisar una entrada que el juego da por estatica.
+        std::fprintf(stderr, "[wdog] badva=%016llx entryhi=%016llx index=%08x wired=%u random=%u\n",
+                     (unsigned long long)cpu.cop0[CPU::C0_BadVAddr], (unsigned long long)cpu.cop0[CPU::C0_EntryHi],
+                     (u32)cpu.cop0[CPU::C0_Index], (u32)cpu.cop0[CPU::C0_Wired], (u32)cpu.cop0[CPU::C0_Random]);
+        for(int i = 0; i < 32; i++) {
+          const auto& e = cpu.tlb[i];
+          if(!e.lo0 && !e.lo1 && !e.hi) continue;
+          std::fprintf(stderr, "[wdog]   tlb[%02d] hi=%016llx lo0=%016llx lo1=%016llx mask=%08llx g=%d\n",
+                       i, (unsigned long long)e.hi, (unsigned long long)e.lo0,
+                       (unsigned long long)e.lo1, (unsigned long long)e.mask, (int)e.global);
+        }
+        // Histograma de excepciones: separa de un vistazo "el guest toma interrupciones
+        // normales" de "esta en una tormenta de TLBL/AdEL". Es contador puro, sin coste.
+        {
+          static const char* nm[16] = {"Int","Mod","TLBL","TLBS","AdEL","AdES","IBE","DBE",
+                                       "Sys","Bp","RI","CpU","Ov","Tr","?","FPE"};
+          std::fprintf(stderr, "[wdog] exc:");
+          for(int i = 0; i < 16; i++)
+            if(cpu.excCodeHist[i]) std::fprintf(stderr, " %s(%d)=%llu", nm[i], i,
+                                                (unsigned long long)cpu.excCodeHist[i]);
+          std::fprintf(stderr, "\n");
+        }
         memory.miDump();
         {
           // La PC puede venir de un segmento TLB (Perfect Dark ejecuta desde 0x70000000):
@@ -478,10 +502,21 @@ auto System::run() -> void {
             u32 state = idst >> 16, pc = rd32(a + 0x11c);
             if(state != 1 && state != 2 && state != 4 && state != 8) continue;
             if(pri > 255 || id > 64) continue;
-            if((pc & 3) || pc < 0x8000'0000u || pc >= 0x8080'0000u) continue;
-            u32 q = rd32(a + 0x08), sr = rd32(a + 0x118), ra = rd32(a + 0x110);
-            std::fprintf(stderr, "[wdog]   thread@%08x id=%u pri=%u state=%u queue=%08x pc=%08x ra=%08x sr=%08x\n",
-                         0x8000'0000u + a, id, pri, state, q, pc, ra, sr);
+            // El PC de un OSThread no tiene por que estar en KSEG0: Perfect Dark pagina su
+            // codigo por TLB y sus hilos viven en 0x70000000 (lib) y 0x7f000000 (game). Un
+            // filtro a KSEG0 descartaba TODOS los hilos reales y solo dejaba falsos positivos.
+            bool pcOk = (pc & 3) == 0 && ((pc >= 0x8000'0000u && pc < 0x8080'0000u) ||
+                                          (pc >= 0x7000'0000u && pc <  0x8000'0000u));
+            if(!pcOk) continue;
+            // Contexto libultra: base +0x20; ra=+0xE0, sp=+0xD0, sr=+0xF8, pc=+0xFC (u64 -> mitad baja).
+            u32 q  = rd32(a + 0x08), sr = rd32(a + 0x118);
+            u32 ra = rd32(a + 0x104), sp = rd32(a + 0x0f4), flags = idst & 0xffffu;
+            // flags bit1 = OS_FLAG_FAULT: libultra para el hilo que toma una excepcion no
+            // manejada y lo saca de la cola de ejecucion. Su cause/badvaddr quedan en el
+            // contexto (ctx+0x100/+0x104) y son lo unico que explica el cuelgue posterior.
+            u32 cause = rd32(a + 0x120), badv = rd32(a + 0x124);
+            std::fprintf(stderr, "[wdog]   thread@%08x id=%u pri=%u state=%u flags=%04x queue=%08x pc=%08x ra=%08x sp=%08x sr=%08x cause=%08x badva=%08x\n",
+                         0x8000'0000u + a, id, pri, state, flags, q, pc, ra, sp, sr, cause, badv);
             if(qn < 8) { bool dup = false;
               for(int k = 0; k < qn; k++) if(qs[k] == q) dup = true;
               if(!dup && q >= 0x8000'0000u && q < 0x8080'0000u) qs[qn++] = q; }

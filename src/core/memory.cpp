@@ -1,3 +1,4 @@
+#include "wrtag.hpp"
 #include "../telemetry/hostprof.hpp"
 #include "memory.hpp"
 #include <chrono>
@@ -74,6 +75,7 @@ static auto mempakFormat(std::vector<u8>& p) -> void;
 
 auto Memory::reset(bool expansionPak) -> void {
   rdram.assign(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000, 0);
+  wrtag::init((u32)rdram.size());
   dmem.assign(DMEM_SIZE, 0);
   imem.assign(IMEM_SIZE, 0);
   pifram.assign(PIFRAM_SIZE, 0);
@@ -634,6 +636,7 @@ auto Memory::miRepeatStore(u32 phys, u64 value, u32 sz) -> void {
 
 auto Memory::write8(u32 addr, u8 value) -> void {
   if(isvWrite(addr & 0x1fff'ffff, value, 1)) return;
+  wrtag::mark(addr & 0x1fff'ffff, wrtag::kCpu, (u32)storePc);
   watchHit(addr & 0x1fff'ffff, 1, value, false);
   if(isCart(addr & 0x1fff'ffff)) { cartWrite(addr & 0x1fff'ffff, value, 1); return; }
   if(isSaveDomain(addr & 0x1fff'ffff) && saveType != SaveType::None) { saveWrite(addr & 0x1fff'ffff, value, 1); return; }
@@ -645,6 +648,7 @@ auto Memory::write8(u32 addr, u8 value) -> void {
 }
 auto Memory::write16(u32 addr, u16 value) -> void {
   if(isvWrite(addr & 0x1fff'ffff, value, 2)) return;
+  wrtag::markRange(addr & 0x1fff'ffff, 2, wrtag::kCpu, (u32)storePc);
   watchHit(addr & 0x1fff'ffff, 2, value, false);
   if(isCart(addr & 0x1fff'ffff)) { cartWrite(addr & 0x1fff'ffff, value, 2); return; }
   if(isSaveDomain(addr & 0x1fff'ffff) && saveType != SaveType::None) { saveWrite(addr & 0x1fff'ffff, value, 2); return; }
@@ -655,6 +659,7 @@ auto Memory::write16(u32 addr, u16 value) -> void {
 }
 auto Memory::write32(u32 addr, u32 value) -> void {
   if(isvWrite(addr & 0x1fff'ffff, value, 4)) return;
+  wrtag::markRange(addr & 0x1fff'ffff, 4, wrtag::kCpu, (u32)storePc);
   watchHit(addr & 0x1fff'ffff, 4, value, false);
   if(isCart(addr & 0x1fff'ffff)) { cartWrite(addr & 0x1fff'ffff, value, 4); return; }
   if(isSaveDomain(addr & 0x1fff'ffff) && saveType != SaveType::None) { saveWrite(addr & 0x1fff'ffff, value, 4); return; }
@@ -688,6 +693,7 @@ auto Memory::write64(u32 addr, u64 value) -> void {
 // --- RCP MMIO register file --------------------------------------------------
 auto Memory::rcpReg32(u32 phys) -> u32 { return mmioRead32(phys); }
 auto Memory::rcpRegWrite32(u32 phys, u32 value) -> void {
+  wrtag::markRange(phys, 4, wrtag::kCpu, (u32)storePc);
   watchHit(phys, 4, value, false);
   mmioWrite32(phys, value);
 }
@@ -977,9 +983,23 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // Drenar aqui serializaba RSP y RDP: medido con el perfilador de host, el hilo del RSP
         // pasaba el 44% de su tiempo dormido en este punto mientras el RDP vaciaba el frame
         // entero, y luego el RDP paraba mientras el RSP producia el siguiente.
-        // KESTREL_RDPDRAIN=1 recupera el comportamiento anterior para bisecar.
-        static const bool rdpDrainOnStart = std::getenv("KESTREL_RDPDRAIN") != nullptr;
-        if(rcpMode == RcpMode::Threaded && rdpDrainOnStart) rdpDrain();
+        // ...pero ese razonamiento solo vale mientras el buffer sea el MISMO. Un START fresco
+        // instala OTRO buffer de comandos, y ahi el juego deja de mirar DPC_CURRENT: da por
+        // muerto lo anterior y reescribe la memoria. Con el RDP en su hilo puede quedar trabajo
+        // del buffer viejo por delante, y el rasterizador acababa leyendo comandos que el
+        // microcodigo ya habia reescrito, se desincronizaba a media instruccion y terminaba
+        // pintando el framebuffer encima del codigo del guest (Perfect Dark: SET_COLOR_IMAGE con
+        // direccion arbitraria, 97727 pixeles dentro de 0x1000-0x60000; ver docs/PD-DERAIL.md).
+        // La cura NO es esperar aqui: el hardware nunca para a la CPU al escribir DPC_END, y
+        // medido cuesta ~13-15 % de pared (SM64/200 intercambios: 3,57 -> 4,10 s en threaded-jit,
+        // 3,56 -> 4,09 s en prdp-jit) porque serializa RSP y RDP, ademas de alejar la fidelidad
+        // del oraculo lockstep (campos VI por intercambio 4,05 -> 3,31, oraculo 4,09).
+        // La cura es que el consumidor lea una COPIA del tramo (rdpSnapshot), tomada en el kick,
+        // que es un instante de lectura que el hardware tambien puede elegir. Aqui solo se cambia
+        // de generacion para que la copia del buffer nuevo no pise la del viejo aun sin consumir.
+        // KESTREL_RDPDRAIN=1 recupera el drenado, solo para bisecar.
+        static const bool drainOnStart = std::getenv("KESTREL_RDPDRAIN") != nullptr;
+        if(rcpMode == RcpMode::Threaded) { if(drainOnStart) rdpDrain(); else rdpGen ^= 1; }
         rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u;
         ev("rdpst", rcp.dpc_start, rcp.dpc_end);
         // HW recarga CURRENT desde START en el propio kick y la CPU lo ve al momento
@@ -1129,6 +1149,8 @@ auto Memory::piDma(bool toCart) -> void {
           u8 b = dram < rdram.size() ? rdram[dram] : 0;
           saveWrite(cart, b, 1);
         } else {                                        // save -> RDRAM (load)
+          wrtag::mark(dram, wrtag::kPiDma, 0);
+          if(watchAddr) watchHit(dram, 1, 0, true);
           if(dram < rdram.size()) rdram[dram] = (u8)saveRead(cart, 1);
         }
         dram++; cart++;
@@ -1183,6 +1205,8 @@ auto Memory::piDma(bool toCart) -> void {
       cart += 2;
       length -= 2;
     }
+    wrtag::markRange(dram, (u32)std::max(0, curLen - misalign), wrtag::kPiDma, 0);
+    if(watchAddr) watchHit(dram, (u32)std::max(0, curLen - misalign), 0, true);
     if(firstBlock && curLen < 127 - misalign) {
       for(s32 i = 0; i < curLen - misalign; i++) {
         if(dram < rdram.size()) rdram[dram] = blk[i];
@@ -1284,7 +1308,7 @@ auto Memory::spDma(bool toRam) -> void {
         u32 mo = (memOff + i) & 0xfff;
         u32 d  = dramAddr + i;
         if(d >= rdram.size()) break;
-        if(toRam) { watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
+        if(toRam) { wrtag::mark(d, wrtag::kSpDma, 0); watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
         else      sp[mo]   = rdram[d];
       }
     } else {
@@ -1349,7 +1373,7 @@ auto Memory::dpcAdvance() -> void {
     std::fflush(stderr);
   }
   if(rcpMode == RcpMode::Threaded && !rdpInline) rdpSubmit(cur, rcp.dpc_end, xbus);
-  else                             rdpRunJob(cur, rcp.dpc_end, xbus);
+  else                             rdpRunJob(cur, rcp.dpc_end, xbus, rdram.data());
 }
 
 auto Memory::siDma(bool toPif) -> void {
@@ -1359,7 +1383,7 @@ auto Memory::siDma(bool toPif) -> void {
     pifProcessJoybus();   // execute the command block so responses are ready for read-back
   } else {
     if(watchAddr) std::fprintf(stderr, "[siDma] PIF->RDRAM dram=0x%06x by pc=0x%08x\n", dram, (u32)storePc);
-    for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) { watchHit(dram + i, 1, pifram[i], true); rdram[dram + i] = pifram[i]; }
+    for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) { wrtag::mark(dram + i, wrtag::kSiDma, 0); watchHit(dram + i, 1, pifram[i], true); rdram[dram + i] = pifram[i]; }
   }
   rcp.si_status = 0;
   raiseIntr(MI_SI);
@@ -1589,7 +1613,35 @@ auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
   return false;
 }
 
-auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
+// DPC_CURRENT es UN puntero de lectura, el del command processor. Al acabar un span no se
+// puede publicar su final si detras hay spans encolados que empiezan mas abajo: el FIFO de
+// F3DEX2 es circular y el microcodigo decide que hay hueco libre comparando su puntero de
+// escritura contra CURRENT. Si CURRENT dice "tope del buffer" mientras siguen encolados
+// tramos que arrancan en la base, el microcodigo da por consumido el ring entero, envuelve
+// y reescribe comandos que el RDP todavia no ha leido: el rasterizador acaba decodificando
+// basura a media instruccion, saca un SET_COLOR_IMAGE con direccion arbitraria y pinta el
+// framebuffer encima del codigo del guest (visto en Perfect Dark: pixeles RGBA5551 en
+// 0x0104d0, 0x009a74...). En hardware esto no pasa porque el puntero de lectura es unico y
+// solo avanza cuando el RDP consume de verdad. Aqui la cola de trabajos es el artefacto, asi
+// que al cerrar un span publicamos el arranque del siguiente pendiente en vez de nuestro fin.
+auto Memory::rdpPublishCurrent(u32 fallback) -> void {
+  u32 pub = fallback;
+  u32 qlo = 0, qhi = 0;
+  {
+    std::lock_guard<std::mutex> lk(rdpMx);
+    if(!rdpQueue.empty()) pub = rdpQueue.front().current;
+    for(const auto& j : rdpQueue) {
+      u32 a = j.current & 0x00ff'ffffu, b = j.end & 0x00ff'ffffu;
+      if(!qhi || a < qlo) qlo = a;
+      if(b > qhi) qhi = b;
+    }
+  }
+  wrtag::setWin(0, 0, 0);
+  wrtag::setWin(1, qlo, qhi);
+  rcp.dpc_current.store(pub, std::memory_order_release);
+}
+
+auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> void {
   // GPU path (paraLLEl-RDP): opt-in via KESTREL_PRDP. Lazily brought up on first job with
   // this RDRAM block; when live it consumes the FIFO on the GPU instead of SoftRDP. The
   // guest RDRAM vector is allocated once and never resized, so its pointer is stable for
@@ -1602,15 +1654,16 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   rdpHasResume = false;
   rdpLastEnd = end;
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
+  wrtag::setWin(0, current & 0x00ff'ffffu, end & 0x00ff'ffffu);
   if(vrdp::active()) {
     // `stop` puede quedar delante de `end` si el ultimo comando del span esta partido: el
     // command processor no ejecuta comandos a medias. Ese trozo NO se pierde -- el siguiente
     // kick reanuda desde ahi porque dpc_submitted retrocede al punto de parada.
     u32 stop = end;
-    bool sync = vrdp::runFifo(rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus,
+    bool sync = vrdp::runFifo(cmdSrc, (u32)rdram.size(), dmem.data(), current, end, xbus,
                               &stop);
     if(stop != end) { rdpResume = stop; rdpHasResume = true; }
-    rcp.dpc_current.store(stop, std::memory_order_release);
+    rdpPublishCurrent(stop);
     if(sync) {
       rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
       rcp.dpSyncs++;                       // misma contabilidad que el camino SoftRDP
@@ -1622,14 +1675,15 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus) -> void {
   // El rasterizador publica su puntero de lectura en DPC_CURRENT mientras consume el
   // FIFO: es lo que el microcodigo mira para saber cuanto buffer puede reutilizar.
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
+  wrtag::setWin(0, current & 0x00ff'ffffu, end & 0x00ff'ffffu);
   softRdp.curOut = &rcp.dpc_current;
+  softRdp.cmdSrc = cmdSrc;
   u32 nc = softRdp.run(*this, current, end, xbus);
   // stopAt vive en el espacio de direcciones que usa SoftRdp::run (enmascarado igual que
   // alli), asi que la comparacion se hace contra el mismo `end` enmascarado.
   const u32 endMasked = xbus ? (end & 0x0fff'ffffu) : (end & 0x00ff'ffffu);
   if(softRdp.stopAt != endMasked) { rdpResume = softRdp.stopAt; rdpHasResume = true; }
-  rcp.dpc_current.store(softRdp.stopAt == endMasked ? end : softRdp.stopAt,
-                        std::memory_order_release);
+  rdpPublishCurrent(softRdp.stopAt == endMasked ? end : softRdp.stopAt);
   static const bool rdpTrace = std::getenv("KESTREL_RDPTRACE") != nullptr;
   if(rdpTrace) {
     static u32 dpCalls = 0;
@@ -1660,6 +1714,17 @@ auto Memory::evDump(u32 n) -> void {
   std::fflush(stderr);
 }
 
+auto Memory::rdpSnapshot(u32 current, u32 end) -> void {
+  // Copia [current, end) de RDRAM al buffer de la generacion en curso. Se reserva al vuelo
+  // (una vez, del tamano de la RDRAM) para no pagar la memoria en lockstep ni en las pruebas.
+  auto& sh = rdpShadow[rdpGen];
+  if(sh.size() != rdram.size()) sh.assign(rdram.size(), 0);
+  u32 a = current & 0x00ff'ffffu, b = end & 0x00ff'ffffu;
+  if(b > (u32)rdram.size()) b = (u32)rdram.size();
+  if(a >= b) return;
+  std::memcpy(sh.data() + a, rdram.data() + a, b - a);
+}
+
 auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   bool wake;
   {
@@ -1671,10 +1736,15 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
     // esta sin empezar) y este continua exactamente donde acababa, con el mismo modo de bus,
     // es el mismo tramo de FIFO partido en dos escrituras: unirlos es lo que hace el
     // hardware. DPC_CURRENT acaba en el mismo sitio y se ejecutan los mismos comandos.
-    if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus)
+    // La copia se toma con el mutex cogido y ANTES de publicar el trabajo: el worker no
+    // puede ver el tramo hasta que sus bytes estan a salvo. Solo el camino RDRAM; en xbus
+    // los comandos viven en DMEM, que el RSP no reescribe mientras su tarea corre.
+    if(!xbus) rdpSnapshot(current, end);
+    if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus
+       && rdpQueue.back().gen == rdpGen)
       rdpQueue.back().end = end;
     else
-      rdpQueue.push_back({current, end, xbus});
+      rdpQueue.push_back({current, end, xbus, rdpGen});
     rdpBusy.store(true, std::memory_order_relaxed);
     // Si el worker no esta dormido en el condvar, volvera a coger este mutex al terminar el
     // trabajo en curso y vera la cola llena: la notificacion sobra. Con esperador, notify_all
@@ -1686,6 +1756,11 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   // puede despertar al drenador, cuyo predicado sigue falso, y el worker se queda dormido
   // con trabajo encolado -- wakeup perdido: la CPU espera un BREAK que nunca llega.
   if(wake) rdpCv.notify_all();
+  // KESTREL_SYNCRDP=1: bisecar la corrupcion de RDRAM. Deja el RSP en su hilo pero
+  // obliga a la CPU a esperar a que el RDP consuma el FIFO antes de seguir, o sea el
+  // RDP pasa a ser efectivamente lockstep. No es fiel al hardware; solo diagnostico.
+  static const bool syncRdp = std::getenv("KESTREL_SYNCRDP") != nullptr;
+  if(syncRdp) rdpDrain();
 }
 
 auto Memory::rdpWorkerLoop() -> void {
@@ -1716,7 +1791,10 @@ auto Memory::rdpWorkerLoop() -> void {
       job = rdpQueue.front(); rdpQueue.pop_front();
     }
     auto t0 = std::chrono::steady_clock::now();
-    rdpRunJob(job.current, job.end, job.xbus);
+    // Los comandos salen de la copia de SU generacion; en xbus no hay copia (DMEM).
+    const u8* src = (!job.xbus && !rdpShadow[job.gen].empty()) ? rdpShadow[job.gen].data()
+                                                              : rdram.data();
+    rdpRunJob(job.current, job.end, job.xbus, src);
     rdpBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
     rdpJobsRun.fetch_add(1, std::memory_order_relaxed);
@@ -1917,6 +1995,10 @@ auto Memory::rspSubmitKick() -> void {
     ev("sp.kick", rcp.sp_pc, rcp.sp_status.load());
   }
   rspCv.notify_all();   // ver nota en rdpSubmit: worker y drenador comparten condvar
+  // KESTREL_SYNCRSP=1: la pareja de KESTREL_SYNCRDP. El RDP sigue en su hilo, pero la
+  // CPU espera a que el microcodigo termine antes de seguir. Solo diagnostico.
+  static const bool syncRsp = std::getenv("KESTREL_SYNCRSP") != nullptr;
+  if(syncRsp) rspAwaitIdle();
 }
 
 auto Memory::rspWorkerLoop() -> void {

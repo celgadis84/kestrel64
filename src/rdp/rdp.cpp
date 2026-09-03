@@ -1,3 +1,4 @@
+#include "../core/wrtag.hpp"
 #include "rdp.hpp"
 #include <cstdlib>
 #include "../core/memory.hpp"
@@ -73,19 +74,57 @@ template<typename V>
 inline auto rd64(const V& m, u32 p) -> u64 {
   return (u64(rd32(m, p)) << 32) | rd32(m, p + 4);
 }
+// Igual, pero sobre un puntero crudo: la instantanea del FIFO que el productor dejo al
+// encolar el tramo (mismo tamano y mismas direcciones fisicas que la RDRAM, ver
+// Memory::rdpSnapshot). `n` acota como lo hace m.size().
+inline auto rd32p(const u8* m, u32 p, u32 n) -> u32 {
+  if(p + 3 >= n) return 0;
+  return (u32(m[p]) << 24) | (u32(m[p+1]) << 16) | (u32(m[p+2]) << 8) | u32(m[p+3]);
+}
+inline auto rd64p(const u8* m, u32 p, u32 n) -> u64 {
+  return (u64(rd32p(m, p, n)) << 32) | rd32p(m, p + 4, n);
+}
+// KESTREL_RDPGUARD=<lo>:<hi>: chiva cualquier escritura del RDP a RDRAM dentro de ese
+// rango fisico (hasta 40 veces). Sirve para probar si el rasterizador esta pisando codigo
+// o heap del guest por un color/z image mal programado. Coste apagado = una comparacion
+// contra un global que siempre esta en cache.
+struct RdpGuardRange { u32 lo = 0, hi = 0; };
+inline auto rdpGuardRange() -> RdpGuardRange {
+  RdpGuardRange r;
+  if(const char* e = std::getenv("KESTREL_RDPGUARD")) {
+    char* q = nullptr; r.lo = (u32)std::strtoul(e, &q, 0);
+    if(q && *q == ':') r.hi = (u32)std::strtoul(q + 1, nullptr, 0);
+  }
+  return r;
+}
+inline const RdpGuardRange g_rg = rdpGuardRange();
+inline u32 g_rgLo = g_rg.lo, g_rgHi = g_rg.hi;
+inline int g_rgN = 0;
+inline auto rdpGuard(u32 p, u32 v, int nb) -> void {
+  if(p < g_rgLo || p >= g_rgHi) return;
+  if(++g_rgN > 40) return;
+  std::fprintf(stderr, "[rdpguard] write%d phys=0x%06x v=0x%08x\n", nb, p, v);
+  std::fflush(stderr);
+}
 template<typename V>
 inline auto wr8(V& m, u32 p, u8 v) -> void {
   if(p >= m.size()) return;
+  if(g_rgHi) rdpGuard(p, v, 8);
+  wrtag::mark(p, wrtag::kRdp, 0);
   m[p] = v;
 }
 template<typename V>
 inline auto wr16(V& m, u32 p, u16 v) -> void {
   if(p + 1 >= m.size()) return;
+  if(g_rgHi) rdpGuard(p, v, 16);
+  wrtag::markRange(p, 2, wrtag::kRdp, 0);
   m[p] = u8(v >> 8); m[p+1] = u8(v);
 }
 template<typename V>
 inline auto wr32(V& m, u32 p, u32 v) -> void {
   if(p + 3 >= m.size()) return;
+  if(g_rgHi) rdpGuard(p, v, 32);
+  wrtag::markRange(p, 4, wrtag::kRdp, 0);
   m[p] = u8(v >> 24); m[p+1] = u8(v >> 16); m[p+2] = u8(v >> 8); m[p+3] = u8(v);
 }
 // sign-extend an n-bit field
@@ -1419,7 +1458,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   // Command fetch source: RDRAM by physical address, or DMEM (12-bit wrap) in xbus
   // mode. Big-endian 64-bit word either way. Pixel writes still target RDRAM.
   auto fetch = [&](u32 a) -> u64 {
-    if(!xbus) return rd64(m, a);
+    if(!xbus) return cmdSrc ? rd64p(cmdSrc, a, (u32)m.size()) : rd64(m, a);
     u64 v = 0;
     for(int i = 0; i < 8; i++) v = (v << 8) | dm[(a + i) & 0xfff];
     return v;
@@ -1442,6 +1481,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     // Publicar el puntero de lectura ANTES de consumir el comando: el productor debe
     // ver como ocupado todo lo que aun no se ha leido.
     if(curOut) curOut->store(cur, std::memory_order_release);
+    if(wrtag::tag) wrtag::moveWinLo(0, cur);
     u64 cmd = fetch(cur);
     u32 op = (cmd >> 56) & 0x3f;
     if(ops) {
@@ -1578,7 +1618,11 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       // excepcion de libultra (0x0-0x400) ni del area del OS. Si aparece aqui es que
       // el FIFO se ha desincronizado o el puntero llego corrupto: avisar con el
       // comando crudo y la posicion del FIFO para poder rastrear el origen.
-      if(ci_addr < 0x400u || citrace) {
+      // El suelo por defecto son los vectores de excepcion; KESTREL_CIFLOOR=<phys> lo
+      // sube para cazar un framebuffer que aterriza sobre el codigo del juego.
+      static const u32 ciFloor = []{ const char* e = std::getenv("KESTREL_CIFLOOR");
+                                     return e ? (u32)std::strtoul(e, nullptr, 0) : 0x400u; }();
+      if(ci_addr < ciFloor || citrace) {
         lowCi = true; lowMark = pxWrites;
         std::fprintf(stderr, "[rdp!] SET_COLOR_IMAGE bajo: addr=%06x cmd=%016llx fifo=%08x\n",
                      ci_addr, (unsigned long long)cmd, cur);
