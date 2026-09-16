@@ -811,8 +811,8 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     // Las dos se evaluan en el reloj de invitado del lector (ver dpcCurrentFor). En
     // Lockstep el trabajo se ejecuta dentro del propio DPC_END y dpBusyAt() ya vale false
     // antes de que nadie pueda leer: se lee idle, como en HW.
-    case 0x08: return dpcCurrentFor(cartNow());
-    case 0x0c: return dpcStatusFor(cartNow());
+    case 0x08: return dpcCurrentFor(cartNow(), 0);
+    case 0x0c: return dpcStatusFor(cartNow(), 0);
     // Performance counters, 24-bit each. The RDP accumulates them per rasterized
     // span (see SoftRdp::accountPixels); games time the RDP with these.
     case 0x10: return rcp.dpc_clock.load(std::memory_order_relaxed)    & 0xff'ffff;
@@ -2949,15 +2949,15 @@ auto Memory::dpReadSync(u64 now) -> void {
   rspRdvAt.store(0, std::memory_order_release);
 }
 
-auto Memory::dpcCurrentFor(u64 now) -> u32 {
-  dpcRdCur.fetch_add(1, std::memory_order_relaxed);
+auto Memory::dpcCurrentFor(u64 now, u32 who) -> u32 {
+  bumpOwned(dpcRdCur[who]);
   if(now > dpMaxQuery.load(std::memory_order_relaxed))
     dpMaxQuery.store(now, std::memory_order_relaxed);
   if(!dpGuestOn()) return rcp.dpc_current.load(std::memory_order_acquire);
   u64 c   = dpCompletedAt(now);
   u64 sub = dpSubSeq.load(std::memory_order_acquire);
   if(sub > c) {
-    dpcRdOpen.fetch_add(1, std::memory_order_relaxed);
+    bumpOwned(dpcRdOpen[who]);
     // El trabajo `c` esta abierto para este reloj. DPC_CURRENT no se queda clavado en la
     // direccion de apertura: el motor va consumiendo el FIFO comando a comando y el puntero
     // avanza con el. Es lo que mira el microcodigo grafico para saber cuanto buffer puede
@@ -2980,9 +2980,9 @@ auto Memory::dpcCurrentFor(u64 now) -> u32 {
   return rcp.dpc_current.load(std::memory_order_acquire);
 }
 
-auto Memory::dpcStatusFor(u64 now) -> u32 {
+auto Memory::dpcStatusFor(u64 now, u32 who) -> u32 {
   u32 st = rcp.dpc_status.load(std::memory_order_acquire) | 0x80u;  // CBUF_READY
-  dpcRdSt.fetch_add(1, std::memory_order_relaxed);
+  bumpOwned(dpcRdSt[who]);
   if(!dpGuestOn()) {
     u32 pend = dpPending.load(std::memory_order_acquire);
     if(pend)      st |= 0x100u | 0x40u;
@@ -2992,11 +2992,11 @@ auto Memory::dpcStatusFor(u64 now) -> u32 {
   u64 c   = dpCompletedAt(now);
   u64 out = dpSubSeq.load(std::memory_order_acquire) - c;   // trabajos vivos para ESTE reloj
   if(out >= 1) { st |= 0x100u | 0x40u;   // DMA_BUSY | CMD_BUSY
-    dpcRdBusy.fetch_add(1, std::memory_order_relaxed); }
+    bumpOwned(dpcRdBusy[who]); }
   // END_VALID: ya hay un buffer esperando ademas del que el motor esta leyendo, o sea que el
   // par START/END esta lleno y no cabe otro.
   if(out >= 2) { st |= 0x200u;
-    dpcRdEndV.fetch_add(1, std::memory_order_relaxed); }
+    bumpOwned(dpcRdEndV[who]); }
   return st;
 }
 

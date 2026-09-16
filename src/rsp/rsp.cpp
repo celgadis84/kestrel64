@@ -446,13 +446,13 @@ auto Rsp::idleSkip(u64 now, u32 val) -> void {
   publishExact();
   cyclesRun.fetch_add(k * len, std::memory_order_relaxed);
   idleAt += k * len;
-  idleSkips.fetch_add(1, std::memory_order_relaxed);
-  idleIters.fetch_add(k, std::memory_order_relaxed);
+  bumpOwned(idleSkips);                 // solo escribe el hilo del RSP
+  idleIters.store(idleIters.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
 }
 
 // --- COP0 register access (SP + DPC) ----------------------------------------
 auto Rsp::mfc0(int rt, int rd) -> void {
-  if((rd & 0xf) == 10) mem->rcp.dpcCurReads.fetch_add(1, std::memory_order_relaxed);  // DPC_CURRENT
+  if((rd & 0xf) == 10) bumpOwned(mem->rcp.dpcCurReads);  // DPC_CURRENT (solo escribe el RSP)
   // Directo al decodificador de MMIO. `Memory::read32` empieza por cart, dominio de save
   // y `resolve`, y `resolve` recorre la lista de regiones entera antes de rendirse -- y
   // estas dos bases SIEMPRE caen fuera de todas ellas, asi que el valor es el mismo. El
@@ -463,7 +463,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
   if(rd & 8) {
     const u32 r = rd & 7;
     if(r == 2 || r == 3) {
-      mem->dpcRdRsp.fetch_add(1, std::memory_order_relaxed);
+      bumpOwned(mem->dpcRdRsp);
       // El sondeo del FIFO del RDP se responde en el instante de invitado del RSP, asi que
       // ese instante tiene que ser el de ESTA instruccion, no el de la ultima frontera de
       // tanda: cuantas vueltas da el bucle de espera es justo lo que cambiaba entre corridas.
@@ -473,7 +473,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // la barrera del SP la deje llegar hasta aqui. Ver Memory::dpReadSync.
       if(mem->dpReadAhead(now)) { publishExact(); mem->dpReadSync(now); }
       mem->rdpAwaitGuest(now);
-      const u32 val = r == 2 ? mem->dpcCurrentFor(now) : mem->dpcStatusFor(now);
+      const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
       setR(rt, val);
       idleSkip(now, val);
       return;
@@ -1884,7 +1884,7 @@ auto Rsp::dumpDpWait() const -> void {
                (unsigned long long)comp, (unsigned)mem->rspBusy.load(),
                (unsigned)((mem->rcpPend.load() >> 2) & 1u),
                (unsigned long long)exactCycles(), (unsigned long long)mem->spKickOps,
-               (unsigned long long)mem->spKickCycles, mem->dpcCurrentFor(nw));
+               (unsigned long long)mem->spKickCycles, mem->dpcCurrentFor(nw, 1));
   for(u64 k = (sub >= 3 ? sub - 3 : 0); k < sub; ++k) {
     const u32 i = (u32)(k & Memory::kDpRingM);
     std::fprintf(stderr, "[dpwait]   span %llu a=%06x..%06x t=%llu..%llu\n",

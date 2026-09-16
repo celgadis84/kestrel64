@@ -1,6 +1,7 @@
 #pragma once
 // Loom core — fundamental fixed-width types and small helpers.
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstddef>
@@ -33,6 +34,14 @@ inline auto bswap32(u32 v) -> u32 {
 }
 inline auto bswap64(u64 v) -> u64 {
   return  (u64)bswap32((u32)v) << 32 | bswap32((u32)(v >> 32));
+}
+
+// Contador atomico con UN solo hilo escritor: carga y guarda en vez de fetch_add, que en x86
+// es un LOCK XADD. Los lectores de otros hilos siguen viendo un valor coherente (puede ir una
+// unidad por detras, igual que con fetch_add). Si escribieran dos hilos se perderian cuentas:
+// usar solo donde el dueno esta claro.
+template<class A> inline auto bumpOwned(A& a) -> void {
+  a.store(a.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
 
 

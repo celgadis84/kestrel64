@@ -528,8 +528,9 @@ struct Memory {
   // del RSP su propio instante (rspGuestNow), que es lo que hace que el microcodigo vea
   // siempre lo mismo corra el anfitrion como corra.
   static auto dpGuestOn() -> bool;       // KESTREL_DPGUEST=0 vuelve al modelo de anfitrion
-  auto dpcCurrentFor(u64 now) -> u32;
-  auto dpcStatusFor(u64 now) -> u32;
+  // `who`: 0 = hilo de CPU, 1 = hilo del RSP (solo elige contador, no cambia el valor).
+  auto dpcCurrentFor(u64 now, u32 who) -> u32;
+  auto dpcStatusFor(u64 now, u32 who) -> u32;
   auto rdpAwaitGuest(u64 now) -> void;   // esperar a que el RDP alcance ese instante
 
   // CITA DE LECTURA DEL FIFO -- el RSP no puede leer el estado del RDP en un instante de
@@ -685,9 +686,13 @@ struct Memory {
   // microcodigo, cuantas ven el motor ocupado y cuantas ven END_VALID. Si dos corridas dan
   // numeros distintos, por ahi se cuela el anfitrion.
   std::atomic<u64> dpLateMax{0};
-  std::atomic<u32> dpcRdCur{0}, dpcRdSt{0}, dpcRdBusy{0}, dpcRdEndV{0}, dpAwaits{0};
+  // Por lector: [0] hilo de CPU, [1] hilo del RSP. Cada contador tiene UN solo escritor y se
+  // incrementa sin prefijo LOCK (bumpOwned): el microcodigo sondea DPC millones de veces por
+  // corrida y cada fetch_add era un LOCK XADD. Las cuentas siguen exactas.
+  std::atomic<u32> dpcRdCur[2]{}, dpcRdSt[2]{}, dpcRdBusy[2]{}, dpcRdEndV[2]{}, dpcRdOpen[2]{};
+  std::atomic<u32> dpAwaits{0};
   std::atomic<u32> dpWvBar{0}, dpWvAwait{0}, dpWvSched{0};   // quien suelta el salvavidas
-  std::atomic<u32> dpcRdRsp{0}, dpcRdOpen{0};   // reparto CPU/RSP y cuantas caen con trabajo abierto
+  std::atomic<u32> dpcRdRsp{0};   // lecturas de DPC_CURRENT/STATUS desde el RSP (solo escribe el RSP)
   // Ciclos del RCP (62,5 MHz, RSP y RDP igual) -> instrucciones-equivalentes de CPU.
   auto rcpCyclesToOps(u64 cyc) const -> u64 {
     return paceDivDen.div(cyc * paceCpuNum + paceCpuDen - 1);
