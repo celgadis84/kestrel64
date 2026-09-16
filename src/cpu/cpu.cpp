@@ -332,6 +332,7 @@ auto CPU::reset() -> void {
   llbit = false;
   if(mem) mem->cartClock = &retired;   // PI write-latch decay clock (retired-instr count)
   if(mem) mem->cartStall = stallClockCart() ? &stallOps : nullptr;  // + las ops equivalentes a las paradas de cache
+  if(mem) mem->jitGuardPtr = &jitGuard;
   if(mem) mem->cartClockPend = &jitPending;   // + lo que la cadena del JIT aun no ha commiteado
 }
 
@@ -1313,8 +1314,12 @@ auto CPU::checkInterrupts() -> void {
 [[gnu::cold, gnu::noinline]] auto CPU::deliverInterrupt() -> void {
   static int noint = std::getenv("KESTREL_NOINT") ? 1 : 0;
   if(noint) return;   // debug: suppress interrupt delivery to isolate inflate corruption
-  static int intlog = std::getenv("KESTREL_INTLOG") ? 1 : 0;
-  if(intlog) {
+  // KESTREL_INTLOG=2: TODAS, con instrucciones retiradas y MI, para comparar modos linea a linea.
+  static int intlog = std::getenv("KESTREL_INTLOG") ? std::atoi(std::getenv("KESTREL_INTLOG")) : 0;
+  if(intlog >= 2)
+    std::fprintf(stderr, "[deliver] cnt=%08x cmp=%08x fr=%u ret=%llu pc=%08x cause=%08x mi=%02x\n", (u32)cop0[C0_Count], (u32)cop0[C0_Compare], countFrac, (unsigned long long)retired,
+                 (u32)pc, (u32)cop0[C0_Cause], mem ? (u32)mem->rcp.mi_intr.load() : 0u);
+  else if(intlog) {
     static u64 n = 0;
     if((++n & 0x3f) == 0)
       std::fprintf(stderr, "[deliver] #%llu at pc=%08x cause=%08x\n",
@@ -2392,8 +2397,10 @@ auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
   // mascara de ops de 64 bits, asi que no hay comprobacion previa que saltarse), solo sin
   // pagar el indirecto. Con el anillo de depuracion armado se vuelve a execute() para no
   // perder la traza de instrucciones.
+  // Mismo reloj que en el helper de memoria (emitMemOp): las ops previas del bloque aun no
+  // estan en retired, y una LWL/SWL/LWC1... sobre MMIO fecharia su evento antes de tiempo.
   if((op >> 26) == 0x11 && !pcRingOn) cop1op(op);
-  else                                execute(op);
+  else { jitPending += off >> 2; execute(op); jitPending -= off >> 2; }
   gpr[0] = 0;                 // r0 cableado: el bloque puede leerlo como fuente después
   inDelay = justBranched;     // misma actualización que hace step() tras execute()
   // Cualquier desviación del avance secuencial (excepción vectorizada, halt, salto) significa

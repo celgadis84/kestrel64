@@ -440,7 +440,16 @@ auto Rsp::idleSkip(u64 now, u32 val) -> void {
   // es un instante de invitado. Eso es lo que devuelve rspParkWait.
   const u64 tgt = mem->rspParkWait(now, seq0);
   if(tgt <= now) { idleNoRoom++; return; }
-  u64 k = mem->rcpOpsToCycles(tgt - now) / len;
+  // Vueltas que se pueden saltar: las lecturas en cyc + j*len (j = 1..k) tienen que caer TODAS
+  // antes de `tgt`, que es lo que habria visto el bucle dando las vueltas de verdad (Lockstep).
+  // El instante de un ciclo es rcpCyclesToOps(flanco) redondeado hacia arriba, asi que el
+  // ultimo flanco antes de tgt es rcpOpsToCycles(tgt - 1). Contarlo en ciclos ABSOLUTOS, no
+  // como rcpOpsToCycles(tgt - now): `now` ya viene redondeado a ops y perdia la fraccion de
+  // ciclo del RSP -- DK64 Threaded acababa una tarea 6 ciclos antes que Lockstep.
+  const u64 absCyc  = mem->spKickEdge + (cyc - mem->spKickCycles);
+  const u64 lastCyc = mem->rcpOpsToCycles(tgt - 1);
+  if(lastCyc <= absCyc) { idleNoRoom++; return; }
+  u64 k = (lastCyc - absCyc) / len;
   if(!k) { idleNoRoom++; return; }
   if(k > (1u << 20)) k = 1u << 20;
   publishExact();
@@ -484,6 +493,17 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       idleSkip(now, val);
       return;
     }
+  }
+  // SP_STATUS: las senales (SIG0..SIG7) las escribe tambien la CPU, que en Threaded va por su
+  // cuenta. Leerlo en el instante de invitado de ESTA instruccion: primero esperar a que la CPU
+  // llegue (aun puede escribir antes de `now`), y luego no ver lo que escribio despues. El
+  // microcodigo sondea SIG0 (osSpTaskYield) en bucle; sin esto el ciclo en que cedia lo decidia
+  // el anfitrion. Ver Memory::spReadSync y Memory::spStatusForRsp.
+  if(rd == 4 && mem->rcpMode == Memory::RcpMode::Threaded) {
+    const u64 now = mem->rspGuestNowAt(exactCycles());
+    if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now); }
+    setR(rt, mem->spStatusForRsp(now));
+    return;
   }
   u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
                                       : PHYS_SP  + ((rd & 7) << 2));

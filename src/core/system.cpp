@@ -227,6 +227,32 @@ auto System::stepCpu(u64 n) -> u64 {
   // y el latch del PI. Con KESTREL_CACHECOST apagado avanza 1 por instruccion y esto
   // queda byte a byte igual que el "rspPhase += rspStepNum" de siempre.
   u64 lastGuestOps = cpu.guestOps();
+  // Lockstep: interleave the RSP at Clocks::rspInsnsPerCpuInsn() (4/3 stock).
+  // Threaded: the RSP runs to completion on its own worker (see rspWorkerLoop),
+  // so the CPU thread must NOT also step it -- that would double-execute the core.
+  // Corre tras cada paso del interprete Y tras cada bloque del JIT: un bloque que lanza el
+  // RSP (CLEAR_HALT en mitad del bloque) sigue hasta su final, y si aqui no se pusiera al
+  // dia el reloj de ese tramo se perdia (lastGuestOps ya apuntaba al final del bloque): el
+  // RSP arrancaba con los ciclos de la cola del bloque de menos y MI_SP llegaba una
+  // instruccion tarde con JIT (DK64 Lockstep).
+  auto rspInterleave = [&] {
+    u64 nowGuestOps = cpu.guestOps();
+    u64 dGuestOps   = nowGuestOps - lastGuestOps;
+    lastGuestOps    = nowGuestOps;
+    // Reloj del RCP ABSOLUTO: el RSP da un ciclo en cada flanco rcpOpsToCycles(ops) que cruza
+    // la CPU, contado desde el lanzamiento (spKickOps) y no desde el principio del paso, que
+    // con un bloque del JIT puede ser anterior al CLEAR_HALT. Antes un acumulador de fase que
+    // solo avanzaba con el RSP en marcha arrastraba el resto de la tarea anterior, y el fin
+    // caia +-1 instruccion distinto del plazo de Threaded (spCycleAt): DK64 divergia ahi.
+    if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running && dGuestOps) {
+      u64 from  = std::max(nowGuestOps - dGuestOps, memory.spKickOps);
+      u64 steps = nowGuestOps > from
+                ? memory.rcpOpsToCycles(nowGuestOps) - memory.rcpOpsToCycles(from) : 0;
+      memory.lockRspExec = true;
+      while(steps--) { memory.rsp.step(1); if(!memory.rsp.running) break; }
+      memory.lockRspExec = false;
+    }
+  };
   u64 i = 0;
   while(i < n && !cpu.halted) {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
@@ -237,7 +263,14 @@ auto System::stepCpu(u64 n) -> u64 {
       // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
       cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
       u32 k = cpu.jitTryBlock();
-      if(k) { i += k; lastGuestOps = cpu.guestOps();
+      if(k) { i += k;
+              // Un bloque nunca cruza un plazo, pero el cobro del bucle ocioso (jitIdleSkip)
+              // puede dejar el reloj EXACTAMENTE en el: el interprete lo remata tras esa
+              // instruccion, asi que aqui tambien. Sin esto MI_SI llegaba una op tarde con JIT
+              // (DK64 Lockstep divergia del interprete en el hilo ocioso).
+              if(memory.siBusy && memory.cartNow() >= memory.siDoneAt) memory.siFinish();
+              if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire();
+              rspInterleave();
               if(paced) memory.rcpPace(cpu.guestOps()); continue; }
     }
     cpu.step();
@@ -289,18 +322,7 @@ auto System::stepCpu(u64 n) -> u64 {
         if(b == pcv) { lastBpHit.store(pcv); paused.store(true); return i; }
       }
     }
-    // Lockstep: interleave the RSP at Clocks::rspInsnsPerCpuInsn() (4/3 stock).
-    // Threaded: the RSP runs to completion on its own worker (see rspWorkerLoop),
-    // so the CPU thread must NOT also step it — that would double-execute the core.
-    u64 nowGuestOps = cpu.guestOps();
-    u64 dGuestOps   = nowGuestOps - lastGuestOps;
-    lastGuestOps    = nowGuestOps;
-    if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running && dGuestOps) {
-      rspPhase += rspStepNum * dGuestOps;
-      while(rspPhase >= rspStepDen) {
-        rspPhase -= rspStepDen; memory.rsp.step(1); if(!memory.rsp.running) break;
-      }
-    }
+    rspInterleave();
   }
   return i;
 }

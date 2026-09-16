@@ -5803,3 +5803,65 @@ cogido y el worker se bloquea al publicar DPC_CURRENT), `jitIdleSkip`, COP0 del 
 - Contadores de diagnostico del sondeo de DPC por hilo lector y sin prefijo LOCK (`bumpOwned` en `types.hpp`). ~-0,3 % prdp-jit, cuentas exactas. `cyclesRun` se deja con `fetch_add` a proposito (Dekker de `rspWaiters`).
 - El RSP lee DPC_CURRENT/STATUS sin esperar al worker del RDP (salen del horario de invitado de `dpScheduleSpan`; `KESTREL_RSPDPAWAIT=1` la devuelve). La espera por pixeles pasa a los DMA del RSP (`rspDmaRdpWait`), y solo si el DMA solapa la zona color/z que el pase de coste marca al encolar (`KESTREL_DMASPAN=0` = siempre). SM64 prdp-jit 3,40 -> 3,34 s (-2 %), md5 igual. Fence de SYNC_FULL diferido: probado, neutro, descartado.
 - Zona que puede estar pintando el RDP en 4 intervalos separados (antes uno de color y otro de z): SM64 borra el z-buffer (0x400) como color image y el intervalo unico cubria casi toda la RDRAM, asi que cada DMA del RSP esperaba al motor. Esperas 401 -> 0, SM64 prdp-jit 3,34 -> 3,26 s. Publicacion con seqlock. Siguiente palanca anotada: fence perezoso para la CPU (proteger las paginas de la zona hasta que el motor drene, en vez de `dpBarrierWait`), techo medido -9 %.
+
+## 2026-09-16 — Fidelidad de tiempos: Threaded y JIT = Lockstep, evento a evento (DK64 1.500 M)
+
+Objetivo: que Lockstep (`KESTREL_THREADS=0`) sea el oraculo determinista y que Threaded y
+el JIT den EXACTAMENTE lo mismo, no solo el mismo md5 de cuadro. Metodo:
+`KESTREL_INTLOG=2` imprime cada entrega de interrupcion (`[deliver] cnt cmp fr ret pc cause mi`)
+y se comparan las lineas `cnt/cmp/fr/ret` entre modos. DK64 USA, 1.500 M instrucciones,
+10.845 entregas: **identicas en lockstep/threaded x interprete/JIT, y repetible**.
+
+Convenio de visibilidad (lo que lo sostiene todo): una tienda de la CPU en la op n
+(`cartNow()` = n) surte efecto en el flanco n+1; una escritura del RSP sellada con el
+instante de SU ciclo la ve la CPU en cuanto lee en `now >= sello`.
+
+Cambios, por orden:
+
+1. **Reloj del RCP absoluto** (`spMarkKick`, `spKickEdge`, `spCycleAt`): el ciclo j de una
+   tarea cae en el flanco `spKickEdge + j` del reloj libre de 62,5 MHz, no j ciclos despues
+   del CLEAR_HALT redondeado.
+2. **Reloj de MMIO dentro de bloques JIT** (`emitMemOp` pasa las ops previas del bloque;
+   `jitInterpOp` suma `off>>2` a `jitPending`): un evento de MMIO se fecha en su
+   instruccion, no al principio del bloque.
+3. `siFinish` y `rcpRetire` tras cada bloque JIT (como tras cada instruccion interpretada).
+4. `jitGuardPtr`: quien arma un plazo nuevo desde el hilo de CPU pone a 0 el permiso de la
+   cadena del JIT, que se calculo sin el.
+5. MFC0 Count en el JIT incluye `jitPending + idx` con `countFrac`/`stallCycles`.
+6. `rspInterleave` en Lockstep tras pasos del interprete y tras bloques JIT.
+7. **Lockstep usa el horario de invitado del RDP** (`dpScheduleSpan` + plazo MI_DP), igual
+   que Threaded; `lockRspExec` hace que durante el RSP intercalado el reloj sea el del RSP.
+8. **Visibilidad del FIFO del RDP** (`dpJobKickG`, `dpVisibleAt`): un tramo lanzado despues
+   del instante del lector no existe para DPC_CURRENT/STATUS. La CPU sella `kick+1`, el RSP
+   `kick`. Sin esto Threaded acababa una tarea de DK64 6 ciclos antes.
+9. `idleSkip` cuenta vueltas en ciclos absolutos (`rcpOpsToCycles(tgt-1)`).
+10. **SP_STATUS en tiempo de invitado para el RSP** (`Memory::spReadSync`,
+    `spStatusForRsp`, anillo `spSigRing`): F3DEX sondea SIG0 (osSpTaskYield) en bucle y la
+    CPU lo escribe en tiempo de pared. La tarea lanzada en 870.553.865 duraba 55.876 ciclos en
+    Lockstep y 66.060 / 201.692 en Threaded (segun RSPJIT). Ahora el RSP espera a que la CPU
+    llegue a su instante (sin adelanto kRdvLead: con la CPU por delante el fin de tarea naceria
+    tarde) y deshace las escrituras de senales de la CPU con sello posterior. 55.876 en todos.
+
+Descartado: fence perezoso (ver arriba), y la cita `KESTREL_DPRDV` sigue apagada (el
+aparcamiento cubre DPC; SP_STATUS tiene su propia cita sin adelanto).
+
+Pendiente anotado: carrera esporadica en Threaded vista antes de estos cambios (un MI_SP de
+mas/menos en 605 M, dos corridas distintas a 877 M) -- no reaparece en 3 corridas a 1.500 M
+tras el cambio 10; `KESTREL_RSPIDLE=0` en Threaded diverge (tareas de 7,5 M ciclos), sin
+investigar; el savestate no guarda el anillo del horario del RDP ni `dpDoneAt`.
+
+**Gates.** gate_all 477 s / gate_prdp 313 s. systemtest PASS en todos los modos, sm64 md5
+iguales. krom: `RDPTest/CPU` y `RDPTest/RSP` bajan 99,65 -> 99,07 en interp y 100 -> 99,07 en
+prdp, y se acepta con baseline nueva. Motivo: Lockstep antes pintaba el buffer del RDP en el
+instante del lanzamiento; ahora sigue el horario de invitado igual que Threaded, y la CPU lee
+DPC_CURRENT/STATUS con el relleno de 320x240 (83.177 GCLK) aun en curso. Con
+`KESTREL_CACHECOST=60` (fallos de cache cobrados, la CPU de arranque va a su velocidad real)
+vuelve a 99,65 con los valores de la consola (CURRENT=END, STATUS=0x80). El fallo esta en el
+reloj de CPU plano por defecto (CPI medio 1,4), no en el horario del RDP; la recalibracion
+del CPI base sigue pendiente.
+
+**Hueco nuevo anotado (Threaded, preexistente, sin baseline krom threaded):** los pixeles que
+el RDP escribe en RDRAM no tienen instante de invitado para la CPU. En RDPTestCPU la CPU pinta
+la "R" del titulo mientras el worker aun no ha hecho el relleno negro; Threaded la borra,
+Lockstep no (98,98 vs 99,07). El arreglo fiel es el fence perezoso por paginas (la CPU no
+toca la zona de pintado pendiente hasta que el motor drene).

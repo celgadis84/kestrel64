@@ -17,6 +17,11 @@
 #include <string_view>
 #ifdef _WIN32
 #include <windows.h>
+
+// Quien esta corriendo AHORA. Cada chip sella los eventos con SU propio reloj de invitado:
+// el RSP escribe DPC_END desde su hilo y el instante correcto es el suyo, no el numero de
+// instrucciones que la CPU lleve retiradas en ese momento de tiempo de pared.
+static thread_local bool tlIsRspThread = false;
 #endif
 
 namespace kestrel {
@@ -970,8 +975,28 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // SIGNAL bits: pairs at bits 9..24 map to SP_STATUS read bits 7..14 (SIG0..SIG7).
       // Microcode sets these at task end (SIG2 = task done) so the OS routes the SP
       // interrupt to OS_EVENT_SP (scheduler) rather than OS_EVENT_SP_BREAK.
-      for(u32 i = 0; i < 8; i++)
-        pair(9 + 2*i, 10 + 2*i, [&,i]{ clr(1u << (7+i)); }, [&,i]{ set(1u << (7+i)); });
+      {
+        // Threaded: la escritura de senales de la CPU se apunta con su instante (flanco n+1,
+        // el mismo convenio que DPC_END) para que el RSP la vea cuando le toca y no cuando el
+        // anfitrion la aplico. Una escritura del RSP es presente para el: las entradas
+        // pendientes de la CPU dejan de poder deshacer esos bits. Ver Memory::spStatusForRsp.
+        const bool track = rcpMode == RcpMode::Threaded;
+        std::unique_lock<std::mutex> lk(spSigMx, std::defer_lock);
+        if(track) lk.lock();
+        const u32 before = rcp.sp_status.load(std::memory_order_acquire);
+        for(u32 i = 0; i < 8; i++)
+          pair(9 + 2*i, 10 + 2*i, [&,i]{ clr(1u << (7+i)); }, [&,i]{ set(1u << (7+i)); });
+        const u32 changed = (before ^ rcp.sp_status.load(std::memory_order_acquire)) & 0x7f80u;
+        if(track && changed) {
+          if(tlIsRspThread) {
+            for(u32 k = 0; k < spSigCount; ++k) spSigRing[(spSigHead + k) % kSpSigN].mask &= ~changed;
+          } else {
+            if(spSigCount == kSpSigN) { spSigHead = (spSigHead + 1) % kSpSigN; --spSigCount; }
+            spSigRing[(spSigHead + spSigCount) % kSpSigN] = {cartNow() + 1, changed, before & changed};
+            ++spSigCount;
+          }
+        }
+      }
       // CPU releasing the RSP (clear HALT, not re-halting): run the microcode LLE.
       // The core executes to its BREAK, updating sp_status/sp_pc and raising the SP
       // interrupt itself. Guarded against reentrancy (microcode can poke SP_STATUS
@@ -1022,7 +1047,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
             if(rspInline) rsp.step(~0ull);   // diagnostico: RSP sincrono dentro del hilo CPU
             else          rspSubmitKick(); }
         } else {
-          if(!rsp.running) { rsp.mem = this; rsp.start(); }   // arm; System::run steps it interleaved
+          if(!rsp.running) { rsp.mem = this; rsp.start(); spMarkKick(); }   // arm; System::run steps it interleaved
         }
       }
       // If both CLEAR_HALT (bit0) and SET_HALT (bit1) are written together the SET
@@ -1543,7 +1568,23 @@ auto Memory::dpcAdvance() -> void {
     std::fflush(stderr);
   }
   if(rcpMode == RcpMode::Threaded && !rdpInline) rdpSubmit(cur, rcp.dpc_end, xbus);
-  else                             rdpRunJob(cur, rcp.dpc_end, xbus, rdram.data());
+  else if(rcpMode == RcpMode::Lockstep && rcpDeadlineOn()) {
+    // Lockstep pinta aqui mismo, pero el RDP de la consola NO termina en la instruccion que
+    // escribe DPC_END: tarda lo que cuesta el tramo en GCLK. Antes MI_DP salia en ese mismo
+    // instante y DPC_CURRENT/STATUS se veian drenados al momento, mientras Threaded fechaba
+    // el tramo con su coste -- dos maquinas distintas, y el oraculo era la menos fiel (DK64
+    // divergia en el primer MI_DP del juego). Ahora los dos modos usan el MISMO horario de
+    // invitado: dpScheduleSpan fecha arranque y cierre, las lecturas de DPC salen de ese
+    // horario y MI_DP lo publica rcpRetire al vencer el plazo.
+    const u64 kick = lockRspExec ? rspGuestNowAt(rsp.exactCycles()) : cartNow();
+    {
+      std::lock_guard<std::mutex> lk(rdpMx);
+      dpScheduleSpan(cur, rcp.dpc_end, xbus, rdram.data(), kick);
+    }
+    dpJobOps = kick;
+    rdpRunJob(cur, rcp.dpc_end, xbus, rdram.data(), rdpCostOn());
+  }
+  else rdpRunJob(cur, rcp.dpc_end, xbus, rdram.data());
 }
 
 auto Memory::siDma(bool toPif) -> void {
@@ -1581,6 +1622,10 @@ auto Memory::siDma(bool toPif) -> void {
   siBusy   = true;
   siToPif  = toPif;
   siDoneAt = cartNow() + (instant ? 0 : usToInsns(us));
+  // Lo arranca un store, que con el JIT puede ir en mitad de una cadena enlazada cuyo permiso
+  // no conocia este plazo: DK64 Lockstep veia MI_SI ~2600 instrucciones tarde con JIT. El
+  // resto del bloque en curso no llega (una transaccion dura cientos de us = miles de ops).
+  if(jitGuardPtr) *jitGuardPtr = 0;
   rcp.si_status = SI_DMA_BUSY;
   if(instant) siFinish();
 }
@@ -1948,7 +1993,7 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
   const u64 gclk0 = rcp.rdpGclk.load(std::memory_order_relaxed);
   // Publicar el fin de cuadro en el reloj del invitado en vez de en el del anfitrion. En
   // Lockstep no hace falta: lo ejecuta el propio hilo de CPU y ya cae en un punto determinista.
-  const bool defer = rcpMode == RcpMode::Threaded && rcpDeadlineOn();
+  const bool defer = rcpDeadlineOn();
   // GPU path (paraLLEl-RDP): opt-in via KESTREL_PRDP. Lazily brought up on first job with
   // this RDRAM block; when live it consumes the FIFO on the GPU instead of SoftRDP. The
   // guest RDRAM vector is allocated once and never resized, so its pointer is stable for
@@ -2085,11 +2130,6 @@ auto Memory::rdpSnapshot(u32 current, u32 end) -> void {
   if(a >= b) return;
   std::memcpy(sh.data() + a, rdram.data() + a, b - a);
 }
-
-// Quien esta corriendo AHORA. Cada chip sella los eventos con SU propio reloj de invitado:
-// el RSP escribe DPC_END desde su hilo y el instante correcto es el suyo, no el numero de
-// instrucciones que la CPU lleve retiradas en ese momento de tiempo de pared.
-static thread_local bool tlIsRspThread = false;
 
 auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   bool wake;
@@ -2699,7 +2739,6 @@ auto Memory::dpBarrierWait(u64 now) -> void {
 // tarea nace siempre vivo -- que es lo que antes se rompia y hacia que MI_DP se publicase
 // donde el anfitrion hubiese llegado.
 auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 kick) -> void {
-  if(rcpMode != RcpMode::Threaded) return;
   const u64 gclk0 = rcp.rdpGclk.load(std::memory_order_relaxed);
   u32 costCur = current;
   if(rdpCostHasResume && current == rdpCostLastEnd) costCur = rdpCostResume;
@@ -2735,6 +2774,13 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpJobEndAddr[seq & kDpRingM] = end;
   dpJobStartG[seq & kDpRingM]  = t0;
   dpJobEndG[seq & kDpRingM]    = t1;
+  // Desde que instante lo ve un lector. El RSP sella con el instante de SU ciclo, y eso ya es
+  // lo que ve la CPU en su siguiente instruccion. La CPU sella con cartNow(), que son las ops
+  // retiradas ANTES de la que escribe DPC_END: la escritura queda al final de esa instruccion,
+  // o sea en el flanco n+1. Lockstep lo hace asi por construccion (el RSP se intercala tras la
+  // instruccion entera); Threaded con la CPU adelantada lo veia un ciclo de sondeo antes y la
+  // tarea de DK64 acababa 6 ciclos antes.
+  dpJobKickG[seq & kDpRingM]   = (tlIsRspThread || lockRspExec) ? kick : kick + 1;
   dpSchedEnd.store(t1, std::memory_order_release);
   dpSubSeq.store(seq + 1, std::memory_order_release);
   // Diagnostico: el horario entero en tiempo de invitado. Dos corridas del mismo binario
@@ -2750,7 +2796,12 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
                    (unsigned long long)kick, (unsigned long long)t0, (unsigned long long)t1,
                    current, end, (unsigned long long)cost);
   }
-  if(costed && softCost.sawSyncFull && rcpDeadlineOn()) dpEndArmAt(t1);
+  if(costed && softCost.sawSyncFull && rcpDeadlineOn()) {
+    dpEndArmAt(t1);
+    // Plazo nuevo armado desde el hilo de CPU (un store a DPC_END, que con el JIT puede ir en
+    // mitad de una cadena): el permiso de la cadena no lo conocia. Igual que siDma.
+    if(!tlIsRspThread && jitGuardPtr) *jitGuardPtr = 0;
+  }
   // Zona que este tramo puede pintar (ver rspDmaRdpWait). Se publica ANTES de que rdpSubmit
   // levante el bit2: quien vea el bit ya ve la zona. Sin pase de coste no se sabe: todo.
   // Publicacion bajo seqlock (dpWrSeq impar = a medias): un lector nunca ve un intervalo que
@@ -2827,16 +2878,16 @@ auto Memory::rcpSchedReset() -> void {
   dpMaxQuery.store(0, std::memory_order_relaxed);
   dpLastKick = 0;
   dpBarWaivedAt = ~0ull;
+  { std::lock_guard<std::mutex> lk(spSigMx); spSigHead = spSigCount = 0; }
   for(u32 i = 0; i < kDpRingN; ++i) {
-    dpJobStartG[i] = dpJobEndG[i] = 0;
+    dpJobStartG[i] = dpJobEndG[i] = dpJobKickG[i] = 0;
     dpJobAddr[i] = dpJobEndAddr[i] = 0;
   }
   // Plazos y barreras: no hay tarea en vuelo (el estado se toma en reposo), asi que nada
   // esta armado y el ancla de la barrera del SP se vuelve a atar al reloj que acaba de
   // entrar. Dejarla en el ancla vieja daria un spBarrierAt() de otra partida.
   rcpPend.store(0, std::memory_order_relaxed);
-  spKickOps    = cartNow();
-  spKickCycles = rsp.cyclesRun.load(std::memory_order_relaxed);
+  spMarkKick();
   spDoneAt = dpDoneAt = 0;
   rspRdvAt.store(0, std::memory_order_relaxed);
   dpRdv.store(0, std::memory_order_relaxed);
@@ -2975,13 +3026,55 @@ auto Memory::dpReadSync(u64 now) -> void {
   rspRdvAt.store(0, std::memory_order_release);
 }
 
+// SP_STATUS tal como lo ve el RSP en su instante `now`. Las entradas con sello <= now ya
+// ocurrieron y se descartan (el reloj del RSP no retrocede); las posteriores se deshacen de la
+// mas nueva a la mas vieja, dejando los bits como estaban antes de cada una.
+auto Memory::spStatusForRsp(u64 now) -> u32 {
+  std::lock_guard<std::mutex> lk(spSigMx);
+  while(spSigCount && spSigRing[spSigHead].stamp <= now) { spSigHead = (spSigHead + 1) % kSpSigN; --spSigCount; }
+  u32 v = rcp.sp_status.load(std::memory_order_acquire);
+  for(u32 k = spSigCount; k-- > 0;) {
+    const SpSigWr& w = spSigRing[(spSigHead + k) % kSpSigN];
+    v = (v & ~w.mask) | (w.prev & w.mask);
+  }
+  return v | (rcp.sp_intr_on_break ? 0x40u : 0u);
+}
+
+// Cita del sondeo de SP_STATUS. Es la fase obligatoria de dpReadSync y nada mas: la CPU tiene
+// que haber retirado hasta `now` para que ninguna escritura suya anterior a ese instante siga
+// pendiente, pero SIN el adelanto kRdvLead -- con la CPU por delante del RSP el fin de tarea
+// podria caer en un instante ya rebasado y el plazo de SP naceria tarde. La barrera del SP deja
+// llegar a la CPU justo hasta el reloj publicado, que el llamador ya ha publicado exacto.
+// No depende de KESTREL_DPRDV: sin ella el ciclo en que el microcodigo ve SIG0 es de anfitrion.
+auto Memory::spReadSync(u64 now) -> void {
+  if(cartNow() >= now) return;
+  spRdv.fetch_add(1, std::memory_order_relaxed);
+  if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
+  bool timing = false;
+  std::chrono::steady_clock::time_point t0{};
+  for(u32 k = 0;; ++k) {
+    if(cartNow() >= now) break;
+    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    if((k & 15u) == 15u) spinPause();
+    if((k & 255u) != 255u) continue;
+    std::this_thread::yield();
+    if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
+    if(!timing) { timing = true; t0 = std::chrono::steady_clock::now(); continue; }
+    if(std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(20)) {
+      spRdvWaives.fetch_add(1, std::memory_order_relaxed);
+      break;   // salvavidas: la CPU no avanza (parada, o esperando algo del RSP)
+    }
+  }
+}
+
 auto Memory::dpcCurrentFor(u64 now, u32 who) -> u32 {
   bumpOwned(dpcRdCur[who]);
   if(now > dpMaxQuery.load(std::memory_order_relaxed))
     dpMaxQuery.store(now, std::memory_order_relaxed);
   if(!dpGuestOn()) return rcp.dpc_current.load(std::memory_order_acquire);
   u64 c   = dpCompletedAt(now);
-  u64 sub = dpSubSeq.load(std::memory_order_acquire);
+  u64 sub = dpVisibleAt(now);
+  if(c > sub) c = sub;
   if(sub > c) {
     bumpOwned(dpcRdOpen[who]);
     // El trabajo `c` esta abierto para este reloj. DPC_CURRENT no se queda clavado en la
@@ -3016,7 +3109,8 @@ auto Memory::dpcStatusFor(u64 now, u32 who) -> u32 {
     return st;
   }
   u64 c   = dpCompletedAt(now);
-  u64 out = dpSubSeq.load(std::memory_order_acquire) - c;   // trabajos vivos para ESTE reloj
+  u64 vis = dpVisibleAt(now);
+  u64 out = vis > c ? vis - c : 0;   // trabajos vivos para ESTE reloj
   if(out >= 1) { st |= 0x100u | 0x40u;   // DMA_BUSY | CMD_BUSY
     bumpOwned(dpcRdBusy[who]); }
   // END_VALID: ya hay un buffer esperando ademas del que el motor esta leyendo, o sea que el
@@ -3164,7 +3258,7 @@ auto Memory::rcpDeadlineOn() -> bool {
 }
 
 auto Memory::spEndArm(u64 cyclesUsed) -> void {
-  spDoneAt = spKickOps + rcpCyclesToOps(cyclesUsed);
+  spDoneAt = spCycleAt(cyclesUsed);
   spArms.fetch_add(1, std::memory_order_relaxed);
   if(spDoneAt < cartNow()) spLate.fetch_add(1, std::memory_order_relaxed);
   // El plazo sustituye a la barrera: a partir de aqui el fin ya tiene instante propio y la
@@ -3248,8 +3342,7 @@ auto Memory::rspSubmitKick() -> void {
     // Instante de invitado del lanzamiento y base de ciclos del RSP: el plazo de fin se mide
     // contra estos dos y los toma SIEMPRE el hilo de CPU, aqui, donde el invitado escribe
     // CLEAR_HALT. Ver la nota de spEndArm en memory.hpp.
-    spKickOps    = cartNow();
-    spKickCycles = rsp.cyclesRun.load(std::memory_order_relaxed);
+    spMarkKick();
     rspBusy.store(true, std::memory_order_release);
     if(spBarrierOn() && rcpMode == RcpMode::Threaded && rcpDeadlineOn())
       rcpPend.fetch_or(8u, std::memory_order_release);

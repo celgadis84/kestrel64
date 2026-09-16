@@ -402,6 +402,17 @@ struct Memory {
   std::atomic<u32> dpWrSeq{0};
   auto dpWrReset() -> void;
   u64  spKickOps = 0, spKickCycles = 0;   // instante de invitado / ciclos de RSP al lanzar
+  // Flanco del reloj del RCP en el que cae el lanzamiento: rcpOpsToCycles(spKickOps). El reloj
+  // del RCP es ABSOLUTO (62,5 MHz libre desde el arranque), asi que el ciclo j de una tarea no
+  // cae j ciclos despues del CLEAR_HALT sino en el flanco spKickEdge + j. Lockstep y Threaded
+  // miden los dos contra este flanco (ver spKickAt y System::stepCpu) y por eso ven MI_SP en la
+  // misma instruccion.
+  u64  spKickEdge = 0;
+  auto spMarkKick() -> void {
+    spKickOps    = cartNow();
+    spKickEdge   = rcpOpsToCycles(spKickOps);
+    spKickCycles = rsp.cyclesRun.load(std::memory_order_relaxed);
+  }
   u64  spDoneAt  = 0, dpDoneAt = 0;       // plazos, en cartNow()
   auto spEndArm(u64 cyclesUsed) -> void;             // desde el worker del RSP
   auto dpEndArm(u64 kickOps, u64 gclkUsed) -> void;
@@ -485,6 +496,21 @@ struct Memory {
   std::atomic<u64> dpCompSeq{0};   // trabajos pintados por el anfitrion (solo detector de cambio)
   u64 dpJobStartG[kDpRingN]{};     // instante de invitado de arranque
   u64 dpJobEndG[kDpRingN]{};       // instante de invitado de cierre
+  u64 dpJobKickG[kDpRingN]{};      // instante de invitado en que se escribio DPC_END
+  // SENALES DE SP_STATUS EN TIEMPO DE INVITADO (Threaded). La CPU va por delante del RSP en
+  // tiempo de invitado (hasta kRdvLead), y sus escrituras de SIG0..SIG7 caian en el registro
+  // en tiempo de pared. El microcodigo sondea SIG0 (osSpTaskYield) en bucle, asi que el ciclo
+  // en que cedia dependia del anfitrion: DK64 acababa una tarea en 55876 ciclos en Lockstep y
+  // en 66060 o 201692 en Threaded. Cada escritura de la CPU apunta aqui desde que instante
+  // existe y que bits tenian antes; el RSP deshace las que aun son futuras para el.
+  struct SpSigWr { u64 stamp; u32 mask; u32 prev; };
+  static constexpr u32 kSpSigN = 32;
+  SpSigWr spSigRing[kSpSigN]{};
+  u32 spSigHead = 0, spSigCount = 0;       // bajo spSigMx
+  std::mutex spSigMx;
+  auto spStatusForRsp(u64 now) -> u32;     // SOLO hilo del RSP (Threaded)
+  auto spReadSync(u64 now) -> void;        // SOLO hilo del RSP: la CPU llega a `now`, sin adelanto
+  std::atomic<u32> spRdv{0}, spRdvWaives{0};
   u32 dpJobAddr[kDpRingN]{};       // DPC_CURRENT al abrir
   u32 dpJobEndAddr[kDpRingN]{};    // DPC_CURRENT al cerrar
   // Instante de invitado en que ARRANCA un trabajo lanzado en `ops`. El motor es UNO: un
@@ -500,6 +526,20 @@ struct Memory {
   // Cuantos trabajos ha cerrado el motor YA, en el reloj del que pregunta.
   // Todos los tramos lanzados tienen ya fecha de cierre (se calcula al lanzarlos), asi que
   // la cuenta arranca en dpSubSeq: no hay que esperar a que el anfitrion pinte nada.
+  // Cuantos tramos EXISTEN ya para ese reloj: los que se lanzaron en `now` o antes. El FIFO
+  // tiene dos escritores en hilos distintos (CPU y RSP) y cualquiera de los dos puede ir por
+  // delante del otro en tiempo de invitado; un tramo con lanzamiento posterior al lector es
+  // una escritura que en la consola todavia no ha ocurrido y no puede verse en DPC_STATUS ni
+  // en DPC_CURRENT. Contando dpSubSeq a pelo, el RSP de Threaded veia el FIFO ocupado unas
+  // instrucciones antes que en Lockstep y la tarea de DK64 acababa 6 ciclos antes.
+  auto dpVisibleAt(u64 now) const -> u64 {
+    u64 c = dpSubSeq.load(std::memory_order_acquire);
+    for(u32 i = 0; i < kDpRingN && c > 0; ++i) {
+      if(dpJobKickG[(c - 1) & kDpRingM] <= now) break;
+      --c;
+    }
+    return c;
+  }
   auto dpCompletedAt(u64 now) const -> u64 {
     u64 c = dpSubSeq.load(std::memory_order_acquire);
     for(u32 i = 0; i < kDpRingN && c > 0; ++i) {
@@ -637,15 +677,20 @@ struct Memory {
   std::atomic<u64> dpRdv{0};            // citas pedidas
   std::atomic<u32> dpRdvWaives{0};      // veces que el salvavidas la solto
   auto rspGuestNow() -> u64 {
-    return (rcpMode == RcpMode::Threaded && rspBusy.load(std::memory_order_acquire))
+    return ((rcpMode == RcpMode::Threaded && rspBusy.load(std::memory_order_acquire)) || lockRspExec)
              ? spBarrierAt() : cartNow();
   }
+  // Lockstep: el bucle del sistema esta dando ciclos al RSP AHORA (ver rspInterleave en
+  // system.cpp). Lo que el microcodigo toque ahi se sella con el reloj del RSP, igual que en
+  // Threaded lo hace su hilo: si no, un DPC_END escrito por el RSP se fechaba en el final de
+  // la instruccion de CPU y no en el ciclo exacto del RSP que lo escribio.
+  bool lockRspExec = false;
   // Igual, pero con los ciclos de RSP que pasa quien llama. Lo usa el propio hilo del RSP,
   // que sabe exactamente cuantas instrucciones lleva retiradas en esta instruccion (ver
   // Rsp::exactCycles) mientras que el contador publicado va a saltos de tanda.
   auto rspGuestNowAt(u64 rspCycles) -> u64 {
-    return (rcpMode == RcpMode::Threaded && rspBusy.load(std::memory_order_acquire))
-             ? spKickOps + rcpCyclesToOps(rspCycles - spKickCycles) : cartNow();
+    return ((rcpMode == RcpMode::Threaded && rspBusy.load(std::memory_order_acquire)) || lockRspExec)
+             ? spCycleAt(rspCycles - spKickCycles) : cartNow();
   }
   // BARRERA DE INVITADO DEL RSP -- la gemela de la del RDP, para el otro dominio.
   //
@@ -671,8 +716,7 @@ struct Memory {
   // KESTREL_SPBARRIER=0 la apaga para bisecar.
   static auto spBarrierOn() -> bool;
   auto spBarrierAt() const -> u64 {
-    return spKickOps + rcpCyclesToOps(
-             rsp.cyclesRun.load(std::memory_order_acquire) - spKickCycles);
+    return spCycleAt(rsp.cyclesRun.load(std::memory_order_acquire) - spKickCycles);
   }
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
   u64  spBarWaivedAt = ~0ull;
@@ -709,6 +753,10 @@ struct Memory {
   auto rcpOpsToCycles(u64 ops) const -> u64 {
     return paceDivNum.div(ops * paceCpuDen);
   }
+  // Primer instante de invitado en que la tarea del RSP lanzada en spKickOps lleva `cyc` ciclos
+  // hechos: el flanco absoluto spKickEdge + cyc pasado a ops. Nunca antes de spKickOps + 1 si
+  // cyc >= 1, porque el flanco spKickEdge + 1 esta estrictamente despues del lanzamiento.
+  auto spCycleAt(u64 cyc) const -> u64 { return rcpCyclesToOps(spKickEdge + cyc); }
   // Ops que faltan para el plazo mas cercano, o ~0 si no hay ninguno armado. El dynarec la
   // mira igual que mira siDueIn: un bloque no puede tragarse el instante de la interrupcion.
   auto rcpDueIn(u64 now) const -> u64 {
@@ -862,6 +910,10 @@ public:
   // commit es diferido, por cadena). Sin esto el reloj de decaimiento se congela dentro de
   // una cadena larga y el latch del PI sobrevive mucho mas de lo que debe.
   const u32* cartClockPend = nullptr;
+  // Permiso de la cadena del JIT (CPU::jitGuard). Quien arma un plazo NUEVO desde el hilo de
+  // CPU lo pone a 0: el permiso se calculo antes de que existiera, asi que la cadena se lo
+  // tragaria. A 0 el siguiente prologo vuelve al trampolin, que ya lo ve (siDueIn).
+  u32* jitGuardPtr = nullptr;
   const u64* cartStall = nullptr;       // ops equivalentes a las paradas de cache (CPU::stallOps)
   auto cartNow() const -> u64 {
     return (cartClock ? *cartClock : 0) + (cartClockPend ? (u64)*cartClockPend : 0)

@@ -419,7 +419,7 @@ extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(vo
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
 // al epílogo); *isStore = si muta memoria. Devuelve false si op no es un mem-op soportado.
 static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore,
-                      RcSnap& snap) -> bool {
+                      RcSnap& snap, u32 opsBefore, s32 pendOff) -> bool {
   u32 OP = op >> 26;
   void* fn = nullptr;
   bool isFp = false;
@@ -599,10 +599,17 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
     fastDone = e.jmp_rel32_placeholder(); hasFast = true;
   }
   for(int i = 0; i < nFail; i++) e.patchRel32(fastFail[i]);   // todos aterrizan en el CALL
+  // Reloj del invitado durante el helper. Las ops de ESTE bloque se cobran en retired al salir,
+  // asi que dentro del CALL cartNow() iba `opsBefore` instrucciones por detras del interprete:
+  // una escritura MMIO (CLEAR_HALT del RSP, MI, PI...) fechaba su evento antes de tiempo y
+  // Lockstep con JIT divergia del interprete en DK64. Solo en la ruta lenta: el camino rapido
+  // de RDRAM no mira el reloj.
+  if(opsBefore) e.add_m32_imm32(RBX, pendOff, opsBefore);
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX; R12 no fiable)
   e.mov_r_imm32(R8, rt);                  // arg2 = rt
   e.mov_r_imm64(RAX, (u64)fn);
   e.call_reg(RAX);
+  if(opsBefore) e.add_m32_imm32(RBX, pendOff, (u32)-(s32)opsBefore);   // no toca AL
   e.test_al_al();
   bailSite = e.je_rel32_placeholder();    // al==0 (faulted) → salta al stub de bail
   snap = rc.snap();                       // lo sucio aqui lo escribe el stub de bail
@@ -776,14 +783,28 @@ static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& 
   // $0 descarta el resultado, pero la comprobacion de privilegio se hace igual: la guardia
   // de arriba queda, solo desaparece el store.
   if(rt) {
-    e.mov_r_m(RAX, RBX, (s32)(offsetof(CPU, cop0) + 8u * rd));
-    // Con el factor de fabrica (256) cada op vale un tick, luego "entrada + idx" es exacto.
-    // Con cualquier otro factor el numero de ticks de esas idx ops depende del resto
-    // acumulado (countFrac), que vive en el CPU y no en el bloque: se cede al interprete
-    // antes que emitir una aproximacion (JIT tiene que ser bit a bit igual al oraculo).
-    if(rd == CPU::C0_Count && idx) {
-      if(cpi256 != 256) return false;
-      e.alu32_imm(0, RAX, idx);                               // + ops ya retiradas del bloque
+    if(rd == CPU::C0_Count) {
+      // Count guardado va atrasado por TODO lo que aun no se ha commiteado: las idx ops de
+      // este bloque y las de los eslabones anteriores de la cadena, que el camino rapido del
+      // prologo deja en jitPending sin pasar por el trampolin. El valor que veria el
+      // interprete es exactamente lo que sumaria countTicks(jitPending + idx) -- resto
+      // (countFrac) y paradas acumuladas (stallCycles) incluidos -- sin tocar el estado.
+      // Antes solo se sumaba idx: con la cadena enlazada Count salia 1 tick corto, osSetTimer
+      // armaba otro Compare y DK64 Lockstep con JIT sacaba el timer 6 ops antes.
+      e.mov_r32_m(RAX, RBX, (s32)offsetof(CPU, jitPending));   // zero-extiende
+      if(idx) e.add_r_imm32(RAX, (s32)idx);
+      e.mov_r_imm32(RDX, cpi256);
+      e.imul64(RAX, RDX);
+      e.mov_r32_m(RCX, RBX, (s32)offsetof(CPU, countFrac));
+      e.add_r_r(RAX, RCX);
+      e.mov_r32_m(RCX, RBX, (s32)offsetof(CPU, stallCycles));
+      e.shift64_imm(4, RCX, 7);                               // shl rcx, 7
+      e.add_r_r(RAX, RCX);
+      e.shift64_imm(5, RAX, 8);                               // shr rax, 8 = ticks
+      e.mov_r32_m(RCX, RBX, (s32)(offsetof(CPU, cop0) + 8u * rd));
+      e.add_r_r(RAX, RCX);                                    // los 32 bajos = Count
+    } else {
+      e.mov_r_m(RAX, RBX, (s32)(offsetof(CPU, cop0) + 8u * rd));
     }
     e.movsxd(RAX, RAX);                              // MFC0 = sext32 de la palabra baja
     rc.st64(RAX, rt);
@@ -1355,7 +1376,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     }
     c.jitCache->buf.used = dBefore;
     usize dsite; bool dStore; RcSnap dsnap;
-    if(emitMemOp(e, rc, dop, dsite, dStore, dsnap)) {
+    if(emitMemOp(e, rc, dop, dsite, dStore, dsnap, idx + 1, pendOff)) {
       bailSites.push_back(dsite); bailIdx.push_back(idx); bailSnap.push_back(dsnap);
       b.hasMem = true; if(dStore) b.hasStore = true;
       return true;
@@ -1496,7 +1517,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     }
     c.jitCache->buf.used = before;
     usize site; bool isStore; RcSnap msnap;
-    if(emitMemOp(e, rc, op, site, isStore, msnap)) {
+    if(emitMemOp(e, rc, op, site, isStore, msnap, b.nOps, pendOff)) {
       bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap);
       b.hasMem = true; if(isStore) b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
