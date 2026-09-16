@@ -65,10 +65,16 @@ struct SoftRdp {
   // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.
   u32 stopAt = 0;
   auto colorImage() const -> u32 { return ci_addr; }
-  // Zona de RDRAM que cubren las primitivas cobradas desde el ultimo reinicio ([lo, hi)
-  // fisico; lo > hi = vacia): color image y z image hasta la esquina del scissor. Cota por
-  // arriba de lo que el motor que pinta de verdad puede escribir. Ver Memory::rspDmaRdpWait.
-  u32 wrLo = ~0u, wrHi = 0, wzLo = ~0u, wzHi = 0;
+  // Zona de RDRAM que cubren las primitivas cobradas desde el ultimo reinicio: color image y
+  // z image hasta la esquina del scissor, en hasta kWrSlots intervalos [lo, hi) fisicos (lo >
+  // hi = vacio). Varios y no uno: un juego que borra el z-buffer usandolo como color image
+  // (SM64, z en 0x400) y pinta luego en un framebuffer alto dejaba un unico intervalo que
+  // cubria casi toda la RDRAM. Cota por arriba de lo que el motor que pinta de verdad puede
+  // escribir. Ver Memory::rspDmaRdpWait.
+  static constexpr u32 kWrSlots = 4;
+  u32 wrLo[kWrSlots] = {~0u, ~0u, ~0u, ~0u}, wrHi[kWrSlots] = {};
+  auto wrAdd(u32 a, u32 b) -> void;
+  auto wrClear() -> void { for(u32 i = 0; i < kWrSlots; i++) { wrLo[i] = ~0u; wrHi[i] = 0; } }
   auto colorImageSize() const -> u32 { return ci_size; }
 
   // --- DPC performance counters (accounting only, never gates execution) -------

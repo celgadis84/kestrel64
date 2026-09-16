@@ -396,7 +396,10 @@ struct Memory {
                                  // bit3 = barrera del RSP activa (ver spBarrierAt)
   auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
   std::atomic<u64> rspDmaRdpWaits{0};
-  std::atomic<u32> dpWrLo[2] = {~0u, ~0u}, dpWrHi[2] = {0, 0};   // color, z (ver rspDmaRdpWait)
+  // Zona que puede estar pintando el RDP (ver rspDmaRdpWait): SoftRdp::kWrSlots intervalos
+  // publicados bajo seqlock (dpWrSeq impar = a medias).
+  std::atomic<u32> dpWrLo[4] = {~0u, ~0u, ~0u, ~0u}, dpWrHi[4] = {0, 0, 0, 0};
+  std::atomic<u32> dpWrSeq{0};
   auto dpWrReset() -> void;
   u64  spKickOps = 0, spKickCycles = 0;   // instante de invitado / ciclos de RSP al lanzar
   u64  spDoneAt  = 0, dpDoneAt = 0;       // plazos, en cartNow()

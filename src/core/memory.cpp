@@ -2753,20 +2753,27 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   if(costed && softCost.sawSyncFull && rcpDeadlineOn()) dpEndArmAt(t1);
   // Zona que este tramo puede pintar (ver rspDmaRdpWait). Se publica ANTES de que rdpSubmit
   // levante el bit2: quien vea el bit ya ve la zona. Sin pase de coste no se sabe: todo.
-  if(costed) {
-    dpWrLo[0].store(softCost.wrLo, std::memory_order_release); dpWrHi[0].store(softCost.wrHi, std::memory_order_release);
-    dpWrLo[1].store(softCost.wzLo, std::memory_order_release); dpWrHi[1].store(softCost.wzHi, std::memory_order_release);
-  } else if(!rdpCostOn()) {
-    dpWrLo[0].store(0, std::memory_order_release); dpWrHi[0].store(~0u, std::memory_order_release);
+  // Publicacion bajo seqlock (dpWrSeq impar = a medias): un lector nunca ve un intervalo que
+  // aun no esta entero.
+  if(costed || !rdpCostOn()) {
+    dpWrSeq.fetch_add(1, std::memory_order_release);
+    for(u32 i = 0; i < SoftRdp::kWrSlots; i++) {
+      dpWrLo[i].store(costed ? softCost.wrLo[i] : (i ? ~0u : 0u), std::memory_order_release);
+      dpWrHi[i].store(costed ? softCost.wrHi[i] : (i ? 0u : ~0u), std::memory_order_release);
+    }
+    dpWrSeq.fetch_add(1, std::memory_order_release);
   }
 }
 
+static_assert(SoftRdp::kWrSlots == sizeof(Memory::dpWrLo) / sizeof(Memory::dpWrLo[0]));
 // Con rdpMx cogido y el motor drenado del todo (bit2 recien bajado).
 auto Memory::dpWrReset() -> void {
-  softCost.wrLo = softCost.wzLo = ~0u; softCost.wrHi = softCost.wzHi = 0;
-  for(u32 i = 0; i < 2; i++) {
+  softCost.wrClear();
+  dpWrSeq.fetch_add(1, std::memory_order_release);
+  for(u32 i = 0; i < SoftRdp::kWrSlots; i++) {
     dpWrHi[i].store(0, std::memory_order_release); dpWrLo[i].store(~0u, std::memory_order_release);
   }
+  dpWrSeq.fetch_add(1, std::memory_order_release);
 }
 
 auto Memory::dpGuestOn() -> bool {
@@ -3068,9 +3075,15 @@ auto Memory::rspDmaRdpWait(u32 lo, u32 hi) -> void {
   static const bool span = [] { const char* e = std::getenv("KESTREL_DMASPAN");
                                 return !(e && e[0] == '0'); }();
   if(span) {
-    bool hit = false;
-    for(u32 i = 0; i < 2; i++)
-      hit |= lo < dpWrHi[i].load(std::memory_order_acquire) && dpWrLo[i].load(std::memory_order_acquire) < hi;
+    bool hit;
+    for(;;) {
+      const u32 s0 = dpWrSeq.load(std::memory_order_acquire);
+      if(s0 & 1u) { std::this_thread::yield(); continue; }
+      hit = false;
+      for(u32 i = 0; i < SoftRdp::kWrSlots; i++)
+        hit |= lo < dpWrHi[i].load(std::memory_order_acquire) && dpWrLo[i].load(std::memory_order_acquire) < hi;
+      if(dpWrSeq.load(std::memory_order_acquire) == s0) break;
+    }
     if(!hit) return;
   }
   rspDmaRdpWaits.fetch_add(1, std::memory_order_relaxed);
