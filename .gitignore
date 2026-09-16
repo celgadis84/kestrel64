@@ -45,6 +45,5 @@ kestrel64-*-setup.exe
 # marcas de tiempo de los gates
 /.gate_t*
 
-# notas locales de sesion y copias de referencia de otros emuladores
+# notas locales de sesion
 scratchpad/
-/pj64reg.cpp

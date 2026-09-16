@@ -394,6 +394,10 @@ struct Memory {
   std::atomic<u32> rcpPend{0};   // bit0 = fin de SP armado, bit1 = fin de DP armado,
                                  // bit2 = trabajo de RDP en vuelo (ver dpBarrierAt),
                                  // bit3 = barrera del RSP activa (ver spBarrierAt)
+  auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
+  std::atomic<u64> rspDmaRdpWaits{0};
+  std::atomic<u32> dpWrLo[2] = {~0u, ~0u}, dpWrHi[2] = {0, 0};   // color, z (ver rspDmaRdpWait)
+  auto dpWrReset() -> void;
   u64  spKickOps = 0, spKickCycles = 0;   // instante de invitado / ciclos de RSP al lanzar
   u64  spDoneAt  = 0, dpDoneAt = 0;       // plazos, en cartNow()
   auto spEndArm(u64 cyclesUsed) -> void;             // desde el worker del RSP

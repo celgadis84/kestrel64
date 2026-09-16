@@ -472,7 +472,13 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // la otra escritora del FIFO. Publicar primero el reloj exacto es lo que permite que
       // la barrera del SP la deje llegar hasta aqui. Ver Memory::dpReadSync.
       if(mem->dpReadAhead(now)) { publishExact(); mem->dpReadSync(now); }
-      mem->rdpAwaitGuest(now);
+      // Sin esperar al worker del RDP: CURRENT y STATUS salen del horario de invitado que fijo
+      // dpScheduleSpan al lanzar el tramo, no de por donde vaya el anfitrion. Lo unico del RDP
+      // que el RSP podria ver a medias son pixeles, y a la RDRAM solo llega por DMA: esa
+      // espera esta en Memory::rspDmaRdpWait. Medido SM64 prdp-jit: 3,40 -> 3,34 s, mismo md5.
+      // KESTREL_RSPDPAWAIT=1 vuelve a la espera antigua (para bisecar).
+      static const bool aw = []{ const char* e = std::getenv("KESTREL_RSPDPAWAIT"); return e && e[0] == '1'; }();
+      if(aw) mem->rdpAwaitGuest(now);
       const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
       setR(rt, val);
       idleSkip(now, val);

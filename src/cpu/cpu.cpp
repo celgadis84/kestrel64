@@ -945,7 +945,7 @@ auto CPU::unimplemented(u32 op) -> void {
                    mem->rcp.dpc_status.load(), (unsigned)mem->rsp.running);
     if(mem)
       std::fprintf(stderr, "[det] rspCycles=%llu rdpGclk=%llu spArm=%u/%u tarde dpArm=%u/%u tarde"
-                           " dpcRd=%u/%u rsp=%u open=%u busy=%u endv=%u await=%u lateMax=%llu waiv=%u/%u wv=%u/%u/%u ooo=%u(C%u/R%u) stale=%u(C%u/R%u) rdv=%llu/%u idle=%llu/%llu(sig%llu/drn%llu/room%llu) park=%u/%u/%u\n",
+                           " dpcRd=%u/%u rsp=%u open=%u busy=%u endv=%u await=%u dmaW=%llu lateMax=%llu waiv=%u/%u wv=%u/%u/%u ooo=%u(C%u/R%u) stale=%u(C%u/R%u) rdv=%llu/%u idle=%llu/%llu(sig%llu/drn%llu/room%llu) park=%u/%u/%u\n",
                    (unsigned long long)mem->rsp.cyclesRun.load(),
                    (unsigned long long)mem->rcp.rdpGclk.load(),
                    mem->spArms.load(), mem->spLate.load(),
@@ -955,6 +955,7 @@ auto CPU::unimplemented(u32 op) -> void {
                    mem->dpcRdRsp.load(), mem->dpcRdOpen[0].load() + mem->dpcRdOpen[1].load(),
                    mem->dpcRdBusy[0].load() + mem->dpcRdBusy[1].load(),
                    mem->dpcRdEndV[0].load() + mem->dpcRdEndV[1].load(), mem->dpAwaits.load(),
+                   (unsigned long long)mem->rspDmaRdpWaits.load(),
                    (unsigned long long)mem->dpLateMax.load(),
                    mem->dpBarWaives.load(), mem->spBarWaives.load(),
                   mem->dpWvBar.load(), mem->dpWvAwait.load(), mem->dpWvSched.load(),

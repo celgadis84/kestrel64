@@ -210,6 +210,14 @@ auto chunkCost(double pipeline, const int* seq, int n, bool reads, bool fbzbSame
 // depth compare, which on hardware suppresses both writes).
 auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void {
   if(!npx) return;
+  {
+    // Zona escrita (ver wrLo): 4 bytes por pixel sea cual sea el formato; pasarse solo cuesta
+    // esperas de mas.
+    const u32 w = (u32)std::max<int>((int)ci_width, sx1) + 1, h = (u32)std::max(sy1, 0) + 1;
+    const u32 bytes = w * h * 4;
+    if(nWrite) { wrLo = std::min(wrLo, ci_addr); wrHi = std::max(wrHi, ci_addr + bytes); }
+    if(nZWrite && zi_addr) { wzLo = std::min(wzLo, zi_addr); wzHi = std::max(wzHi, zi_addr + bytes); }
+  }
   bool fbRead = (other_lo & 0x40) != 0;                  // IM_RD
   bool zRead  = (other_lo & 0x10) != 0 && zi_addr != 0;  // Z_CMP
   bool zWrite = nZWrite != 0;

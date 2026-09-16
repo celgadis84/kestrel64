@@ -1403,6 +1403,8 @@ auto Memory::spDma(bool toRam) -> void {
   u32 memOff   = memAddr & 0xff8;
   const u32 memOff0 = memOff;   // el bucle de abajo lo avanza; el dynarec necesita el inicial
   u32 dramAddr = rcp.sp_dram_addr & 0xfffff8;
+  if(rcpMode == RcpMode::Threaded)                     // solo hace algo en el hilo del RSP
+    rspDmaRdpWait(dramAddr, dramAddr + (length + skip) * count);
   if(toRam && dramAddr < 0x400u && dmaVectorWarn())
     std::fprintf(stderr, "[dma!] SP->RDRAM sobre vectores: dram=0x%06x len=%u\n", dramAddr, length);
 
@@ -2235,6 +2237,7 @@ auto Memory::rdpWorkerLoop() -> void {
       if(rdpQueue.empty()) {
         rcpPend.fetch_and(~4u, std::memory_order_release);
         dpBarWaivedAt = ~0ull;
+        dpWrReset();   // motor drenado: lo pintado ya esta en RDRAM (ver rspDmaRdpWait)
       }
     }
     rdpCv.notify_all();   // wake any rdpDrain() waiter
@@ -2748,6 +2751,22 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
                    current, end, (unsigned long long)cost);
   }
   if(costed && softCost.sawSyncFull && rcpDeadlineOn()) dpEndArmAt(t1);
+  // Zona que este tramo puede pintar (ver rspDmaRdpWait). Se publica ANTES de que rdpSubmit
+  // levante el bit2: quien vea el bit ya ve la zona. Sin pase de coste no se sabe: todo.
+  if(costed) {
+    dpWrLo[0].store(softCost.wrLo, std::memory_order_release); dpWrHi[0].store(softCost.wrHi, std::memory_order_release);
+    dpWrLo[1].store(softCost.wzLo, std::memory_order_release); dpWrHi[1].store(softCost.wzHi, std::memory_order_release);
+  } else if(!rdpCostOn()) {
+    dpWrLo[0].store(0, std::memory_order_release); dpWrHi[0].store(~0u, std::memory_order_release);
+  }
+}
+
+// Con rdpMx cogido y el motor drenado del todo (bit2 recien bajado).
+auto Memory::dpWrReset() -> void {
+  softCost.wrLo = softCost.wzLo = ~0u; softCost.wrHi = softCost.wzHi = 0;
+  for(u32 i = 0; i < 2; i++) {
+    dpWrHi[i].store(0, std::memory_order_release); dpWrLo[i].store(~0u, std::memory_order_release);
+  }
 }
 
 auto Memory::dpGuestOn() -> bool {
@@ -3031,6 +3050,49 @@ auto Memory::rdpAwaitGuest(u64 now) -> void {
     waited += dt;
     if(waited > kBarrierMaxWait) { dpWvAwait.fetch_add(1, std::memory_order_relaxed);
       dpBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
+  }
+}
+
+// Un DMA del RSP no puede mirar RDRAM que el RDP aun esta escribiendo. Es la UNICA via por la
+// que el RSP toca la RDRAM (su bus solo ve DMEM/IMEM), asi que es aqui, y no al leer DPC,
+// donde tiene que esperar a los pixeles: si el DMA solapa la zona que el motor puede estar
+// pintando (dpWrLo/Hi, sacada del pase de coste al lanzar el tramo) espera a que quede drenado
+// DEL TODO en el anfitrion (bit2 de rcpPend, que cubre tambien el fence). Sin mirar instantes de
+// invitado a proposito: esperar de mas solo cuesta tiempo de anfitrion (el reloj del RSP no
+// avanza mientras) y esperar de menos no puede pasar. No hay abrazo mortal: el worker no
+// necesita a nadie para drenar. Salvavidas como las demas esperas.
+auto Memory::rspDmaRdpWait(u32 lo, u32 hi) -> void {
+  if(!tlIsRspThread || !dpBarrierOn()) return;
+  if(!(rcpPend.load(std::memory_order_acquire) & 4u)) return;
+  // Solo si el DMA cae encima de lo que el motor puede estar pintando (KESTREL_DMASPAN=0: siempre).
+  static const bool span = [] { const char* e = std::getenv("KESTREL_DMASPAN");
+                                return !(e && e[0] == '0'); }();
+  if(span) {
+    bool hit = false;
+    for(u32 i = 0; i < 2; i++)
+      hit |= lo < dpWrHi[i].load(std::memory_order_acquire) && dpWrLo[i].load(std::memory_order_acquire) < hi;
+    if(!hit) return;
+  }
+  rspDmaRdpWaits.fetch_add(1, std::memory_order_relaxed);
+  const u32 bits = 4u;
+  u64 waited = 0;
+  while(rcpPend.load(std::memory_order_acquire) & bits) {
+    auto t0 = std::chrono::steady_clock::now();
+    bool done = false;
+    for(u32 k = 0, lim = dpSpinLen(); k < lim; ++k) {
+      if(!(rcpPend.load(std::memory_order_acquire) & bits)) { done = true; break; }
+      if((k & 15u) == 15u) spinPause();
+    }
+    if(!done) {
+      std::unique_lock<std::mutex> lk(rdpMx);
+      rdpCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+        return !(rcpPend.load(std::memory_order_acquire) & bits); });
+    }
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    dpBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    waited += dt;
+    if(waited > kBarrierMaxWait) { dpBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
   }
 }
 

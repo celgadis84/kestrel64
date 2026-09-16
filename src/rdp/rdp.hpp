@@ -65,6 +65,10 @@ struct SoftRdp {
   // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.
   u32 stopAt = 0;
   auto colorImage() const -> u32 { return ci_addr; }
+  // Zona de RDRAM que cubren las primitivas cobradas desde el ultimo reinicio ([lo, hi)
+  // fisico; lo > hi = vacia): color image y z image hasta la esquina del scissor. Cota por
+  // arriba de lo que el motor que pinta de verdad puede escribir. Ver Memory::rspDmaRdpWait.
+  u32 wrLo = ~0u, wrHi = 0, wzLo = ~0u, wzHi = 0;
   auto colorImageSize() const -> u32 { return ci_size; }
 
   // --- DPC performance counters (accounting only, never gates execution) -------
