@@ -5865,3 +5865,42 @@ el RDP escribe en RDRAM no tienen instante de invitado para la CPU. En RDPTestCP
 la "R" del titulo mientras el worker aun no ha hecho el relleno negro; Threaded la borra,
 Lockstep no (98,98 vs 99,07). El arreglo fiel es el fence perezoso por paginas (la CPU no
 toca la zona de pintado pendiente hasta que el motor drene).
+
+## 2026-09-17 -- DK64 Threaded determinista con grano SIG (Q=14)
+
+Oraculo: DK64, 1.500 M instrucciones, traza `[deliver]` (KESTREL_INTLOG=2). Antes 1 de cada
+4-6 corridas Threaded salia distinta (md5 3683d83f/30953df9, luego un baile de MI_DP de una op).
+Ahora **6/6 Threaded identicas y == Lockstep** (e0006a16), 14 s de pared.
+
+Cuatro fugas de tiempo de anfitrion, cerradas en orden:
+
+1. **Carrera Dekker del aparcamiento del RSP** (`dpScheduleSpan` vs `rspParkWait`): los dos
+   miraban antes de publicar. Ahora el tramo se publica (`dpSubSeq`) y DESPUES se mira
+   `rspPark`, con el aviso bajo `parkMx`. 3 de cada 10 corridas perdian una tarea de SP.
+2. **Grano de visibilidad de SIG0..7** (`KESTREL_SPSIGQ`, log2, defecto 14, 0 = exacto): la
+   escritura de CPU sella `roundup(cartNow()+1, Q)` y el RSP solo espera a la CPU hasta
+   `floor(now, Q)`. Se apunta en los dos modos. `spSigAtKick` (el lanzamiento ve todo lo
+   escrito antes) y `spLateClearHalt` (CLEAR_HALT con SIG aplazado relanza tras el BREAK,
+   la carrera de rspq de libdragon). Con Q=0 Threaded ya era == Lockstep; con Q=14 quedaban
+   las tres de abajo.
+3. **Lecturas DPC del RSP con tramo abierto por delante de la CPU**: con `KESTREL_DPRDV`
+   apagado el RSP leia DPC_CURRENT/STATUS sin esperar a la CPU (contador `stale` 21-23 y el
+   resultado cambiaba con el). Ahora pasa por `spReadSync` (cita exacta, sin adelanto).
+   `dpMaxQuery` se actualiza tambien en `dpcStatusFor`, que antes dejaba ciego el contador.
+4. **Salvavidas de 20 ms de las citas del RSP con la CPU en la barrera del RDP**: la CPU
+   parada en `dpBarrierWait` esperando a la GPU hacia saltar la renuncia del RSP. Nuevo
+   `cpuDpBarWait`: mientras esta puesto, el reloj de pared del salvavidas no corre (el RDP no
+   depende del RSP, no hay bloqueo mutuo; la barrera tiene su propio kBarrierMaxWait).
+5. **Escrituras DPC del RSP** (`Rsp::mtc0`, rd&8): con el motor congelado el RSP escribia
+   DPC_END en un instante de invitado futuro y la CPU, al descongelar antes en invitado pero
+   despues en pared, encolaba el tramo con ese END. Ahora la misma cita que las lecturas.
+   Con la tarea en marcha la CPU nunca va por delante del RSP (barrera del SP).
+
+Nota: el dynarec del RSP no actualiza `exactLeft` antes de llamar a helpers, asi que el reloj
+de MFC0 dentro de un bloque no es exacto; no ha hecho falta para este oraculo (RSPJIT=0 tambien
+divergia por las causas de arriba).
+
+**krom prdp preexistente:** `gate_prdp` marca regress=6 improve=45 (GRB12/15/24Decode 100->0,
+I8Decode, PPU2BPPTile8x8, Cycle1ShadeTriangle16BPP). El exe de d75ca9b da exactamente las
+mismas cifras, asi que no es de este cambio; baseline prdp desfasada o dependiente del
+anfitrion GPU. Pendiente mirar.

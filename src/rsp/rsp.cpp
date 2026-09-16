@@ -480,7 +480,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // El RSP no puede leer el FIFO en un instante al que la CPU aun no ha llegado: es
       // la otra escritora del FIFO. Publicar primero el reloj exacto es lo que permite que
       // la barrera del SP la deje llegar hasta aqui. Ver Memory::dpReadSync.
-      if(mem->dpReadAhead(now)) { publishExact(); mem->dpReadSync(now); }
+      if(mem->dpReadAhead(now)) { publishExact(); if(Memory::dpRdvOn()) mem->dpReadSync(now); else mem->spReadSync(now); }
       // Sin esperar al worker del RDP: CURRENT y STATUS salen del horario de invitado que fijo
       // dpScheduleSpan al lanzar el tramo, no de por donde vaya el anfitrion. Lo unico del RDP
       // que el RSP podria ver a medias son pixeles, y a la RDRAM solo llega por DMA: esa
@@ -499,9 +499,13 @@ auto Rsp::mfc0(int rt, int rd) -> void {
   // llegue (aun puede escribir antes de `now`), y luego no ver lo que escribio despues. El
   // microcodigo sondea SIG0 (osSpTaskYield) en bucle; sin esto el ciclo en que cedia lo decidia
   // el anfitrion. Ver Memory::spReadSync y Memory::spStatusForRsp.
-  if(rd == 4 && mem->rcpMode == Memory::RcpMode::Threaded) {
+  if(rd == 4) {
     const u64 now = mem->rspGuestNowAt(exactCycles());
-    if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now); }
+    // Solo son visibles las escrituras de CPU fechadas hasta el ultimo borde de grano.
+    const u64 vis = now & ~(Memory::spSigQuant() - 1);
+    if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < vis) {
+      publishExact(); mem->spReadSync(vis);
+    }
     setR(rt, mem->spStatusForRsp(now));
     return;
   }
@@ -519,7 +523,19 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   // programa cada DMA con cuatro MTC0 seguidos, asi que el prologo de `Memory::write32`
   // -- IS-Viewer, cart, dominio de save y el recorrido entero de regiones de `resolve`,
   // que aqui NO puede acertar nunca -- salia el 23 % del hilo del RSP en el perfil.
-  if(rd & 8) { mem->rcpRegWrite32(PHYS_DPC + ((rd & 7) << 2), v); return; }
+  if(rd & 8) {
+    // Escribir en DPC es tocar el mismo estado que la CPU: congelar/descongelar el motor
+    // (DPC_STATUS) decide si un DPC_END lanza tramo o solo mueve el puntero. Si el RSP escribe
+    // DPC_END en un instante al que la CPU aun no ha llegado y la CPU descongela ANTES en tiempo
+    // de invitado pero DESPUES en pared, la CPU encola el tramo con un END del futuro -- medido
+    // en DK64 threaded: 1 de cada 4 corridas partia distinto un tramo y MI_DP bailaba una op.
+    // La CPU nunca va por delante del RSP con tarea en marcha (barrera del SP), asi que basta
+    // la misma cita que en las lecturas.
+    const u64 now = mem->rspGuestNowAt(exactCycles());
+    if(mem->dpReadAhead(now)) mem->spReadSync(now);
+    mem->rcpRegWrite32(PHYS_DPC + ((rd & 7) << 2), v);
+    return;
+  }
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
   // without a BREAK — so Status.broke is NOT set (unlike the BREAK instruction).
@@ -546,6 +562,17 @@ auto Rsp::exec(u32 op) -> void {
     case 0x08: take(r[rs]); break;                                 // JR
     case 0x09: { u32 tgt = r[rs]; setR(rd, (curpc + 8) & 0xfff); take(tgt); } break;  // JALR (read rs before linking rd)
     case 0x0d:                                                     // BREAK
+      if(Memory::spSigQuant() > 1 && !mem->rcp.sp_intr_on_break) {
+        // Senales de la CPU aun aplazadas por el grano: ver Memory::spLateClearHalt.
+        const u64 now = mem->rspGuestNowAt(exactCycles());
+        if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < now) {
+          publishExact(); mem->spReadSync(now);
+        }
+        if(u32 f = mem->spLateClearHalt(now)) {
+          if(!(f & 2u)) mem->rcp.sp_status.fetch_or(2u, std::memory_order_acq_rel);   // BROKE
+          break;
+        }
+      }
       // Halt now, but publish HALT|BROKE only once step() has written the final PC
       // back (see below) — the CPU treats HALT as "task over" and immediately writes
       // the next task's SP_PC, so a status that lands first lets our own stale PC

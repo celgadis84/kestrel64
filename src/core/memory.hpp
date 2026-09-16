@@ -503,14 +503,27 @@ struct Memory {
   // en que cedia dependia del anfitrion: DK64 acababa una tarea en 55876 ciclos en Lockstep y
   // en 66060 o 201692 en Threaded. Cada escritura de la CPU apunta aqui desde que instante
   // existe y que bits tenian antes; el RSP deshace las que aun son futuras para el.
-  struct SpSigWr { u64 stamp; u32 mask; u32 prev; };
+  // stamp = instante en que el RSP la ve (redondeado al grano), raw = flanco real de la
+  // escritura, flags: 1 = llevaba CLEAR_HALT con el RSP en marcha, 2 = llevaba CLEAR_BROKE.
+  struct SpSigWr { u64 stamp; u64 raw; u32 mask; u32 prev; u32 flags; };
   static constexpr u32 kSpSigN = 32;
   SpSigWr spSigRing[kSpSigN]{};
   u32 spSigHead = 0, spSigCount = 0;       // bajo spSigMx
   std::mutex spSigMx;
-  auto spStatusForRsp(u64 now) -> u32;     // SOLO hilo del RSP (Threaded)
+  auto spStatusForRsp(u64 now) -> u32;     // SOLO quien ejecuta el RSP
+  // Grano de visibilidad de las senales que escribe la CPU para el RSP (potencia de 2, en ops
+  // de CPU). 1 = exacto. Ver Memory::spSigQuant.
+  static auto spSigQuant() -> u64;
+  auto spSigAtKick() -> void;              // lanzamiento: lo pendiente pasa a su instante real
+  auto spLateClearHalt(u64 now) -> u32;    // SOLO quien ejecuta el RSP, en BREAK (ver rsp.cpp)
   auto spReadSync(u64 now) -> void;        // SOLO hilo del RSP: la CPU llega a `now`, sin adelanto
-  std::atomic<u32> spRdv{0}, spRdvWaives{0};
+  std::atomic<u32> spRdv{0}, spRdvWaives{0}, spLateHalts{0};
+  // La CPU esta dentro de dpBarrierWait: la retiene el RDP (trabajo del anfitrion, p. ej. la GPU
+  // compilando pipelines), no el RSP. Una cita del RSP que espera a la CPU no puede soltarse
+  // por reloj de pared mientras dure: el RDP no depende del RSP, asi que no hay bloqueo mutuo
+  // que romper, y soltarla deja al RSP leer por delante de la CPU -- con eso volvia a entrar el
+  // anfitrion. La barrera del RDP tiene su propio salvavidas (kBarrierMaxWait).
+  std::atomic<bool> cpuDpBarWait{false};
   u32 dpJobAddr[kDpRingN]{};       // DPC_CURRENT al abrir
   u32 dpJobEndAddr[kDpRingN]{};    // DPC_CURRENT al cerrar
   // Instante de invitado en que ARRANCA un trabajo lanzado en `ops`. El motor es UNO: un

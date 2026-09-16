@@ -943,6 +943,11 @@ auto System::run() -> void {
                    (unsigned)memory.padPolls.load(std::memory_order_relaxed),
                    (unsigned long long)(cpu.retired / 1'000'000),
                    memory.rcp.vi_origin);
+      // Citas del sondeo de SP_STATUS (Memory::spReadSync) y BREAK relanzados por un CLEAR_HALT
+      // aplazado (Memory::spLateClearHalt). Con el grano por defecto las citas son del orden de
+      // una por borde cruzado; si suben al millon es que el grano se ha perdido.
+      std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
+                   memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
       // Fallos de cache primaria del tramo. Es la materia prima del CPI real: el VR4300 no
       // gasta un numero fijo de ciclos por instruccion, gasta uno mas la penalizacion de
       // RDRAM de cada fallo. Sin esta cuenta el CPI solo se puede suponer.

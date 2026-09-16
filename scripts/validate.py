@@ -497,7 +497,7 @@ def _bench_once(mode, args, flips):
         if not got or int(got.group(1)) < flips:
             print(f"bench[{mode}]: INVALIDO — la corrida no llego a {flips} intercambios "
                   f"({'sin [frames]' if not got else got.group(1)}); sube --bench-insn")
-            return None, ""
+            return None, "", 0
         hb = [l for l in log.splitlines() if l.startswith("[hb]")]
         times.append(dt)
         fields.append(int(got.group(2)))
