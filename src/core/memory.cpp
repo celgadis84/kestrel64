@@ -1,6 +1,9 @@
+#include "archive.hpp"
 #include "wrtag.hpp"
 #include "../telemetry/hostprof.hpp"
+#include "movie.hpp"
 #include "memory.hpp"
+#include "runtime.hpp"
 #include <chrono>
 #include "../audio/audio.hpp"
 #include "../vrdp/vrdp.hpp"
@@ -9,6 +12,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <xmmintrin.h>   // _mm_pause: pista de espera activa
 #include <string_view>
 #ifdef _WIN32
 #include <windows.h>
@@ -45,8 +50,12 @@ static auto selfThreadHandle() -> void* {
 }
 
 auto Memory::sampleWorkerCpu() -> void {
+  // Se llama SIEMPRE desde el hilo de CPU (heartbeat e informe final), asi que el handle
+  // propio se toma aqui la primera vez y ya vale para todas.
+  if(!cpuThreadH) cpuThreadH = selfThreadHandle();
   rspCpuNs.store(threadCpuNs(rspThreadH), std::memory_order_relaxed);
   rdpCpuNs.store(threadCpuNs(rdpThreadH), std::memory_order_relaxed);
+  cpuCpuNs.store(threadCpuNs(cpuThreadH), std::memory_order_relaxed);
 }
 
 // Physical base addresses of the N64 memory map.
@@ -75,6 +84,7 @@ static auto mempakFormat(std::vector<u8>& p) -> void;
 
 auto Memory::reset(bool expansionPak) -> void {
   rdram.assign(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000, 0);
+  rdramHidden.assign(rdram.size() >> 1, 0);
   wrtag::init((u32)rdram.size());
   dmem.assign(DMEM_SIZE, 0);
   imem.assign(IMEM_SIZE, 0);
@@ -86,11 +96,27 @@ auto Memory::reset(bool expansionPak) -> void {
   if(!isEeprom() && saveType != SaveType::None && saveRam.empty())
     saveRam.assign(saveSize(), isFlash() ? 0xFF : 0x00);
   flashMode = FlashMode::Status;
-  // El Controller Pak es del MANDO, no de la cartuchera: se enchufa siempre salvo que se
-  // pida lo contrario (algun juego mira si hay pak para ofrecer el Rumble en su sitio).
-  if(const char* m = std::getenv("KESTREL_MEMPAK")) mempakPresent = m[0] != '0';
-  if(mempakPresent && mempak.empty()) mempakFormat(mempak);
-  if(const char* b = std::getenv("KESTREL_BUTTONS")) padButtons = (u32)strtoul(b, nullptr, 16);
+  // Los cuatro conectores. El 1 viene enchufado y los demas vacios, que es como se
+  // encuentra una consola encima de la mesa; el menu de la ventana los cambia en caliente
+  // (rt::padOn/padAcc) y KESTREL_PADS deja hacerlo sin ventana, por ejemplo en un gate.
+  //   KESTREL_PADS=1101   mandos 1, 2 y 4
+  //   KESTREL_PADACC=1102 accesorio por puerto: 0 nada, 1 Controller Pak, 2 Rumble Pak
+  // El Controller Pak es del MANDO, no de la cartuchera: existe aunque el juego no guarde.
+  const char* pads = std::getenv("KESTREL_PADS");
+  const char* accs = std::getenv("KESTREL_PADACC");
+  const char* oldMempak = std::getenv("KESTREL_MEMPAK");   // compatibilidad: solo puerto 1
+  for(int i = 0; i < 4; i++) {
+    bool on = pads && pads[0] ? (pads[i] ? pads[i] != '0' : false) : (i == 0);
+    u8   ac = accs && accs[i] ? (u8)(accs[i] - '0') : (u8)1;
+    if(i == 0 && oldMempak && oldMempak[0] == '0') ac = 0;
+    if(ac > 2) ac = 0;
+    padPort[i].connected = on;
+    padPort[i].accessory = ac;
+    rt::padOn[i].store(on, std::memory_order_relaxed);
+    rt::padAcc[i].store(ac, std::memory_order_relaxed);
+    if(ac == 1 && padPort[i].mempak.empty()) mempakFormat(padPort[i].mempak);
+  }
+  if(const char* b = std::getenv("KESTREL_BUTTONS")) padButtons() = (u32)strtoul(b, nullptr, 16);
   initMap();
 }
 
@@ -126,7 +152,9 @@ auto Memory::saveSize() const -> u32 {
 
 // Path of the ROM with its extension replaced. Only an extension belonging to the final
 // path component is stripped, so a directory with a dot in it stays intact.
-static auto withExt(const std::string& romPath, const char* ext) -> std::string {
+static auto withExt(const std::string& romPath0, const char* ext) -> std::string {
+  // Una ROM comprimida guarda con el nombre de la ROM de dentro (ver stripContainerExt).
+  const std::string romPath = archive::stripContainerExt(romPath0);
   usize dot = romPath.find_last_of('.');
   usize slash = romPath.find_last_of("/\\");
   if(dot == std::string::npos || (slash != std::string::npos && dot < slash))
@@ -228,11 +256,18 @@ static auto mempakFormat(std::vector<u8>& p) -> void {
 // mupen/ares convention so saves are interchangeable: .eep (EEPROM), .sra (SRAM), .fla
 // (FlashRAM), .mpk (Controller Pak). The path is the ROM path with its extension replaced.
 auto Memory::attachSaveFile(const std::string& romPath) -> void {
-  // El Controller Pak va aparte: no depende del tipo de save de la cartuchera.
-  if(mempakPresent) {
-    if(mempak.empty()) mempakFormat(mempak);
-    mempakPath = withExt(romPath, ".mpk");
-    loadInto(mempakPath, mempak, "mpk");
+  // Los Controller Pak van aparte: no dependen del tipo de save de la cartuchera, y cada
+  // puerto lleva el suyo. El del puerto 1 conserva el nombre de siempre (.mpk) para no
+  // invalidar los que ya existen; los demas anaden el numero de puerto.
+  for(int i = 0; i < 4; i++) {
+    PadPort& pp = padPort[i];
+    // Los cuatro se preparan aunque ahora mismo no lleven pak: el accesorio se puede
+    // cambiar en marcha desde el dialogo, y sin la ruta ya resuelta ese puerto escribiria
+    // en un pak recien formateado y luego lo volcaria encima del fichero que ya existia.
+    if(pp.mempak.empty()) mempakFormat(pp.mempak);
+    pp.mempakPath = withExt(romPath, (i == 0 ? std::string(".mpk")
+                                             : ".mpk" + std::to_string(i + 1)).c_str());
+    loadInto(pp.mempakPath, pp.mempak, "mpk");
   }
 
   saveFilePath.clear();
@@ -245,7 +280,8 @@ auto Memory::attachSaveFile(const std::string& romPath) -> void {
 }
 
 auto Memory::flushSaveFile() const -> void {
-  if(mempakDirty) storeFrom(mempakPath, mempak);
+  for(const PadPort& pp : padPort)
+    if(pp.mempakDirty && !pp.mempakPath.empty()) storeFrom(pp.mempakPath, pp.mempak);
   if(saveFilePath.empty() || saveType == SaveType::None || !saveDirty) return;
   storeFrom(saveFilePath, isEeprom() ? eeprom : saveRam);
 }
@@ -546,6 +582,27 @@ auto Memory::cartRom32(u32 phys) -> u32 {
   return (u32)rom[off] << 24 | (u32)rom[off + 1] << 16 | (u32)rom[off + 2] << 8 | rom[off + 3];
 }
 
+// IO_BUSY (PI_STATUS bit 1) se apaga SOLO. En el N64 la escritura pendiente en el bus del
+// PI dura lo que dura el ciclo del bus y despues el bit cae; nadie tiene que leer el
+// cartucho para que baje. Aqui solo lo bajaba cartRead(), asi que un juego que escribe en
+// el espacio del cartucho y luego espera en PI_STATUS giraba para siempre. Es justo lo que
+// hace el `dma_wait()` de libdragon:
+//
+//     lw   v0, 16(v1)        # v1 = 0xA4600000, +0x10 = PI_STATUS
+//     andi v0, v0, 0x3       # DMA_BUSY | IO_BUSY
+//     bnez v0, -8
+//
+// snapper64 se quedaba ahi (pc=0x8005b6c8) y nunca llegaba a configurar el VI: origin=0,
+// width=0, ctrl=0 tras 1151 campos. El plazo es el mismo latch que ya existia
+// (CART_LATCH_TTL), medido en el reloj de invitado, asi que una lectura inmediata de
+// PI_STATUS despues de la escritura sigue viendo IO_BUSY como en HW.
+auto Memory::piIoDecay() -> void {
+  if(cartLatchValid && cartNow() >= cartLatchExpiry) {
+    cartLatchValid = false;
+    rcp.pi_status &= ~0x2u;
+  }
+}
+
 // CPU read from cart space. If a write recently latched a value onto the PI bus
 // (and it has not decayed), that value is returned and consumed. Otherwise a real
 // ROM read, mangled by the 16-bit-wide PI bus: sub-word reads only reach the UPPER
@@ -562,7 +619,7 @@ auto Memory::cartRead(u32 phys, u32 nbytes) -> u32 {
     if(nbytes == 2) return (v >> 16) & 0xffff;
     return v;
   }
-  if(cartLatchValid && now >= cartLatchExpiry) { cartLatchValid = false; rcp.pi_status &= ~0x2u; }
+  piIoDecay();
   if(nbytes == 4) return cartRom32(phys & ~3u);
   u32 w  = cartRom32((phys + 2) & ~3u);     // 16-bit bus: address the upper halfword
   u16 hw = (u16)(w >> 16);
@@ -698,6 +755,24 @@ auto Memory::rcpRegWrite32(u32 phys, u32 value) -> void {
   mmioWrite32(phys, value);
 }
 
+// El buffer de spans no es memoria plana: cada entrada ocupa cuatro ranuras de la ventana
+// de 128 palabras, y solo las tres primeras tienen registro detras. La tercera guarda unicamente
+// 8 bits (la cobertura del span) y la cuarta no existe. Cualquier programa que barra la ventana
+// -- no solo un test -- ve ese patron, que es la forma real del RAM interno del RDP.
+auto Memory::dpsSpanRead(u32 idx) const -> u32 {
+  idx &= 0x7f;
+  return (idx & 3) == 3 ? 0u : rcp.dps_span[idx];
+}
+
+auto Memory::dpsSpanWrite(u32 idx, u32 v) -> void {
+  idx &= 0x7f;
+  switch(idx & 3) {
+  case 0: case 1: rcp.dps_span[idx] = v; break;
+  case 2:         rcp.dps_span[idx] = v & 0xff; break;
+  default:        break;   // sin registro fisico: la escritura se pierde
+  }
+}
+
 auto Memory::mmioRead32(u32 a) -> u32 {
   u32 blk = a & 0x1ff0'0000;
   u32 off = a & 0x000f'ffff;
@@ -733,15 +808,25 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     switch(off & 0xff) {
     case 0x00: return rcp.dpc_start;
     case 0x04: return rcp.dpc_end;
-    case 0x08: return rcp.dpc_current.load(std::memory_order_acquire);
-    case 0x0c: return rcp.dpc_status | 0x80u;   // COMMAND_BUFFER_READY: the soft RDP is
-                                                 // always ready to accept a new command list
+    // Las dos se evaluan en el reloj de invitado del lector (ver dpcCurrentFor). En
+    // Lockstep el trabajo se ejecuta dentro del propio DPC_END y dpBusyAt() ya vale false
+    // antes de que nadie pueda leer: se lee idle, como en HW.
+    case 0x08: return dpcCurrentFor(cartNow());
+    case 0x0c: return dpcStatusFor(cartNow());
     // Performance counters, 24-bit each. The RDP accumulates them per rasterized
     // span (see SoftRdp::accountPixels); games time the RDP with these.
     case 0x10: return rcp.dpc_clock.load(std::memory_order_relaxed)    & 0xff'ffff;
     case 0x14: return rcp.dpc_bufbusy.load(std::memory_order_relaxed)  & 0xff'ffff;
     case 0x18: return rcp.dpc_pipebusy.load(std::memory_order_relaxed) & 0xff'ffff;
     case 0x1c: return rcp.dpc_tmem.load(std::memory_order_relaxed)     & 0xff'ffff;
+    }
+    return 0;
+  case BASE_DPS & 0x1ff0'0000:
+    switch(off & 0xff) {
+    case 0x00: return rcp.dps_tbist;
+    case 0x04: return rcp.dps_test_mode;
+    case 0x08: return rcp.dps_buftest_addr;
+    case 0x0c: return dpsSpanRead(rcp.dps_buftest_addr);
     }
     return 0;
   case BASE_VI & 0x1ff0'0000:
@@ -761,7 +846,7 @@ auto Memory::mmioRead32(u32 a) -> u32 {
       u32 total = rcp.viHalflines();
       u64 cph = viFieldInsns / total;   // instrucciones retiradas por media-linea
       if(cph == 0) cph = 1;
-      u64 cyc = cartClock ? *cartClock : 0;
+      u64 cyc = cartNow();   // mismo reloj de invitado que viTick (incluye paradas de cache)
       return (u32)((cyc / cph) % total);
     }
     case 0x14: return rcp.vi_burst;
@@ -789,7 +874,7 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     case 0x04: return rcp.pi_cart_addr;
     case 0x08: return rcp.pi_rd_len;
     case 0x0c: return rcp.pi_wr_len;
-    case 0x10: return rcp.pi_status;
+    case 0x10: piIoDecay(); return rcp.pi_status;
     default: if((off & 0xff) >= 0x14 && (off & 0xff) <= 0x30) return rcp.pi_bsd[((off & 0xff) - 0x14) / 4];
     }
     return 0;
@@ -847,18 +932,29 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x08: rcp.sp_rd_len = v; spDma(/*toRam=*/false); break;   // RDRAM -> SP mem
     case 0x0c: rcp.sp_wr_len = v; spDma(/*toRam=*/true);  break;   // SP mem -> RDRAM
     case 0x10: {  // SP_STATUS write: paired clear/set control bits.
-      // Threaded: a launch write (lone CLEAR_HALT) must land *after* the previous task
-      // published its own status. The worker sets HALT|BROKE from inside rsp.run(); if
-      // the CPU cleared HALT first and that late store landed afterwards, the CPU would
-      // read a spurious "task finished" and pull the output DMEM before the new task
-      // ever wrote it. The single real RSP orders these implicitly. Only launches wait —
-      // a mid-task SP_STATUS poke (abort, signal bits) must never block on the worker.
-      if(rcpMode == RcpMode::Threaded && (v & (1u << 0)) && !(v & (1u << 1))) rspAwaitIdle();
       // HALT as the CPU sees it *before* this write. A CLEAR_HALT only launches the
       // core when it was actually halted; arriving mid-task it is a no-op, because
       // the bit it clears is already clear. This is the launch condition — not any
       // emulator-side "is the worker thread busy" bookkeeping.
       bool wasHalted = (rcp.sp_status.load(std::memory_order_acquire) & 1u) != 0;
+      // Threaded: un LANZAMIENTO (CLEAR_HALT suelto sobre un nucleo parado) tiene que caer
+      // *despues* de que la tarea anterior publique su estado. El worker pone HALT|BROKE
+      // desde dentro de rsp.run(); si la CPU limpiase HALT antes y esa tienda tardia cayese
+      // detras, la CPU leeria un "tarea terminada" falso y sacaria el DMEM de salida antes
+      // de que la tarea nueva lo escribiese. El RSP real ordena esto solo.
+      //
+      // La espera va atada a `wasHalted`, la MISMA condicion que el lanzamiento de abajo.
+      // Con el nucleo ya corriendo, un CLEAR_HALT es un no-op en hardware: limpia un bit que
+      // ya esta limpio, no lanza nada y no hay estado que ordenar. Esperar ahi era un invento
+      // nuestro, y con libdragon sale carisimo: `rspq_flush_internal()` (src/rspq/rspq.c:1165)
+      // escribe SET_SIG_MORE|CLEAR_HALT|CLEAR_BROKE — dos veces seguidas, a proposito — en
+      // CADA vaciado de cola, con el microcodigo persistente corriendo. Como `rspq` solo hace
+      // break cuando la cola se VACIA, cada uno de esos avisos clavaba a la CPU emulada hasta
+      // que el RSP se comia toda la cola: 36% del tiempo de pared en junkrunner64, con el
+      // worker del RSP ocupado solo un 30%. El propio libdragon dice ahi que un emulador
+      // deberia "resincronizar" CPU y RSP en SP_STATUS, no bloquear hasta el BREAK.
+      if(rcpMode == RcpMode::Threaded && wasHalted && (v & (1u << 0)) && !(v & (1u << 1)))
+        rspAwaitIdle();
       // Each field has a (clear,set) bit pair. Writing BOTH bits of a pair at once is
       // a no-op for that field (hardware quirk); only a lone clear or lone set acts.
       auto pair = [&](u32 clrBit, u32 setBit, auto onClr, auto onSet){
@@ -932,7 +1028,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // If both CLEAR_HALT (bit0) and SET_HALT (bit1) are written together the SET
       // wins: HALT stays set (already applied above) and the RSP does not launch.
       // A lone SET_HALT while the core is mid-task stops it (external halt).
-      if((v & (1 << 1)) && !(v & (1 << 0))) rsp.running = false;
+      if((v & (1 << 1)) && !(v & (1 << 0))) { rsp.running = false; rsp.brake = false; }
       break;
     }
     case 0x1c: rcp.sp_semaphore = 0; break;          // write clears
@@ -1037,6 +1133,14 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     }
     }
     return; }
+  case BASE_DPS & 0x1ff0'0000:
+    switch(off & 0xff) {
+    case 0x00: rcp.dps_tbist = v & 0x7ff; break;   // los 11 bits del BIST de TMEM
+    case 0x04: rcp.dps_test_mode = v & 1; break;
+    case 0x08: rcp.dps_buftest_addr = v & 0x7f; break;   // registro de direccion de 7 bits
+    case 0x0c: dpsSpanWrite(rcp.dps_buftest_addr, v); break;
+    }
+    return;
   case BASE_VI & 0x1ff0'0000:
     // Mirror the VI programming to the GPU backend so its scanout matches. The N64 VI
     // register index (offset>>2, 0..13) maps 1:1 onto ::RDP::VIRegister. No-op when PRDP off.
@@ -1053,7 +1157,21 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     // threaded eso depende del reloj de pared y los cinco modos dejaron de coincidir en
     // SM64. El punto de captura tiene que ser el buffer recien publicado, que nadie toca.
     case 0x04: { u32 nv = v & 0xffffff;
-                 if(rcp.vi_origin && nv != rcp.vi_origin) rcp.viFlips++;
+                 if(rcp.vi_origin && nv != rcp.vi_origin) {
+                   rcp.viFlips++;
+                   // KESTREL_FLIPLOG=1: cuantos campos de video ha costado cada cuadro. La media
+                   // (campos por intercambio) esconde lo unico que importa en un juego que se
+                   // autorregula: si la cadencia es estable (siempre 2) o resbala (2,3,2,4...).
+                   // Un juego que cuenta cuadros para reproducir una demo se rompe con el
+                   // resbalon, no con la media. Diagnostico puro: no toca estado del invitado.
+                   static const int fliplog = std::getenv("KESTREL_FLIPLOG") ? 1 : 0;
+                   if(fliplog) {
+                     static u32 lastField = 0;
+                     std::fprintf(stderr, "[flip] #%u campo=%u delta=%u\n",
+                                  rcp.viFlips, rcp.viFields, rcp.viFields - lastField);
+                     lastField = rcp.viFields;
+                   }
+                 }
                  rcp.vi_origin = nv; } break;
     case 0x08: rcp.vi_width = v & 0xfff; break;
     case 0x0c: rcp.vi_intr = v & 0x3ff; break;
@@ -1082,13 +1200,15 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       rcp.ai_len = len;
       if(spTrace()) { static u32 n=0; if(n++<20) std::fprintf(stderr,"[ai] LEN write #%u len=%u fifo=%u dac=%u\n",n,len,rcp.ai_fifo_count,rcp.ai_dacrate); }
       if(len && rcp.ai_fifo_count < 2) {
+        // El DAC acaba leyendo el buffer entero de RDRAM; se contabiliza al aceptarlo.
+        ramBytesAi.fetch_add(len, std::memory_order_relaxed);
         rcp.ai_fifo_addr[rcp.ai_fifo_count] = rcp.ai_dram;
         rcp.ai_fifo_len[rcp.ai_fifo_count]  = len;
         if(rcp.ai_fifo_count == 0) rcp.ai_play_remaining = len;  // starts playing now
         rcp.ai_fifo_count++;
         // Fan the accepted buffer out to the host speakers. Read-only on RDRAM, so
         // this cannot perturb determinism (systemtest / lockstep md5 unaffected).
-        u32 rate = rcp.ai_dacrate ? (48'681'812u / (rcp.ai_dacrate + 1)) : 32'000u;
+        u32 rate = rcp.ai_dacrate ? (aiVidClock / (rcp.ai_dacrate + 1)) : 32'000u;
         audio::pushRdram(rdram.data(), (u32)rdram.size(), rcp.ai_dram, len, rate);
       }
       break;
@@ -1125,13 +1245,30 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x00: rcp.si_dram_addr = v & 0xffffff; break;
     case 0x04: siDma(/*toPif=*/false); break;   // PIF RAM -> RDRAM (read 64B)
     case 0x10: siDma(/*toPif=*/true);  break;   // RDRAM -> PIF RAM (write 64B)
-    case 0x18: clearIntr(MI_SI); rcp.si_status = 0; break;
+    // Escribir SI_STATUS solo BORRA LA INTERRUPCION: el bit de ocupado lo lleva el
+    // hardware, no el invitado. Ponerlo a cero a pelo dejaba ver el SI libre con la
+    // transaccion todavia en vuelo (el manejador del SDK escribe aqui al atender MI_SI).
+    case 0x18: clearIntr(MI_SI); rcp.si_status = siBusy ? SI_DMA_BUSY : 0; break;
     }
     return;
   }
 }
 
 // --- DMA engines -------------------------------------------------------------
+// "Los vectores de excepcion (0x0-0x400) no son destino legitimo de ningun DMA" es un
+// invariante de libultra, NO del hardware: ahi el kernel del juego pone sus manejadores y
+// pisarlos es un fallo real. El N64 no protege esa zona de ninguna manera, y un SDK que no
+// sea libultra puede usarla legitimamente -- libdragon mete estructuras suyas en RDRAM baja
+// y dispara el aviso decenas de veces por campo (dram=0x0001a0/0x0001a8 en junkrunner64).
+// Por eso el aviso pasa a ser opt-in (KESTREL_DMAWARN=1) y ademas se corta a 16 lineas: es
+// diagnostico para depurar un kernel libultra, no una condicion de error del emulador.
+static auto dmaVectorWarn() -> bool {
+  static const bool on = std::getenv("KESTREL_DMAWARN") != nullptr;
+  if(!on) return false;
+  static unsigned n = 0;
+  return ++n <= 16;
+}
+
 auto Memory::piDma(bool toCart) -> void {
   // SRAM/FlashRAM save DMA (PI domain 2, 0x08000000). These devices are byte-wide and
   // linear — no ROM 16-bit-bus mux — so a plain byte copy through saveRead/saveWrite is
@@ -1155,6 +1292,7 @@ auto Memory::piDma(bool toCart) -> void {
         }
         dram++; cart++;
       }
+      ramBytesPi.fetch_add(len, std::memory_order_relaxed);
       rcp.pi_cart_addr = (cart) & 0xffff'fffe;
       rcp.pi_dram_addr = ((dram + 1) & ~1u) & 0x00ff'fffe;
       rcp.pi_status = 0x8;
@@ -1166,6 +1304,9 @@ auto Memory::piDma(bool toCart) -> void {
     // RDRAM -> ROM cart: ROM is read-only so nothing lands. The address registers still
     // advance by the (even-rounded) length, matching HW.
     u32 len = ((rcp.pi_rd_len & 0x00ff'ffff) + 1 + 1) & ~1u;
+    // En la consola el motor LEE la RDRAM aunque el destino sea ROM y no se quede nada:
+    // el bus se ocupa igual, asi que el medidor lo cuenta.
+    ramBytesPi.fetch_add(len, std::memory_order_relaxed);
     rcp.pi_cart_addr = (rcp.pi_cart_addr + len) & 0xffff'fffe;
     rcp.pi_dram_addr = (rcp.pi_dram_addr + len) & 0x00ff'fffe;
     rcp.pi_status = 0x8;
@@ -1181,11 +1322,12 @@ auto Memory::piDma(bool toCart) -> void {
   // documented block algorithm, cf. ares n64/pi/dma.cpp.)
   u8 blk[128];
   s32 length = (s32)((rcp.pi_wr_len & 0x00ff'ffff) + 1);
+  ramBytesPi.fetch_add((u64)length, std::memory_order_relaxed);
   s32 maxBlock = 128;
   bool firstBlock = true;
   u32 cart = rcp.pi_cart_addr & 0x1fff'fffe;
   u32 dram = rcp.pi_dram_addr & 0x00ff'ffff;
-  if(dram < 0x400u)
+  if(dram < 0x400u && dmaVectorWarn())
     std::fprintf(stderr, "[dma!] PI->RDRAM sobre vectores: dram=0x%06x len=%d\n", dram, (int)length);
   while(length > 0) {
     s32 misalign = (s32)(dram & 7);
@@ -1254,18 +1396,25 @@ auto Memory::spDma(bool toRam) -> void {
   u32 length = ((len & 0xfff) + 8) & ~7u;
   u32 count  = ((len >> 12) & 0xff) + 1;
   u32 skip   = (len >> 20) & 0xfff;
+  // Ocupacion del bus: el salto entre filas no se transfiere, solo se saltan direcciones.
+  ramBytesRsp.fetch_add((u64)length * count, std::memory_order_relaxed);
   u32 memAddr  = rcp.sp_mem_addr & 0x1fff;
   bool imem    = (memAddr & 0x1000) != 0;
   u32 memOff   = memAddr & 0xff8;
   const u32 memOff0 = memOff;   // el bucle de abajo lo avanza; el dynarec necesita el inicial
   u32 dramAddr = rcp.sp_dram_addr & 0xfffff8;
-  // Invariante: los vectores de excepcion (0x0-0x400) no son destino legitimo de
-  // ningun DMA. Si alguno apunta ahi, el kernel del juego queda sin manejador y la
-  // siguiente interrupcion se va a la nada: avisar en el acto.
-  if(toRam && dramAddr < 0x400u)
+  if(toRam && dramAddr < 0x400u && dmaVectorWarn())
     std::fprintf(stderr, "[dma!] SP->RDRAM sobre vectores: dram=0x%06x len=%u\n", dramAddr, length);
 
   std::vector<u8>& sp = imem ? this->imem : this->dmem;
+  // Traza de transferencias del motor del SP: sin ella un microcodigo que gira sobre IMEM
+  // a ceros no dice si el fallo es del RSP o de que nadie le cargo el codigo.
+  if(spTrace()) {
+    static u32 n = 0; n++;
+    if(n <= 40) std::fprintf(stderr, "[spdma] #%u %s %s dram=0x%06x memOff=0x%03x len=%u count=%u skip=%u by pc=0x%08x\n",
+                             n, imem ? "IMEM" : "DMEM", toRam ? "->RDRAM" : "<-RDRAM",
+                             dramAddr, memOff, length, count, skip, (u32)storePc);
+  }
   if(watchAddr && toRam)
     std::fprintf(stderr, "[spDma] %s->RDRAM dram=0x%06x memOff=0x%03x len=%u count=%u skip=%u by pc=0x%08x\n",
                  imem ? "IMEM" : "DMEM", dramAddr, memOff, length, count, skip, (u32)storePc);
@@ -1301,26 +1450,38 @@ auto Memory::spDma(bool toRam) -> void {
       }
     }
   }
+  // RDRAM NO POBLADA: la ventana de direcciones de la RDRAM es mucho mayor que los chips
+  // instalados (4 u 8 MB). Leer donde no responde ningun chip devuelve CEROS, y escribir
+  // ahi se pierde; no es un "hasta aqui" que aborte la transferencia. La IPL3 de libdragon
+  // depende de esto de forma explicita para poner IMEM a cero antes de usarlo como fuente
+  // del bzero por DMA (boot/ipl3.c, rsp_bzero_init): "we run a DMA from RDRAM address
+  // > 8MiB where many areas return 0 on read", con SP_DRAM_ADDR = 8 MB + 0x2000. Cortar la
+  // copia dejaba IMEM con la basura anterior y esa basura acababa rellenando la RDRAM
+  // entera -- punteros podridos y vectores de excepcion machacados.
   const bool byByte = watchAddr != 0;
   for(u32 c = 0; c < count; c++) {
     if(byByte) {
       for(u32 i = 0; i < length; i++) {
         u32 mo = (memOff + i) & 0xfff;
         u32 d  = dramAddr + i;
-        if(d >= rdram.size()) break;
-        if(toRam) { wrtag::mark(d, wrtag::kSpDma, 0); watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
-        else      sp[mo]   = rdram[d];
+        bool have = d < rdram.size();
+        if(toRam) { if(!have) continue;
+                    wrtag::mark(d, wrtag::kSpDma, 0); watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
+        else      sp[mo] = have ? rdram[d] : 0;
       }
     } else {
       for(u32 i = 0; i < length; ) {
         u32 mo = (memOff + i) & 0xfff;
         u32 d  = dramAddr + i;
-        if(d >= rdram.size()) break;
         u32 n = length - i;
-        if(n > 0x1000u - mo)                n = 0x1000u - mo;             // vuelta de la SP mem
-        if(n > (u32)(rdram.size() - d))     n = (u32)(rdram.size() - d);  // final de la RDRAM
-        if(toRam) dmaCopy(&rdram[d], &sp[mo], n);
-        else      dmaCopy(&sp[mo], &rdram[d], n);
+        if(n > 0x1000u - mo) n = 0x1000u - mo;                            // vuelta de la SP mem
+        if(d < rdram.size()) {
+          if(n > (u32)(rdram.size() - d)) n = (u32)(rdram.size() - d);    // final de los chips
+          if(toRam) dmaCopy(&rdram[d], &sp[mo], n);
+          else      dmaCopy(&sp[mo], &rdram[d], n);
+        } else if(!toRam) {
+          std::memset(&sp[mo], 0, n);        // sin chip que responda: se leen ceros
+        }
         i += n;
       }
     }
@@ -1347,6 +1508,13 @@ auto Memory::spDma(bool toRam) -> void {
 // graficas, y su segunda tarea dejaba 128 bytes de comandos (con su SYNC_FULL) sin ejecutar:
 // sin interrupcion DP el planificador de libultra da el RDP por ocupado eternamente y el
 // juego no vuelve a emitir una tarea grafica nunca mas.
+// Diagnostico KESTREL_RDPINLINE: el RDP corre en el hilo de CPU aun en modo threaded. Decide
+// tambien que hilo es el dueno de Granite, y por tanto quien puede llamar a vrdp::idle.
+static auto rdpInlineDiag() -> bool {
+  static const bool on = std::getenv("KESTREL_RDPINLINE") != nullptr;
+  return on;
+}
+
 auto Memory::dpcAdvance() -> void {
   if(rcp.dpc_status & (1u << 1)) return;      // congelado: no se consume nada todavia
   bool xbus = rcp.dpc_status & 0x1u;   // DP_STATUS_XBUS: fetch commands from DMEM
@@ -1364,7 +1532,7 @@ auto Memory::dpcAdvance() -> void {
   // DP-interrupt/pixel-visibility *timing* differs, exactly as on hardware.
   // Diagnostico: KESTREL_RDPINLINE corre el RDP en el hilo CPU aun en modo threaded.
   // Sirve para bisecar que worker introduce una carrera, no para uso normal.
-  static const int rdpInline = std::getenv("KESTREL_RDPINLINE") ? 1 : 0;
+  const bool rdpInline = rdpInlineDiag();
   static const bool dpSyncLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
   if(dpSyncLog) {
     std::fprintf(stderr, "[dpkick] span=%06x..%06x xbus=%u busy=%u\n",
@@ -1377,11 +1545,51 @@ auto Memory::dpcAdvance() -> void {
 }
 
 auto Memory::siDma(bool toPif) -> void {
+  // Arrancar un DMA con otro en vuelo no le pasa a un juego sano (el SDK espera a la
+  // interrupcion antes de tocar el SI otra vez), pero si ocurre se cierra el anterior en
+  // vez de perderlo: dejar un plazo huerfano seria un despertar que nunca llega.
+  if(siBusy) siFinish();
   u32 dram = rcp.si_dram_addr & 0xffffff;
+  siDram = dram;
+  u64 us = kSiXferUs;   // el traslado de los 64 B entre RDRAM y PIF RAM
+  ramBytesSi.fetch_add(64, std::memory_order_relaxed);
   if(toPif) {
+    // RDRAM -> PIF RAM: solo deja el bloque de ordenes en la PIF. El PIF NO lo ejecuta
+    // aqui (ver el comentario del DMA de lectura).
     for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) pifram[i] = rdram[dram + i];
-    pifProcessJoybus();   // execute the command block so responses are ready for read-back
   } else {
+    // PIF RAM -> RDRAM: el PIF ejecuta el bloque de ordenes JUSTO ANTES de entregarlo.
+    // Es lo que hace el hardware y de lo que depende el SDK: osContStartReadData solo
+    // reescribe el bloque cuando la orden anterior no era CONT_CMD_READ_BUTTON, asi que
+    // a partir del segundo fotograma el juego lanza SOLO este DMA de lectura. Si el
+    // joybus no corre aqui, el juego relee la misma respuesta vieja fotograma tras
+    // fotograma y los botones se congelan: solo se ven pulsaciones largas, las que
+    // duran hasta el siguiente DMA de escritura.
+    // El joybus corre AQUI (el PIF lo corre antes de contestar al RD64B) y dice cuanto
+    // dura; la copia a RDRAM se hace al vencer el plazo, en siFinish().
+    us += pifProcessJoybus();
+  }
+  // Plazo: el joybus es serie y lento (4 us por bit), asi que la transaccion tarda cientos
+  // de microsegundos y el hardware solo levanta MI_SI cuando termina. Aqui se arma el plazo
+  // en el reloj del invitado; quien lo remata es siFinish() (interprete: en la instruccion
+  // exacta; JIT: la guarda le prohibe saltarselo dentro de un bloque).
+  // A/B: KESTREL_SIINSTANT=1 devuelve el comportamiento anterior (la transaccion termina en
+  // la misma instruccion que la arranca). Solo para bisecar: en hardware NO pasa.
+  static const bool instant = std::getenv("KESTREL_SIINSTANT") != nullptr;
+  siBusy   = true;
+  siToPif  = toPif;
+  siDoneAt = cartNow() + (instant ? 0 : usToInsns(us));
+  rcp.si_status = SI_DMA_BUSY;
+  if(instant) siFinish();
+}
+
+// Vencimiento del plazo del SI. La entrega a RDRAM se hace AQUI y no al arrancar porque es
+// cuando el hardware la tiene hecha: el PIF va contestando byte a byte durante la ventana.
+auto Memory::siFinish() -> void {
+  if(!siBusy) return;
+  siBusy = false;
+  if(!siToPif) {
+    u32 dram = siDram;
     if(watchAddr) std::fprintf(stderr, "[siDma] PIF->RDRAM dram=0x%06x by pc=0x%08x\n", dram, (u32)storePc);
     for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) { wrtag::mark(dram + i, wrtag::kSiDma, 0); watchHit(dram + i, 1, pifram[i], true); rdram[dram + i] = pifram[i]; }
   }
@@ -1389,17 +1597,27 @@ auto Memory::siDma(bool toPif) -> void {
   raiseIntr(MI_SI);
 }
 
-// Parse the 64-byte PIF RAM joybus command block and fill in device responses,
+// Run the 64-byte PIF RAM joybus command block and fill in device responses,
 // matching what libultra's __osContGetInitData / __osEepStatus expect to read
 // back. Byte scan: 0xFE ends the block, 0x00 skips to the next channel, 0xFF is
 // padding. Any other value is a TX byte count that opens a command whose result
 // goes into the RX area; the RX-size byte carries the channel error flags.
 //
-// Emulated devices: channel 0 = standard controller with a Controller Pak in its slot;
-// channel 4 = EEPROM; every other channel reports "no device".
-auto Memory::pifProcessJoybus() -> void {
+// Dispositivos emulados: canales 0-3 = los cuatro conectores de mando (cada uno con su
+// accesorio: nada, Controller Pak o Rumble Pak), canal 4 = EEPROM. Un conector sin mando y
+// los canales 5+ contestan "no device", que es lo que hace la consola con el hueco vacio.
+auto Memory::pifProcessJoybus() -> u32 {
   static int silog = std::getenv("KESTREL_SILOG") ? 1 : 0;
   const u8 NO_DEVICE = 0x80;   // CONT_NO_RESPONSE: (rxsize & 0xC0) >> 4 = 0x8
+  // Coste de LINEA del joybus, que es lo unico que hace lenta la transaccion: la consola y
+  // el mando hablan por un solo hilo a 4 us por bit (bit de parada de la consola 3 us, el
+  // del mando 4 us). Se factura por orden, contando los bytes que de verdad viajan: los TX
+  // siempre, los RX solo si el dispositivo contesta. De ahi salen ~167 us por una lectura
+  // de botones (1 byte de orden + 4 de respuesta) y ~670 us por los cuatro conectores, que
+  // es la cifra que se mide en hardware.
+  u32 us = 0;
+  auto billTx = [&](u32 n)  { us += n * 8 * 4 + 3; };   // bytes hacia el dispositivo + parada consola
+  auto billRx = [&](u32 n)  { us += n * 8 * 4 + 4; };   // bytes de vuelta + parada del mando
   int channel = 0;
   for(int i = 0; i < 63; ) {
     u8 t = pifram[i];
@@ -1415,70 +1633,95 @@ auto Memory::pifProcessJoybus() -> void {
     u8* rxp  = &pifram[rxStart];
     u8& rxsz = pifram[i + 1];                          // holds the error flags on return
 
+    billTx(tx);
     auto absent = [&] { rxsz |= NO_DEVICE;
       if(silog) std::fprintf(stderr, "[silog] ABSENT ch=%d cmd=0x%02x tx=%u rx=%u pc=0x%08x\n",
                              channel, cmd, tx, rx, (u32)storePc); };
     if(silog) std::fprintf(stderr, "[silog] cmd ch=%d cmd=0x%02x tx=%u rx=%u pc=0x%08x\n",
                            channel, cmd, tx, rx, (u32)storePc);
 
-    if(channel == 0) {                                // player 1 controller
+    if(channel < 4) {                                 // uno de los cuatro conectores
+      PadPort& pp = padPort[channel];
+      if(!pp.connected) { absent(); channel++; i = rxStart + rx; continue; }
       switch(cmd) {
       case 0x00:                                      // request status / info
       case 0xFF:                                      // reset (same reply)
-        // Byte de estado: CONT_CARD_ON (0x01) si hay accesorio. CONT_CARD_PULL (0x02) se
-        // deja a cero a proposito -- ambos puestos significan "pak recien cambiado" y el
-        // SDK devuelve PFS_ERR_NEW_PACK, que el juego ensena como error al usuario.
+        // Byte de estado: CONT_CARD_ON (0x01) si hay accesorio en la ranura. CONT_CARD_PULL
+        // (0x02) se deja a cero a proposito -- ambos puestos significan "pak recien
+        // cambiado" y el SDK devuelve PFS_ERR_NEW_PACK, que el juego ensena como error.
         if(rx >= 3) { rxp[0] = 0x05; rxp[1] = 0x00;   // tipo 0x0005 (mando estandar)
-                      rxp[2] = mempakPresent ? 0x01 : 0x00; }
+                      rxp[2] = pp.accessory ? 0x01 : 0x00; }
         break;
       case 0x01: {                                    // read buttons
         // El mando inyectado por telemetria pisa al del anfitrion mientras le queden
-        // sondeos, y el gasto se contabiliza AQUI (una lectura del joybus del mando 1),
-        // que es lo unico que el juego percibe como el paso del tiempo del mando.
-        u32 btn = padButtons; s8 sx = padStickX, sy = padStickY;
-        s32 left = padRemotePolls.load(std::memory_order_acquire);
-        if(left != 0 && channel == 0) {
-          btn = padRemoteButtons.load(std::memory_order_relaxed);
-          s32 st = padRemoteStick.load(std::memory_order_relaxed);
+        // sondeos, y el gasto se contabiliza AQUI (una lectura del joybus), que es lo unico
+        // que el juego percibe como el paso del tiempo del mando.
+        if(channel == 0) padPolls.fetch_add(1, std::memory_order_relaxed);
+        u32 btn = pp.buttons; s8 sx = pp.stickX, sy = pp.stickY;
+        s32 left = padRemotePolls[channel].load(std::memory_order_acquire);
+        if(left != 0) {
+          btn = padRemoteButtons[channel].load(std::memory_order_relaxed);
+          s32 st = padRemoteStick[channel].load(std::memory_order_relaxed);
           sx = (s8)(st & 0xff); sy = (s8)((st >> 8) & 0xff);
-          if(left > 0) padRemotePolls.store(left - 1, std::memory_order_release);
+          if(left > 0) padRemotePolls[channel].store(left - 1, std::memory_order_release);
         }
+        // Grabacion/reproduccion de entradas: esta es la frontera que el juego percibe, con
+        // el mando del anfitrion y el inyectado por telemetria ya resueltos.
+        movie::sample(channel, btn, sx, sy);
         for(int k = 0; k < rx; k++) rxp[k] = 0x00;
         if(rx >= 2) { rxp[0] = (btn >> 8) & 0xff; rxp[1] = btn & 0xff; }
         if(rx >= 4) { rxp[2] = (u8)sx; rxp[3] = (u8)sy; }  // analog stick
         break;
       }
-      case 0x02:                                      // leer 32 bytes del Controller Pak
+      case 0x02:                                      // leer 32 bytes del accesorio
       case 0x03: {                                    // escribir 32 bytes
         // La direccion viaja como (bloque << 5) | CRC5(bloque): 11 bits de bloque de 32
-        // bytes, o sea 64 KiB de espacio para 32 KiB de pak. Lo de arriba es la ventana
-        // del Rumble Pak (0x8000): un Controller Pak no responde nada util ahi.
+        // bytes, o sea 64 KiB de espacio de direcciones para 32 KiB de Controller Pak. La
+        // mitad alta la usa el Rumble Pak: 0x8000 es su firma y 0xC000 el motor.
         const bool wr = cmd == 0x03;
         u16 wire = tx >= 3 ? (u16)((pifram[txStart + 1] << 8) | pifram[txStart + 2]) : 0;
         u16 block = (u16)(wire >> 5);
         u32 off = (u32)block * 32;
         u8 data[32];
-        if(wr) {
-          for(int k = 0; k < 32; k++) data[k] = (3 + k) < tx ? pifram[txStart + 3 + k] : 0;
-          if(mempakPresent && off + 32 <= mempak.size()) {
-            std::memcpy(&mempak[off], data, 32);
-            mempakDirty = true;
+        if(wr) for(int k = 0; k < 32; k++) data[k] = (3 + k) < tx ? pifram[txStart + 3 + k] : 0;
+
+        if(pp.accessory == 1) {                       // Controller Pak: 32 KiB de RAM
+          if(wr) {
+            if(off + 32 <= pp.mempak.size()) {
+              std::memcpy(&pp.mempak[off], data, 32);
+              pp.mempakDirty = true;
+            }
+          } else {
+            for(int k = 0; k < 32; k++)
+              data[k] = off + k < pp.mempak.size() ? pp.mempak[off + k] : 0x00;
+            for(int k = 0; k < rx && k < 32; k++) rxp[k] = data[k];
           }
-        } else {
-          for(int k = 0; k < 32; k++)
-            data[k] = mempakPresent && off + k < mempak.size() ? mempak[off + k] : 0x00;
-          for(int k = 0; k < rx && k < 32; k++) rxp[k] = data[k];
+        } else if(pp.accessory == 2) {                // Rumble Pak: sin RAM, solo motor
+          // El SDK lo reconoce escribiendo 0x80 en toda la ventana 0x8000 y releyendola:
+          // si devuelve 0x80 hay Rumble. Fuera de esa ventana el pak no contesta nada
+          // (ceros), y una escritura en 0xC000 enciende (dato != 0) o apaga el motor.
+          if(wr) {
+            if(off >= 0xC000 && off < 0xD000) pp.rumble = data[0] != 0;
+          } else {
+            u8 fill = (off >= 0x8000 && off < 0x9000) ? 0x80 : 0x00;
+            for(int k = 0; k < 32; k++) data[k] = fill;
+            for(int k = 0; k < rx && k < 32; k++) rxp[k] = data[k];
+          }
+        } else {                                      // ranura vacia
+          if(!wr) { for(int k = 0; k < 32; k++) data[k] = 0x00;
+                    for(int k = 0; k < rx && k < 32; k++) rxp[k] = 0x00; }
         }
+
         // El CRC de datos cierra la respuesta en los dos sentidos: en la lectura cubre lo
         // devuelto, en la escritura lo que el juego mando (asi comprueba que llego bien).
-        // Sin pak enchufado el mando devuelve el CRC INVERTIDO, que es justo como el SDK
+        // Con la ranura VACIA el mando devuelve el CRC INVERTIDO, que es justo como el SDK
         // detecta la ausencia antes de ir a preguntar el estado.
         u8 crc = mempakDataCrc(data);
-        if(!mempakPresent) crc = (u8)~crc;
+        if(!pp.accessory) crc = (u8)~crc;
         int crcAt = wr ? 0 : 32;
         if(rx > crcAt) rxp[crcAt] = crc;
         if(silog && mempakAddrCrc(block) != (wire & 0x1f))
-          std::fprintf(stderr, "[silog] mempak addr CRC malo wire=0x%04x\n", wire);
+          std::fprintf(stderr, "[silog] pak addr CRC malo ch=%d wire=0x%04x\n", channel, wire);
         break;
       }
       default: absent(); break;
@@ -1508,11 +1751,15 @@ auto Memory::pifProcessJoybus() -> void {
       default: absent(); break;
       }
     } else {
-      absent();                                        // channels 1-3, 5+ : nothing plugged in
+      absent();                                        // canal 5+: no existe
     }
+    // Un conector vacio no contesta: la consola espera el tiempo de espera del bus y sigue.
+    // Se factura como si la respuesta no hubiera existido, que es lo que ocurre en la linea.
+    if(!(rxsz & NO_DEVICE)) billRx(rx);
     channel++;
     i = rxStart + rx;
   }
+  return us;
 }
 
 // --- VI field tick -----------------------------------------------------------
@@ -1529,18 +1776,37 @@ auto Memory::viTick(u64 retiredNow) -> bool {
   // Instante del campo (en instrucciones) en que el barrido pasa por la linea programada.
   u64 off = (u64)(rcp.vi_intr & 0x3fe) * field / total;
   auto crossings = [&](u64 x) -> u64 { return x >= off ? (x - off) / field + 1 : 0ull; };
-  bool intrFire   = rcp.vi_intr != 0 && crossings(retiredNow) > crossings(viLastRetired);
+  // V_INTR == 0 es una linea de coincidencia VALIDA (media-linea 0, arranque de campo): el
+  // VI compara V_CURRENT con V_INTR sin caso especial, y hay homebrew (libdragon) que deja
+  // la linea en 0 y espera la interrupcion de campo ahi. El valor de reset es 256, no 0,
+  // asi que no hace falta ningun guard para las ROMs que nunca programan el registro.
+  bool intrFire   = crossings(retiredNow) > crossings(viLastRetired);
   bool fieldClose = (retiredNow / field) > (viLastRetired / field);
   viLastRetired = retiredNow;
   rcp.vi_current = (u32)((retiredNow % field) * total / field) & ~1u;
   if(intrFire) raiseIntr(MI_VI);
   if(fieldClose) {
     rcp.viFields++;
+    // Barrido de video: el VI no tiene framebuffer propio, relee la imagen de RDRAM cada
+    // campo, una linea por linea de salida (su buffer interno es de una linea). Es trafico
+    // continuo y con prioridad sobre el RDP -- de ahi el factor T_VI del modelo de coste --
+    // asi que en el medidor del bus pesa tanto como para verse: 320x237x2 por campo a 60 Hz
+    // son ya ~9 MB/s con la pantalla quieta.
+    if((rcp.vi_ctrl & 3) >= 2 && rcp.vi_origin && rcp.vi_width) {
+      u32 vs = (rcp.vi_vstart >> 16) & 0x3ff, ve = rcp.vi_vstart & 0x3ff;
+      u32 lines = ve > vs ? (ve - vs) / 2 : 0;          // el registro va en medias lineas
+      u32 bpp   = (rcp.vi_ctrl & 3) == 3 ? 4u : 2u;
+      ramBytesVi.fetch_add((u64)rcp.vi_width * lines * bpp, std::memory_order_relaxed);
+    }
     // Cierre de campo: rota el contexto por-cuadro del backend GPU. Corre en el hilo de
     // emulacion, el mismo que encola comandos del RDP — begin_frame_context tiene que ir
     // serializado con la emision (el scanout es la unica llamada entre hilos). No-op si
     // esta apagado. Antes practicamente no se llamaba (solo al dar la vuelta el contador).
     vrdp::frameBegin();
+    // Con el RDP en este mismo hilo (lockstep, o el diagnostico RDPINLINE) no hay worker que
+    // se quede ocioso: el aviso de ocio de parallel-rdp va una vez por campo. Sin el, una lista
+    // que no acaba en SYNC_FULL no llega nunca a la GPU y la RDRAM se queda sin pintar.
+    if(rcpMode != RcpMode::Threaded || rdpInlineDiag()) vrdp::idle();
   }
   // El DAC drena por muestras, no por campos: fuera del cierre de campo, en cada subtramo.
   aiTick(retiredNow);
@@ -1565,7 +1831,7 @@ auto Memory::aiTick(u64 retiredNow) -> void {
   if(rcp.ai_fifo_count == 0) { rcp.aiAcc = 0; return; }   // en silencio no se acumula credito
   // Un salto enorme (arranque, savestate, pausa larga) no debe vaciar la FIFO de golpe.
   if(delta > viFieldInsns * 4) delta = viFieldInsns * 4;
-  u32 rate = rcp.ai_dacrate ? (48'681'812u / (rcp.ai_dacrate + 1)) : 32'000u;
+  u32 rate = rcp.ai_dacrate ? (aiVidClock / (rcp.ai_dacrate + 1)) : 32'000u;
   u64 den  = viFieldInsns * (u64)viFieldHzMilli;      // instrucciones por segundo x1000
   if(den == 0) return;
   rcp.aiAcc += delta * ((u64)rate * 4ull * 1000ull);
@@ -1604,6 +1870,7 @@ auto Memory::vrdpBringUp() -> void {
 // sin sus lookups por hilo y el RDP acaba sin completar trabajos (el juego se queda esperando
 // MESG_DP_COMPLETE para siempre). De ahi que esto solo espere.
 auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
+  if(!vrdp::built) return false;                      // este .exe no lo lleva: nada que esperar
   const char* e = std::getenv("KESTREL_PRDP");
   if(e && e[0] == '0') return false;                  // SoftRDP forzado: nada que esperar
   for(u32 i = 0; i < timeoutMs; i++) {
@@ -1641,7 +1908,45 @@ auto Memory::rdpPublishCurrent(u32 fallback) -> void {
   rcp.dpc_current.store(pub, std::memory_order_release);
 }
 
-auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> void {
+// Cobrar el trabajo del RDP cuando quien rasteriza es la GPU.
+//
+// parallel-rdp dibuja en la tarjeta grafica y no tiene forma de decirle al invitado lo que
+// aquello habria costado en la consola: el reloj de coste (rcp.rdpGclk) y DPC_CLOCK solo los
+// alimenta SoftRdp::accountPixels. Sin esto, con la GPU activa el RDP le sale GRATIS al
+// juego: DPC_CLOCK clavado a cero -- que es un registro que los juegos LEEN para medirse --
+// y Memory::rdpPace no frena nunca, asi que la CPU del invitado nunca espera al RDP y el
+// juego corre mas suelto de lo que corrio jamas en hardware. Medido en Donkey Kong 64: la
+// demo de atraccion iba a 30 fps clavados sin perder un solo fotograma.
+//
+// El arreglo es pasar el MISMO tramo de FIFO por el decodificador de SoftRdp en modo
+// solo-coste (ver SoftRdp::costOnly): recorre los comandos, mantiene el estado (scissor,
+// modos, imagenes) y cobra los pixeles que entrarian al pipeline, pero no escribe ni un
+// byte de RDRAM -- los pixeles buenos son los de la GPU. El coste es O(altura) por
+// primitiva, no O(area), porque cada tramo se cobra de una vez.
+//
+// KESTREL_RDPCOST=0 lo apaga, para el A/B de rendimiento.
+auto Memory::rdpCostOn() -> bool {
+  static const bool on = []{ const char* e = std::getenv("KESTREL_RDPCOST"); return !(e && e[0] == '0'); }();
+  return on;
+}
+
+auto Memory::rdpCostPass(u32 current, u32 stop, bool xbus, const u8* cmdSrc) -> bool {
+  if(!rdpCostOn() || stop == current) return false;
+  softCost.costOnly = true;
+  softCost.charge   = true;
+  softCost.curOut   = nullptr;   // DPC_CURRENT lo publica quien pinta, no este paseo
+  softCost.cmdSrc   = cmdSrc;
+  softCost.run(*this, current, stop, xbus);
+  return true;
+}
+
+auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool preCosted) -> void {
+  // Coste de ESTE trabajo. Con preCosted ya esta cobrado y fechado por quien lanzo el tramo
+  // (dpScheduleSpan): aqui no se cobra nada, solo se pinta.
+  const u64 gclk0 = rcp.rdpGclk.load(std::memory_order_relaxed);
+  // Publicar el fin de cuadro en el reloj del invitado en vez de en el del anfitrion. En
+  // Lockstep no hace falta: lo ejecuta el propio hilo de CPU y ya cae en un punto determinista.
+  const bool defer = rcpMode == RcpMode::Threaded && rcpDeadlineOn();
   // GPU path (paraLLEl-RDP): opt-in via KESTREL_PRDP. Lazily brought up on first job with
   // this RDRAM block; when live it consumes the FIFO on the GPU instead of SoftRDP. The
   // guest RDRAM vector is allocated once and never resized, so its pointer is stable for
@@ -1650,7 +1955,14 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> voi
   // Reanudar un comando que quedo partido por el borde del span anterior. Solo si este span
   // continua justo donde acabo aquel: si el juego instalo un buffer nuevo (START fresco), el
   // trozo pendiente pertenece a un FIFO que ya no existe y se descarta, como en HW.
-  if(rdpHasResume && current == rdpLastEnd) current = rdpResume;
+  const u32 rawCur = current;
+  if(rdpHasResume && rawCur == rdpLastEnd) current = rdpResume;
+  u32 costCur = rawCur;
+  if(!preCosted) {
+    if(rdpCostHasResume && rawCur == rdpCostLastEnd) costCur = rdpCostResume;
+    rdpCostHasResume = false;
+    rdpCostLastEnd = end;
+  }
   rdpHasResume = false;
   rdpLastEnd = end;
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
@@ -1659,16 +1971,43 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> voi
     // `stop` puede quedar delante de `end` si el ultimo comando del span esta partido: el
     // command processor no ejecuta comandos a medias. Ese trozo NO se pierde -- el siguiente
     // kick reanuda desde ahi porque dpc_submitted retrocede al punto de parada.
+    // El paseo de coste va DELANTE del dibujado, y no es un detalle de orden.
+    //
+    // Es software puro, determinista, y no escribe un byte: recorre los comandos con el
+    // decodificador de SoftRdp y cobra en rcp.rdpGclk lo que ese tramo habria costado en la
+    // consola. Ponerlo detras de vrdp::runFifo (como estaba) deja rdpGclk CLAVADO durante todo
+    // el trabajo y lo sube de golpe al final, con dos consecuencias:
+    //
+    //   - Memory::rdpPace frena a la CPU contra "el trabajo que el RDP lleva hecho", y ese
+    //     trabajo valia cero hasta el ultimo instante: el freno no mordia mientras la GPU
+    //     dibujaba, que es justo cuando tiene que morder.
+    //   - el plazo de fin de tarea (dpEndArm) nacia con el coste ya conocido pero con la CPU
+    //     del invitado ya pasada de largo, o sea VENCIDO -- y entonces MI_DP cae donde el
+    //     anfitrion decida. Dos corridas del mismo binario publicaban la interrupcion en
+    //     instrucciones distintas y el juego divergia (docs/GAPS.md 3b).
+    //
+    // Cobrando primero, el coste del tramo esta puesto antes de que la GPU empiece: el freno
+    // acota a la CPU contra el trabajo REAL y el plazo nace vivo.
+    if(!preCosted && rdpCostPass(costCur, end, xbus, cmdSrc)) {
+      const u32 endM = xbus ? (end & 0x0fff'ffffu) : (end & 0x00ff'ffffu);
+      if(softCost.stopAt != endM) { rdpCostResume = softCost.stopAt; rdpCostHasResume = true; }
+    }
     u32 stop = end;
     bool sync = vrdp::runFifo(cmdSrc, (u32)rdram.size(), dmem.data(), current, end, xbus,
                               &stop);
     if(stop != end) { rdpResume = stop; rdpHasResume = true; }
     rdpPublishCurrent(stop);
     if(sync) {
-      rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
-      rcp.dpSyncs++;                       // misma contabilidad que el camino SoftRDP
       ev("rdpint", current, end);
-      raiseIntr(MI_DP);
+      if(defer) {
+        // Con el tramo ya fechado, el plazo de MI_DP lo armo quien lo lanzo.
+        if(!preCosted) dpEndArm(dpJobOps, rcp.rdpGclk.load(std::memory_order_relaxed) - gclk0);
+      } else {
+        rcp.dpc_status &= ~(0x8u | 0x20u); // pipe drained: clear START_GCLK | PIPE_BUSY
+        rcp.dpSyncs++;                     // misma contabilidad que el camino SoftRDP
+        dpRets.fetch_add(1, std::memory_order_relaxed);
+        raiseIntr(MI_DP);
+      }
     }
     return;
   }
@@ -1676,6 +2015,20 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> voi
   // FIFO: es lo que el microcodigo mira para saber cuanto buffer puede reutilizar.
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   wrtag::setWin(0, current & 0x00ff'ffffu, end & 0x00ff'ffffu);
+  // El paseo de coste va DELANTE tambien aqui. Antes este camino cobraba mientras pintaba, y
+  // eso deja el instante de cierre del trabajo sin conocer hasta el ultimo pixel: cualquiera
+  // que preguntase por el RDP a mitad de trabajo recibia una respuesta que dependia de lo
+  // rapido que fuese el anfitrion pintando. Con el coste por delante el horario del trabajo
+  // esta publicado antes de tocar un pixel, igual que en el camino de la GPU.
+  {
+    const bool costed = !preCosted && rdpCostPass(costCur, end, xbus, cmdSrc);
+    if(costed) {
+      const u32 endM = xbus ? (end & 0x0fff'ffffu) : (end & 0x00ff'ffffu);
+      if(softCost.stopAt != endM) { rdpCostResume = softCost.stopAt; rdpCostHasResume = true; }
+    }
+    softRdp.charge = !costed && !preCosted;   // el coste se paga UNA vez
+  }
+  softRdp.costOnly = false;      // este camino SI pinta
   softRdp.curOut = &rcp.dpc_current;
   softRdp.cmdSrc = cmdSrc;
   u32 nc = softRdp.run(*this, current, end, xbus);
@@ -1692,10 +2045,16 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc) -> voi
                    current, end, nc, softRdp.colorImage(), softRdp.colorImageSize());
   } else { (void)nc; }
   if(softRdp.sawSyncFull) {
-    rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
-    rcp.dpSyncs++;                       // "a frame finished rendering" — see KESTREL_MAXSYNCS
     ev("rdpint", current, end);
-    raiseIntr(MI_DP);
+    if(defer) {
+      // Con el tramo ya fechado, el plazo de MI_DP lo armo quien lo lanzo.
+      if(!preCosted) dpEndArm(dpJobOps, rcp.rdpGclk.load(std::memory_order_relaxed) - gclk0);
+    } else {
+      rcp.dpc_status &= ~(0x8u | 0x20u); // pipe drained: clear START_GCLK | PIPE_BUSY
+      rcp.dpSyncs++;                     // "a frame finished rendering" -- see KESTREL_MAXSYNCS
+      dpRets.fetch_add(1, std::memory_order_relaxed);
+      raiseIntr(MI_DP);
+    }
   }
 }
 
@@ -1725,26 +2084,50 @@ auto Memory::rdpSnapshot(u32 current, u32 end) -> void {
   std::memcpy(sh.data() + a, rdram.data() + a, b - a);
 }
 
+// Quien esta corriendo AHORA. Cada chip sella los eventos con SU propio reloj de invitado:
+// el RSP escribe DPC_END desde su hilo y el instante correcto es el suyo, no el numero de
+// instrucciones que la CPU lleve retiradas en ese momento de tiempo de pared.
+static thread_local bool tlIsRspThread = false;
+
 auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   bool wake;
   {
     std::lock_guard<std::mutex> lk(rdpMx);
     ev("dp.sub", current, end);
-    // El FIFO del RDP es UNO: escribir DPC_END no encola "un trabajo", solo adelanta el
-    // puntero final del mismo buffer de comandos. Si el ultimo tramo encolado todavia no ha
-    // empezado (el worker saca de la cola ANTES de ejecutar, asi que todo lo que sigue aqui
-    // esta sin empezar) y este continua exactamente donde acababa, con el mismo modo de bus,
-    // es el mismo tramo de FIFO partido en dos escrituras: unirlos es lo que hace el
-    // hardware. DPC_CURRENT acaba en el mismo sitio y se ejecutan los mismos comandos.
     // La copia se toma con el mutex cogido y ANTES de publicar el trabajo: el worker no
     // puede ver el tramo hasta que sus bytes estan a salvo. Solo el camino RDRAM; en xbus
     // los comandos viven en DMEM, que el RSP no reescribe mientras su tarea corre.
     if(!xbus) rdpSnapshot(current, end);
+    // EL HORARIO SE HACE AQUI, y fuera del if/else de mas abajo. El tramo [current, end) que
+    // acaba de escribir el invitado se fecha entero -- coste, instante de arranque, instante
+    // de cierre, plazo de MI_DP -- en el mismo hilo que escribio DPC_END y antes de que nadie
+    // pinte nada. Lo que el invitado ve del motor sale solo de estas fechas, asi que ya no
+    // depende de por donde vaya el anfitrion. Unir o no unir tramos en la cola de abajo es,
+    // desde aqui, invisible.
+    {
+      const u8* costSrc = (!xbus && !rdpShadow[rdpGen].empty()) ? rdpShadow[rdpGen].data()
+                                                               : rdram.data();
+      dpScheduleSpan(current, end, xbus, costSrc,
+                     tlIsRspThread ? rspGuestNow() : cartNow());
+    }
+    // El FIFO del RDP es UNO: escribir DPC_END no encola "un trabajo", solo adelanta el
+    // puntero final del mismo buffer de comandos. Si el ultimo tramo encolado todavia no ha
+    // empezado y este continua exactamente donde acababa, con el mismo modo de bus, es el
+    // mismo tramo partido en dos escrituras y se pinta de una vez: una vuelta menos del
+    // worker. Esto es reparto de trabajo del anfitrion, nada mas.
     if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus
-       && rdpQueue.back().gen == rdpGen)
+       && rdpQueue.back().gen == rdpGen) {
       rdpQueue.back().end = end;
-    else
-      rdpQueue.push_back({current, end, xbus, rdpGen});
+    }
+    else {
+      rdpQueue.push_back({current, end, xbus, rdpGen,
+                          tlIsRspThread ? rspGuestNow() : cartNow()});
+      // Hay trabajo por pintar: la CPU queda acotada por dpBarrierAt(), que es el instante en
+      // que el motor termina TODO lo mandado.
+      if(dpBarrierOn() && rcpMode == RcpMode::Threaded)
+        rcpPend.fetch_or(4u, std::memory_order_release);
+      dpPending.fetch_add(1, std::memory_order_release);
+    }
     rdpBusy.store(true, std::memory_order_relaxed);
     // Si el worker no esta dormido en el condvar, volvera a coger este mutex al terminar el
     // trabajo en curso y vera la cola llena: la notificacion sobra. Con esperador, notify_all
@@ -1763,6 +2146,32 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   if(syncRdp) rdpDrain();
 }
 
+static inline void spinPause();
+
+// Vueltas que gira el worker del RDP, ocioso, antes de dormirse en el condvar. Con el motor
+// en la GPU cada tramo se despacha en microsegundos y el worker se duerme entre DPC_END y
+// DPC_END: el siguiente productor (sobre todo el HILO DEL RSP, a decenas de miles de DPC_END
+// por segundo) encuentra rdpWaiting=true y paga notify_all = llamada al kernel, mas el
+// despertar del worker. Perfil del hilo del RSP 2026-09-11: 10,6 % fuera de imagen desde
+// rdpSubmit. Girar un poco sobre dpPending (lectura atomica, sin mutex) coge el tramo
+// siguiente sin que nadie llame al kernel. Solo coste de anfitrion: el horario del tramo ya
+// esta fechado por quien lo lanzo (dpScheduleSpan), el invitado no ve cuando se pinta.
+// KESTREL_RDPSPIN=<n> (0 = dormir directamente). Medido 2026-09-16, bench SM64 200
+// intercambios, minimo de 5 en dos rondas intercaladas:
+//   prdp-jit      0 -> 3,98/3,98 s   4096 -> 3,53/3,55   16384 -> 3,54/3,48
+//                 32768 -> 3,45/3,46   131072 -> 3,49/3,47   1 M -> 3,48/3,48
+//   threaded-jit  0 -> 4,93/4,93 s   32768 -> 4,64/4,62   (SoftRDP)
+// Meseta desde 32768: -13 % de pared con Parallel-RDP y -6 % con SoftRDP.
+static auto rdpSpinLen() -> u32 {
+  static const u32 v = []() -> u32 {
+    const char* e = std::getenv("KESTREL_RDPSPIN");
+    if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
+                  if(end && !*end && n >= 0 && n <= 10'000'000) return (u32)n; }
+    return 32768u;
+  }();
+  return v;
+}
+
 auto Memory::rdpWorkerLoop() -> void {
   hostprof::start("rdp");   // opt-in: KESTREL_HOSTPROF_WHO=rdp
   rdpThreadH = selfThreadHandle();
@@ -1779,6 +2188,18 @@ auto Memory::rdpWorkerLoop() -> void {
   vrdpBringUp();
   for(;;) {
     RdpJob job;
+    // dpPending cuenta tramos encolados + el que se esta pintando, y el worker ya descuento el
+    // suyo: aqui arriba > 0 es exactamente "cola no vacia". Sin wakeup perdido: si el tramo
+    // llega despues del giro, o el productor ve rdpWaiting (lo lee con el mutex) o el
+    // predicado de abajo ve la cola llena.
+    bool spun = false;
+    for(u32 k = 0, n = rdpSpinLen(); k < n; k++) {
+      if(dpPending.load(std::memory_order_acquire)) { spun = true; break; }
+      if((k & 15u) == 15u) spinPause();
+    }
+    // Sin trabajo tras el giro: el hilo se va a dormir. Lo acumulado en el renderer sale a la
+    // GPU (ver vrdp::idle). Fuera de rdpMx: puede costar un submit de Vulkan.
+    if(!spun && !rdpInlineDiag() && !dpPending.load(std::memory_order_acquire)) vrdp::idle();
     {
       std::unique_lock<std::mutex> lk(rdpMx);
       // rdpWaiting le dice al productor si hace falta despertarnos (ver rdpSubmit).
@@ -1788,39 +2209,102 @@ auto Memory::rdpWorkerLoop() -> void {
       rdpCv.wait(lk, [&]{ return rdpStop || !rdpQueue.empty(); });
       rdpWaiting = false;
       if(rdpStop && rdpQueue.empty()) return;
+      // El horario de este tramo ya esta hecho desde que se lanzo (dpScheduleSpan): el worker
+      // no toca ni una fecha, solo pinta.
       job = rdpQueue.front(); rdpQueue.pop_front();
     }
     auto t0 = std::chrono::steady_clock::now();
     // Los comandos salen de la copia de SU generacion; en xbus no hay copia (DMEM).
     const u8* src = (!job.xbus && !rdpShadow[job.gen].empty()) ? rdpShadow[job.gen].data()
                                                               : rdram.data();
-    rdpRunJob(job.current, job.end, job.xbus, src);
+    dpJobOps = job.ops;   // instante de invitado del lanzamiento, para el plazo de fin
+    rdpRunJob(job.current, job.end, job.xbus, src, rdpCostOn());
     rdpBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
     rdpJobsRun.fetch_add(1, std::memory_order_relaxed);
     ev("dp.done", job.end, (u32)rdpQueue.size());
     {
       std::lock_guard<std::mutex> lk(rdpMx);
+      // El motor suelta el trabajo cuando ha terminado de LEER sus comandos, no antes: solo
+      // aqui puede el productor reescribir ese buffer sin pisar al rasterizador.
+      dpPending.fetch_sub(1, std::memory_order_release);
       if(rdpQueue.empty()) rdpBusy.store(false, std::memory_order_relaxed);
+      // dpCompSeq NO es tiempo de invitado: es cuantos trabajos lleva pintados el anfitrion.
+      // Solo sirve para que los que esperan sepan que algo se ha movido de verdad.
+      dpCompSeq.fetch_add(1, std::memory_order_release);
+      if(rdpQueue.empty()) {
+        rcpPend.fetch_and(~4u, std::memory_order_release);
+        dpBarWaivedAt = ~0ull;
+      }
     }
     rdpCv.notify_all();   // wake any rdpDrain() waiter
   }
+}
+
+// Espera acotada CON PARTE. Ninguna de las esperas del hilo de CPU sobre los workers del
+// RCP tenia tope: si un worker deja de publicar, el emulador se queda quieto para siempre y
+// sin decir por que -- la ventana sigue viva y el juego no avanza, que desde fuera parece
+// lentitud y no un cuelgue. Dejar de esperar NO es una opcion: seguir sin el resultado del
+// RSP o del RDP corrompe el estado del invitado, y el hardware tampoco "se cansa". Asi que
+// el tope no rompe la espera, la PARTE: cada KESTREL_RCPWAIT ms (2000 por defecto, =0 vuelve
+// a la espera muda de siempre) se imprime el estado de los dos dominios y se sigue esperando.
+static auto rcpWaitReportMs() -> unsigned {
+  static const unsigned ms = []{
+    const char* e = std::getenv("KESTREL_RCPWAIT");
+    return e ? (unsigned)std::strtoul(e, nullptr, 10) : 2000u;
+  }();
+  return ms;
+}
+
+template<typename Pred, typename Report>
+static auto awaitReporting(std::unique_lock<std::mutex>& lk, std::condition_variable& cv,
+                           Pred pred, Report report) -> void {
+  const unsigned ms = rcpWaitReportMs();
+  if(!ms) { cv.wait(lk, pred); return; }
+  const auto period = std::chrono::milliseconds(ms);
+  for(unsigned round = 1; !cv.wait_for(lk, period, pred); round++) report(round);
 }
 
 auto Memory::rdpDrain() -> void {
   if(rcpMode != RcpMode::Threaded) return;
   auto t0 = std::chrono::steady_clock::now();
   { std::unique_lock<std::mutex> lk(rdpMx);
-    rdpCv.wait(lk, [&]{ return rdpQueue.empty() && !rdpBusy.load(std::memory_order_relaxed); }); }
+    awaitReporting(lk, rdpCv,
+      [&]{ return rdpQueue.empty() && !rdpBusy.load(std::memory_order_relaxed); },
+      [&](unsigned round){
+        std::fprintf(stderr, "[rcp] llevo %u x %u ms esperando al RDP: cola=%zu ocupado=%d "
+                             "dpc start=%08x cur=%08x end=%08x status=%08x\n",
+                     round, rcpWaitReportMs(), rdpQueue.size(),
+                     (int)rdpBusy.load(std::memory_order_relaxed), rcp.dpc_start,
+                     rcp.dpc_current.load(std::memory_order_relaxed), rcp.dpc_end,
+                     rcp.dpc_status.load(std::memory_order_relaxed));
+      }); }
   cpuWaitNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+}
+
+auto Memory::reportRspStall(unsigned round, const char* esperando) -> void {
+  // El OSTask vive en DMEM 0xFC0 y su primera palabra es el tipo (1 = grafico, 2 = audio):
+  // saber cual de los dos microcodigos es el que no vuelve suele bastar para el diagnostico.
+  u32 taskType = 0;
+  if(dmem.size() >= DMEM_SIZE) taskType = (u32)dmem[0xFC0] << 24 | (u32)dmem[0xFC1] << 16 |
+                                          (u32)dmem[0xFC2] << 8  | (u32)dmem[0xFC3];
+  std::fprintf(stderr, "[rcp] llevo %u x %u ms esperando a %s del RSP: ocupado=%d kick=%d "
+                       "corriendo=%d sp_status=%08x sp_pc=%03x pc=%03x ciclos=%llu tarea=%u\n",
+               round, rcpWaitReportMs(), esperando,
+               (int)rspBusy.load(std::memory_order_relaxed), (int)rspKick, (int)rsp.running,
+               rcp.sp_status.load(std::memory_order_relaxed), rcp.sp_pc, rsp.pc,
+               (unsigned long long)rsp.cyclesRun.load(std::memory_order_relaxed), taskType);
 }
 
 auto Memory::rspAwaitIdle() -> void {
   if(rcpMode != RcpMode::Threaded) return;
   auto t0 = std::chrono::steady_clock::now();
   { std::unique_lock<std::mutex> lk(rspMx);
-    rspWaiters.fetch_add(1); rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); }); rspWaiters.fetch_sub(1); }
+    rspWaiters.fetch_add(1);
+    awaitReporting(lk, rspCv, [&]{ return !rspBusy.load(std::memory_order_acquire); },
+                   [&](unsigned round){ reportRspStall(round, "que termine la tarea"); });
+    rspWaiters.fetch_sub(1); }
   cpuWaitNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
 }
@@ -1833,9 +2317,14 @@ auto Memory::rspAwaitIdle() -> void {
 // se va millones de instrucciones por delante y todas se gastan girando en el bucle de espera
 // del juego, que ademas martillea los registros MMIO que el worker escribe (ping-pong de linea
 // de cache entre nucleos). Aqui se restaura el mismo acoplamiento que en Lockstep: mientras
-// haya tarea de RSP en vuelo, la CPU no puede haber retirado mas de paceCpuNum/paceCpuDen
+// haya tarea de RSP en vuelo, la CPU no puede haber avanzado mas de paceCpuNum/paceCpuDen
 // instrucciones por cada ciclo de RSP consumido desde el enganche (3/4 con los relojes de
 // serie: la CPU retira una instruccion cada dos ciclos de 93.75 MHz y el RSP una por ciclo
+// de 62.5 MHz). La medida del lado CPU es guestOps() -- retiradas MAS las paradas de
+// cache ya convertidas a instrucciones-equivalentes -- y no retired a secas: durante los
+// ~60 ciclos que cuesta una falta de cache el RSP sigue corriendo, asi que contar solo
+// retiradas frenaba la CPU de mas y ademas discrepaba del interleave de Lockstep, que
+// mide en ese mismo reloj. Con KESTREL_CACHECOST apagado los dos valores coinciden.
 // de 62.5 MHz). Era 3/2 -- el doble -- por comparar los dos relojes en vez de comparar
 // instrucciones retiradas; el ratio sale ahora de Clocks, igual que el de Lockstep. Si se pasa DUERME en el condvar del RSP en vez
 // de girar: mismo trabajo util del guest, un nucleo del host libre para los workers, y el
@@ -1903,24 +2392,82 @@ auto Memory::rspAwaitIdle() -> void {
 static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
                             ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 4096;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
+// Tope de las barreras de invitado (RDP y RSP). No es el mismo caso que kPaceMaxWait: el
+// regulador espera a que un contador AVANCE, cosa que pasa cada pocos microsegundos,
+// mientras que una barrera espera a que un trabajo entero CIERRE. Un cuadro de DK64
+// rasterizado por software pasa de 20 ms de tiempo de PARED con facilidad, asi que el
+// tope viejo saltaba 32 veces en 300 campos -- y cada salto suelta la barrera, o sea que
+// suelta el determinismo. Un segundo sigue siendo un salvavidas contra un worker muerto,
+// pero ya no se cruza en el camino de un trabajo legitimamente largo.
+static constexpr u64 kBarrierMaxWait = 1'000'000'000ull;   // ns
+
+// Pista de pausa para los bucles de espera activa. La CPU y el RSP se vigilan leyendo
+// contadores que escribe el otro (`rcpPend`, `spBarrierAt`, `cartNow`), y sin pista cada
+// vuelta del bucle pide la linea en exclusiva: la coherencia le quita al otro hilo justo el
+// ciclo con el que iba a soltarla, y en SMT le roba ademas las ranuras de emision. PAUSE dice
+// "esto es una espera" (Nehalem ~9 ciclos) y ademas evita la penalizacion de salida del bucle
+// por especulacion de orden de memoria. No cambia NADA observable: solo es una pista de
+// anfitrion, el estado de invitado sale identico con ella y sin ella.
+// KESTREL_SPINPAUSE=0 la quita, para medir.
+static const bool g_spinPauseOn = [] {
+  const char* e = std::getenv("KESTREL_SPINPAUSE");
+  return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
+}();
+// Cadencia de una de cada 16 vueltas en quien llama: PAUSE no cuesta lo mismo en todos los
+// anfitriones (Nehalem ~9 ciclos, Skylake y posteriores ~140), y una por vuelta estiraria el
+// giro de 2048 vueltas dos ordenes de magnitud en una maquina moderna.
+static inline void spinPause() { if(g_spinPauseOn) _mm_pause(); }
+
+// Vueltas de espera activa de la barrera del SP antes de dormir. KESTREL_BARSPIN lo ajusta
+// (0 = dormir directamente). Tambien es solo coste de anfitrion.
+static auto barSpinLen() -> u32 {
+  static const u32 v = []() -> u32 {
+    const char* e = std::getenv("KESTREL_BARSPIN");
+    if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
+                  if(end && !*end && n >= 0 && n <= 1'000'000) return (u32)n; }
+    return 2048u;
+  }();
+  return v;
+}
 // Grano del permiso del regulador (ver paceAllowance). Calibrable como la holgura.
 static const u64 kPaceGrain = std::getenv("KESTREL_PACEGRAIN")
                             ? std::strtoull(std::getenv("KESTREL_PACEGRAIN"), nullptr, 0) : 1024;
 
-auto Memory::rcpPace(u64 cpuRetired) -> u32 {
+// Freno de los DOS dominios del RCP. El permiso que vuelve es el mas corto de los dos: la
+// CPU no puede adelantar ni al RSP ni al RDP mas de lo que el hardware permite.
+auto Memory::rcpPace(u64 cpuOps) -> u32 {
+  u32 a = rspPace(cpuOps);
+  u32 b = rdpPace(cpuOps);
+  return a < b ? a : b;
+}
+
+auto Memory::rspPace(u64 cpuOps) -> u32 {
   if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return 0xFFFF'FFFFu; }
   u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
   if(!pacePrimed) {
     pacePrimed = true; paceGiveUp = false; paceWaitedNs = 0;
-    paceCpu0 = cpuRetired; paceRsp0 = rspNow;
+    paceCpu0 = cpuOps; paceRsp0 = rspNow;
     paceEpisodes.fetch_add(1, std::memory_order_relaxed);
     return paceGrant(0, kPaceSlack);
   }
   if(paceGiveUp) return 0xFFFF'FFFFu;
   for(;;) {
-    u64 ahead = cpuRetired - paceCpu0;
-    u64 allow = ((rspNow - paceRsp0) * paceCpuNum) / paceCpuDen + kPaceSlack;
+    u64 ahead = cpuOps - paceCpu0;
+    u64 allow = paceDivDen.div((rspNow - paceRsp0) * paceCpuNum) + kPaceSlack;
     if(ahead <= allow) return paceGrant(ahead, allow);
+    // El freno ata la CPU al avance en CICLOS del RSP, y eso presupone que el RSP esta
+    // trabajando. Cuando esta parado en una cita de lectura del FIFO (dpReadSync) el que
+    // tiene que avanzar es justo el otro: el microcodigo espera a que la CPU instale el
+    // siguiente buffer de comandos. Frenarla ahi es frenar al que tiene la pelota, y los dos
+    // hilos se quedan mirandose hasta que salta el timeout del condvar. Quien acota a la CPU
+    // en esa ventana es la barrera del SP con su adelanto (kRdvLead), no el regulador.
+    if(rspRdvAt.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
+    // Lo mismo, pero en grande: con el RSP aparcado (ver rspParkWait) el unico que puede
+    // desatascar la escena es la CPU, y el freno la ata al avance de un reloj que por
+    // definicion no avanza.
+    if(rspPark.load(std::memory_order_acquire) &&
+       !rspParkWake.load(std::memory_order_acquire))
+      return paceGrant(ahead, ahead + kPaceSlack);
     paceHolds.fetch_add(1, std::memory_order_relaxed);
     auto t0 = std::chrono::steady_clock::now();
     {
@@ -1979,7 +2526,635 @@ auto Memory::paceGrant(u64 ahead, u64 allow) -> u32 {
   return left > 0xFFFF'FFFFull ? 0xFFFF'FFFFu : (u32)left;
 }
 
+// --- Freno del dominio RDP ---------------------------------------------------------
+//
+// El PROBLEMA que resuelve (medido 2026-09-09 en Donkey Kong 64, ver docs/GAPS.md): el
+// worker del RDP tarda tiempo de PARED del anfitrion, y mientras tanto la CPU emulada seguia
+// retirando instrucciones en el bucle de espera del juego. Como el reloj de video del
+// invitado se deriva de las instrucciones retiradas, esa espera se cobraba como TIEMPO DEL
+// JUEGO: con SoftRDP en hilos, DK64 pasaba de 29,2 a 18,0 fps de invitado y gastaba el doble
+// de instrucciones para dibujar los mismos 3000 cuadros. Un juego que cuenta cuadros (la demo
+// de apertura de DK64) se desincroniza por eso. Y la velocidad del JUEGO pasaba a depender de
+// lo rapido que fuese el PC, cosa que el hardware no hace.
+//
+// La SEMANTICA que impone es la del bus del N64: la CPU y el RCP van acoplados. Mientras hay
+// trabajo de RDP en vuelo, la CPU no puede haber avanzado mas de paceCpuNum/paceCpuDen
+// instrucciones por cada GCLK que el RDP ha consumido de verdad. Es el mismo contrato que
+// rspPace impone contra Rsp::cyclesRun, con dos diferencias:
+//
+//   - la medida de trabajo es rcp.rdpGclk, el reloj de coste del RDP (el MISMO modelo
+//     calibrado contra hardware que alimenta DPC_CLOCK, ver SoftRdp::accountPixels), en una
+//     copia monotona que el invitado no puede poner a cero;
+//   - el RDP corre al reloj del RCP, 62,5 MHz, igual que el RSP, asi que el ratio es el mismo
+//     y no hace falta uno nuevo.
+//
+// Frenar NO es lo mismo que esperar: el hilo de CPU duerme en tiempo de pared y NO retira
+// instrucciones, o sea que el tiempo del invitado se para. El RDP sigue costando lo que dice
+// su modelo de ciclos, ni mas ni menos, corra el anfitrion lo que corra. Cuando el RDP va
+// sobrado (parallel-RDP sobre GPU) el freno no llega a morder y el solape se conserva entero.
+//
+// Salvavidas identico al del RSP: si el contador de GCLK deja de avanzar mas de kPaceMaxWait
+// sin que el trabajo termine, se suelta el freno de este episodio. El regulador es una
+// cuestion de fidelidad, nunca puede ser una via de bloqueo.
+auto Memory::rdpPace(u64 cpuOps) -> u32 {
+  if(!rdpBusy.load(std::memory_order_acquire)) { dpacePrimed = false; return 0xFFFF'FFFFu; }
+  u64 gclkNow = rcp.rdpGclk.load(std::memory_order_acquire);
+  if(!dpacePrimed) {
+    dpacePrimed = true; dpaceGiveUp = false; dpaceWaitedNs = 0;
+    dpaceCpu0 = cpuOps; dpaceGclk0 = gclkNow;
+    dpaceEpisodes.fetch_add(1, std::memory_order_relaxed);
+    return paceGrant(0, kPaceSlack);
+  }
+  if(dpaceGiveUp) return 0xFFFF'FFFFu;
+  for(;;) {
+    u64 ahead = cpuOps - dpaceCpu0;
+    u64 allow = paceDivDen.div((gclkNow - dpaceGclk0) * paceCpuNum) + kPaceSlack;
+    if(ahead <= allow) return paceGrant(ahead, allow);
+    dpaceHolds.fetch_add(1, std::memory_order_relaxed);
+    auto t0 = std::chrono::steady_clock::now();
+    {
+      // El worker solo avisa por rdpCv al TERMINAR el trabajo, no por cada pixel, asi que
+      // aqui el plazo corto no es un lujo: es como se ve el avance de rdpGclk a mitad de un
+      // tramo largo. Con el predicado puesto, el aviso del final sigue despertando al vuelo.
+      std::unique_lock<std::mutex> lk(rdpMx);
+      rdpCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+        return !rdpBusy.load(std::memory_order_acquire)
+            || rcp.rdpGclk.load(std::memory_order_acquire) != gclkNow;
+      });
+    }
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    dpaceBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
+    dpaceWaitedNs += dt;
+    if(!rdpBusy.load(std::memory_order_acquire)) { dpacePrimed = false; return 0xFFFF'FFFFu; }
+    u64 prev = gclkNow;
+    gclkNow = rcp.rdpGclk.load(std::memory_order_acquire);
+    if(gclkNow != prev) { dpaceWaitedNs = 0; continue; }
+    if(dpaceWaitedNs > kPaceMaxWait) { dpaceGiveUp = true; return 0xFFFF'FFFFu; }
+  }
+}
+
+auto Memory::dpBarrierOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_DPBARRIER");
+    return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
+  }();
+  return v;
+}
+
+// Espera activa sobre el motor del RDP: true en cuanto se cumpla el predicado de las esperas
+// de la barrera (motor sin trabajo, barrera nueva o un tramo mas pintado), false si se acaban
+// las vueltas. KESTREL_DPSPIN=<n>, 0 = dormir directamente.
+static auto dpSpinLen() -> u32 {
+  static const u32 v = []() -> u32 {
+    const char* e = std::getenv("KESTREL_DPSPIN");
+    if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
+                  if(end && !*end && n >= 0 && n <= 10'000'000) return (u32)n; }
+    // Medido 2026-09-16 (min de 5, dos rondas): prdp-jit 0 3,48 / 2048 3,46 / 262144 3,42 /
+    // 1 M 3,41 s; threaded-jit 0 4,63 / 2048 4,55 / 262144 4,51 / 1 M 4,50 s. Meseta desde
+    // 262144: cubre el fence de SYNC_FULL de la GPU (~1,4 ms por cuadro) sin dormir.
+    return 262144u;
+  }();
+  return v;
+}
+
+auto Memory::dpSpinUntil(u64 bar, u64 comp) -> bool {
+  for(u32 k = 0, lim = dpSpinLen(); k < lim; ++k) {
+    if(!(rcpPend.load(std::memory_order_acquire) & 4u) || dpBarrierAt() != bar
+       || dpCompSeq.load(std::memory_order_acquire) != comp) return true;
+    if((k & 15u) == 15u) spinPause();
+  }
+  return false;
+}
+
+// Parar el reloj del invitado en la barrera. Dormir aqui NO cuesta tiempo de invitado: el
+// hilo de CPU no retira instrucciones mientras espera, exactamente igual que en rdpPace.
+auto Memory::dpBarrierWait(u64 now) -> void {
+  u64 bar = dpBarrierAt();
+  if(now < bar || bar == dpBarWaivedAt) return;
+  // El instante de cierre del trabajo es FIJO desde que se publica, asi que ya no basta con
+  // esperar a que "la barrera se mueva": no se va a mover. Lo que hay que esperar es a que el
+  // trabajo CIERRE (o a que entre el siguiente, que trae barrera nueva). Sin esto la espera
+  // agotaba sus 20 ms en cada trabajo largo y el salvavidas soltaba la barrera -- y con ella
+  // se iba tambien el determinismo, porque a partir de ahi la CPU corria libre.
+  u64 comp = dpCompSeq.load(std::memory_order_acquire);
+  u64 waited = 0;
+  for(;;) {
+    auto t0 = std::chrono::steady_clock::now();
+    // Giro corto antes de dormir, como en spBarrierWait. Con el motor en la GPU un tramo se
+    // pinta en microsegundos, y dormir en rdpCv convierte cada uno en un viaje de ida y vuelta
+    // por el planificador del anfitrion. Los tres atomicos que mira el predicado los sube el
+    // worker sin avisar a nadie mas que al condvar: verlos cambiar es lo mismo que despertar.
+    // Solo tiempo de anfitrion: el hilo de CPU no retira instrucciones mientras gira.
+    if(!dpSpinUntil(bar, comp)) {
+      std::unique_lock<std::mutex> lk(rdpMx);
+      rdpCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+        return !(rcpPend.load(std::memory_order_acquire) & 4u) || dpBarrierAt() != bar
+            || dpCompSeq.load(std::memory_order_acquire) != comp; });
+    }
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
+    dpBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    if(!(rcpPend.load(std::memory_order_acquire) & 4u)) return;
+    u64 nextComp = dpCompSeq.load(std::memory_order_acquire);
+    if(nextComp != comp) { comp = nextComp; waited = 0; }
+    u64 next = dpBarrierAt();
+    if(next != bar) { bar = next; waited = 0; if(now < bar) return; continue; }
+    waited += dt;
+    // Salvavidas, igual que el del regulador: si el worker deja de publicar, la barrera se
+    // suelta para ESTE valor y se sigue. La fidelidad nunca puede ser una via de bloqueo.
+    if(waited > kBarrierMaxWait) { dpBarWaivedAt = bar; dpWvBar.fetch_add(1, std::memory_order_relaxed); dpBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
+  }
+}
+
+// DPC_CURRENT tal y como lo ve alguien cuyo reloj de invitado va por `now`.
+//
+// El puntero de lectura del FIFO es lo que el microcodigo mira para saber cuanto buffer puede
+// reutilizar, y hasta ahora lo publicaba el worker cuando terminaba el trabajo EN TIEMPO DE
+// PARED: el RSP veia el FIFO libre antes o despues segun corriese el PC, gastaba un numero
+// distinto de ciclos en su bucle de sondeo y la tarea entera acababa costando otra cosa.
+// Medido en SM64: `Rsp::cyclesRun` bailaba un 0,8 % entre corridas y en una corrida lenta la
+// partida entera divergia (24 campos de retraso en empezar a dibujar).
+//
+// En tiempo de invitado la regla es simple: mientras el RDP no haya terminado el trabajo, el
+// puntero sigue donde lo abrio; cuando el reloj del lector pasa del instante de fin, ya vale
+// lo que el motor dejo. Las dos cosas salen del horario del trabajo, que es todo tiempo de
+// invitado, asi que dos corridas dan lo mismo.
+// FECHAR UN TRAMO DE FIFO, EN EL HILO QUE LO LANZA.
+//
+// Aqui se decide todo lo que el invitado podra ver de este tramo: cuanto cuesta, cuando
+// arranca el motor con el, cuando lo cierra y en que instante cae MI_DP si trae SYNC_FULL.
+// Nada de eso mira al anfitrion, y por eso dos corridas del mismo binario dan lo mismo.
+//
+// Va con rdpMx cogido, asi que el modelo de coste (que escribe rcp.rdpGclk y los contadores
+// de DPC) sigue teniendo un solo escritor a la vez aunque lo llamen la CPU y el RSP.
+//
+// El motor es UNO: un tramo no puede empezar antes de que drene lo anterior, de ahi el
+// maximo contra dpSchedEnd. Y como el coste se cobra ANTES de pintar, el plazo de fin de
+// tarea nace siempre vivo -- que es lo que antes se rompia y hacia que MI_DP se publicase
+// donde el anfitrion hubiese llegado.
+auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 kick) -> void {
+  if(rcpMode != RcpMode::Threaded) return;
+  const u64 gclk0 = rcp.rdpGclk.load(std::memory_order_relaxed);
+  u32 costCur = current;
+  if(rdpCostHasResume && current == rdpCostLastEnd) costCur = rdpCostResume;
+  rdpCostHasResume = false;
+  rdpCostLastEnd   = end;
+  const bool costed = rdpCostPass(costCur, end, xbus, src);
+  if(costed) {
+    const u32 endM = xbus ? (end & 0x0fff'ffffu) : (end & 0x00ff'ffffu);
+    if(softCost.stopAt != endM) { rdpCostResume = softCost.stopAt; rdpCostHasResume = true; }
+  }
+  const u64 cost = rcp.rdpGclk.load(std::memory_order_relaxed) - gclk0;
+  u64 t0 = dpSchedEnd.load(std::memory_order_relaxed);
+  if(kick > t0) t0 = kick;
+  const u64 t1 = t0 + rcpCyclesToOps(cost);
+  const u64 seq = dpSubSeq.load(std::memory_order_relaxed);
+  if(kick < dpMaxQuery.load(std::memory_order_relaxed)) {
+    dpStale.fetch_add(1, std::memory_order_relaxed);
+    (tlIsRspThread ? dpStaleR : dpStaleC).fetch_add(1, std::memory_order_relaxed);
+  }
+  if(seq && kick < dpLastKick) {
+    dpOoo.fetch_add(1, std::memory_order_relaxed);
+    (tlIsRspThread ? dpOooR : dpOooC).fetch_add(1, std::memory_order_relaxed);
+  }
+  dpLastKick = kick;
+  // Si el RSP esta aparcado esperando justo esto, su instante de despertar es el lanzamiento
+  // de ESTE tramo -- un valor de invitado, o sea determinista. El primero que llega manda.
+  if(rspPark.load(std::memory_order_acquire)) {
+    u64 exp = 0;
+    if(rspParkWake.compare_exchange_strong(exp, kick, std::memory_order_acq_rel))
+      parkCv.notify_all();
+  }
+  dpJobAddr[seq & kDpRingM]    = current;
+  dpJobEndAddr[seq & kDpRingM] = end;
+  dpJobStartG[seq & kDpRingM]  = t0;
+  dpJobEndG[seq & kDpRingM]    = t1;
+  dpSchedEnd.store(t1, std::memory_order_release);
+  dpSubSeq.store(seq + 1, std::memory_order_release);
+  // Diagnostico: el horario entero en tiempo de invitado. Dos corridas del mismo binario
+  // tienen que dar el MISMO fichero linea por linea; si no, hay una fuga de tiempo de anfitrion
+  // metida en el reloj. Solo instantes de invitado: nada de cartNow() ni de ciclos del RSP.
+  // KESTREL_DPSCHED=1.
+  static const bool schedTrace = std::getenv("KESTREL_DPSCHED") != nullptr;
+  if(schedTrace) {
+    static u32 n = 0;
+    if(n++ < 6000)
+      std::fprintf(stderr, "[ds] %llu %c kick=%llu t0=%llu t1=%llu cur=%06x end=%06x cost=%llu\n",
+                   (unsigned long long)seq, tlIsRspThread ? 'R' : 'C',
+                   (unsigned long long)kick, (unsigned long long)t0, (unsigned long long)t1,
+                   current, end, (unsigned long long)cost);
+  }
+  if(costed && softCost.sawSyncFull && rcpDeadlineOn()) dpEndArmAt(t1);
+}
+
+auto Memory::dpGuestOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_DPGUEST");
+    return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
+  }();
+  return v;
+}
+
+// La cita de lectura del FIFO nace APAGADA. Resolvia el mismo problema que el aparcamiento
+// (que el RSP no lea el FIFO en un instante al que la CPU aun no ha llegado) pero por el lado
+// caro: obligando al RSP a esperar a la CPU en CADA sondeo. El aparcamiento lo resuelve por el
+// lado barato -- el RSP aterriza directamente en el lanzamiento del siguiente buffer, que ya es
+// un instante de invitado -- y ademas sin el adelanto kRdvLead, que era lo que hacia nacer
+// tarde 10-13 plazos de SP por corrida. Medido en DK64, 300 campos:
+//   aparcamiento solo      9 s   spArm 173/0 tarde   rastro identico 4/4 INCLUIDO rsp=
+//   aparcamiento + cita   11 s   spArm 173/11 tarde  rastro identico solo sin rsp=
+// Se deja a mano (KESTREL_DPRDV=1) porque cubre un caso que el aparcamiento no toca: sondear
+// DPC_CURRENT con un tramo ABIERTO y por delante de la CPU. En DK64 son ~235 sondeos de 13,9 M
+// y ninguno diverge, pero otro juego podria vivir ahi.
+auto Memory::dpRdvOn() -> bool {
+  static const bool v = []{
+    const char* e = std::getenv("KESTREL_DPRDV");
+    return e && *e && std::strcmp(e, "0") && std::strcmp(e, "off");
+  }();
+  return v;
+}
+
+// Ver la nota larga en memory.hpp. Aqui solo la mecanica: publicar ya lo ha hecho quien
+// llama (Rsp::mfc0), asi que la barrera del SP ya no retiene a la CPU antes de `now`.
+// Aparcar el RSP mientras espera al FIFO drenado.
+//
+// La cita de lectura (dpReadSync) obliga al RSP a ir por detras de la CPU, y la barrera del
+// SP obliga a la CPU a ir por detras del RSP. Juntas dejan a los dos hilos clavados en el
+// mismo instante de invitado, avanzando de cinco en cinco instrucciones con un cambio de hilo
+// en medio: un millon de citas en 300 campos de DK64.
+//
+// La salida no es aflojar ninguna de las dos, es reconocer cuando una de ellas sobra. Con el
+// motor del RDP drenado y el microcodigo dando vueltas al bucle de espera del FIFO, el RSP no
+// puede producir NINGUN evento: ni cierra tarea, ni escribe DPC_END, ni toca memoria. Lo unico
+// que puede sacarlo de ahi es que la CPU instale el siguiente buffer. Asi que durante esa
+// ventana la barrera del SP no protege nada y se levanta entera, la CPU corre suelta, y el
+// instante en que el RSP despierta es el lanzamiento de ese buffer: un instante de invitado,
+// no de anfitrion. El salto sigue siendo un numero entero de vueltas del bucle.
+auto Memory::rcpSchedReset() -> void {
+  std::lock_guard<std::mutex> lk(rdpMx);
+  dpSchedEnd.store(0, std::memory_order_relaxed);
+  dpSubSeq.store(0, std::memory_order_relaxed);
+  dpCompSeq.store(0, std::memory_order_relaxed);
+  dpMaxQuery.store(0, std::memory_order_relaxed);
+  dpLastKick = 0;
+  dpBarWaivedAt = ~0ull;
+  for(u32 i = 0; i < kDpRingN; ++i) {
+    dpJobStartG[i] = dpJobEndG[i] = 0;
+    dpJobAddr[i] = dpJobEndAddr[i] = 0;
+  }
+  // Plazos y barreras: no hay tarea en vuelo (el estado se toma en reposo), asi que nada
+  // esta armado y el ancla de la barrera del SP se vuelve a atar al reloj que acaba de
+  // entrar. Dejarla en el ancla vieja daria un spBarrierAt() de otra partida.
+  rcpPend.store(0, std::memory_order_relaxed);
+  spKickOps    = cartNow();
+  spKickCycles = rsp.cyclesRun.load(std::memory_order_relaxed);
+  spDoneAt = dpDoneAt = 0;
+  rspRdvAt.store(0, std::memory_order_relaxed);
+  dpRdv.store(0, std::memory_order_relaxed);
+  rspPark.store(0, std::memory_order_relaxed);
+  rspParkWake.store(0, std::memory_order_relaxed);
+  // Firma del bucle de espera del FIFO: la lectura anterior es de la partida vieja y podria
+  // casar por casualidad con la primera de la nueva.
+  rsp.idlePc = 0xffffffffu;
+  rsp.idleHash = rsp.idleVal = 0;
+  rsp.idleAt = rsp.idleLen = 0;
+  rsp.idleNoSig = rsp.idleNoDrain = rsp.idleNoRoom = 0;
+}
+
+auto Memory::rspParkWait(u64 now, u64 seq0) -> u64 {
+  // Tope de adelanto de la CPU. Es tambien el destino de reserva: si la CPU llega hasta el sin
+  // haber lanzado nada, el RSP salta ahi -- instante de invitado exacto -- y se vuelve a aparcar.
+  const u64 cap = now + kParkLead;
+  // CARRERA DE PUBLICACION. dpScheduleSpan mira `rspPark` para saber si tiene que dejar la
+  // fecha de despertar, asi que un tramo archivado entre que idleSkip vio el motor drenado y
+  // que aqui se publica el aparcamiento no deja ninguna: el aviso se pierde y el RSP se queda
+  // hasta el tope o hasta el tramo SIGUIENTE segun como se crucen los dos hilos -- o sea,
+  // segun el anfitrion. Medido: 1 de cada 4 corridas de DK64 divergia por esto, siempre con
+  // una fecha de fin de SP naciendo tarde. Se comprueba a mano con el contador de tramos:
+  // si se ha movido desde `seq0`, el lanzamiento de ESE tramo es el despertar. Con el motor
+  // drenado el arranque del tramo ES su lanzamiento, asi que dpJobStartG vale directamente,
+  // y la carga con acquire de dpSubSeq es la que hace visible lo que escribio dpScheduleSpan.
+  auto missed = [&]() -> u64 {
+    if(dpSubSeq.load(std::memory_order_acquire) == seq0) return 0;
+    return dpJobStartG[seq0 & kDpRingM];
+  };
+  if(u64 m = missed()) return m;
+  if(cartNow() >= cap) return cap;
+  rspParkWake.store(0, std::memory_order_relaxed);
+  // Suelta el freno del prologo del dynarec ANTES de publicar el aparcamiento: mientras el
+  // RSP duerme no ejecuta microcodigo ni escribe MMIO, asi que devolver el control al
+  // trampolin en cada eslabon de la cadena solo cuesta una llamada por bloque. Ver Rsp::brake.
+  rsp.brake = false;
+  rspPark.store(now, std::memory_order_release);
+  const auto tPark = std::chrono::steady_clock::now();
+  if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
+  u64 wake = 0, miss = 0;
+  bool capped = false;
+  u64 seen = cartNow();
+  u64 stuckNs = 0;
+  u32 spins = 0;
+  for(;;) {
+    ++spins;
+    auto t0 = std::chrono::steady_clock::now();
+    {
+      std::unique_lock<std::mutex> lk(parkMx);
+      parkCv.wait_for(lk, std::chrono::milliseconds(20), [&]{
+        wake = rspParkWake.load(std::memory_order_acquire);
+        if(wake) return true;
+        miss = missed();
+        if(miss) return true;
+        if(cartNow() >= cap) { capped = true; return true; }
+        return rspStop || rsp.hostStop.load(std::memory_order_relaxed);
+      });
+    }
+    if(wake || miss || capped) break;
+    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    // Salvavidas al estilo del regulador: lo que no se tolera es que la CPU se ATASQUE, no
+    // que tarde. Mientras siga retirando instrucciones se sigue esperando, porque el lanzamiento
+    // que despierta al RSP es suyo y va a llegar. Sin este reinicio el corte saltaba en los dos
+    // tramos lentos de DK64 y con el se iba la unica columna del rastro que aun no cuadraba.
+    const u64 nowCart = cartNow();
+    if(nowCart != seen) { seen = nowCart; stuckNs = 0; continue; }
+    stuckNs += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 std::chrono::steady_clock::now() - t0).count();
+    if(stuckNs > 200'000'000ull) break;
+  }
+  rsp.brake = true;                      // antes de retirar el aparcamiento: el RSP vuelve a correr
+  rspPark.store(0, std::memory_order_release);
+  const u64 parkNs = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                       std::chrono::steady_clock::now() - tPark).count();
+  rspParkNs.fetch_add(parkNs, std::memory_order_relaxed);
+  rspParks.fetch_add(1, std::memory_order_relaxed);
+  static const bool parkLog = std::getenv("KESTREL_PARKLOG") != nullptr;
+  if(parkLog)
+    std::fprintf(stderr, "[pk] now=%llu wall=%.2fms via=%s salto=%lld cart=%llu spins=%u\n",
+                 (unsigned long long)now, parkNs / 1e6,
+                 wake ? "wake" : miss ? "miss" : capped ? "cap" : "lifeguard",
+                 (long long)((wake ? wake : miss ? miss : capped ? cap : now) - (long long)now),
+                 (unsigned long long)cartNow(), spins);
+  // El lanzamiento del tramo siempre es anterior al tope (si la CPU hubiera pasado del tope
+  // no habria llegado a aparcarse), asi que de haber varios candidatos gana el mas temprano.
+  if(wake) return wake;
+  if(miss) { rspParkMiss.fetch_add(1, std::memory_order_relaxed); return miss; }
+  if(capped) return cap;
+  // Salvavidas de anfitrion: aqui el instante ya no seria de invitado, asi que no se salta nada.
+  rspParkWv.fetch_add(1, std::memory_order_relaxed);
+  if(std::getenv("KESTREL_DPSYNCLOG"))
+    std::fprintf(stderr, "[park] salvavidas now=%llu cart=%llu cap=%llu stop=%u/%u\n",
+                 (unsigned long long)now, (unsigned long long)cartNow(),
+                 (unsigned long long)cap, (unsigned)rspStop,
+                 (unsigned)rsp.hostStop.load(std::memory_order_relaxed));
+  return 0;
+}
+
+auto Memory::dpReadSync(u64 now) -> void {
+  if(!dpRdvOn() || !dpGuestOn()) return;
+  if(cartNow() >= now) return;
+  dpRdv.fetch_add(1, std::memory_order_relaxed);
+  rspRdvAt.store(now, std::memory_order_release);   // abre el adelanto de la CPU
+  // La CPU puede estar dormida en la barrera del SP con el valor viejo: hay que sacarla.
+  if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
+  bool timing = false;
+  std::chrono::steady_clock::time_point t0{};
+  // Fase obligatoria: hasta `now`, con salvavidas.
+  for(u32 k = 0;; ++k) {
+    if(cartNow() >= now) break;
+    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    if((k & 15u) == 15u) spinPause();
+    if((k & 255u) != 255u) continue;
+    std::this_thread::yield();
+    if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
+    // El reloj de pared no se toca hasta la primera tanda: son millones de citas por corrida
+    // y dos lecturas de steady_clock en cada una costarian mas que la espera entera.
+    if(!timing) { timing = true; t0 = std::chrono::steady_clock::now(); continue; }
+    if(std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(20)) {
+      dpRdvWaives.fetch_add(1, std::memory_order_relaxed);
+      break;   // salvavidas: la CPU no avanza (parada, o esperando algo del RSP)
+    }
+  }
+  // Fase de holgura. No hace falta para la correccion -- abandonarla no rompe nada -- pero es
+  // la que decide el COSTE: sin ella la cita despierta al RSP en cuanto la CPU avanza un pelo,
+  // el RSP salta ese pelo y vuelve a citarse, y las dos mitades degeneran en un paso a paso de
+  // cinco instrucciones con un cambio de hilo en medio. Dejando que la CPU se adelante un grano
+  // entero, el salto del bucle de espera se lo come de una vez y las citas bajan un orden de
+  // magnitud. El grano cabe dentro de kRdvLead, asi que la barrera del SP no lo estorba.
+  const u64 tgt = now + kRdvGrain;
+  for(u32 k = 0; k < 8192 && cartNow() < tgt; ++k) {
+    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    if((k & 15u) == 15u) spinPause();
+  }
+  rspRdvAt.store(0, std::memory_order_release);
+}
+
+auto Memory::dpcCurrentFor(u64 now) -> u32 {
+  dpcRdCur.fetch_add(1, std::memory_order_relaxed);
+  if(now > dpMaxQuery.load(std::memory_order_relaxed))
+    dpMaxQuery.store(now, std::memory_order_relaxed);
+  if(!dpGuestOn()) return rcp.dpc_current.load(std::memory_order_acquire);
+  u64 c   = dpCompletedAt(now);
+  u64 sub = dpSubSeq.load(std::memory_order_acquire);
+  if(sub > c) {
+    dpcRdOpen.fetch_add(1, std::memory_order_relaxed);
+    // El trabajo `c` esta abierto para este reloj. DPC_CURRENT no se queda clavado en la
+    // direccion de apertura: el motor va consumiendo el FIFO comando a comando y el puntero
+    // avanza con el. Es lo que mira el microcodigo grafico para saber cuanto buffer puede
+    // reutilizar, asi que clavarlo equivale a decirle "no he leido nada todavia" durante todo
+    // el trabajo -- y se queda sondeando en bucle. Medido en DK64: 5,5 k lecturas de DPC
+    // pasaban a 9,8 M y el RSP quemaba 3,5x sus ciclos.
+    //
+    // Sin coste por comando no se puede saber por donde va exactamente, pero el reparto lineal
+    // sobre el intervalo del trabajo es la aproximacion honrada: mismo ritmo medio, extremos
+    // exactos, y monotona. Todo el calculo es en tiempo de invitado.
+    const u32 a0 = dpJobAddr[c & kDpRingM], a1 = dpJobEndAddr[c & kDpRingM];
+    const u64 t0 = dpJobStartG[c & kDpRingM], t1 = dpJobEndG[c & kDpRingM];
+    if(a1 <= a0 || now <= t0) return a0;
+    if(t1 <= t0 || now >= t1) return a1;
+    const u64 span = (u64)(a1 - a0);
+    u32 adv = (u32)((span * (now - t0)) / (t1 - t0));
+    return a0 + (adv & ~7u);   // el FIFO se lee en palabras de 64 bits
+  }
+  if(c > 0)   return dpJobEndAddr[(c - 1) & kDpRingM];
+  return rcp.dpc_current.load(std::memory_order_acquire);
+}
+
+auto Memory::dpcStatusFor(u64 now) -> u32 {
+  u32 st = rcp.dpc_status.load(std::memory_order_acquire) | 0x80u;  // CBUF_READY
+  dpcRdSt.fetch_add(1, std::memory_order_relaxed);
+  if(!dpGuestOn()) {
+    u32 pend = dpPending.load(std::memory_order_acquire);
+    if(pend)      st |= 0x100u | 0x40u;
+    if(pend >= 2) st |= 0x200u;
+    return st;
+  }
+  u64 c   = dpCompletedAt(now);
+  u64 out = dpSubSeq.load(std::memory_order_acquire) - c;   // trabajos vivos para ESTE reloj
+  if(out >= 1) { st |= 0x100u | 0x40u;   // DMA_BUSY | CMD_BUSY
+    dpcRdBusy.fetch_add(1, std::memory_order_relaxed); }
+  // END_VALID: ya hay un buffer esperando ademas del que el motor esta leyendo, o sea que el
+  // par START/END esta lleno y no cabe otro.
+  if(out >= 2) { st |= 0x200u;
+    dpcRdEndV.fetch_add(1, std::memory_order_relaxed); }
+  return st;
+}
+
+// Esperar a que el RDP alcance el instante de invitado del lector. Lo usa el hilo del RSP
+// antes de mirar DPC: los dos chips van al mismo reloj de 62,5 MHz y el RSP no puede leer el
+// estado del RDP "del futuro" -- ni del pasado. Sin esto el RSP adelanta al RDP en tiempo de
+// pared y ve el FIFO como este en ese momento, que es justo la puerta por la que se colaba el
+// anfitrion. Salvavidas de 20 ms como todas las demas esperas.
+auto Memory::rdpAwaitGuest(u64 now) -> void {
+  if(!dpGuestOn() || !dpBarrierOn() || rcpMode != RcpMode::Threaded) return;
+  if(!(rcpPend.load(std::memory_order_acquire) & 4u)) return;
+  u64 waited = 0;
+  u64 comp = dpCompSeq.load(std::memory_order_acquire);
+  for(;;) {
+    u64 bar = dpBarrierAt();
+    if(now <= bar) return;
+    dpAwaits.fetch_add(1, std::memory_order_relaxed);
+    auto t0 = std::chrono::steady_clock::now();
+    if(!dpSpinUntil(bar, comp)) {
+      std::unique_lock<std::mutex> lk(rdpMx);
+      rdpCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+        return !(rcpPend.load(std::memory_order_acquire) & 4u) || dpBarrierAt() != bar
+            || dpCompSeq.load(std::memory_order_acquire) != comp; });
+    }
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    dpBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    if(!(rcpPend.load(std::memory_order_acquire) & 4u)) return;
+    u64 nextComp = dpCompSeq.load(std::memory_order_acquire);
+    if(nextComp != comp) { comp = nextComp; waited = 0; continue; }
+    if(dpBarrierAt() != bar) { waited = 0; continue; }
+    waited += dt;
+    if(waited > kBarrierMaxWait) { dpWvAwait.fetch_add(1, std::memory_order_relaxed);
+      dpBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
+  }
+}
+
+auto Memory::spBarrierOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_SPBARRIER");
+    return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
+  }();
+  return v;
+}
+
+// Parar el reloj del invitado en la barrera del RSP. Dormir aqui NO cuesta tiempo de invitado:
+// el hilo de CPU no retira instrucciones mientras espera, igual que en rspPace.
+auto Memory::spBarrierWait(u64 now) -> void {
+  u64 bar = spBarrierEff();
+  if(now < bar || bar == spBarWaivedAt) return;
+  // Espera activa corta antes de dormir. Quien levanta esta barrera es el RSP publicando
+  // su reloj, y cuando lo publica para pedir una cita de lectura del FIFO (dpReadSync) lo
+  // que falta son decenas de instrucciones de CPU. Dormir 200 us para eso convierte cada
+  // cita en un viaje de ida y vuelta de milisegundos, y hay millones de citas por corrida.
+  for(u32 k = 0, lim = barSpinLen(); k < lim; ++k) {
+    if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;
+    if(now < spBarrierEff()) return;
+    if((k & 15u) == 15u) spinPause();
+  }
+  u64 waited = 0;
+  for(;;) {
+    auto t0 = std::chrono::steady_clock::now();
+    {
+      std::unique_lock<std::mutex> lk(rspMx);
+      rspWaiters.fetch_add(1);
+      rspCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+        return !(rcpPend.load(std::memory_order_acquire) & 8u) || spBarrierEff() != bar; });
+      rspWaiters.fetch_sub(1);
+    }
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
+    spBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;   // tarea terminada
+    u64 next = spBarrierEff();
+    if(next != bar) { bar = next; waited = 0; if(now < bar) return; continue; }
+    waited += dt;
+    // Salvavidas, igual que el del regulador: si el RSP deja de avanzar (microcodigo que
+    // espera algo de la CPU) la barrera se suelta para ESTE valor. Nunca via de bloqueo.
+    if(waited > kBarrierMaxWait) { spBarWaivedAt = bar; spBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
+  }
+}
+
+auto Memory::rcpDeadlineOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_RCPDEADLINE");
+    return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
+  }();
+  return v;
+}
+
+auto Memory::spEndArm(u64 cyclesUsed) -> void {
+  spDoneAt = spKickOps + rcpCyclesToOps(cyclesUsed);
+  spArms.fetch_add(1, std::memory_order_relaxed);
+  if(spDoneAt < cartNow()) spLate.fetch_add(1, std::memory_order_relaxed);
+  // El plazo sustituye a la barrera: a partir de aqui el fin ya tiene instante propio y la
+  // CPU solo tiene que esperar a que ese instante llegue.
+  rcpPend.fetch_or(1u, std::memory_order_release);
+  rcpPend.fetch_and(~8u, std::memory_order_release);
+  spBarWaivedAt = ~0ull;
+}
+
+auto Memory::dpEndArm(u64 kickOps, u64 gclkUsed) -> void {
+  dpEndArmAt(kickOps + rcpCyclesToOps(gclkUsed));
+}
+
+auto Memory::dpEndArmAt(u64 at) -> void {
+  // Dos SYNC_FULL seguidos sin que el hilo de CPU haya pasado por rcpRetire: el segundo no
+  // puede hacerse visible ANTES que el primero, asi que el plazo solo puede irse hacia
+  // adelante. MI_DP es un bit de nivel, con publicarlo una vez basta.
+  if((rcpPend.load(std::memory_order_relaxed) & 2u) && at < dpDoneAt) at = dpDoneAt;
+  dpDoneAt = at;
+  dpArms.fetch_add(1, std::memory_order_relaxed);
+  if(at < cartNow()) { dpLate.fetch_add(1, std::memory_order_relaxed);
+    u64 ov = cartNow() - at;
+    u64 m = dpLateMax.load(std::memory_order_relaxed);
+    while(ov > m && !dpLateMax.compare_exchange_weak(m, ov)) {}
+  }
+  rcpPend.fetch_or(2u, std::memory_order_release);
+}
+
+// Publica el fin de tarea. `bits` limita a cual (1 = SP, 2 = DP); el plazo ya se comprobo.
+auto Memory::rcpFlushPending(u32 bits) -> void {
+  u32 pend = rcpPend.load(std::memory_order_acquire) & bits;
+  if(pend & 1u) {
+    rcpPend.fetch_and(~1u, std::memory_order_relaxed);
+    rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
+    spRets.fetch_add(1, std::memory_order_relaxed);
+    if(rcp.sp_intr_on_break) raiseIntr(MI_SP);
+  }
+  if(pend & 2u) {
+    rcpPend.fetch_and(~2u, std::memory_order_relaxed);
+    rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
+    rcp.dpSyncs++;                       // misma contabilidad que los dos caminos del RDP
+    dpRets.fetch_add(1, std::memory_order_relaxed);
+    raiseIntr(MI_DP);
+  }
+}
+
+auto Memory::rcpRetire() -> void {
+  u32 pend = rcpPend.load(std::memory_order_acquire);
+  if(!pend) return;
+  u64 now = cartNow();
+  // Las barreras PRIMERO. El plazo de MI_DP se arma ahora al lanzar el tramo, o sea que puede
+  // vencer antes de que el anfitrion haya pintado un pixel de el; publicar la interrupcion ahi
+  // le ensenaria al invitado un fotograma que todavia no existe en RDRAM. La barrera es justo
+  // lo que garantiza que, cuando el reloj del invitado llega al cierre, el trabajo esta hecho.
+  if(pend & 4u) dpBarrierWait(now);
+  if(pend & 8u) spBarrierWait(now);
+  pend = rcpPend.load(std::memory_order_acquire);
+  u32 due = 0;
+  if((pend & 1u) && now >= spDoneAt) due |= 1u;
+  if((pend & 2u) && now >= dpDoneAt) due |= 2u;
+  if(due) rcpFlushPending(due);
+}
+
 auto Memory::rspSubmitKick() -> void {
+  bool wakeRsp;
   {
     std::unique_lock<std::mutex> lk(rspMx);
     // Serialize against a worker that has finished its microcode (BREAK reached,
@@ -1988,27 +3163,70 @@ auto Memory::rspSubmitKick() -> void {
     // the task. This never blocks on a genuinely running RSP: mid-task HALT is
     // clear, so the write is a no-op and we are not called at all.
     rspWaiters.fetch_add(1);
-    rspCv.wait(lk, [&]{ return !rspBusy.load(std::memory_order_acquire); });
+    awaitReporting(lk, rspCv, [&]{ return !rspBusy.load(std::memory_order_acquire); },
+                   [&](unsigned round){ reportRspStall(round, "poder lanzar la siguiente"); });
     rspWaiters.fetch_sub(1);
+    // Un fin de tarea anterior que todavia no habia vencido no puede quedarse colgado detras
+    // del siguiente lanzamiento: se publica ya. En la practica no pasa (el invitado lanza
+    // despues de atender MI_SP), es una red de seguridad.
+    if(rcpPend.load(std::memory_order_relaxed) & 1u) rcpFlushPending(1u);
+    // Instante de invitado del lanzamiento y base de ciclos del RSP: el plazo de fin se mide
+    // contra estos dos y los toma SIEMPRE el hilo de CPU, aqui, donde el invitado escribe
+    // CLEAR_HALT. Ver la nota de spEndArm en memory.hpp.
+    spKickOps    = cartNow();
+    spKickCycles = rsp.cyclesRun.load(std::memory_order_relaxed);
     rspBusy.store(true, std::memory_order_release);
+    if(spBarrierOn() && rcpMode == RcpMode::Threaded && rcpDeadlineOn())
+      rcpPend.fetch_or(8u, std::memory_order_release);
     rspKick = true;
+    wakeRsp = rspIdleWaiting;
     ev("sp.kick", rcp.sp_pc, rcp.sp_status.load());
   }
-  rspCv.notify_all();   // ver nota en rdpSubmit: worker y drenador comparten condvar
+  // Solo hay que despertar a quien duerme: el worker (rspIdleWaiting, leido con el mutex con el
+  // que el lo pone) o un esperador contado en rspWaiters. Con el worker girando (rspSpinLen) la
+  // tienda de rspBusy de arriba ya le basta, y notify_all con esperador es una llamada al kernel.
+  if(wakeRsp || rspWaiters.load(std::memory_order_acquire))
+    rspCv.notify_all();   // ver nota en rdpSubmit: worker y drenador comparten condvar
   // KESTREL_SYNCRSP=1: la pareja de KESTREL_SYNCRDP. El RDP sigue en su hilo, pero la
   // CPU espera a que el microcodigo termine antes de seguir. Solo diagnostico.
   static const bool syncRsp = std::getenv("KESTREL_SYNCRSP") != nullptr;
   if(syncRsp) rspAwaitIdle();
 }
 
+// La pareja de rdpSpinLen para el worker del RSP: vueltas que gira entre tareas antes de dormir.
+// Aqui no hay decenas de miles de lanzamientos por segundo sino unos cientos, pero cada uno
+// que encuentra al worker dormido paga la llamada al kernel en el hilo de CPU y, sobre todo,
+// la latencia de despertar un hilo en Windows, con la CPU del invitado esperando en la barrera
+// del SP a que el RSP empiece a avanzar. Solo coste de anfitrion: el instante de lanzamiento
+// y la base de ciclos los fija el hilo de CPU en rspSubmitKick. KESTREL_RSPSPIN=<n>.
+static auto rspSpinLen() -> u32 {
+  static const u32 v = []() -> u32 {
+    const char* e = std::getenv("KESTREL_RSPSPIN");
+    if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
+                  if(end && !*end && n >= 0 && n <= 10'000'000) return (u32)n; }
+    return 0u;
+  }();
+  return v;
+}
+
 auto Memory::rspWorkerLoop() -> void {
+  tlIsRspThread = true;
   hostprof::start("rsp");   // opt-in: KESTREL_HOSTPROF_WHO=rsp
   hostprof::gate(&rspBusy);   // no contar el sueno entre tareas: solo el coste de emular
   rspThreadH = selfThreadHandle();
   for(;;) {
+    // rspBusy lo baja este mismo hilo al final de la tarea y lo sube rspSubmitKick con el mutex
+    // cogido junto con rspKick: verlo subido es "hay lanzamiento". Si llega despues del giro,
+    // el lanzador ve rspIdleWaiting (mismo mutex) y notifica.
+    for(u32 k = 0, n = rspSpinLen(); k < n; k++) {
+      if(rspBusy.load(std::memory_order_acquire)) break;
+      if((k & 15u) == 15u) spinPause();
+    }
     {
       std::unique_lock<std::mutex> lk(rspMx);
+      rspIdleWaiting = true;
       rspCv.wait(lk, [&]{ return rspStop || rspKick; });
+      rspIdleWaiting = false;
       if(rspStop && !rspKick) return;
       rspKick = false;
     }
@@ -2016,9 +3234,16 @@ auto Memory::rspWorkerLoop() -> void {
     // sp_status/sp_pc and raises MI_SP itself. Any DPC_END the microcode writes
     // funnels through mmioWrite → rdpSubmit, so the RDP pipelines behind us.
     auto t0 = std::chrono::steady_clock::now();
+    const u64 park0 = rspParkNs.load(std::memory_order_relaxed);
     rsp.step(~0ull);   // start() ya corrio en el hilo CPU al escribir CLEAR_HALT
-    rspBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                          std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
+    // Ocupacion = tiempo DENTRO de la tarea menos lo que se paso dormido en el aparcamiento:
+    // un hilo aparcado no esta trabajando. Ver rspParkNs.
+    {
+      u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                 std::chrono::steady_clock::now() - t0).count();
+      u64 slept = rspParkNs.load(std::memory_order_relaxed) - park0;
+      rspBusyNs.fetch_add(dt > slept ? dt - slept : 0, std::memory_order_relaxed);
+    }
     rspJobsRun.fetch_add(1, std::memory_order_relaxed);
     ev("sp.done", rcp.sp_pc, rcp.sp_status.load());
     // El flag SE BAJA CON EL MUTEX COGIDO. Sin el, la tienda+notify puede caer entre el
@@ -2026,8 +3251,12 @@ auto Memory::rspWorkerLoop() -> void {
     // registro de su espera: la notificacion se pierde y la CPU duerme para siempre
     // esperando un RSP que ya termino. Es el patron que exige condition_variable —
     // el worker del RDP ya lo hacia asi.
-    { std::lock_guard<std::mutex> lk(rspMx); rspBusy.store(false, std::memory_order_release); }
-    rspCv.notify_all();   // wake a possible drain waiter
+    { std::lock_guard<std::mutex> lk(rspMx); rspBusy.store(false, std::memory_order_release);
+      rcpPend.fetch_and(~8u, std::memory_order_release); }
+    // Los que esperan el fin de tarea (drenador, lanzador, freno) se cuentan en rspWaiters antes
+    // de mirar su predicado con el mutex; rspBusy ya bajo con ese mutex, asi que o lo cuentan
+    // antes y aqui se ve, o miran despues y ven rspBusy=false.
+    if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   }
 }
 
@@ -2042,6 +3271,9 @@ auto Memory::stopRcpThreads() -> void {
   { std::lock_guard<std::mutex> lk(rdpMx); rdpStop = true; }
   rdpCv.notify_all();
   if(rdpWorker.joinable()) rdpWorker.join();
+  // El apagon primero: el worker puede estar dentro de una tarea que no va a terminar
+  // (ver Rsp::hostStop). rspStop solo lo mira entre tareas.
+  rsp.hostStop.store(true, std::memory_order_release);
   { std::lock_guard<std::mutex> lk(rspMx); rspStop = true; }
   rspCv.notify_all();
   if(rspWorker.joinable()) rspWorker.join();

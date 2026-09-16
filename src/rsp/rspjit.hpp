@@ -2,16 +2,33 @@
 // kestrel64 — dynarec del RSP.
 //
 // Por que aqui y no una micro-optimizacion mas del interprete: el perfilador de host sobre
-// el hilo del RSP (KESTREL_HOSTPROF_WHO=rsp, SM64) reparte asi el tiempo:
+// el hilo del RSP (KESTREL_HOSTPROF_WHO=rsp, SM64) repartia asi el tiempo ANTES de que
+// existiera este dynarec:
 //
 //   Rsp::step 59.9% · Rsp::execCop2 31.6% · execStore 4.8% · execLoad 3.7%
 //
-// y el reparto de instrucciones de microcodigo (KESTREL_VUSTAT) dice que COP2 es el 41.6%
-// de las instrucciones. O sea: la parte vectorial, que es la que hace el trabajo de verdad,
-// rinde POR ENCIMA de su peso (41.6% de las instrucciones, 31.6% del tiempo), y lo que
-// sobra esta en el bucle de despacho -- leer la palabra de IMEM, decodificar el mayor,
-// mantener el pestillo de delay-slot, contar. Exactamente el problema que en la CPU
-// resolvio el dynarec. Ver docs/PERF-CPU.md §12-ter.
+// y el reparto de instrucciones de microcodigo (KESTREL_VUSTAT) decia que COP2 era el 41.6%
+// de las instrucciones: la parte vectorial rendia POR ENCIMA de su peso y lo que sobraba
+// estaba en el bucle de despacho. Ese era el objetivo.
+//
+// MEDIDO OTRA VEZ (2026-09-11, build-prof-prdp con DWARF, SM64 / Parallel-RDP / threaded /
+// 400 intercambios, 926 muestras, `scripts/hostprof_sym.py`) el bucle de despacho YA NO
+// APARECE, que es justo lo que tenia que pasar:
+//
+//   dentro de la imagen 24.6%  ·  fuera 75.4%  (de la cual, codigo emitido: 32.1%)
+//   fuera, por quien llamo:  Rsp::step 32.07% (rsp.cpp:1950, la llamada `blk.fn(this)`)
+//                            condition_variable::wait_for 26.89% (el hilo OCIOSO)
+//                            Memory::rdpSubmit 10.58% (el RSP patea el RDP)
+//   dentro, lo mas alto:     Rsp::exec 2.16% · Memory::dpCompletedAt 2.05%
+//                            SoftRdp::drawTriangle 1.73% · Rsp::publishExact 1.40%
+//                            Rsp::step 1.40%   -- ni una sola funcion por encima del 2.2%
+//
+// O sea: el 32% que antes era `Rsp::step` interpretando ahora es microcodigo compilado, y
+// nada de lo que queda en el interprete pasa del 2%. Los dos numeros que mandan hoy en el
+// hilo del RSP no son de este fichero: 26.9% ESPERANDO (con `[block]` diciendo `rsp ocupado
+// 65.1%`, o sea que el hilo no esta saturado) y 10.6% empujando comandos al RDP.
+//
+// El problema que en la CPU resolvio el dynarec. Ver docs/PERF-CPU.md §12-ter.
 //
 // El RSP es un blanco mucho mas facil que la CPU: 4 KB de IMEM (1024 palabras), sin TLB,
 // sin excepciones, sin HI/LO, PC de 12 bits. Eso permite tres simplificaciones que el
@@ -43,7 +60,13 @@
 // BLEZ/BGTZ, los cuatro REGIMM, J/JAL, JR/JALR). El par salto+delay era el 2x mas caro del
 // interprete -- dos vueltas del despachador mas el pestillo `inDelay` -- y ademas cortaba
 // el bloque en cada bucle del microcodigo, que es justo donde se pasa el tiempo. El bloque
-// escribe Rsp::pc el mismo; siguen fuera BREAK, COP0 y todo lo no reconocido.
+// escribe Rsp::pc el mismo; siguen fuera BREAK y todo lo no reconocido.
+//
+// Etapa 2b: MFC0/MTC0 DENTRO del bloque, por el puente Rsp::jitCop0 con el reloj exacto de la
+// instruccion. Si el MTC0 para el nucleo (SET_HALT) o lanza un DMA que reescribe IMEM, el
+// bloque corta justo detras y vuelve al bucle en C sin enlazar. Medido SM64 prdp-jit 400
+// intercambios: instrucciones interpretadas 8,26 M -> 0,70 M, entradas 8,52 M -> 0,71 M;
+// tiempo de pared neutro (3,41-3,42 s / 4,51 s), md5 iguales en todos los modos.
 //
 // Etapa 3: ENLACE DE BLOQUES. Hasta aqui cada bloque volvia al bucle en C de Rsp::step, que
 // releia el PC, indexaba la tabla y volvia a llamar: medidos ~6.2 M de idas y vueltas por

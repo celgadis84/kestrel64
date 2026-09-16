@@ -52,6 +52,14 @@ struct Presenter {
     menuPaused = pausedFlag; menuRom = rom;
   }
 
+  // Ata el avance por fotogramas (TAS): P pausa/reanuda, F avanza un campo de video con la
+  // pausa puesta, Shift+F avanza ocho. Sin atar, las teclas no hacen nada.
+  auto bindFrameAdvance(std::atomic<u32>* fields) -> void { taFields = fields; }
+
+  // Ata el rebobinado: la tecla de retroceso pide pasos mientras se mantenga apretada. Sin
+  // atar, no hace nada; con el rebobinado apagado en el nucleo, tampoco.
+  auto bindRewind(std::atomic<u32>* req) -> void { rwReq = req; }
+
 private:
   Memory* mem = nullptr;
   std::atomic<bool>* shutdown = nullptr;
@@ -66,6 +74,9 @@ private:
   std::atomic<int>* stSlot = nullptr;
   bool stPrev[3] = {};      // flanco de F5/F7/F6: la tecla se sondea, no llega como evento
   std::atomic<bool>* menuPaused = nullptr;   // ver bindMenu
+  std::atomic<u32>* taFields = nullptr;      // ver bindFrameAdvance
+  bool taPrev[2] = {};                       // flanco de P y F
+  std::atomic<u32>* rwReq = nullptr;         // ver bindRewind
   std::string menuRom;
 };
 

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <vector>
 
 namespace kestrel::rspjit {
 
@@ -16,6 +17,7 @@ extern "C" {
   void kestrel_rspjit_load (Rsp* r, u32 op) { r->jitLoad(op); }
   void kestrel_rspjit_store(Rsp* r, u32 op) { r->jitStore(op); }
   void kestrel_rspjit_exec (Rsp* r, u32 op) { r->jitExec(op); }
+  bool kestrel_rspjit_cop0 (Rsp* r, u32 op, u32 rem, u32 nextPc) { return r->jitCop0(op, rem, nextPc); }
 }
 
 auto Cache::syncImem(const u8* imem) -> void {
@@ -144,6 +146,18 @@ struct E {
   // de 127 bytes, pero si alguna vez no cupiera patch8 avisa y el bloque se descarta en
   // vez de emitir un salto a ninguna parte.
   auto jcc8(u8 cc) -> usize { u8_((u8)(0x70 | (cc & 0x0f))); u8_(0); return b.used; }
+  auto jcc32(u8 cc) -> usize { u8_(0x0F); u8_((u8)(0x80 | (cc & 0x0f))); u32_(0); return b.used; }
+  auto patch32(usize at) -> bool {
+    if(!b.base || at < 4 || at > b.cap || b.used > b.cap) return false;
+    long long d = (long long)b.used - (long long)at;
+    if(d < 0 || d > 0x7fffffffLL) return false;
+    for(int i = 0; i < 4; i++) b.base[at - 4 + i] = (u8)((u64)d >> (8 * i));
+    return true;
+  }
+  // mov r8d / r9d, imm32: el tercer y cuarto argumento de Win64 (solo los usa jitCop0)
+  auto mov_r8_imm32(u32 imm) -> void { u8_(0x41); u8_(0xB8); u32_(imm); }
+  auto mov_r9_imm32(u32 imm) -> void { u8_(0x41); u8_(0xB9); u32_(imm); }
+  auto test8_al() -> void { u8_(0x84); u8_(0xC0); }
   auto jmp8() -> usize { u8_(0xEB); u8_(0); return b.used; }
   auto patch8(usize at) -> bool {
     if(!b.base || at == 0 || at - 1 >= b.cap || b.used > b.cap) return false;
@@ -265,12 +279,11 @@ enum : u8 { D_SHL = 4, D_SHR = 5, D_SAR = 7 };
 enum : u8 { CC_L = 0x9C, CC_B = 0x92, CC_E = 0x94, CC_NE = 0x95,
            CC_LE = 0x9E, CC_G = 0x9F, CC_GE = 0x9D, CC_A = 0x97 };
 
-enum class Kind : u8 { Stop, Native, Cop2, Lwc2, Swc2, ExecMem, Mem, Branch };
+enum class Kind : u8 { Stop, Native, Cop2, Lwc2, Swc2, ExecMem, Mem, Branch, Cop0 };
 
 // Que hace el compilador con cada instruccion. Stop = la ejecuta el interprete y el bloque
-// termina ANTES de ella: saltos (necesitan el pestillo de delay-slot), BREAK y MTC0 (puede
-// parar el nucleo o lanzar un DMA que reescriba IMEM bajo nuestros pies), y todo lo que no
-// este reconocido, que asi cae en el mismo camino de siempre.
+// termina ANTES de ella: BREAK y todo lo que no este reconocido, que asi cae en el mismo
+// camino de siempre. Los saltos cierran el bloque llevandose su delay-slot.
 auto classify(u32 op) -> Kind {
   u32 maj = op >> 26;
   switch(maj) {
@@ -298,11 +311,17 @@ auto classify(u32 op) -> Kind {
     return Kind::Native;
   case 0x21: case 0x23: case 0x25: case 0x27: case 0x29: case 0x2b:
     return Kind::Mem;                // LH/LHU/LW/LWU/SH/SW: nativos, envoltura al helper
-  case 0x10:
-    // MFC0 solo lee un registro de SP/DPC: no puede parar el nucleo ni reescribir IMEM,
-    // asi que no hay razon para cortar el bloque -- basta llamar al mismo interprete. MTC0
-    // si puede las dos cosas, y ese se queda en Stop.
-    return (op >> 21 & 0x1f) == 0x00 ? Kind::ExecMem : Kind::Stop;
+  case 0x10: {
+    // MFC0 y MTC0 van por el interprete (Rsp::jitCop0) con el reloj exacto de la instruccion.
+    // MTC0 puede parar el nucleo (SET_HALT) o lanzar un DMA que reescriba IMEM: el puente lo
+    // mira al volver y el bloque corta ahi mismo. Antes MTC0 cerraba el bloque y lo ejecutaba
+    // el interprete: medido en SM64 (400 intercambios) 5,07 M MTC0 interpretados -- la rutina
+    // de DMA del microcodigo, `mtc0 SP_MEM_ADDR; bgtz; mtc0 SP_DRAM_ADDR; jr ra; mtc0 RD_LEN`,
+    // y `mtc0 DPC_END; jr` -- y detras de cada uno el salto y su ranura tambien interpretados
+    // (JR 1,17 M, BGTZ 1,16 M, 2,07 M ranuras): el 98 % de lo que quedaba fuera del dynarec.
+    const u32 sub = op >> 21 & 0x1f;
+    return (sub == 0x00 || sub == 0x04) ? Kind::Cop0 : Kind::Stop;
+  }
   case 0x12: return Kind::Cop2;
   case 0x32: return Kind::Lwc2;
   case 0x3a: return Kind::Swc2;
@@ -1505,7 +1524,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
       break;   // ni la VU en linea ni los movimientos llaman a nadie
     case Kind::Lwc2: case Kind::Swc2:     // camino en linea (usa RDI) + envoltura al helper
       needsCall = true; needsDmem = true; break;
-    case Kind::ExecMem:
+    case Kind::ExecMem: case Kind::Cop0:
       needsCall = true; break;
     case Kind::Mem:                        // camino rapido en DMEM + envoltura al helper
       needsCall = true; needsDmem = true; break;
@@ -1564,6 +1583,7 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   if(accReg)  for(u8 k = 0; k < 3; k++) e.xmmSpill((u8)(6 + k), (s32)(accBase  + 16 * k), true);
   if(wideTmp) for(u8 k = 0; k < 5; k++) e.xmmSpill((u8)(9 + k), (s32)(wideBase + 16 * k), true);
 
+  std::vector<usize> cutSites;             // saltos a la salida sin enlace (MTC0 que corta)
   for(u32 i = 0; i < n; i++) {
     const u32 a = (pc0 + 4 * i) & 0xffc;
     u32 w; std::memcpy(&w, rsp.imp + a, 4);
@@ -1587,6 +1607,20 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
     case Kind::Swc2:
       if(!emitVecMem(ctx, op, true)) emitCall(ctx, rspSwc2Entry(op), op); break;
     case Kind::ExecMem: emitCall(ctx, (void*)&kestrel_rspjit_exec,  op); break;
+    case Kind::Cop0: {
+      // Reloj exacto y posible corte: ver Rsp::jitCop0. La ranura de retardo es siempre la
+      // ultima del bloque y su PC ya lo escribio el salto.
+      const bool slot = endsBranch && i == n - 1;
+      accSpill(ctx);
+      e.mov64_rr(rCX, rBX);
+      e.mov_imm32(rDX, op);
+      e.mov_r8_imm32(n - i - 1);
+      e.mov_r9_imm32(slot ? ~0u : (u32)((a + 4) & 0xffc));
+      e.mov_imm64(rAX, (u64)(std::uintptr_t)&kestrel_rspjit_cop0);
+      e.call_r(rAX);
+      e.test8_al();
+      cutSites.push_back(e.jcc32(CC_NE));
+    } break;
     case Kind::Mem:     emitMem(ctx, op); break;
     case Kind::Stop:    break;                 // no puede pasar: el conteo paro antes
     }
@@ -1690,6 +1724,14 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
       if(!e.patch8(out)) ctx.ok = false;
       e.ret();
     }
+  }
+
+  // Corte desde un COP0 (ver Rsp::jitCop0): el puente ya dejo PC y saldo como los dejaria el
+  // interprete, asi que aqui solo se desmonta el marco y se vuelve al bucle en C, sin enlazar.
+  if(!cutSites.empty()) {
+    for(usize at : cutSites) if(!e.patch32(at)) ctx.ok = false;
+    emitRestore();
+    e.ret();
   }
 
   if(c.buf.overflowed()) { c.clear(); return; }

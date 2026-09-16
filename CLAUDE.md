@@ -5,9 +5,11 @@ active project of this workspace. Built to run N64 games (esp. Perfect Dark) fas
 weak-single-thread / idle-GPU hosts, where cooperative-single-thread cycle-accurate
 emulators (ares, cen64) hit an architectural ceiling.
 
-Live status: `docs/STATUS.md`. Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
+Live status: `docs/STATUS.md`. Backlog de huecos y pendientes: `docs/GAPS.md` (lo que
+falta frente a ares/PJ64/mupen + pendientes propios, ordenado; se actualiza al cerrar
+cada punto). Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
 `docs/TEXTURE-FORMATS.md`, `docs/parallel-rdp-integration.md`, `docs/VI-CLOCK.md`,
-`docs/RSP-JIT.md`.
+`docs/RSP-JIT.md`, `docs/ROMS-COMPRIMIDAS.md`.
 
 ## Architecture bet
 
@@ -28,8 +30,13 @@ Toolchain = clang at `/c/msys64/clang64/bin` (MSYS2 CLANG64). Static-linked exe.
 ```bash
 export PATH=/c/msys64/clang64/bin:$PATH
 cd /e/Claude/N64/kestrel64
-cmake --build build -j
+sh scripts/release.sh          # <-- ESTE. Regenera los CUATRO arboles + lanzador + paquete.
 ```
+
+**`cmake --build <arbol> -j` a secas NO vale como "he compilado"**: deja los otros arboles
+con el .exe de hace semanas, y el que el usuario ejecuta (`build-prdp-static/`) es
+justamente uno de los que se queda atras. Compilar un arbol suelto solo es legitimo como
+paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release.sh`.
 
 - **ALWAYS `taskkill //F //IM kestrel64.exe` before rebuild** (Windows locks the exe).
 - cmake binary lives in `/c/msys64/clang64/bin`.
@@ -37,11 +44,15 @@ cmake --build build -j
   (parallel-rdp GPU backend). Default OFF so deterministic core never depends on GPU.
 - `-DKESTREL_STATIC=ON` = self-contained `.exe` (libc++/GLFW inside, no DLLs) for the
   published package; `sh scripts/dist.sh` stages `dist/` + zip. See `docs/distribucion.md`.
-- **REGLA: cada generacion de .exe genera TODO** — los tres arboles, el lanzador grafico
+- **REGLA: cada generacion de .exe genera TODO** — los cuatro arboles, el lanzador grafico
   congelado, el zip portable y el instalador. Un solo comando, `sh scripts/release.sh`
   (`--gates` para pasar antes `gate_all` + `gate_prdp`, `--quick` para saltarse `build/` y
-  `build-prdp/` e iterar solo sobre el estatico, `NOISS=1` para omitir el instalador). Deja
+  `build-prdp/` e iterar solo sobre los estaticos, `NOISS=1` para omitir el instalador). Deja
   `dist/VERSION.txt` con version, commit y md5 para que un zip suelto diga de donde salio.
+- El paquete lleva **dos** ejecutables porque el plugin grafico se elige al compilar:
+  `kestrel64.exe` (`build-prdp-static`, parallel-RDP, el recomendado) y `kestrel64-soft.exe`
+  (`build-static`, SoftRDP, para maquinas sin Vulkan y como rasterizador de referencia).
+  Cada uno con su nota `*.build` al lado, que es como el lanzador sabe cual es cual.
 - Las puertas por si solas recompilan `build/` y `build-prdp/` y **nunca**
   `build-prdp-static/`, que es el exe que viajan lanzador e instalador: por eso existe
   `release.sh`. Sus piezas sueltas siguen ahi si hace falta una a mano: `scripts/pack.sh`
@@ -125,6 +136,13 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   de una ROM de krom = 10 s, SM64 60 campos = 30 s. Nada de esperas de minutos "a ver si
   sale".
 
+### Perfect Dark: llegar a gameplay para medir
+
+Medir en el menu no vale. `docs/PD-GAMEPLAY.md` tiene los dos caminos: navegar el menu con
+`scripts/pad.py` (mando inyectado, pulsaciones contadas en lecturas del joybus) o escribir
+el nivel directo en RAM (`g_MissionConfig` 0x07dbd8 + `g_MainChangeToStageNum` 0x043c04;
+`g_StageNum` 0x043d60 vale 0x5A en el titulo y confirma que la ROM comparte mapa).
+
 ### MCP gotchas
 - `read_memory` inside a block-capture returns 0 — read `mem->rdram` directly instead.
 - Never declare "hung" from capped/truncated log output.
@@ -165,12 +183,27 @@ a 4 M, asi que hay que bajarlo para ver nada; ademas de los contadores de siempr
 --se emiten EN LINEA en el codigo generado, o sea que con STATS puesto el JIT emite codigo
 distinto-- y `[cadena] rotasPorTramp`; con ellos se mato la hipotesis del enlace secuencial,
 ver `docs/PERF-CPU.md` §20.5) ·
-`KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_FIELDHASH=1` /
+`KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_RCPWAIT=<ms>` (cada cuanto da parte una espera del hilo de CPU sobre un worker del RCP -- `rspAwaitIdle`, el kick del RSP y `rdpDrain`; por defecto 2000, `=0` = espera muda de antes. No abandona la espera, la parte en rondas e imprime el estado del dominio: asi un worker que deja de publicar se ve como lo que es en vez de parecer lentitud) · `KESTREL_FIELDHASH=1` /
 `KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n buffer swaps) ·
 `KESTREL_VITICKS=<n>` (VI ticks per field, default 16 — ver `docs/VI-CLOCK.md`) ·
+`KESTREL_CPI=<n>` (ciclos de CPU por instruccion retirada; **de fabrica 1,4**, que es la parte
+alta del rango real del VR4300. De el cuelgan el ritmo del reloj Count y el presupuesto de
+instrucciones por campo. `=2` = modelo historico bit a bit, un tick de Count por op; no se
+admite mas de 2 porque las guardas de borde de timer del JIT cuentan ops. Ver `docs/STATUS.md`) ·
+`KESTREL_SIINSTANT=1` (la transaccion del SI/joybus vuelve a terminar en la misma instruccion
+que la arranco, como antes del 2026-09-08. De fabrica el SI factura el tiempo de la linea
+joybus -- 4 us por bit, parada de consola 3 us, parada del mando 4 us -- y remata el DMA en
+diferido levantando `MI_SI` al vencer el plazo; ver `docs/GAPS.md`) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
-`KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_SAVETYPE` ·
+`KESTREL_CPUIDLE=0` (apaga el cobro en bloque del hilo ocioso del invitado -- `beq $0,$0,-1`
+con NOP en la ranura de retardo; el salto usa el MISMO permiso que una cadena enlazada del JIT,
+asi que no cambia cuando se mira cada evento. -14 % de pared en SM64 threaded-jit; se niega con
+`Status[2:0] != 1` y en Threaded sin plazos de RCP. Telemetria `[ocioso]` dentro de
+`KESTREL_JIT_STATS`) ·
+`KESTREL_NOFETCHFAST=1` (disable I-cache-line fetch memoization) · `KESTREL_RDRAM=4|8` (MB de RDRAM: 8 = Expansion Pak, por defecto; 4 = consola de serie. Se decide al arrancar y no cambia en caliente; el invitado lo lee en 0x318/0x3F0 y el JIT lo acota con `jitRdramSz`) · `KESTREL_SAVETYPE` · `KESTREL_CHEATS=<fichero .cht>` (trucos GameShark, ver `docs/CHEATS.md`) · `KESTREL_MOVIE_REC=<f.k64m>` / `KESTREL_MOVIE_PLAY=<f.k64m>` (peliculas TAS: graba/reproduce lo que el JUEGO LEE en cada comando 0x01 del joybus, no lo que aprieta el jugador; reproducir comprueba los CRC del cartucho y se niega si son de otro; ver `docs/TAS.md`) · `KESTREL_REWIND=1` + `KESTREL_REWIND_FIELDS=<n>` / `KESTREL_REWIND_MB=<n>` (rebobinado con la tecla de retroceso; APAGADO de fabrica porque cada foto para el RCP y recorre el estado entero: +45 % de pared con foto cada 2 campos, +24 % cada 6. Ver `docs/REWIND.md`) ·
+Una ROM dentro de un `.zip` o un `.gz` se abre directamente, sin variable ninguna: el desempaquetado va en `src/core/archive.cpp` (DEFLATE propio, ver `docs/ROMS-COMPRIMIDAS.md`), y las partidas/estados/trucos cuelgan del nombre SIN la extension del contenedor ·
 `KESTREL_AUDIOSTAT=1` (al cerrar: muestras empujadas/servidas/de relleno/tiradas y nivel del anillo; con el se diagnostico el audio entrecortado) · `KESTREL_MEMPAK=0` (desenchufa el Controller Pak del mando 1; por defecto va puesto) ·
+`KESTREL_SPINPAUSE=0` (quita la pista `PAUSE` de las esperas activas: la CPU se vigila con el RSP y el RDP girando sobre contadores que escribe el otro hilo, y `_mm_pause` le dice al nucleo que eso es una espera para que no le robe la linea de cache ni las ranuras de emision al hermano SMT. Va a una de cada 16 vueltas a proposito: PAUSE cuesta ~9 ciclos en Nehalem y ~140 de Skylake en adelante. Es SOLO una pista de anfitrion, el resultado del invitado sale identico; medido NEUTRO en este anfitrion -- ver `docs/baselines/timings.md`) · `KESTREL_BARSPIN=<n>` (vueltas que gira la CPU en la barrera del SP antes de dormir; 0 = el defecto, 2048) · `KESTREL_RDPSPIN=<n>` (vueltas que gira el worker del RDP ocioso antes de dormir en `rdpCv`; defecto 32768, 0 = dormir enseguida. -13 % de pared con Parallel-RDP, -6 % con SoftRDP: evita despertar el hilo por el kernel en cada DPC_END) · `PARALLEL_RDP_SINGLE_THREADED_COMMAND=0|1` (lo pone kestrel a 1 si no esta: parallel-rdp procesa los comandos en el worker del RDP sin su hilo `CommandRing`, -1,6 % de pared; 0 = anillo de siempre) · `KESTREL_RSPSPIN=<n>` (igual para el worker del RSP entre tareas; defecto 0, medido neutro) · `KESTREL_DPSPIN=<n>` (vueltas que gira quien espera al RDP -- `dpBarrierWait` en la CPU, `rdpAwaitGuest` en el RSP -- antes de dormir en `rdpCv`; defecto 262144, 0 = dormir enseguida; -2 % con Parallel-RDP y -3 % con SoftRDP, meseta desde 262144; `KESTREL_BARSPIN` en cambio medido plano de 2048 a 1 M) ·
 `KESTREL_RSPJIT` (RSP dynarec, **default ON**, oracle=RSP interp; `=0` off) /
 `KESTREL_RSPJIT_STATS=1` (coverage, ver `docs/RSP-JIT.md`) / `KESTREL_RSPJIT_LINK=0`
 (A/B: bloques de RSP sin encadenar; modo `rspnolink`) / `KESTREL_RSPJIT_NOVECMEM=1`
@@ -232,8 +265,10 @@ vectores de excepcion).
 campos el codigo del guest contra una copia de referencia y dice el primer byte que cambio
 (`_LO`/`_HI` acotan el rango fisico, `_AFTER` retrasa el armado) · `KESTREL_DMAGUARD=<lo>:<hi>`
 chiva cualquier DMA del SP que escriba dentro de ese rango fisico · `KESTREL_REGCHK=1` hace que
-el JIT compruebe los registros contra el interprete · `KESTREL_EXCODD=1` vuelca los 32 GPR al
-tomar una excepcion con PC no alineada · `KESTREL_GUESTTHREADS=1` anade el volcado de OSThread
+el JIT compruebe los registros contra el interprete · `KESTREL_EXCODD=<n>` vuelca contexto y los 32
+GPR en las <n> primeras excepciones IMPOSIBLES en un juego sano -- instruccion reservada,
+coprocesador no usable, error de direccion, y tambien TLBL/TLBS cuando el TLB no tiene NI UNA
+entrada valida (ahi no es paginacion, es puntero salvaje) · `KESTREL_GUESTTHREADS=1` anade el volcado de OSThread
 al latido del watchdog.
 
 La ventana del emulador lleva **barra de menu nativa con el catalogo entero de opciones**,

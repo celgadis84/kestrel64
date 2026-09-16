@@ -25,6 +25,10 @@
   </nav>
 
   <div class="topright">
+    <select class="chip" id="theme" title="Aspecto del lanzador">
+      <option value="kestrel">Tema cernicalo</option>
+      <option value="wonder">Tema WonderMenu</option>
+    </select>
     <button class="chip" id="btn-input">Mando</button>
     <button class="chip" id="btn-video">Video</button>
     <button class="chip" id="btn-oc">Overclock</button>
@@ -40,11 +44,12 @@
     <span class="path" id="rom-dir">sin carpeta</span>
     <input class="search" id="search" placeholder="filtrar...">
     <div class="modes" id="modes">
-      <button data-mode="cover" class="on" title="Coverflow 3D">Coverflow</button>
+      <button data-mode="cover" class="on" title="Cajas 3D en fila, estilo coverflow">Coverflow 3D</button>
+      <button data-mode="wheel" title="Anillo giratorio de cajas 3D, estilo USB Loader GX">Carrusel 3D</button>
+      <button data-mode="grid" title="Pared de cajas 3D">Rejilla 3D</button>
       <button data-mode="rows" title="Filas estilo Netflix">Filas</button>
-      <button data-mode="grid" title="Rejilla de caratulas">Rejilla</button>
-      <button data-mode="wheel" title="Rueda estilo Hyperspin">Rueda</button>
       <button data-mode="list" title="Tabla con detalles">Tabla</button>
+      <button data-mode="wmrows" title="Lista de filas altas, estilo WonderMenu">Lista Wonder</button>
       <button data-mode="shelf" title="Caja y cartucho en 3D">Estante</button>
     </div>
   </div>
@@ -60,6 +65,7 @@
     </div>
     <div class="dockrun">
       <div class="ocmini" id="ocmini" title="Overclock activo">1.00x</div>
+      <button class="btn ghost" id="dock-card" disabled title="Informacion, manual, trucos y partidas">Ficha</button>
       <button class="btn big" id="launch" disabled>Jugar</button>
       <button class="btn ghost" id="stop" hidden>Parar</button>
     </div>
@@ -191,11 +197,40 @@
   </div>
 </div></div>
 
+<div class="modal" id="m-game"><div class="box widest gamecard">
+  <h3><span id="card-title">Ficha</span><button class="x">&times;</button></h3>
+  <div class="cardwrap">
+    <aside class="cardside">
+      <div class="cardart"><img id="card-art" alt=""></div>
+      <button class="btn big" id="card-play">Jugar</button>
+      <p class="cardrun" id="card-running" hidden>En marcha ahora mismo</p>
+      <button class="favbtn" id="card-fav">&#9734; Favorito</button>
+      <div class="cardstats" id="card-stats"></div>
+      <label class="switch tiny"><input type="checkbox" id="card-direct"><span></span>
+        Elegir un juego lo arranca directamente, sin ficha</label>
+    </aside>
+    <div class="cardmain">
+      <nav class="cardtabs" id="cardtabs">
+        <button data-t="info" class="on">Informacion</button>
+        <button data-t="manual">Manual <small></small></button>
+        <button data-t="cheats">Trucos <small></small></button>
+        <button data-t="saves">Partidas <small></small></button>
+      </nav>
+      <div class="cardbody" id="card-body"></div>
+    </div>
+  </div>
+  <div class="foot">
+    <span id="card-path"></span>
+    <button class="btn ghost x2">Cerrar</button>
+  </div>
+</div></div>
+
 <div id="toast"></div>
 
 <script src="gl.js"></script>
 <script src="models.js"></script>
 <script src="scene3d.js"></script>
 <script src="app.js"></script>
+<script src="card.js"></script>
 </body>
 </html>

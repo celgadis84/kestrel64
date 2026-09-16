@@ -27,6 +27,20 @@ echo "empaquetando desde $BUILD/"
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$EXE" "$OUT/"
 
+# Segundo ejecutable: el MISMO emulador compilado con el rasterizador por software. El que
+# se distribuye lleva parallel-RDP y cae solo a SoftRDP si Vulkan no arranca, pero esa caida
+# es en caliente: quien tenga una GPU vieja, un driver roto o una maquina virtual paga el
+# intento en cada arranque y no tiene forma de pedir el oraculo determinista del proyecto.
+# Con los dos al lado, el rasterizador pasa a ser una eleccion de verdad en el lanzador.
+SOFT="${SOFTBUILD:-build-static}"
+if [ -x "$SOFT/kestrel64.exe" ]; then
+  cp "$SOFT/kestrel64.exe" "$OUT/kestrel64-soft.exe"
+  echo soft > "$OUT/kestrel64-soft.build"
+  echo "  + kestrel64-soft.exe (SoftRDP)"
+else
+  SOFT=""
+fi
+
 # Que backend grafico lleva dentro el .exe se decidio con cmake y desde fuera no se ve.
 # El lanzador lo necesita para saber si tiene sentido pasarle KESTREL_PRDP, asi que se
 # deja anotado aqui, que es el unico sitio que conoce el dir de build de origen.
@@ -53,13 +67,16 @@ fi
 # dependencia del toolchain que el usuario final no tiene: se copia. Lo que cuelga de
 # C:\WINDOWS (kernel32, ws2_32, winmm y sobre todo vulkan-1.dll, que instala el driver de
 # la GPU) NO se copia: llevarse la vulkan-1.dll de esta maquina romperia otras.
-ldd "$EXE" | while read -r name arrow path rest; do
-  case "$path" in
-    /c/WINDOWS/*|/C/WINDOWS/*|"") continue ;;
-  esac
-  [ -f "$path" ] || continue
-  cp -u "$path" "$OUT/"
-  echo "  + $name"
+for e in "$EXE" ${SOFT:+"$SOFT/kestrel64.exe"}; do
+  ldd "$e" | while read -r name arrow path rest; do
+    case "$path" in
+      /c/WINDOWS/*|/C/WINDOWS/*|"") continue ;;
+    esac
+    [ -f "$path" ] || continue
+    [ -f "$OUT/$name" ] && continue
+    cp -u "$path" "$OUT/"
+    echo "  + $name"
+  done
 done
 
 # Segunda pasada: una DLL copiada puede arrastrar las suyas (libc++ -> libunwind, por
@@ -85,7 +102,7 @@ kestrel64 -- emulador de Nintendo 64
 
 Arrancar:   doble clic en kestrel64-gui.exe (el lanzador). Tambien vale doble clic
             en kestrel64.exe y elegir la ROM, o desde consola:
-              kestrel64.exe ruta\la.rom.z64
+              kestrel64.exe ruta\la.rom.z64
 
 Lanzado desde una consola el emulador arranca EN PAUSA a proposito: es el modo de
 depuracion, para poder enganchar el depurador antes de la primera instruccion.
@@ -98,6 +115,11 @@ lo que hay que actualizar es el driver de video.
 Las DLL de esta carpeta son parte del programa: deben quedarse junto al .exe.
 (Si no hay ninguna, este build va enlazado estatico y el .exe se basta solo.)
 
+kestrel64-soft.exe es el MISMO emulador con el rasterizador por software (SoftRDP):
+no necesita GPU ni Vulkan y es el rasterizador de referencia del proyecto, a cambio de
+ir bastante mas lento. El .exe normal usa parallel-RDP (GPU) y es el recomendado; este
+es la salida para una maquina sin Vulkan o para comparar. El lanzador deja elegir.
+
 kestrel64-gui.exe es el lanzador grafico y la forma normal de usar esto: biblioteca
 de ROM con caratulas, overclock por componente, mando, telemetria y depurador. No
 necesita nada instalado, lleva el interprete y la interfaz dentro. El perfil, el mapa
@@ -107,11 +129,29 @@ de mando y las caratulas descargadas se guardan en %LOCALAPPDATA%\kestrel64.
 empaqueto sin PyInstaller y el lanzador necesita Python 3 instalado.)
 TXT
 
+VER=$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' src/core/system.hpp | head -1)
+[ -n "$VER" ] || VER=dev
+
+# Manifiesto. Va AQUI, y no en release.sh, porque aqui es donde se cierran el zip y la
+# carpeta que lee el instalador: escrito despues, el portable viajaba sin el y el .iss
+# recogia el del paquete anterior. Sin esto un zip suelto en un escritorio no dice de que
+# commit salio ni si el arbol estaba sucio, que es justo lo que se pregunta cuando llega un
+# fallo de fuera. El md5 es el del fichero ya empaquetado, no el del arbol de build.
+{
+  echo "kestrel64 $VER"
+  echo "fecha:   $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "commit:  $(git rev-parse --short HEAD 2>/dev/null || echo '?')$(git diff --quiet 2>/dev/null || echo ' (arbol sucio)')"
+  echo "backend: $(cat "$OUT/kestrel64.build" 2>/dev/null || echo '?')"
+  for f in kestrel64.exe kestrel64-soft.exe kestrel64-gui.exe; do
+    [ -f "$OUT/$f" ] && echo "md5:     $(cd "$OUT" && md5sum "$f")"
+  done
+} > "$OUT/VERSION.txt"
+cat "$OUT/VERSION.txt"
+echo
+
 # Zip portable: es lo que se manda a otra maquina tal cual. Se usa el ZipFile de .NET y no
 # Compress-Archive porque en esta maquina el modulo Microsoft.PowerShell.Archive no carga,
 # ni `zip`, que no viene con MSYS2 por defecto.
-VER=$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' src/core/system.hpp | head -1)
-[ -n "$VER" ] || VER=dev
 ZIP="$(pwd)/kestrel64-$VER-win64.zip"
 rm -f "$ZIP"
 WD=$(cygpath -w "$(cd "$OUT" && pwd)"); WZ=$(cygpath -w "$ZIP")

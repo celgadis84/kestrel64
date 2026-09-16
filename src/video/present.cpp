@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <cmath>
+#include <mutex>
+#include <string>
 
 #ifdef KESTREL_PRDP
 // paraLLEl-RDP's volk *defines* the vk* symbols as function POINTER VARIABLES. present.cpp
@@ -33,6 +36,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <GLFW/glfw3native.h>
+#include "vifilter.hpp"
 #endif
 
 namespace kestrel {
@@ -469,9 +473,18 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   // salida de television pase lo que pase la resolucion de origen. Sacarla de srcW/srcH
   // estiraba las resoluciones no-4:3 (un framebuffer 320x120 con Y_SCALE a la mitad salia
   // aplastado al doble de ancho).
+  //
+  // La relacion sale de rt::aspectW/H (KESTREL_ASPECT, cambiable desde el menu): 4:3 de
+  // fabrica, 16:9 para los juegos que dibujan anamorfico en su modo panoramico, y 0:0 =
+  // estirar a la ventana entera para quien lo prefiera asi.
   const u32 ew = v.extent.width, eh = v.extent.height;
-  u32 dw = ew, dh = (u32)((u64)ew * 3 / 4);
-  if(dh > eh) { dh = eh; dw = (u32)((u64)eh * 4 / 3); }
+  const int aw = rt::aspectW.load(std::memory_order_relaxed);
+  const int ah = rt::aspectH.load(std::memory_order_relaxed);
+  u32 dw = ew, dh = eh;
+  if(aw > 0 && ah > 0) {
+    dh = (u32)((u64)ew * (u32)ah / (u32)aw);
+    if(dh > eh) { dh = eh; dw = (u32)((u64)eh * (u32)aw / (u32)ah); }
+  }
   const s32 dx = (s32)(ew - dw) / 2, dy = (s32)(eh - dh) / 2;
 
   // Las bandas laterales quedarian con basura del frame anterior: el blit solo cubre el
@@ -710,6 +723,23 @@ static const u32 kPadBits[14] = {
   0x0020, 0x0010, 0x0008, 0x0004, 0x0002, 0x0001,
 };
 
+// Puerta OCTOGONAL del stick de la N64. El tope del stick es fisico y no es un cuadrado:
+// el anillo tiene ocho lados, con unos +-85 en los cuatro ejes y solo +-69 en las cuatro
+// diagonales. Un mando moderno de recorrido cuadrado entrega la esquina entera, y escalarla
+// por ejes da (85,85): modulo 120, un valor que la consola NO PUEDE producir. Los juegos
+// que sacan la velocidad del modulo del stick (Mario, DK64, Zelda) correrian en diagonal
+// mas rapido de lo que jamas corrieron en hardware.
+// El recorte se hace a lo largo del rayo, que es lo que hace el anillo de plastico: la
+// DIRECCION que pide el jugador se respeta, solo se acorta el alcance.
+// Borde del octante entre (C,0) y (D,D): u + v*(C-D)/D = C, con u=max(|x|,|y|), v=min.
+static auto padOctagon(float& x, float& y) -> void {
+  const float C = 85.0f, D = 69.0f, k = (C - D) / D;
+  float ax = std::fabs(x), ay = std::fabs(y);
+  float u = ax > ay ? ax : ay, v = ax > ay ? ay : ax;
+  float lim = u + v * k;
+  if(lim > C) { float s = C / lim; x *= s; y *= s; }
+}
+
 // El mapa se relee cuando `rt::padGen` cambia: el menu de la ventana escribe el fichero y
 // sube la generacion, y el mando queda reasignado sin salir del juego.
 // Teclado y mando de fabrica, en el orden de kPadIds. Es la misma tabla que ensena el
@@ -738,17 +768,31 @@ PadMap::PadMap() {
   for(int i = 0; i < kN; i++) { key[i] = kFactory[i].key; gpb[i] = kFactory[i].gpb; }
 }
 
-static auto loadPadMap() -> const PadMap& {
-  static PadMap m;
+static auto loadPadMapFile(PadMap& m, const char* path) -> void;
+
+// Un mapa por conector. El fichero de cada uno se nombra con KESTREL_PAD1..KESTREL_PAD4 y
+// todos se releen a la vez cuando sube la generacion, porque el dialogo escribe los cuatro.
+static auto loadPadMap(int pad) -> const PadMap& {
+  static PadMap m[4];
   static u32 seen = 0xffffffffu;
   u32 gen = rt::padGen.load(std::memory_order_acquire);
-  if(seen == gen) return m;
-  seen = gen;
-  m = PadMap();
-  const char* path = std::getenv("KESTREL_PAD1");
-  if(!path || !*path) return m;
+  if(seen != gen) {
+    seen = gen;
+    for(int p = 0; p < 4; p++) {
+      m[p] = PadMap();
+      char var[16];
+      std::snprintf(var, sizeof var, "KESTREL_PAD%d", p + 1);
+      loadPadMapFile(m[p], std::getenv(var));
+    }
+  }
+  return m[pad];
+}
+
+// Superpone un fichero de mapeo sobre un mapa que ya trae los valores de fabrica.
+static auto loadPadMapFile(PadMap& m, const char* path) -> void {
+  if(!path || !*path) return;
   std::FILE* f = std::fopen(path, "r");
-  if(!f) { std::fprintf(stderr, "[input] no se pudo abrir %s\n", path); return m; }
+  if(!f) { std::fprintf(stderr, "[input] no se pudo abrir %s\n", path); return; }
   char line[256];
   int n = 0;
   while(std::fgets(line, sizeof line, f)) {
@@ -766,8 +810,110 @@ static auto loadPadMap() -> const PadMap& {
   std::fclose(f);
   std::fprintf(stderr, "[input] mapa de mando: %d controles desde %s (el resto, de fabrica)\n",
                n, path);
-  return m;
 }
+
+
+// --------------------------------------------------------- mandos fisicos de Windows
+// GLFW solo se puede consultar desde el hilo que hace el present, asi que la lista de
+// mandos enchufados se publica en rt:: para que el dialogo la lea sin tocar GLFW.
+static auto publishJoysticks() -> void {
+  static double next = 0.0;
+  double now = glfwGetTime();
+  if(now < next) return;   // enumerar los 16 huecos cada frame no aporta nada
+  next = now + 0.5;
+
+  std::string name[rt::kMaxJoy];
+  for(int j = 0; j < rt::kMaxJoy; j++) {
+    if(!glfwJoystickPresent(j)) continue;
+    const char* n = glfwJoystickIsGamepad(j) ? glfwGetGamepadName(j) : glfwGetJoystickName(j);
+    name[j] = n ? n : "Mando";
+  }
+  {
+    std::lock_guard<std::mutex> lk(rt::joyMx);
+    bool changed = false;
+    for(int j = 0; j < rt::kMaxJoy; j++)
+      if(rt::joyName[j] != name[j]) { rt::joyName[j] = name[j]; changed = true; }
+    if(changed) rt::joyGen.fetch_add(1, std::memory_order_release);
+  }
+
+  // El perfil guarda el aparato de cada conector por NOMBRE, no por indice: Windows
+  // renumera los mandos al enchufar y desenchufar, y un indice guardado acabaria apuntando
+  // a otro jugador. El nombre se resuelve aqui, y se sigue intentando en cada barrido: un
+  // mando que se enchufa a mitad de partida entra solo en su conector.
+  static bool want[4] = {};
+  static std::string wantName[4];
+  static bool init = false;
+  if(!init) {
+    init = true;
+    for(int p = 0; p < 4; p++) {
+      char var[20];
+      std::snprintf(var, sizeof var, "KESTREL_PADDEV%d", p + 1);
+      const char* d = std::getenv(var);
+      if(!d || !*d) continue;
+      if(!std::strcmp(d, "auto")) { rt::padDev[p].store(-2, std::memory_order_relaxed); continue; }
+      if(!std::strcmp(d, "kb"))   { rt::padDev[p].store(-1, std::memory_order_relaxed); continue; }
+      want[p] = true;
+      wantName[p] = d;
+    }
+  }
+  for(int p = 0; p < 4; p++) {
+    if(!want[p]) continue;
+    int found = -3;
+    for(int j = 0; j < rt::kMaxJoy; j++) if(name[j] == wantName[p]) { found = j; break; }
+    rt::padDev[p].store(found, std::memory_order_relaxed);
+  }
+}
+
+// Primer mando utilizable. Es lo que usa el modo automatico del conector 1, que es el
+// comportamiento historico: teclado y el mando que haya, los dos a la vez.
+static auto firstGamepad() -> int {
+  for(int j = 0; j < rt::kMaxJoy; j++) if(glfwJoystickIsGamepad(j)) return j;
+  return -1;
+}
+
+#if defined(_WIN32)
+// GLFW no tiene API de vibracion: en Windows el motor va por XInput. Se carga a mano
+// porque enlazar xinput obliga a arrastrar el SDK y hay tres nombres de DLL segun el
+// sistema. Sin ninguna de las tres, el Rumble Pak sigue existiendo para el juego (el
+// joybus responde igual), simplemente no se nota en la mano.
+struct XInputVibration { u16 left, right; };
+using XInputSetState_t = u32 (__stdcall*)(u32, XInputVibration*);
+
+static auto xinputSetState() -> XInputSetState_t {
+  static XInputSetState_t fn = [] {
+    static const char* kDlls[] = {"xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"};
+    for(const char* d : kDlls) {
+      HMODULE h = LoadLibraryA(d);
+      if(!h) continue;
+      auto f = (XInputSetState_t)(void*)GetProcAddress(h, "XInputSetState");
+      if(f) return f;
+    }
+    return (XInputSetState_t)nullptr;
+  }();
+  return fn;
+}
+
+static auto setRumble(int joy, bool on) -> void {
+  if(joy < 0) return;
+  // GLFW no dice a que hueco de XInput corresponde un joystick. Los mandos XInput son los
+  // primeros que enumera Windows, asi que el n-esimo gamepad de GLFW es el hueco n de
+  // XInput; con mandos DirectInput mezclados puede fallar, pero solo se pierde la
+  // vibracion, nunca la entrada.
+  int slot = 0;
+  for(int j = 0; j < joy; j++) if(glfwJoystickIsGamepad(j)) slot++;
+  if(slot > 3) return;
+
+  static bool last[4] = {};
+  if(last[slot] == on) return;   // XInputSetState es una llamada por USB: solo en el flanco
+  last[slot] = on;
+  if(auto f = xinputSetState()) {
+    XInputVibration v = {on ? (u16)0xffff : (u16)0, on ? (u16)0xffff : (u16)0};
+    f((u32)slot, &v);
+  }
+}
+#else
+static auto setRumble(int, bool) -> void {}
+#endif
 
 }  // namespace
 
@@ -858,61 +1004,127 @@ auto Presenter::pumpFrame() -> bool {
     for(int i = 0; i < 3; i++) stPrev[i] = now[i];
   }
 
-  // --- player-1 keyboard → N64 pad -------------------------------------------
-  // Buttons: X=A  C=B  Space=Z  Enter=Start  Q=L  E=R ; D-pad = arrows ;
-  // C-buttons = I/J/K/L ; analog stick = W/A/S/D (full ±80 deflection).
-  {
-    auto down = [&](int key) { return key >= 0 && glfwGetKey(v.win, key) == GLFW_PRESS; };
-    const PadMap& pm = loadPadMap();
-    u32 b = 0;
-    // Un solo camino: el mapa YA trae los valores de fabrica dentro y el fichero, si lo hay,
-    // solo ha pisado los controles que nombra.
-    for(int i = 0; i < 14; i++) if(down(pm.key[i])) b |= kPadBits[i];
-    int sx = (down(pm.key[14]) ? 80 : 0) - (down(pm.key[15]) ? 80 : 0);
-    int sy = (down(pm.key[16]) ? 80 : 0) - (down(pm.key[17]) ? 80 : 0);
-
-    // --- optional physical gamepad (player 1), OR'd on top of the keyboard ------
-    // GLFW's gamepad mapping DB gives every pad the same button/axis layout, so
-    // this is controller-agnostic. Xbox-style default: A=A, B=B, X=Z, Y=R, LB=L,
-    // Back=Start(also Start=Start), left stick=analog, right stick=C-buttons,
-    // triggers=Z/R. Keyboard stays live so either input source works.
-    GLFWgamepadstate gp;
-    if(glfwJoystickIsGamepad(GLFW_JOYSTICK_1) && glfwGetGamepadState(GLFW_JOYSTICK_1, &gp)) {
-      auto bt = [&](int i) { return i >= 0 && gp.buttons[i] == GLFW_PRESS; };
-      // Un gatillo no es un boton: los codigos -2/-3 del mapa se resuelven contra los ejes.
-      auto btm = [&](int i) {
-        if(i == -2) return gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f;
-        if(i == -3) return gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f;
-        return bt(i);
-      };
-      for(int i = 0; i < 14; i++) if(btm(pm.gpb[i])) b |= kPadBits[i];
-      // Alias de fabrica del mando: solo para los controles que el fichero NO redefine, o
-      // remapear un boton dejaria puesto ademas el de antes.
-      auto freeGp = [&](int i) { return !pm.setGp[i]; };
-      if(freeGp(3) && bt(GLFW_GAMEPAD_BUTTON_BACK)) b |= 0x1000;   // START (alt)
-      if(freeGp(9) && bt(GLFW_GAMEPAD_BUTTON_Y))    b |= 0x0010;   // R (alt)
-      if(freeGp(2) && gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f) b |= 0x2000;  // Z
-      if(freeGp(9) && gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f) b |= 0x0010;  // R
-      // Stick derecho -> botones C (digital, con zona muerta). Los C no traen boton de
-      // mando de fabrica, asi que esta es su unica via salvo que el usuario asigne uno.
-      {
-        float rx = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], ry = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y];
-        if(freeGp(10) && ry < -0.5f) b |= 0x0008;  // C-arriba
-        if(freeGp(11) && ry >  0.5f) b |= 0x0004;  // C-abajo
-        if(freeGp(12) && rx < -0.5f) b |= 0x0002;  // C-izquierda
-        if(freeGp(13) && rx >  0.5f) b |= 0x0001;  // C-derecha
-      }
-      // Left stick → analog. Deadzone, then scale to the N64's ±80 range.
-      float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X], ly = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
-      if(lx < -0.2f || lx > 0.2f) sx = (int)(lx * 80.0f);
-      if(ly < -0.2f || ly > 0.2f) sy = (int)(-ly * 80.0f);  // GLFW +y is down
+  // --- avance por fotogramas --------------------------------------------------
+  // P pausa/reanuda, F avanza UN campo de video con la pausa puesta (Shift+F, ocho). Por
+  // flanco, como las de estado: mantener F apretado medio segundo son treinta avances.
+  // El campo es el cuanto porque es donde el juego lee el mando, o sea lo que hace falta
+  // para colocar una pulsacion en el fotograma exacto al grabar una pelicula.
+  if(taFields && menuPaused) {
+    bool nowP = glfwGetKey(v.win, GLFW_KEY_P) == GLFW_PRESS;
+    bool nowF = glfwGetKey(v.win, GLFW_KEY_F) == GLFW_PRESS;
+    bool shift = glfwGetKey(v.win, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS
+              || glfwGetKey(v.win, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    if(nowP && !taPrev[0]) {
+      bool p = !menuPaused->load(std::memory_order_relaxed);
+      menuPaused->store(p, std::memory_order_relaxed);
+      std::printf("[tas] %s\n", p ? "pausa" : "en marcha");
+      std::fflush(stdout);
     }
+    if(nowF && !taPrev[1]) {
+      menuPaused->store(true, std::memory_order_relaxed);
+      taFields->fetch_add(shift ? 8u : 1u, std::memory_order_relaxed);
+    }
+    taPrev[0] = nowP; taPrev[1] = nowF;
+  }
 
-    mem->padButtons = b;
-    if(sx > 80) sx = 80; else if(sx < -80) sx = -80;
-    if(sy > 80) sy = 80; else if(sy < -80) sy = -80;
-    mem->padStickX = (s8)sx;
-    mem->padStickY = (s8)sy;
+  // --- rebobinado -------------------------------------------------------------
+  // La tecla de retroceso rebobina MIENTRAS se mantenga apretada, que es como se usa: no
+  // hay flanco aqui a proposito. La ventana sondea a la velocidad de la pantalla y el
+  // nucleo gasta los pasos a la suya, asi que se pide con un tope de dos pendientes: sin
+  // el, soltar la tecla dejaria una cola de peticiones que seguirian rebobinando solas.
+  if(rwReq) {
+    if(glfwGetKey(v.win, GLFW_KEY_BACKSPACE) == GLFW_PRESS) {
+      if(rwReq->load(std::memory_order_relaxed) < 2)
+        rwReq->fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  // --- los cuatro mandos ------------------------------------------------------
+  // Cada conector lee UNA fuente, elegida en el dialogo de mando: el teclado, un mando
+  // concreto de los que Windows tiene enchufados, o "automatico" (teclado + primer mando a
+  // la vez), que es el comportamiento de siempre y sigue siendo el del jugador 1. Con
+  // cuatro jugadores no puede ser siempre la mezcla: el teclado moveria a dos a la vez.
+  {
+    publishJoysticks();
+    for(int p = 0; p < 4; p++) {
+      Memory::PadPort& pp = mem->padPort[p];
+      pp.connected = rt::padOn[p].load(std::memory_order_relaxed);
+      u8 acc = (u8)rt::padAcc[p].load(std::memory_order_relaxed);
+      if(acc != pp.accessory) {
+        // Cambiar de accesorio a mitad de partida es enchufar otro pak: el Controller Pak
+        // necesita su RAM formateada la primera vez que aparece.
+        // La RAM del Controller Pak la formatea el joybus la primera vez que se usa.
+        pp.accessory = acc;
+      }
+      if(!pp.connected) { pp.buttons = 0; pp.stickX = pp.stickY = 0; continue; }
+
+      const PadMap& pm = loadPadMap(p);
+      int dev = rt::padDev[p].load(std::memory_order_relaxed);   // -2 auto, -1 teclado, >=0 joystick
+      u32 b = 0;
+      float sx = 0.0f, sy = 0.0f;
+
+      if(dev == -1 || dev == -2) {   // teclado (y en automatico, ademas del mando)
+        auto down = [&](int key) { return key >= 0 && glfwGetKey(v.win, key) == GLFW_PRESS; };
+        for(int i = 0; i < 14; i++) if(down(pm.key[i])) b |= kPadBits[i];
+        // El teclado es todo-o-nada: pisar una tecla es llevar el stick al anillo. Sale al
+        // eje maximo y la puerta octogonal de abajo convierte las diagonales en 69, que es
+        // lo que da el mando de verdad cuando se apoya en una esquina del anillo.
+        sx = (down(pm.key[14]) ? 85.0f : 0.0f) - (down(pm.key[15]) ? 85.0f : 0.0f);
+        sy = (down(pm.key[16]) ? 85.0f : 0.0f) - (down(pm.key[17]) ? 85.0f : 0.0f);
+      }
+
+      // Que joystick fisico lee este conector. En automatico, el primero que haya (el
+      // comportamiento de toda la vida); si el usuario ha elegido uno, ese y solo ese.
+      int joy = dev >= 0 ? dev : (dev == -2 ? firstGamepad() : -1);
+      GLFWgamepadstate gp;
+      if(joy >= 0 && glfwJoystickIsGamepad(joy) && glfwGetGamepadState(joy, &gp)) {
+        auto bt = [&](int i) { return i >= 0 && gp.buttons[i] == GLFW_PRESS; };
+        // Un gatillo no es un boton: los codigos -2/-3 del mapa se resuelven contra los ejes.
+        auto btm = [&](int i) {
+          if(i == -2) return gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f;
+          if(i == -3) return gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f;
+          return bt(i);
+        };
+        for(int i = 0; i < 14; i++) if(btm(pm.gpb[i])) b |= kPadBits[i];
+        // Alias de fabrica del mando: solo para los controles que el fichero NO redefine, o
+        // remapear un boton dejaria puesto ademas el de antes.
+        auto freeGp = [&](int i) { return !pm.setGp[i]; };
+        if(freeGp(3) && bt(GLFW_GAMEPAD_BUTTON_BACK)) b |= 0x1000;   // START (alt)
+        if(freeGp(9) && bt(GLFW_GAMEPAD_BUTTON_Y))    b |= 0x0010;   // R (alt)
+        if(freeGp(2) && gp.axes[GLFW_GAMEPAD_AXIS_LEFT_TRIGGER]  > 0.0f) b |= 0x2000;  // Z
+        if(freeGp(9) && gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_TRIGGER] > 0.0f) b |= 0x0010;  // R
+        // Stick derecho -> botones C (digital, con zona muerta). Los C no traen boton de
+        // mando de fabrica, asi que esta es su unica via salvo que el usuario asigne uno.
+        {
+          float rx = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_X], ry = gp.axes[GLFW_GAMEPAD_AXIS_RIGHT_Y];
+          if(freeGp(10) && ry < -0.5f) b |= 0x0008;  // C-arriba
+          if(freeGp(11) && ry >  0.5f) b |= 0x0004;  // C-abajo
+          if(freeGp(12) && rx < -0.5f) b |= 0x0002;  // C-izquierda
+          if(freeGp(13) && rx >  0.5f) b |= 0x0001;  // C-derecha
+        }
+        // Stick izquierdo -> analogico. La zona muerta es RADIAL, no por ejes: una zona
+        // muerta por ejes recorta un cuadrado y deja pasar la esquina, con lo que un stick
+        // en reposo con deriva en las dos direcciones cuela un diagonal. Ademas se reescala
+        // desde el borde de la zona muerta, o el valor daria un salto de 0 a 17 al cruzarla.
+        float lx = gp.axes[GLFW_GAMEPAD_AXIS_LEFT_X], ly = -gp.axes[GLFW_GAMEPAD_AXIS_LEFT_Y];
+        const float dz = 0.12f;                        // reposo del stick del anfitrion
+        float len = std::sqrt(lx * lx + ly * ly);
+        if(len > dz) {
+          float g = ((len - dz) / (1.0f - dz)) / len;  // 0 en el borde de la zona muerta, 1 al fondo
+          if(g > 1.0f / len) g = 1.0f / len;           // el recorrido del anfitrion puede pasar de 1
+          sx = lx * g * 85.0f; sy = ly * g * 85.0f;    // +y de GLFW mira hacia abajo (ya invertido)
+        }
+      }
+
+      // El anillo del mando es lo ULTIMO que toca la senal, igual que en la consola.
+      padOctagon(sx, sy);
+      pp.buttons = b;
+      pp.stickX = (s8)(sx < 0.0f ? sx - 0.5f : sx + 0.5f);
+      pp.stickY = (s8)(sy < 0.0f ? sy - 0.5f : sy + 0.5f);
+      // El motor del Rumble Pak lo enciende el JUEGO por joybus; aqui solo se traslada al
+      // mando fisico. Sin Rumble Pak en la ranura no hay nada que trasladar.
+      setRumble(joy, pp.accessory == 2 && pp.rumble);
+    }
   }
 
   static auto lastTick = std::chrono::steady_clock::now();
@@ -970,8 +1182,23 @@ auto Presenter::pumpFrame() -> bool {
     }
     type = 99;
   }
-  if(vrdpFrame) {
-    // already have pixels from the GPU scanout
+  // Filtros del VI (AA de cobertura, divot, de-dither). El RDP deja en el framebuffer la
+  // cobertura del pixel; el borde suave lo hace el VI al barrer. Cuando el backend es
+  // parallel-rdp esto no entra: su propio VI ya filtro el barrido.
+  const u32 viCtrl = mem->rcp.vi_ctrl;
+  std::vector<u32> filt;
+  if(!vrdpFrame && type != 99 && vi::active(viCtrl)) {
+    filt.resize((usize)width * height);
+    vi::fetchFiltered(ram.data(), ram.size(), mem->rdramHidden.data(), mem->rdramHidden.size(),
+                      origin, width, width, height, viCtrl, filt.data());
+    for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
+      u32 c = filt[(usize)y * width + x];
+      frame[y * width + x] = 0xff000000u | ((c & 0xff) << 16) | (c & 0xff00u) | ((c >> 16) & 0xff);
+    }
+  }
+
+  if(vrdpFrame || !filt.empty()) {
+    // ya hay pixeles (barrido de la GPU, o el camino filtrado del VI de arriba)
   } else if(type == 2) {  // RGBA5551, 2 bytes/pixel, big-endian
     for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
       u32 p = origin + (y * width + x) * 2;

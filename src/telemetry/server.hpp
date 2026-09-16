@@ -7,6 +7,9 @@
 #include "../net/tcp.hpp"
 #include "json.hpp"
 #include <atomic>
+#include <memory>
+#include <mutex>
+#include <vector>
 
 namespace kestrel {
 
@@ -27,6 +30,17 @@ private:
   net::TcpServer tcp;
   std::atomic<bool> stopping{false};
 
+  // Un hilo por cliente (el puente MCP, scripts, el lanzador...), pero el DESPACHO va
+  // serializado: cada orden ve el mismo estado consistente que cuando solo habia un
+  // cliente. Las conexiones vivas se guardan para poder cerrarlas desde stop() y
+  // despertar a los hilos que estan bloqueados en recv.
+  std::mutex dispatchMx;
+  std::mutex clientsMx;
+  std::vector<std::shared_ptr<net::TcpConn>> clients;
+
+  // Atiende una conexion hasta que se cierra. Corre en su propio hilo.
+  auto serveClient(std::shared_ptr<net::TcpConn> conn) -> void;
+
   // Dispatch one request; fills `reply` JSON and optional `blob`.
   auto dispatch(const json::Value& req, json::Value& reply, std::vector<u8>& blob) -> void;
 
@@ -41,6 +55,8 @@ private:
   auto cmdCpuStep(const json::Value& args, json::Value& data) -> void;
   auto cmdCpuDisasm(const json::Value& args, json::Value& data) -> bool;
   auto cmdRunControl(const std::string& cmd, json::Value& data) -> void;
+  auto cmdFrameAdvance(const json::Value& args, json::Value& data) -> void;
+  auto cmdRewind(const json::Value& args, json::Value& data) -> bool;
   auto cmdState(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
   auto cmdRcpRegs(const json::Value& args, json::Value& data) -> void;
   auto cmdRspRegs(const json::Value& args, json::Value& data) -> void;

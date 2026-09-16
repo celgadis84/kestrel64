@@ -6,9 +6,11 @@
 // separadas, cualquier campo anadido a una y olvidado en la otra corrompe el estado y solo
 // se nota como un cuelgue raro tres partidas despues.
 
+#include "archive.hpp"
 #include "savestate.hpp"
 #include "system.hpp"
 #include "memory.hpp"
+#include "movie.hpp"
 #include "../cpu/cpu.hpp"
 #include "../cpu/jit.hpp"
 #include "../rsp/rsp.hpp"
@@ -22,7 +24,12 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 3;   // 3: el credito del DAC de audio (aiLastRetired/aiAcc)
+constexpr u32 kVersion = 10;  // 10: ciclos de parada pendientes (coste de fallo de cache);
+                              // 9: registros DPS (puerto de test al buffer de spans);
+                              // 8: plano oculto de RDRAM (cobertura del RDP para el AA del VI);
+                              // 7: transaccion del SI/joybus en vuelo (plazo del mando);
+                              // 6: resto fraccionario del reloj Count (CPI); 5: posicion de la
+                              // pelicula (TAS); 4: los cuatro puertos de mando
 }  // namespace
 
 // Flujo de bytes bidireccional. En escritura acumula en `out`; en lectura consume `in`.
@@ -147,6 +154,12 @@ auto visitCpu(StateIO& io, CPU& c) -> void {
   io.pod(c.memAbort); io.pod(c.xlatCacheable);
   io.pod(c.inDelay); io.pod(c.justBranched); io.pod(c.jitDelaySlot);
   io.pod(c.timerIntr); io.pod(c.randomReload);
+  io.pod(c.countFrac);   // resto del reloj Count: sin el, un estado cargado con CPI<2 arranca
+                         // con la fase del divisor equivocada y el timer se desvia un tick
+  io.pod(c.stallCycles); // ciclos de parada por fallo de cache aun sin volcar a Count: mismo
+                         // motivo que countFrac -- es reloj de invitado a medio consumir
+  io.pod(c.stallOps); io.pod(c.stallOpsRem);   // y su traduccion a ops, que es lo que ven el
+                         // campo de video (viTick) y los plazos de PI/SI (cartNow)
   io.pod(c.halted);
   io.pod(c.retired); io.pod(c.exceptions);
   io.pod(c.icSeq);
@@ -171,6 +184,8 @@ auto visitRcp(StateIO& io, Rcp& p) -> void {
   io.atom(p.dpc_current); io.atom(p.dpcCurReads);
   io.pod(p.dpc_submitted); io.atom(p.dpc_status);
   io.atom(p.dpc_clock); io.atom(p.dpc_bufbusy); io.atom(p.dpc_pipebusy); io.atom(p.dpc_tmem);
+  io.pod(p.dps_tbist); io.pod(p.dps_test_mode); io.pod(p.dps_buftest_addr);
+  io.arr(p.dps_span, 128);
   io.pod(p.vi_ctrl); io.pod(p.vi_origin); io.pod(p.vi_width); io.pod(p.vi_intr); io.pod(p.vi_current);
   io.pod(p.viFlips); io.pod(p.viFields); io.pod(p.dpSyncs);
   io.pod(p.vi_burst); io.pod(p.vi_vsync); io.pod(p.vi_hsync); io.pod(p.vi_leap);
@@ -207,12 +222,33 @@ auto visitMemory(StateIO& io, Memory& m) -> void {
 auto visitRam(StateIO& io, Memory& m) -> void {
   io.tag("RAM ");
   io.blob(m.rdram.data(), m.rdram.size());   // el tamano de RDRAM no cambia en caliente
+  // Noveno bit de los chips RDRAM: ahi guarda el RDP los 2 bits bajos de la cobertura de
+  // cada pixel y de ahi los lee el filtro de antialias del VI. Es estado de invitado como
+  // la propia RDRAM; sin el, el frame siguiente a cargar un estado sale con los bordes mal.
+  io.vecBlob(m.rdramHidden);
   io.vecBlob(m.dmem);
   io.vecBlob(m.imem);
+  // Transaccion del SI en vuelo: es estado de invitado. Sin ella, un estado guardado justo
+  // despues de que el juego arranque la lectura del mando se carga sin plazo armado, nadie
+  // levanta MI_SI y el hilo que espera en la cola del SI no despierta nunca.
+  io.pod(m.siBusy); io.pod(m.siToPif); io.pod(m.siDram); io.pod(m.siDoneAt);
   io.vecBlob(m.pifram);
   io.vecBlob(m.eeprom);
   io.vecBlob(m.saveRam);
-  io.vecBlob(m.mempak);   // el pak es RAM viva: rebobinar un estado tiene que rebobinarlo
+  // Los pak son RAM viva: rebobinar un estado tiene que rebobinarlos. Van los cuatro
+  // puertos, y con ellos el estado del motor del Rumble (que el juego enciende y apaga).
+  for(auto& pp : m.padPort) { io.vecBlob(pp.mempak); io.pod(pp.rumble); }
+}
+
+// Peliculas TAS: los sondeos consumidos son estado de la partida igual que la RDRAM. Sin
+// esto, cargar un estado rebobina el juego pero no la cinta, y la repeticion se desvia justo
+// en el uso que junta las dos cosas (rehacer un tramo). Va aunque no haya pelicula: el campo
+// existe siempre para que el formato no dependa de una variable de entorno.
+auto visitMovie(StateIO& io) -> void {
+  io.tag("MOVI");
+  u64 p = movie::polls.load(std::memory_order_relaxed);
+  io.pod(p);
+  if(!io.writing && !io.bad) movie::seek(p);
 }
 
 auto visitAll(StateIO& io, System& sys) -> void {
@@ -226,6 +262,7 @@ auto visitAll(StateIO& io, System& sys) -> void {
   StateVisitor::rsp(io, sys.memory.rsp);
   StateVisitor::rdp(io, sys.memory.softRdp);
   visitRam(io, sys.memory);
+  visitMovie(io);
   io.tag("END ");
 }
 
@@ -275,6 +312,9 @@ auto afterLoad(System& sys) -> void {
     if(sys.memory.rcp.mi_repeat_on) *sys.memory.cpuStGuard |= (u8)CPU::StGuardRepeat;
     else                            *sys.memory.cpuStGuard &= (u8)~(u8)CPU::StGuardRepeat;
   }
+  // Horario del RCP: el anillo de tramos del RDP y los anclajes de las barreras hablan de
+  // la partida anterior. Ver Memory::rcpSchedReset.
+  sys.memory.rcpSchedReset();
   // El medio de guardado que acaba de entrar tiene que llegar al disco como cualquier otro.
   sys.memory.saveDirty = true;
 }
@@ -282,7 +322,7 @@ auto afterLoad(System& sys) -> void {
 }  // namespace
 
 auto stateSlotPath(const System& sys, int slot) -> std::string {
-  std::string p = sys.romPath;
+  std::string p = archive::stripContainerExt(sys.romPath);
   usize dot = p.find_last_of('.');
   usize sep = p.find_last_of("/\\");
   if(dot != std::string::npos && (sep == std::string::npos || dot > sep)) p.resize(dot);
@@ -291,16 +331,42 @@ auto stateSlotPath(const System& sys, int slot) -> std::string {
   return p + ext;
 }
 
-auto saveState(System& sys, const std::string& path, std::string& err) -> bool {
-  std::vector<u8> buf;
-  buf.reserve(sys.memory.rdram.size() + (1u << 20));
+auto captureState(System& sys, std::vector<u8>& out) -> void {
+  // clear() conserva la capacidad: el rebobinado reutiliza el mismo vector campo tras campo
+  // y no vuelve a pedir los 8 MB al asignador cada vez.
+  out.clear();
+  out.reserve(sys.memory.rdram.size() + (1u << 20));
   Header h = makeHeader(sys);
-  buf.insert(buf.end(), (const u8*)&h, (const u8*)&h + sizeof(h));
-
+  out.insert(out.end(), (const u8*)&h, (const u8*)&h + sizeof(h));
   StateIO io;
   io.writing = true;
-  io.out = &buf;
+  io.out = &out;
   visitAll(io, sys);
+}
+
+auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> bool {
+  if(len < sizeof(Header)) { err = "estado truncado"; return false; }
+  Header h = {};
+  std::memcpy(&h, data, sizeof(h));
+  Header want = makeHeader(sys);
+  if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
+  if(h.version != kVersion) { err = "version de estado incompatible"; return false; }
+  if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
+  if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
+
+  StateIO io;
+  io.writing = false;
+  io.in = data + sizeof(Header);
+  io.len = len - sizeof(Header);
+  visitAll(io, sys);
+  if(io.bad) { err = "estado corrupto o incompleto"; return false; }
+  afterLoad(sys);
+  return true;
+}
+
+auto saveState(System& sys, const std::string& path, std::string& err) -> bool {
+  std::vector<u8> buf;
+  captureState(sys, buf);
 
   FILE* f = std::fopen(path.c_str(), "wb");
   if(!f) { err = "no se pudo abrir " + path; return false; }
@@ -322,26 +388,10 @@ auto loadState(System& sys, const std::string& path, std::string& err) -> bool {
   std::fclose(f);
   if(!rd) { err = "lectura incompleta"; return false; }
 
-  Header h = {};
-  std::memcpy(&h, buf.data(), sizeof(h));
-  Header want = makeHeader(sys);
-  if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion) { err = "version de estado incompatible"; return false; }
-  if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
-  if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
-
   // La lectura se valida entera sobre la marcha (marcas de seccion + longitudes). Un fallo
   // a mitad deja la maquina a medio reescribir, y por eso el llamante la tiene pausada y
   // avisa: no hay forma barata de deshacerlo sin duplicar los 8 MB de RDRAM.
-  StateIO io;
-  io.writing = false;
-  io.in = buf.data() + sizeof(Header);
-  io.len = buf.size() - sizeof(Header);
-  visitAll(io, sys);
-  if(io.bad) { err = "estado corrupto o incompleto"; return false; }
-
-  afterLoad(sys);
-  return true;
+  return restoreState(sys, buf.data(), buf.size(), err);
 }
 
 }  // namespace kestrel

@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>carrusel smoke</title>
+<style>html,body{margin:0;height:100%;background:#0b0d12}
+#s{position:relative;width:100%;height:100%}
+.gl3d{display:block;width:100%;height:100%}
+#log{position:absolute;left:8px;bottom:6px;color:#8f8;font:12px monospace;z-index:9}</style>
+<div id="s"></div><pre id="log"></pre>
+<script src="gl.js"></script><script src="models.js"></script><script src="scene3d.js"></script>
+<script>
+/* Prueba a ojo de las tres colocaciones del carrusel 3D, sin servidor ni ROMs: se pintan
+   caratulas falsas en un canvas y se montan como texturas. Se abre a mano, o con
+   msedge --headless --screenshot. El modo va en el hash: #ring, #flow, #wall. */
+function art(i) {
+  const c = document.createElement("canvas"); c.width = 192; c.height = 270;
+  const g = c.getContext("2d");
+  const hue = (i * 47) % 360;
+  g.fillStyle = `hsl(${hue},55%,28%)`; g.fillRect(0, 0, 192, 270);
+  g.fillStyle = `hsl(${hue},70%,52%)`; g.fillRect(10, 10, 172, 92);
+  g.fillStyle = "#fff"; g.font = "bold 30px sans-serif"; g.fillText("N64", 22, 70);
+  g.font = "bold 22px sans-serif"; g.fillText("JUEGO " + i, 20, 160);
+  return c.toDataURL("image/png");
+}
+const items = [];
+for (let i = 0; i < 40; i++) items.push({ art: art(i), title: "Juego " + i });
+const mode = (location.hash || "#flow").slice(1);
+const car = SCENE3D.mountCarousel(document.getElementById("s"),
+  { items, mode, index: 12, onSelect: i => car.setIndex(i), onLaunch: i => log("lanzar " + i) });
+function log(t) { document.getElementById("log").textContent += t + "\n"; }
+if (!car) log("SIN WEBGL");
+else {
+  log(mode + ": " + items.length + " juegos, " + car.canvas.width + "x" + car.canvas.height);
+  addEventListener("keydown", e => {
+    if (e.key === "ArrowRight") car.setIndex(12 + 1);
+    if (e.key === "1") car.setMode("flow");
+    if (e.key === "2") car.setMode("ring");
+    if (e.key === "3") car.setMode("wall");
+  });
+}
+</script>

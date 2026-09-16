@@ -11,6 +11,9 @@ const api = async (p, body) => {
 };
 
 let SCHEMA = null, CFG = {}, BUILDS = [], ROMS = [], SEL = -1, MODE = "cover", DIRTY = false;
+/* Carrusel 3D de la biblioteca: vive entre repintados mientras la vista siga siendo
+   una de las suyas, para no tirar y rehacer las texturas de las caratulas. */
+let LIB3D = null, LIB3D_KEY = "";
 let PADGL = null, PAD_SEL = null, SHELF = null;
 
 function toast(msg, bad) {
@@ -38,6 +41,7 @@ function touch() {
   $("#buildinfo").textContent = BUILDS.length
     ? BUILDS.map(x => x.label).join(" + ")
     : "sin compilar (falta kestrel64.exe)";
+  applyTheme(CFG.theme);
   buildConfig();
   buildOC();
   buildVideo();
@@ -430,12 +434,48 @@ function renderStage() {
   }
   if (SEL >= list.length) SEL = 0;
   if (MODE !== "shelf" && SHELF) { SHELF.destroy(); SHELF = null; }
-  ({cover: rCover, rows: rRows, grid: rGrid, wheel: rWheel, list: rList,
-    shelf: rShelf}[MODE] || rCover)(st, list);
+  if (!LAYOUT3D[MODE] && LIB3D) { LIB3D.destroy(); LIB3D = null; LIB3D_KEY = ""; }
+  if (LAYOUT3D[MODE]) r3D(st, list, LAYOUT3D[MODE]);
+  else ({rows: rRows, list: rList, wmrows: rWonder, shelf: rShelf}[MODE] || rRows)(st, list);
   updateDock();
 }
 
 function pick(i) { SEL = i; renderStage(); }
+
+/* ------------------------------------------------------------- caratulas en 3D */
+/* Coverflow, rueda y rejilla son la MISMA escena con otra colocacion: cajas de carton con
+   volumen, no laminas. El selector de vista solo cambia donde se pone cada caja, asi que
+   pasar de una a otra no recarga ni una textura. Sin WebGL se cae a las de CSS de antes. */
+const LAYOUT3D = { cover: "flow", wheel: "ring", grid: "wall" };
+
+function r3D(st, list, layout) {
+  const key = list.map(r => r.id).join("|");
+  if (LIB3D && $(".lib3d", st)) {                 // ya montado: recolocar, no reconstruir
+    if (key !== LIB3D_KEY) { LIB3D.setItems(items3d(list), SEL); LIB3D_KEY = key; }
+    else LIB3D.setIndex(SEL, false);
+    LIB3D.setMode(layout);
+    return;
+  }
+  if (LIB3D) { LIB3D.destroy(); LIB3D = null; }
+  st.innerHTML = `<div class="lib3d"></div>`;
+  const host = $(".lib3d", st);
+  if (typeof SCENE3D !== "undefined")
+    LIB3D = SCENE3D.mountCarousel(host, {
+      items: items3d(list), mode: layout, index: SEL,
+      onSelect: i => { SEL = i; if (LIB3D) LIB3D.setIndex(i); updateDock(); },
+      onLaunch: () => activate(),
+    });
+  if (!LIB3D) {                                   // navegador sin WebGL
+    LIB3D_KEY = "";
+    ({ flow: rCover, ring: rWheel, wall: rGrid }[layout] || rCover)(st, list);
+    return;
+  }
+  LIB3D_KEY = key;
+}
+
+function items3d(list) {
+  return list.map(r => ({ art: artUrl(r), title: r.title }));
+}
 
 function card(r, i, list) {
   const d = document.createElement("div");
@@ -489,7 +529,7 @@ function rCover(st, list) {
     im.src = artUrl(r);
     im.onload = () => { $(".face", d).appendChild(im); $(".refl", d).appendChild(im.cloneNode()); };
     im.onerror = () => { $(".face", d).innerHTML = `<div class="ph">${r.title}</div>`; };
-    d.onclick = () => (i === SEL ? launch() : pick(i));
+    d.onclick = () => (i === SEL ? activate() : pick(i));
     tr.appendChild(d);
   });
   layoutCover(list);
@@ -522,7 +562,7 @@ function rWheel(st, list) {
     const d = document.createElement("div");
     d.className = "wl";
     d.textContent = r.title;
-    d.onclick = () => (i === SEL ? launch() : pick(i));
+    d.onclick = () => (i === SEL ? activate() : pick(i));
     tr.appendChild(d);
   });
   layoutWheel();
@@ -566,6 +606,39 @@ function rList(st, list) {
   });
 }
 
+/* Lista de filas altas al estilo WonderMenu (el menu de flashcart de lmcd): una fila por
+   cartucho, caratula pequena a la izquierda, titulo grande, subtitulo a media tinta y los
+   datos del cartucho a la derecha. Lo elegido no se pinta con un borde sino con una
+   pastilla maciza que SOBRESALE por los dos lados y crece un poco de alto, que es
+   justo lo que hace el original. Todo sale de los tokens (`--selbg`, `--seltxt`, `--selr`,
+   `--font-display`), asi que la misma vista vale con el tema de fabrica y con el de
+   WonderMenu sin una sola regla duplicada. No se copia ni un recurso del proyecto
+   original: es AGPLv3 y aqui solo se replica la DISPOSICION. */
+function rWonder(st, list) {
+  st.innerHTML = `<div class="wrows"></div>`;
+  const w = $(".wrows", st);
+  list.forEach((r, i) => {
+    const h = r.header || {};
+    const d = document.createElement("div");
+    d.className = "wrow" + (i === SEL ? " sel" : "");
+    d.innerHTML = `<div class="wart"></div>
+      <div class="wtxt"><b>${r.title}</b><i>${r.file}</i></div>
+      <div class="wmeta"><span>${h.region_label || "?"}</span>
+        <span>${h.fmt || "?"}</span><em>${h.mb || "?"} MB</em></div>`;
+    const im = new Image();
+    im.src = artUrl(r);
+    im.onload = () => $(".wart", d).appendChild(im);
+    im.onerror = () => $(".wart", d).classList.add("ph");
+    d.onclick = () => (i === SEL ? activate() : pick(i));
+    d.ondblclick = launch;
+    w.appendChild(d);
+  });
+  // Con las flechas la fila elegida se sale de la ventana enseguida; se trae a la vista
+  // sin animacion porque el repintado es completo y la animacion se veria como un salto.
+  const sel = $(".wrow.sel", w);
+  if (sel) sel.scrollIntoView({block: "nearest"});
+}
+
 /* Estante: la caja de carton y el cartucho del juego elegido, en 3D de verdad, con la
    caratula puesta de textura. Se navega con las flechas como en las demas vistas. */
 function rShelf(st, list) {
@@ -597,6 +670,7 @@ function updateDock() {
     $("#dock-badges").innerHTML = "";
     img.removeAttribute("src");
     $("#launch").disabled = true;
+    $("#dock-card").disabled = true;
     return;
   }
   const h = r.header || {};
@@ -621,6 +695,7 @@ function updateDock() {
     CFG.paused ? `<span class="badge acc">arranca en pausa (MCP)</span>` : "",
   ].join("");
   $("#launch").disabled = !BUILDS.length;
+  $("#dock-card").disabled = false;
 }
 
 /* ==================================================================== lanzar */
@@ -1010,7 +1085,21 @@ async function dbgMem() {
 function openModal(sel) { $(sel).classList.add("on"); }
 function closeModal(el) { el.classList.remove("on"); if (PADGL) PADGL.hide(); }
 
+/* El tema vive en un atributo del <html> y TODO lo demas sale de las variables de
+   :root, asi que cambiarlo no repinta nada: el navegador reevalua los tokens solo.
+   Los temas validos estan en style.css; uno desconocido cae al de fabrica. */
+const THEMES = ["kestrel", "wonder"];
+function applyTheme(name) {
+  const th = THEMES.includes(name) ? name : "kestrel";
+  document.documentElement.dataset.theme = th;
+  const sel = $("#theme");
+  if (sel) sel.value = th;
+  return th;
+}
+
 function wire() {
+  $("#theme").onchange = e => { CFG.theme = applyTheme(e.target.value); touch(); };
+
   $$(".tab").forEach(t => t.onclick = () => {
     $$(".tab").forEach(x => x.classList.remove("on"));
     t.classList.add("on");
@@ -1047,6 +1136,7 @@ function wire() {
     if (!r.ok) toast(r.error, true); else teleTick(true);
   });
   $("#launch").onclick = launch;
+  cardWire();
   $("#stop").onclick = async () => { await api("/api/stop", {}); toast("Emulador parado"); };
   $("#con-stop").onclick = async () => { await api("/api/stop", {}); toast("Emulador parado"); };
   $("#oc-link").onchange = e => {
@@ -1064,19 +1154,24 @@ function wire() {
   document.addEventListener("keydown", e => {
     if (capturing) return;
     if (e.key === "Escape") { $$(".modal.on").forEach(closeModal); return; }
+    // Dentro de la ficha, Intro juega (salvo escribiendo en un campo)
+    if (e.key === "Enter" && $("#m-game.on") && !/^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(e.target.tagName)) {
+      closeModal($("#m-game")); launch(); return;
+    }
     if ($(".modal.on")) return;
     const list = filtered();
     if (e.key === "ArrowRight" || e.key === "ArrowDown") {
       if (SEL + 1 < list.length) { SEL++; softLayout(list); }
     } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
       if (SEL > 0) { SEL--; softLayout(list); }
-    } else if (e.key === "Enter") launch();
+    } else if (e.key === "Enter") activate();
   });
 }
 
-/* En coverflow y rueda basta recolocar; en las demas vistas hay que repintar. */
+/* En las vistas de caratula basta mover el carrusel; en las demas hay que repintar. */
 function softLayout(list) {
-  if (MODE === "cover") { layoutCover(list); updateDock(); }
+  if (LIB3D && LAYOUT3D[MODE]) { LIB3D.setIndex(SEL); updateDock(); }
+  else if (MODE === "cover") { layoutCover(list); updateDock(); }
   else if (MODE === "wheel") { layoutWheel(); updateDock(); }
   else renderStage();
 }

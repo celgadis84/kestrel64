@@ -13,6 +13,7 @@
 
 #include "types.hpp"
 #include <string>
+#include <vector>
 
 namespace kestrel {
 
@@ -27,6 +28,13 @@ struct StateVisitor;
 // desde el hilo de la CPU, ver stateSaveReq/stateLoadReq).
 auto saveState(System& sys, const std::string& path, std::string& err) -> bool;
 auto loadState(System& sys, const std::string& path, std::string& err) -> bool;
+
+// Las mismas dos operaciones SIN fichero: el estado entero (cabecera incluida, para que la
+// comprobacion de identidad valga igual) en un vector de bytes. Es lo que usa el rebobinado,
+// que toma un estado por campo y no puede pagar un viaje al disco. Mismas condiciones que
+// saveState/loadState: RCP en reposo y coreMutex en manos del llamante.
+auto captureState(System& sys, std::vector<u8>& out) -> void;
+auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> bool;
 
 // Ruta de una ranura: la ROM con la extension cambiada a .stN, igual que el fichero de
 // guardado de la pila (.eep/.sra/.fla) vive al lado de la ROM.

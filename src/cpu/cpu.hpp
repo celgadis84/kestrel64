@@ -164,12 +164,246 @@ struct CPU {
   u32  randomReload = 0;      // COP0 write hazard: a Wired write reloads Random=31 one
                              // instruction late (2 = armed this step, 1 = reload lands next end)
 
+  // --- reloj Count: CPI configurable -----------------------------------------
+  // El modelo de fabrica ata "instruccion retirada" a "tick de Count". Count corre a medio
+  // reloj de CPU, luego 1 tick/op equivale exactamente a CPI 2. El VR4300 real ronda 1.2-1.4
+  // en codigo de juego (medido: DK64 1.19, Perfect Dark 1.45 -- docs/GAPS.md), asi que el
+  // ratio se expone como factor explicito en 1/256 de tick por op:
+  //     cpi256 = 128 * CPI     ->   CPI 2 = 256 = lo de siempre, byte a byte.
+  // Se acota a <= 256 A PROPOSITO: todas las guardas de borde de timer del JIT comparan la
+  // distancia a Compare contra el numero de OPS del bloque, y solo siguen siendo conservadoras
+  // mientras ticks(ops) <= ops. Con un factor menor sobran guardas (coste), nunca faltan.
+  // Valor de fabrica en 1/128 de ciclo: 179 = 128 x 1,4. El razonamiento largo (por que ya
+  // no es 2 y por que 1,4 y no menos) esta en cpiFromEnv(), en cpu.cpp.
+  static constexpr u32 kCpiDefault256 = 179;
+  static auto cpiFromEnv() -> u32;   // KESTREL_CPI -> cpi256 (una sola vez, sin estado)
+  u32  cpi256    = cpiFromEnv();  // ticks de Count x256 por instruccion retirada
+                                  // OJO: es CONFIGURACION, no estado -- reset() no lo toca, y
+                                  // System lo lee para derivar clocks.cyclesPerInsn. Un solo
+                                  // numero, dos consumidores: el reloj Count y el presupuesto
+                                  // de instrucciones por campo. Si se parseara dos veces
+                                  // podrian discrepar, que es justo el bug que el comentario
+                                  // de Clocks::cyclesPerInsn documenta como ya ocurrido.
+  u32  countFrac = 0;        // resto acumulado, [0,256) -- estado de invitado: va en savestate
+
+  // --- coste de los fallos de cache primaria ---------------------------------
+  // El CPI de un juego no es plano: es "1 ciclo por instruccion retirada" MAS la latencia de
+  // RDRAM que paga cada fallo de cache. Con un CPI constante, un bucle que pasea por RDRAM y
+  // otro que cabe entero en la D-cache corren a la MISMA velocidad de invitado, que es falso
+  // y desplaza la fase del juego respecto al VI. Las dos caches ya estaban emuladas (datos,
+  // tags, sucio, write-back, la instruccion CACHE, integradas en el JIT y en el savestate);
+  // lo unico que faltaba era cobrarlas.
+  //
+  // missCycles = ciclos de CPU que cuesta UN fallo (relleno de linea desde RDRAM). n64brew da
+  // ~640 ns de latencia aleatoria de RDRAM, que a 93,75 MHz son ~60 ciclos. Es CONFIGURACION,
+  // no estado: 0 = apagado = el modelo plano de siempre, byte a byte.
+  static auto missFromEnv() -> u32;      // KESTREL_CACHECOST -> ciclos por fallo (0 = off)
+  u32  missCycles = missFromEnv();
+  // Ciclos de parada acumulados y aun no volcados a Count. Estado de invitado (savestate):
+  // en el interprete se drena en cada op, en el JIT al cerrar el bloque.
+  u32  stallCycles = 0;
+  u64  stallTotal  = 0;                  // estadistica del anfitrion: ciclos cobrados en total
+  // El resto del emulador mide el tiempo de invitado en INSTRUCCIONES RETIRADAS: el campo de
+  // video (Memory::viTick / viFieldInsns), la lectura de VI_V_CURRENT, el plazo del SI y el
+  // latch del PI (Memory::cartNow). Si los fallos de cache solo movieran Count, el reloj del
+  // invitado (Count) y el reloj del video correrian a ritmos distintos -- que es exactamente
+  // el bug de "dos relojes" que documenta Clocks::cyclesPerInsn. Asi que las paradas tambien
+  // se traducen a ops equivalentes: 1 op = cpi256/128 ciclos de CPU.
+  u64  stallOps    = 0;                  // ops equivalentes a las paradas ya cobradas
+  u32  stallOpsRem = 0;                  // resto de esa division (estado de invitado)
+  auto chargeMiss() -> void { stallCycles += missCycles; stallTotal += missCycles; }
+
+  // --- coste de los accesos NO cacheados -------------------------------------
+  // Un load a KSEG1 (o a cualquier region no cacheada) no mira la cache: va al bus y paga la
+  // latencia entera de RDRAM, los mismos ~60 ciclos que un fallo. Es un coste DISTINTO del
+  // fallo de cache aunque la cifra coincida, asi que lleva su propia perilla: solo asi se
+  // puede medir uno sin el otro.
+  //
+  // Solo se cobran las LECTURAS. En la VR4300 los stores no cacheados son "posted": el bufer
+  // de escritura se los queda y la CPU sigue; solo para si llega otro antes de que el anterior
+  // drene. Cobrar cada store como si fuera sincrono seria inventarse una parada que el HW no
+  // tiene, y falsearia al alza justo los juegos que escriben mucho en registros del RCP.
+  static auto uncachedFromEnv() -> u32;   // KESTREL_UNCACHEDCOST -> ciclos por lectura (0 = off)
+  u32  uncachedCycles = uncachedFromEnv();
+  u64  uncachedReads  = 0;                // estadistica del anfitrion: lecturas no cacheadas
+  auto chargeUncached() -> void {
+    uncachedReads++;
+    stallCycles += uncachedCycles; stallTotal += uncachedCycles;
+  }
+  // Un acceso no cacheado (KSEG1, o pagina de TLB con C=2) que aterriza en RDRAM ocupa el
+  // bus igual que un relleno de linea, solo que mueve el ancho exacto del acceso y sin
+  // linea. Los que van a MMIO o al cartucho NO tocan RDRAM y no cuentan.
+  // Fuera de linea: aqui Memory es todavia un tipo incompleto, y de todas formas este
+  // camino ya es el lento (MMIO/cartucho), donde una llamada no se nota.
+  auto ramUncached(u32 pe, u32 size) -> void;
+  // --- coste de multiplicar y dividir enteros ---------------------------------
+  // Manual NEC VR4300, tabla 3-12: "When an integer multiply or divide instruction is executed,
+  // the VR4300 stalls the ENTIRE pipeline. The number of processor cycles (PCycles) stalled at
+  // this time is shown below."  No es un enclavamiento perezoso sobre MFLO/MFHI: para la
+  // tuberia entera, siempre, aunque nadie llegue a leer el resultado.
+  //
+  //     MULT/MULTU 5 - DMULT/DMULTU 8 - DIV/DIVU 37 - DDIV/DDIVU 69
+  //
+  // Aqui cuestan 1 ciclo, como cualquier otra. Se cobra la DIFERENCIA (N-1), leyendo la tabla
+  // como ciclos TOTALES de la instruccion; es la lectura conservadora, porque si el manual
+  // quisiera decir ciclos ADICIONALES habria que cobrar N y saldria un ciclo mas por operacion.
+  // La duda es de +-1 ciclo sobre 37 o 69, o sea ruido frente a lo que mide.
+  //
+  // KESTREL_MULDIVCOST: 0/off = nada (defecto, byte a byte como antes) - stat = solo contar,
+  // sin cobrar (para medir la frecuencia sin alterar el reloj) - 1/on = contar y cobrar.
+  static auto mulDivFromEnv() -> u8;
+  u8   mulDivMode = mulDivFromEnv();
+  u64  mulDivOps  = 0;                   // estadistica del anfitrion
+  u64  mulDivStall = 0;                  // ciclos cobrados por este concepto
+  auto chargeMulDiv(u32 total) -> void {
+    if(!mulDivMode) return;
+    mulDivOps++;
+    if(mulDivMode < 2) return;
+    stallCycles += total - 1; stallTotal += total - 1; mulDivStall += total - 1;
+  }
+  // --- latencia de la FPU ------------------------------------------------------
+  // Manual NEC VR4300, tabla 7-14 ("Delay Cycles"). A diferencia del entero (tabla 3-12, que
+  // para la tuberia ENTERA sin excepcion), la FPU es un ENCLAVAMIENTO: la nota al pie dice
+  // "If the result of a floating-point instruction is needed by the subsequent instruction,
+  // one additional pipeline clock is required", o sea que el coste se paga cuando alguien
+  // consume el resultado, no siempre.
+  //
+  //   Add/Sub  .S 3  .D 3      Mul  .S 5  .D 8      Div  .S 29  .D 58
+  //   Sqrt     .S 29 .D 58     Abs/Mov/Neg 1        C.cond 1
+  //   Round/Trunc/Ceil/Floor .W/.L 5
+  //   Cvt.S: desde D 2, desde W/L 5   -   Cvt.D: desde S 1, desde W/L 5
+  //   Cvt.W 5   -   Cvt.L 5
+  //
+  // De momento hay dos modos y NINGUNO es el enclavamiento fino:
+  //   stat  = solo contar (frecuencia y ciclos potenciales, sin tocar el reloj)
+  //   block = cobrar N-1 SIEMPRE, como si la op bloqueara la tuberia entera
+  // "block" es una COTA SUPERIOR declarada, no el modelo del hardware: sobrecobra cada vez
+  // que detras hay trabajo entero independiente que el VR4300 si solapa. Sirve para acotar
+  // cuanto CPI puede haber aqui antes de pagar el coste de seguir la fecha-de-listo por
+  // registro FP, que es lo que el enclavamiento de verdad necesita. Defecto: apagado.
+  static auto fpuFromEnv() -> u8;
+  u8   fpuMode  = fpuFromEnv();
+  u32  fpuNested = 0;                    // >0 = un trampolin del JIT ya cobro esta op
+  u64  fpuOps   = 0;                     // estadistica del anfitrion
+  u64  fpuStall = 0;                     // ciclos cobrados por este concepto
+  // Ciclos TOTALES de la instruccion segun la tabla 7-14. fmt: 0x10 S, 0x11 D, 0x14 W, 0x15 L.
+  static auto fpuTable(u32 fmt, u32 fn) -> u8 {
+    if(fn >= 0x30) return 1;                        // C.cond.fmt
+    bool dbl = fmt == 0x11, intSrc = fmt == 0x14 || fmt == 0x15;
+    switch(fn) {
+    case 0x00: case 0x01: return 3;                 // ADD / SUB (.S y .D cuestan igual)
+    case 0x02: return dbl ? 8 : 5;                  // MUL
+    case 0x03: case 0x04: return dbl ? 58 : 29;     // DIV / SQRT
+    case 0x05: case 0x06: case 0x07: return 1;      // ABS / MOV / NEG
+    case 0x08: case 0x09: case 0x0a: case 0x0b:     // ROUND/TRUNC/CEIL/FLOOR .L
+    case 0x0c: case 0x0d: case 0x0e: case 0x0f:     // ROUND/TRUNC/CEIL/FLOOR .W
+      return 5;
+    case 0x20: return intSrc ? 5 : 2;               // CVT.S  (desde D 2, desde W/L 5)
+    case 0x21: return intSrc ? 5 : 1;               // CVT.D  (desde S 1, desde W/L 5)
+    case 0x24: case 0x25: return 5;                 // CVT.W / CVT.L
+    default: return 1;
+    }
+  }
+  auto chargeFpu(u32 op) -> void {
+    if(!fpuMode) return;
+    u32 fmt = (op >> 21) & 31;
+    if(fmt < 0x10) return;                          // MFC1/CFC1/MTC1/CTC1/BC1: no son tabla 7-14
+    u32 total = fpuTable(fmt, op & 63);
+    fpuOps++;
+    if(fpuMode < 2 || total < 2) return;
+    stallCycles += total - 1; stallTotal += total - 1; fpuStall += total - 1;
+  }
+  // Guarda para los trampolines COP1 del JIT: cobran ellos al entrar y silencian el cobro del
+  // interprete mientras dure la llamada, porque el camino lento delega en jitInterpOp -> cop1op
+  // y se contaria dos veces la MISMA instruccion.
+  struct FpuCharge {
+    CPU* c;
+    FpuCharge(CPU* cpu, u32 op) : c(cpu) { c->chargeFpu(op); c->fpuNested++; }
+    ~FpuCharge() { c->fpuNested--; }
+  };
+
+  // Peor caso de ciclos parados que puede acumular UNA instruccion: un fallo de I-cache
+  // (siempre posible) mas lo mas caro que pueda hacer ella misma -- fallar en D-cache, ser un
+  // acceso no cacheado, o ser un DDIV. Las tres son excluyentes entre si.
+  auto stallPerOpMax() const -> u64 {
+    u64 own = missCycles > uncachedCycles ? (u64)missCycles : (u64)uncachedCycles;
+    if(mulDivMode >= 2 && own < 68ull) own = 68ull;    // DDIV/DDIVU, el peor de la tabla
+    if(fpuMode  >= 2 && own < 57ull) own = 57ull;    // DIV.D/SQRT.D, el peor de la 7-14
+    return (u64)missCycles + own;
+  }
+  // Reloj de invitado en ops: lo retirado mas lo que costaron las paradas. Es lo que ven el
+  // campo de video y los plazos de PI/SI. Con el coste de cache apagado == retired.
+  // Herramienta de biseccion, no de precision: KESTREL_STALLCLOCK=0 deja de contar las
+  // paradas como tiempo de invitado (el VI, el plazo del SI y el latch del PI vuelven a
+  // medir solo instrucciones retiradas) sin apagar el cobro de ciclos ni la telemetria.
+  // Sirve para partir en dos un fallo con el coste de cache encendido: si con 0 se va,
+  // el problema esta en el ACOPLE al reloj de invitado; si sigue, esta en el cobro.
+  static auto stallClockOn() -> bool;
+  static auto stallClockCart() -> bool;
+  auto guestOps() const -> u64 { return stallClockOn() ? retired + stallOps : retired; }
+
+  // Ticks que le tocan a `ops` instrucciones, arrastrando el resto y las paradas pendientes.
+  // Sin paradas devuelve <= ops siempre (invariante de las guardas del JIT); con ellas puede
+  // devolver MAS, y por eso todo latch de Count==Compare tiene que ser de CRUCE, no de
+  // igualdad, y la guarda de borde del JIT reserva sitio (ver jitTryBlock).
+  auto countTicks(u32 ops) -> u32 {
+    if(cpi256 == 256 && !stallCycles) return ops;      // camino de fabrica, sin aritmetica extra
+    // 1 ciclo de CPU = medio tick de Count = 128/256.
+    u64 a = (u64)countFrac + (u64)ops * (u64)cpi256 + ((u64)stallCycles << 7);
+    if(stallCycles) {
+      // ciclos -> ops equivalentes: ops = ciclos * 128 / cpi256, arrastrando el resto.
+      u64 b = (u64)stallOpsRem + ((u64)stallCycles << 7);
+      stallOps   += b / cpi256;
+      stallOpsRem = (u32)(b % cpi256);
+      stallCycles = 0;
+    }
+    countFrac = (u32)(a & 255u);
+    return (u32)(a >> 8);
+  }
+  // Cota superior de los ticks que pueden costar `ops` instrucciones, incluida la peor racha
+  // posible: por instruccion, un fallo de I mas su acceso a datos (fallo de D o acceso no
+  // cacheado, lo que sea mas caro) -- eso es stallPerOpMax(). Sin ningun coste activado
+  // devuelve exactamente `ops`, asi que las guardas del JIT quedan byte a byte como estaban.
+  auto countTicksMax(u32 ops) const -> u64 {
+    if(!missCycles && !uncachedCycles && mulDivMode < 2 && fpuMode < 2) return ops;
+    return (u64)ops + ((u64)ops * stallPerOpMax() + (u64)stallCycles + 1ull) / 2ull;
+  }
+  // Cuantas instrucciones caben con SEGURIDAD en `ticks` ticks de Count, contando la peor
+  // racha de fallos. Es la inversa conservadora de countTicksMax: se usa para el permiso del
+  // camino rapido del JIT, que se descuenta en OPS pero acota un margen medido en TICKS.
+  auto opsForTicks(u64 ticks) const -> u32 {
+    // Inversa CONSERVADORA de countTicksMax: ticks por op como mucho 1 + ceil(perOp/2).
+    u64 per = stallPerOpMax();
+    u64 n = per ? ticks / (1ull + (per + 1ull) / 2ull) : ticks;
+    return n > 0xffffffffull ? 0xffffffffu : (u32)n;
+  }
+  // Suma `ct` a Count y devuelve true si la suma CRUZO Compare (Compare en (old, old+ct]).
+  // Con ct==1 es exactamente la igualdad de siempre.
+  auto countAdd(u32 ct) -> bool {
+    if(!ct) return false;
+    u32 old = (u32)cop0[C0_Count];
+    cop0[C0_Count] = (u32)(old + ct);
+    return (u32)((u32)cop0[C0_Compare] - old - 1u) < ct;
+  }
+
   // --- run control -----------------------------------------------------------
   bool  halted = false;
   std::string haltReason;
   u64   retired = 0;       // instructions retired
   u32   lastUnimplemented = 0;
   u64   exceptions = 0;    // exceptions/interrupts taken
+
+  // Fallos de cache primaria. El CONTEO es estadistica del anfitrion (no va en el savestate y
+  // reset() no lo toca); lo que SI es estado de invitado es el coste que cobran, y eso vive en
+  // stallCycles / countTicks(), arriba. El camino de fallo es el unico sitio donde se puede
+  // contar esto sin inventarselo, y ya existia y es frio.
+  u64   dcMisses = 0;
+  u64   icMisses = 0;
+  // Bytes que la CPU mueve por el bus de RDRAM: rellenos de linea (16 B de datos, 32 B de
+  // instrucciones), volcados de linea sucia (16 B) y accesos NO cacheados que caen dentro
+  // de la RDRAM. Contador liso, no atomico: solo lo escribe el hilo de CPU y solo lo lee
+  // el muestreo del medidor, que corre en ese mismo hilo. Ver Memory::kRdramPeakBps.
+  u64   ramCpuBytes = 0;
 
   // Control-transfer ring buffer (debug): last taken branches/jumps.
   static constexpr int kJumpLog = 48;
@@ -182,6 +416,13 @@ struct CPU {
   static constexpr int kSampPages = 4096;   // covers 0x80000000..0x81000000
   u32 sampCount[kSampPages] = {};
   u64 sampTotal = 0;
+  // Histograma FINO de una sola pagina, una casilla por instruccion. El de paginas dice
+  // "el 62% esta en 0x80000000" pero ahi viven el vector de excepciones, el despachador y
+  // el hilo ocioso de libultra: para decidir si compensa un salto de reloj hace falta la
+  // direccion exacta. KESTREL_PCSAMPLE=0x80000000 enciende los dos.
+  static constexpr int kSampFine = 1024;    // 4 KB / 4 B por instruccion
+  u32 sampFine[kSampFine] = {};
+  u64 sampFineTotal = 0;
   u64 excCodeHist[32] = {};   // total exceptions per ExcCode
 
   // Physical-PC execution profiler (opt-in via MCP prof.*). Buckets by physical
@@ -261,6 +502,10 @@ struct CPU {
 
   auto connect(Memory* m) -> void;   // ata el bus y le pasa la direccion de stGuard
   auto reset() -> void;
+  // Norma de television de la maquina (valor OS_TV_* que el IPL3 deja en 0x80000300 y
+  // en s4). La fija System a partir de la region del cartucho; sin esto los juegos PAL
+  // que comprueban osTvType se niegan a arrancar. 1 = NTSC.
+  u32 bootTvType = 1;
   auto fastBoot(u32 entryPoint) -> void;  // HLE IPL3 hand-off state
 
   // Execute one instruction (including its effect on pc/nextPc). No-op if halted.
@@ -270,6 +515,13 @@ struct CPU {
   // Lets external observers (telemetry) inspect kernel structs the CPU wrote through
   // the write-back cache but has not yet flushed to the RDRAM backing store.
   auto peekPhysCoherent(u32 phys) -> u8;
+
+  // Ventana COHERENTE para agentes de fuera del guest (motor de trucos, telemetria): lo
+  // que la CPU ve en esa direccion, contando la linea sucia que aun no ha bajado a la
+  // RDRAM. La lectura no toca la cache -- no rellena ni desaloja nada -- y la escritura si
+  // pasa por ella, que es lo unico que garantiza que el juego vea el valor al momento.
+  auto peekPhysCoherent(u32 phys, u32 size) -> u64;
+  auto pokePhysCoherent(u32 phys, u32 size, u64 val) -> void;
 
   // Decode a word into a short mnemonic string (for telemetry disasm).
   static auto disasm(u32 op, u64 pc) -> std::string;
@@ -331,7 +583,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
-    if(__builtin_expect(l.tagv != (base | 1u), 0)) { dcFlush(idx); dcFill(idx, base); }
+    if(__builtin_expect(l.tagv != (base | 1u), 0)) dcMiss(idx, base);
     u32 off = phys & 0xf;
     // El valor guest es big-endian dentro de la linea; el anfitrion es little-endian. Un
     // memcpy del ancho exacto + bswap da el MISMO resultado que el bucle byte a byte.
@@ -350,7 +602,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
-    if(__builtin_expect(l.tagv != (base | 1u), 0)) { dcFlush(idx); dcFill(idx, base); }
+    if(__builtin_expect(l.tagv != (base | 1u), 0)) dcMiss(idx, base);
     u32 off = phys & 0xf;
     switch(size) {
       case 1: l.data[off] = (u8)val; break;
@@ -365,6 +617,12 @@ private:
     if(__builtin_expect(dcDbgOn, 0)) dcWriteDbg(phys, val, size);
   }
   auto dcWriteDbg(u32 phys, u64 val, u32 size) -> void;   // solo con depuracion armada
+  // Un fallo de la D-cache es SIEMPRE lo mismo: volcar la linea vieja y rellenar la nueva.
+  // Son dos mitades de un unico evento, no dos operaciones que el llamador combine, asi que
+  // van juntas fuera de linea: una llamada en vez de dos, una sola resolucion de la linea y
+  // del puntero/tamano de RDRAM. dcFlush y dcFill siguen existiendo por separado porque la
+  // instruccion CACHE si usa cada mitad por su cuenta.
+  auto dcMiss(u32 idx, u32 base) -> void;     // writeback of the resident line + fill of the new one
   auto dcFlush(u32 idx) -> void;              // push a dirty line to RDRAM, clear dirty
   auto dcFill(u32 idx, u32 base) -> void;     // load 16 bytes RDRAM -> line
   auto icFetch(u32 phys) -> u32;              // instruction fetch through the I-cache
@@ -423,6 +681,7 @@ public:
   // Gated por KESTREL_JIT en stepCpu; el intérprete es el fallback para todo lo demás.
   jit::CodeCache* jitCache = nullptr;
   auto jitTryBlock() -> u32;              // ejecuta un bloque; devuelve nº ops (0 = declina)
+  auto jitIdleSkip(u32 phys) -> u32;      // cobra de golpe el bucle ocioso; 0 = aqui no hay
   // Re-chequeo de reentrada de bloque (block-linking Step 1): muestrea interrupt + borde de
   // timer EXACTAMENTE como el driver. Devuelve 1 = seguro correr K ops; 0 = bail a ruta lenta
   // (entrega de interrupt pendiente o cruzaría Count==Compare). Lo llama el prólogo emitido.
@@ -474,6 +733,10 @@ public:
   auto tlbProbePhys(u64 vaddr) -> u64 { bool s = probing; probing = true; u64 p = translate(vaddr, AccFetch); probing = s; return p; }
 private:
   auto tlbWrite(u32 index) -> void;      // TLBWI/TLBWR: cop0 EntryHi/Lo/PageMask -> tlb[index]
+  // Cierto si hay AL MENOS una entrada del TLB con el bit V puesto en alguna de sus dos
+  // paginas. Con el TLB entero invalido ninguna traduccion mapeada puede acertar nunca,
+  // asi que un TLBL/TLBS deja de ser paginacion bajo demanda y pasa a ser puntero salvaje.
+  auto tlbAnyValid() const -> bool;
   auto tlbRead(u32 index) -> void;       // TLBR: tlb[index] -> cop0 registers
   auto tlbProbe() -> void;               // TLBP: set cop0 Index from EntryHi match
   auto cpuMode() -> u32;                 // 0 kernel, 1 supervisor, 2 user (EXL/ERL force kernel)

@@ -20,6 +20,12 @@ API
     POST /api/launch           arranca el emulador con el perfil
     POST /api/stop             lo mata
     GET  /api/status           estado del proceso + ultimas lineas de salida
+    GET  /api/game?rom=...     ficha: cabecera, partidas, manuales, trucos, notas
+    GET  /api/manual?rom=&i=   manual N de esa ficha (solo los que la ficha encontro)
+    POST /api/game/meta        notas del juego (anio, estudio, genero...)
+    POST /api/game/cheats      encender/apagar trucos del .cht de la ROM
+    POST /api/game/cheat/add   anadir truco    POST /api/game/cheat/del  borrarlo
+    POST /api/game/manual?rom=&name=   subir un manual (cuerpo = el fichero)
 """
 
 import argparse
@@ -69,9 +75,11 @@ os.makedirs(STATE, exist_ok=True)
 if not FROZEN:
     sys.path.insert(0, HERE)
 import options as OPT  # noqa: E402
+import gamecard as CARD  # noqa: E402
 import tele as TELE  # noqa: E402
 
-ROM_EXT = (".z64", ".n64", ".v64", ".rom")
+ROM_EXT = (".z64", ".n64", ".v64", ".rom", ".zip", ".gz")
+ROM_EXT_CRUDA = (".z64", ".n64", ".v64", ".rom")   # lo que puede haber DENTRO de un contenedor
 
 # Cliente de telemetria, uno y reutilizado: abrir un socket por peticion contra un
 # emulador que puede estar arrancando da falsos "no hay emulador".
@@ -152,22 +160,32 @@ def builds():
             out.append(dict(id=pid, label=label, desc=desc, exe=exe, dir=d,
                             mtime=int(os.path.getmtime(exe))))
     if not out:
-        # Instalacion: un solo kestrel64.exe al lado del lanzador. Que plugin lleva dentro
-        # se decidio al compilarlo, asi que aqui no hay eleccion que ofrecer.
-        exe = os.path.join(APPDIR, "kestrel64.exe")
-        if os.path.isfile(exe):
+        # Instalacion: los .exe al lado del lanzador. El paquete trae kestrel64.exe (el
+        # recomendado, con parallel-RDP) y kestrel64-soft.exe (el mismo emulador con el
+        # rasterizador por software), asi que aqui SI hay eleccion que ofrecer.
+        DESC = {
+            "soft": "Rasterizador propio en CPU. Determinista, no necesita GPU. Es el oraculo.",
+            "prdp": "RDP a bajo nivel sobre Vulkan, en la GPU. Mas rapido y mas exacto en subpixel.",
+        }
+        for fname in ("kestrel64.exe", "kestrel64-soft.exe"):
+            exe = os.path.join(APPDIR, fname)
+            if not os.path.isfile(exe):
+                continue
             # Que backend lleva dentro no se ve desde fuera del .exe, asi que el empaquetado
             # (scripts/dist.sh) deja la nota al lado. Sin nota se asume el oraculo.
             pid, label = "soft", "SoftRDP"
             try:
-                with open(os.path.join(APPDIR, "kestrel64.build"), encoding="utf-8") as f:
+                tagfile = os.path.splitext(fname)[0] + ".build"
+                with open(os.path.join(APPDIR, tagfile), encoding="utf-8") as f:
                     tag = f.read().strip()
             except OSError:
                 tag = ""
             if tag.startswith("prdp"):
                 pid, label = "prdp", "paraLLEl-RDP"
+            if any(x["id"] == pid for x in out):
+                continue
             out.append(dict(id=pid, label=label, dir=".", exe=exe,
-                            desc="El emulador instalado.", mtime=int(os.path.getmtime(exe))))
+                            desc=DESC[pid], mtime=int(os.path.getmtime(exe))))
     return out
 
 
@@ -188,6 +206,44 @@ def pick_exe(plugin):
 
 
 # --------------------------------------------------------------------------- cabecera ROM
+def _rom_bytes(path):
+    """Devuelve (primeros 0x40 bytes, tamano logico) mirando DENTRO del contenedor.
+
+    El emulador abre .zip y .gz por su cuenta (src/core/archive.cpp), asi que la lista de
+    ROMs tiene que ensenar el juego de dentro y no un "formato desconocido". Se descomprime
+    solo lo justo: del zip la entrada con pinta de ROM, del gz los primeros bytes.
+    """
+    low = path.lower()
+    if low.endswith(".zip"):
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            best = None
+            for i in z.infolist():
+                if i.is_dir():
+                    continue
+                isrom = i.filename.lower().endswith(ROM_EXT_CRUDA)
+                if (best is None or (isrom and not best[0])
+                        or (isrom == best[0] and i.file_size > best[1].file_size)):
+                    best = (isrom, i)
+            if best is None:
+                return None, 0
+            with z.open(best[1]) as f:
+                return f.read(0x40), best[1].file_size
+    if low.endswith(".gz"):
+        import gzip
+        with gzip.open(path, "rb") as f:
+            h = f.read(0x40)
+        # El tamano exacto solo se sabe descomprimiendo entero; el ISIZE del final sirve de
+        # estimacion (es modulo 4 GB, y ninguna ROM de N64 llega ahi).
+        with open(path, "rb") as f:
+            f.seek(-4, 2)
+            size = int.from_bytes(f.read(4), "little")
+        return h, size
+    with open(path, "rb") as f:
+        h = f.read(0x40)
+    return h, os.path.getsize(path)
+
+
 def rom_header(path):
     """Lee la cabecera de 64 bytes y normaliza el orden de bytes.
 
@@ -197,10 +253,10 @@ def rom_header(path):
       0x40123780  n64  little-endian, palabras enteras del reves
     """
     try:
-        with open(path, "rb") as f:
-            h = f.read(0x40)
-        size = os.path.getsize(path)
+        h, size = _rom_bytes(path)
     except Exception:
+        return None
+    if h is None:
         return None
     if len(h) < 0x40:
         return None
@@ -361,11 +417,12 @@ class Emu:
         self.lock = threading.Lock()
         self.cmd = None
         self.started = 0
+        self.card = None     # clave de ficha de la sesion en marcha, para contar el tiempo
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, exe, rom, env, argv, cwd):
+    def start(self, exe, rom, env, argv, cwd, card=None):
         if self.alive():
             self.stop()
         e = dict(os.environ)
@@ -378,6 +435,7 @@ class Emu:
             self.lines = []
             self.cmd = cmd
             self.started = time.time()
+            self.card = card
         # Windows no deja que un proceso cualquiera se ponga en primer plano: el emulador
         # abriria su ventana DETRAS del navegador y, como el teclado se lee de la ventana
         # enfocada, correria sin responder a ninguna tecla. AllowSetForegroundWindow cede
@@ -397,10 +455,10 @@ class Emu:
             ctypes.windll.user32.AllowSetForegroundWindow(self.proc.pid)
         except Exception:
             pass
-        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._pump, args=(self.started, card), daemon=True).start()
         return cmd
 
-    def _pump(self):
+    def _pump(self, t0, card):
         p = self.proc
         try:
             for ln in p.stdout:
@@ -410,6 +468,16 @@ class Emu:
                         del self.lines[:200]
         except Exception:
             pass
+        # stdout cerrado = el proceso se fue. La sesion cuenta en la ficha del juego.
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+        if card:
+            try:
+                CARD.meta_played(STATE, card, time.time() - t0)
+            except Exception:
+                pass
 
     def stop(self):
         if self.proc is None:
@@ -506,6 +574,10 @@ class H(BaseHTTPRequestHandler):
             return self._tele(q)
         if p == "/api/tele/fb":
             return self._tele_fb(q)
+        if p == "/api/game":
+            return self._game(q)
+        if p == "/api/manual":
+            return self._manual(q)
         return self._json(dict(error="ruta desconocida"), 404)
 
     # ---------------------------------------------------------------- telemetria
@@ -611,6 +683,8 @@ class H(BaseHTTPRequestHandler):
     # ---------------------------------------------------------------- POST
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
+        if p == "/api/game/manual":
+            return self._manual_upload()
         b = self._body()
         if p == "/api/config":
             save_profile(b)
@@ -619,7 +693,81 @@ class H(BaseHTTPRequestHandler):
             return self._json(dict(ok=EMU.stop()))
         if p == "/api/launch":
             return self._json(self._launch(b))
+        if p.startswith("/api/game/"):
+            return self._game_post(p, b)
         return self._json(dict(error="ruta desconocida"), 404)
+
+    # ---------------------------------------------------------------- ficha de juego
+    @staticmethod
+    def _rom_ok(rom):
+        """La ficha solo habla de ROMs de verdad: fichero con extension de ROM y cabecera
+        N64 legible. Todo lo que se lee o escribe despues cuelga de esa ruta (misma
+        carpeta, mismo nombre base), asi que no hay forma de pedirle un fichero cualquiera."""
+        if not rom or not os.path.isfile(rom) or not rom.lower().endswith(ROM_EXT):
+            return None
+        return rom_header(rom)
+
+    def _game(self, q):
+        rom = q.get("rom", [""])[0]
+        h = self._rom_ok(rom)
+        if h is None:
+            return self._json(dict(error="ROM no valida"), 404)
+        c = CARD.card(STATE, rom, h)
+        # El fichero de trucos del perfil (KESTREL_CHEATS) le gana al de al lado de la ROM.
+        c["cheats"]["override"] = load_profile().get("cheats") or ""
+        c["running"] = EMU.alive() and EMU.card == c["key"]
+        return self._json(c)
+
+    def _manual(self, q):
+        rom = q.get("rom", [""])[0]
+        h = self._rom_ok(rom)
+        if h is None:
+            return self._send(404, b"no", "text/plain")
+        try:
+            f = CARD.manuals(rom, h)[int(q.get("i", ["0"])[0])]
+        except (ValueError, IndexError):
+            return self._send(404, b"no", "text/plain")
+        with open(f, "rb") as fh:
+            data = fh.read()
+        ctype = CARD.MANUAL_EXT.get(os.path.splitext(f)[1].lower(), "application/octet-stream")
+        name = urllib.parse.quote(os.path.basename(f))
+        self._send(200, data, ctype, {"Content-Disposition": "inline; filename*=UTF-8''" + name})
+
+    def _manual_upload(self):
+        # cuerpo crudo = el fichero; la ROM y el nombre original van en la consulta
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > CARD.MAX_UPLOAD:
+            return self._json(dict(ok=False, error="manual demasiado grande"))
+        data = self.rfile.read(n) if n else b""
+        rom = q.get("rom", [""])[0]
+        if self._rom_ok(rom) is None:
+            return self._json(dict(ok=False, error="ROM no valida"))
+        try:
+            dst = CARD.manual_store(rom, q.get("name", [""])[0], data)
+        except (ValueError, OSError) as e:
+            return self._json(dict(ok=False, error=str(e)))
+        return self._json(dict(ok=True, file=os.path.basename(dst)))
+
+    def _game_post(self, p, b):
+        rom = b.get("rom", "")
+        h = self._rom_ok(rom)
+        if h is None:
+            return self._json(dict(ok=False, error="ROM no valida"))
+        try:
+            if p == "/api/game/meta":
+                m = CARD.meta_save(STATE, CARD.meta_key(rom, h), b.get("meta") or {})
+                return self._json(dict(ok=True, meta=m))
+            if p == "/api/game/cheats":
+                return self._json(dict(ok=True, cheats=CARD.set_cheats(rom, b.get("states") or {})))
+            if p == "/api/game/cheat/add":
+                return self._json(dict(ok=True, cheats=CARD.add_cheat(
+                    rom, b.get("name", ""), b.get("codes", ""), b.get("on", True))))
+            if p == "/api/game/cheat/del":
+                return self._json(dict(ok=True, cheats=CARD.del_cheat(rom, b.get("id", -1))))
+        except (ValueError, OSError) as e:
+            return self._json(dict(ok=False, error=str(e)))
+        return self._json(dict(ok=False, error="ruta desconocida"), 404)
 
     def _launch(self, b):
         prof = b.get("profile") or load_profile()
@@ -635,20 +783,41 @@ class H(BaseHTTPRequestHandler):
             return dict(ok=False, error="no hay ningun kestrel64.exe compilado")
         if bl["id"] != "prdp":
             env["KESTREL_PRDP"] = "0"   # ese exe no lleva backend GPU; que quede dicho
-        # El mapeo del mando va en fichero, no en variables: son 18 asignaciones.
-        pad = prof.get("pad")
-        if pad:
-            pf = os.path.join(STATE, "pad1.cfg")
-            with open(pf, "w", encoding="utf-8") as f:
-                for k, v in pad.items():
-                    f.write("%s %s %s\n" % (k, v.get("key", "") or "-", v.get("gp", "") or "-"))
-            env["KESTREL_PAD1"] = pf
+        # El mapeo del mando va en fichero, no en variables: son 18 asignaciones por
+        # conector. El mando 1 se guarda bajo la clave "pad" (la de siempre) y los otros
+        # tres bajo "pad2".."pad4"; el dialogo del emulador escribe las cuatro.
+        pads, accs = "", ""
+        for q in range(4):
+            key = "pad" if q == 0 else "pad%d" % (q + 1)
+            pad = prof.get(key)
+            if pad:
+                pf = os.path.join(STATE, "pad%d.cfg" % (q + 1))
+                with open(pf, "w", encoding="utf-8") as f:
+                    for k, v in pad.items():
+                        f.write("%s %s %s\n" % (k, v.get("key", "") or "-", v.get("gp", "") or "-"))
+                env["KESTREL_PAD%d" % (q + 1)] = pf
+            # Ajustes por conector. De fabrica solo esta enchufado el mando 1, y con
+            # Controller Pak: es lo que hacia el emulador cuando solo habia un puerto.
+            on = prof.get("pad%d_on" % (q + 1), q == 0)
+            acc = prof.get("pad%d_acc" % (q + 1), 1)
+            dev = prof.get("pad%d_dev" % (q + 1), "auto" if q == 0 else "")
+            pads += "0" if on in (0, "0", False, "false", "") else "1"
+            try:
+                acc = int(acc)
+            except (TypeError, ValueError):
+                acc = 1
+            accs += str(acc if 0 <= acc <= 2 else 0)
+            if dev:
+                env["KESTREL_PADDEV%d" % (q + 1)] = str(dev)
+        env["KESTREL_PADS"] = pads
+        env["KESTREL_PADACC"] = accs
         # La ventana de telemetria habla con el puerto que se le acaba de dar al emulador.
         TELE_PORT[0] = int(prof.get("port", 9128) or 9128)
         if TELE_CLIENT[0] is not None:
             TELE_CLIENT[0].close()
             TELE_CLIENT[0] = None
-        cmd = EMU.start(bl["exe"], rom, env, argv, os.path.dirname(bl["exe"]))
+        cmd = EMU.start(bl["exe"], rom, env, argv, os.path.dirname(bl["exe"]),
+                        CARD.meta_key(rom, rom_header(rom)))
         return dict(ok=True, cmd=cmd, env=env, build=bl["id"], tele_port=TELE_PORT[0])
 
 

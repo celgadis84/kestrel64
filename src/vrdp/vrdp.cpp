@@ -67,6 +67,7 @@ struct Backend {
   ::Vulkan::Device  device;
   ::RDP::CommandProcessor* proc = nullptr;
   bool ok = false;
+  bool direct = false;                   // procesado de comandos sin anillo (ver init)
 
   // VI register shadow written by the CPU thread, applied on the RDP thread.
   std::atomic<u32> viReg[14] = {};
@@ -146,6 +147,11 @@ auto harvestScanout() -> void {
                                                         ::Vulkan::MEMORY_ACCESS_READ_BIT);
   if(rgba) {
     std::lock_guard<std::mutex> lk(g->frameMutex);
+    // El tamano del scanout se dice UNA vez y cada vez que cambia: es la unica prueba de
+    // que el escalado interno esta puesto (el volcado de framebuffer lee la RDRAM del
+    // invitado, que sigue siendo 1x por definicion).
+    if(sb.width != g->frameW || sb.height != g->frameH)
+      std::fprintf(stderr, "[vrdp] scanout %ux%u\n", sb.width, sb.height);
     g->frameW = sb.width; g->frameH = sb.height;
     g->frameRGBA.resize((usize)sb.width * sb.height * 4);
     std::memcpy(g->frameRGBA.data(), rgba, g->frameRGBA.size());
@@ -211,9 +217,58 @@ auto init(u8* rdram, u32 size) -> bool {
                  (align && ((uintptr_t)rdram & (align - 1))) ? "  MISALIGNED -> slow copy path" : "");
   }
 
+  // Escalado interno. parallel-rdp puede rasterizar a 2x/4x/8x la resolucion del N64
+  // manteniendo la semantica del RDP (el dominio ampliado es una RDRAM paralela; lo que el
+  // juego lee de la RDRAM de verdad sigue siendo 1x, asi que un juego que se lea el
+  // framebuffer no nota nada). Es una bandera del CommandProcessor y no del scanout porque
+  // el factor decide el tamano de los buffers que se crean al construirlo: cambiarlo exige
+  // relanzar, y por eso vive en el entorno y no en runtime.hpp.
+  //
+  // KESTREL_SSAA=1 cambia como se RESUELVE el dominio ampliado cuando hay que volcarlo a la
+  // RDRAM de 1x (que es lo que ve el juego si se relee su propio framebuffer, y lo que sale
+  // por el camino sin escalar): en vez de coger una muestra, promedia las NxN -- o sea
+  // antialiasing por supermuestreo dentro del framebuffer del invitado, con tramado opcional
+  // que aqui va emparejado. No encoge la imagen del scanout, que sigue saliendo grande.
+  // parallel-rdp rechaza la combinacion con factor 1, de ahi la guarda. Por defecto apagado:
+  // cuesta una pasada de resolucion extra por render pass.
+  u32 cpFlags = 0;
+  int upscale = 1;
+  if(const char* u = std::getenv("KESTREL_UPSCALE")) {
+    upscale = std::atoi(u);
+    if(upscale != 1 && upscale != 2 && upscale != 4 && upscale != 8) {
+      std::fprintf(stderr, "[vrdp] KESTREL_UPSCALE=%s no vale (1, 2, 4 u 8); se queda en 1\n", u);
+      upscale = 1;
+    }
+  }
+  if(upscale == 2) cpFlags |= ::RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT;
+  if(upscale == 4) cpFlags |= ::RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT;
+  if(upscale == 8) cpFlags |= ::RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT;
+  if(upscale > 1 && envFlag("KESTREL_SSAA", false))
+    cpFlags |= ::RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT
+             | ::RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
+
+  // Procesado de comandos EN ESTE HILO, sin el anillo ni el hilo propio de parallel-rdp.
+  // Todo Granite ya vive en el worker del RDP (ver arriba), asi que el anillo solo anadia un
+  // salto entre hilos por comando y un hilo de anfitrion mas compitiendo por nucleos con CPU y
+  // RSP. Mismos comandos, mismo orden: la imagen no cambia. Medido SM64 prdp-jit min de 5,
+  // 5 rondas: anillo 3,44/3,45/3,47/3,44/3,42 s -> directo 3,42/3,37/3,39/3,37/3,38 (-1,7 %).
+  // Lo unico que el anillo hacia por su cuenta es el aviso de ocio (Op::MetaIdle tras 500 us
+  // sin comandos: manda a la GPU lo acumulado). Sin el, una lista que no acaba en SYNC_FULL
+  // (krom HelloWorldRDP) no se pinta nunca. Ese aviso lo da ahora quien es dueno de Granite:
+  // el worker del RDP al irse a dormir, o el cierre de campo en lockstep (ver vrdp::idle).
+  // Bench con el aviso, 4 rondas: anillo 3,41-3,45 s -> directo 3,38-3,39.
+  // parallel-rdp lo lee de su variable de entorno en el constructor; si el usuario la ha puesto
+  // (PARALLEL_RDP_SINGLE_THREADED_COMMAND=0 vuelve al anillo) se respeta.
+  if(!std::getenv("PARALLEL_RDP_SINGLE_THREADED_COMMAND"))
+    _putenv_s("PARALLEL_RDP_SINGLE_THREADED_COMMAND", "1");
+  if(const char* st = std::getenv("PARALLEL_RDP_SINGLE_THREADED_COMMAND")) g->direct = std::strtol(st, nullptr, 0) > 0;
   // hidden RDRAM (coverage/AA aux bits) is sized at rdram/2 on hardware.
-  g->proc = new ::RDP::CommandProcessor(g->device, rdram, 0, size, size / 2, 0);
+  g->proc = new ::RDP::CommandProcessor(g->device, rdram, 0, size, size / 2, cpFlags);
   if(!g->proc->device_is_supported()) { shutdown(); return false; }
+  if(upscale > 1)
+    std::fprintf(stderr, "[vrdp] escalado interno %dx%s\n", upscale,
+                 (cpFlags & ::RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT)
+                   ? " con supermuestreo a resolucion nativa" : "");
 
   g->stats = std::getenv("KESTREL_PRDP_STATS") != nullptr;
   if(g->stats) std::atexit([]{ dumpStats(); });
@@ -351,6 +406,14 @@ auto viWrite(u32 index, u32 value) -> void {
   if(!g || index >= 14) return;                     // pure state stash; any thread
   g->viReg[index].store(value, std::memory_order_relaxed);
   g->viDirty.fetch_or(1u << index, std::memory_order_release);
+}
+
+auto idle() -> void {
+  if(!g || !g->ok || !g->direct) return;   // con anillo, su hilo ya lo hace
+  // Mismo umbral que el anillo (maintain_queues_idle: >= 32 primitivas o >= 2 render passes
+  // pendientes); si no llega, no manda nada.
+  const u32 w = u32(::RDP::Op::MetaIdle) << 24;
+  g->proc->enqueue_command(1, &w);
 }
 
 auto frameBegin() -> void {

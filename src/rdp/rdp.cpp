@@ -147,7 +147,12 @@ inline auto exp5(u32 v) -> u32 { return (v << 3) | (v >> 2); }
 // R8G8B8A8 -> RGBA5551 (N64 16bpp)
 inline auto to5551(u32 c) -> u16 {
   u32 r = (c >> 24) & 0xff, g = (c >> 16) & 0xff, b = (c >> 8) & 0xff, a = c & 0xff;
-  return u16(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a ? 1 : 0));
+  // El bit 0 de un pixel RGBA5551 no es un alfa: es el BIT ALTO de la cobertura de 3 bits
+  // que el RDP guarda por pixel (los otros dos viven en la RAM oculta de RDRAM). El byte
+  // de alfa que llega aqui es esa cobertura desplazada a 7:5 (parallel-rdp
+  // `write_color(u8x4(rgb, new_coverage << 5))` y la lectura inversa
+  // `a = (hidden << 5) | ((word & 1) << 7)`), asi que el bit que va al framebuffer es el 7.
+  return u16(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | ((a >> 7) & 1));
 }
 }  // namespace
 
@@ -227,17 +232,35 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   double frac = double(nWrite) / double(npx);
   double cycles = (frac * wrote + (1.0 - frac) * killed) * double(npx) / T_CHUNK;
   u32 c = (u32)(u64)cycles;
+  if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  // Ocupacion del bus de RDRAM. Se deriva de la MISMA lista de transacciones que acaba de
+  // usar el modelo de coste, asi que no hay ninguna constante nueva que calibrar: cada
+  // transaccion mueve un chunk entero del buffer al que apunta (T_CHUNK pixeles del ancho
+  // que toque). Un pixel matado hace las lecturas pero ninguna escritura, igual que arriba.
+  {
+    const u64 ciBpp = ci_size == 3 ? 4u : ci_size == 2 ? 2u : 1u;
+    const u64 rdB = (fbRead ? ciBpp : 0) + (zRead ? 2u : 0);
+    const u64 wrB = ciBpp + (zWrite ? 2u : 0);
+    double bytes = (double(nWrite) * double(rdB + wrB) + double(npx - nWrite) * double(rdB));
+    mem.ramBytesRdp.fetch_add((u64)bytes, std::memory_order_relaxed);
+  }
   mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_pipebusy.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_bufbusy.fetch_add(c, std::memory_order_relaxed);
+  // Publicacion para el regulador (ver Memory::rdpPace). release: el freno de la CPU lee
+  // este contador para decidir cuanto puede avanzar, y tiene que ver los pixeles ya escritos.
+  mem.rcp.rdpGclk.fetch_add(c, std::memory_order_release);
 }
 
 // TMEM loads run on the RDP's 64-bit texture port: one GCLK per 8 bytes.
 auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
   u32 c = (u32)((bytes + 7) / 8);
+  if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  mem.ramBytesRdp.fetch_add(bytes, std::memory_order_relaxed);
   mem.rcp.dpc_tmem.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_bufbusy.fetch_add(c, std::memory_order_relaxed);
+  mem.rcp.rdpGclk.fetch_add(c, std::memory_order_release);
 }
 
 // Per-pixel depth test against the 16-bit z image. Opaque z-mode: the pixel wins
@@ -254,6 +277,18 @@ auto SoftRdp::depthTest(Memory& mem, int x, int y, s32 d) -> bool {
   return true;
 }
 
+// RAM oculta de RDRAM. Cada chip RDRAM es de 9 bits: 8 de datos y 1 que la CPU no puede
+// direccionar. El RCP usa esa novena linea para guardar, por cada pixel de 16 bits, los 2
+// bits bajos de su cobertura (y por cada palabra del z-buffer, el delta-z comprimido). Sin
+// ella la cobertura solo tendria el bit que cabe en el pixel y el filtro AA del VI no
+// podria distinguir un borde a 1/8 de uno a 7/8. Se dimensiona a la primera y sigue a
+// RDRAM: una entrada por palabra de 16 bits.
+auto SoftRdp::hiddenBits(Memory& mem) -> u8* {
+  const size_t want = mem.rdram.size() >> 1;
+  if(mem.rdramHidden.size() != want) mem.rdramHidden.assign(want, 0);
+  return mem.rdramHidden.data();
+}
+
 auto SoftRdp::putPixel(Memory& mem, int x, int y, u32 rgba32) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1) return;
   if(x < 0 || y < 0) return;
@@ -268,7 +303,10 @@ auto SoftRdp::storePixel(Memory& mem, int x, int y, u32 rgba32) -> void {
   } else if(ci_size == 1) {   // 8bpp colour-index framebuffer: store the low byte
     wr8(m, ci_addr + (u32(y) * ci_width + u32(x)), (u8)(rgba32 & 0xff));
   } else {            // 16bpp RGBA5551
-    wr16(m, ci_addr + (u32(y) * ci_width + u32(x)) * 2, to5551(rgba32));
+    const u32 a = ci_addr + (u32(y) * ci_width + u32(x)) * 2;
+    wr16(m, a, to5551(rgba32));
+    // ...y los dos bits bajos de la cobertura a la RAM oculta, en la misma palabra.
+    if(a + 1 < m.size()) hiddenBits(mem)[a >> 1] = (u8)((rgba32 >> 5) & 3);
   }
 }
 
@@ -293,7 +331,12 @@ auto SoftRdp::readFb(Memory& mem, int x, int y) -> u32 {
   // krom's texture-rectangle suites are the witness: their transparent texels blend the
   // background straight through, and the hardware capture keeps the background level exactly.
   u32 r = ((px >> 11) & 0x1f) << 3, g = ((px >> 6) & 0x1f) << 3;
-  u32 b = ((px >> 1) & 0x1f) << 3,  al = (px & 1) ? 255 : 0;
+  u32 b = ((px >> 1) & 0x1f) << 3;
+  // El "alfa" del color de memoria es la cobertura guardada, no una transparencia: bit alto
+  // en el bit 0 del pixel, dos bits bajos en la RAM oculta, y el conjunto colocado en 7:5
+  // (parallel-rdp `decode_memory_color`). Es lo que consume el mux B = MEM_ALPHA del
+  // blender y lo que decide el desbordamiento de cobertura del pixel entrante.
+  u32 al = ((((px & 1) << 2) | (hiddenBits(mem)[a >> 1] & 3)) << 5);
   return (r << 24) | (g << 16) | (b << 8) | al;
 }
 
@@ -309,14 +352,22 @@ auto SoftRdp::buildBlendPlan() -> void {
   p.usesMem  = (p.msel == 1) || (p.bsel == 1);
   p.imRd     = (other_lo & 0x40) != 0;
   p.force    = ((other_lo >> 14) & 1) != 0;
-  p.aaEn     = (other_lo & 0x08) != 0;
+  p.aaEn     = (other_lo & 0x08) != 0 && !g_noAA;
   p.passthru = cycleType() >= 2;
   p.dither   = (u8)((other_hi >> 6) & 3);
+  p.cvgDst      = (u8)((other_lo >> 8) & 3);
+  p.colorOnCvg  = (other_lo & 0x80) != 0;
+  p.cvgXAlpha   = ((other_lo >> 12) & 1) != 0;
+  p.alphaCvgSel = ((other_lo >> 13) & 1) != 0;
+  // Leer el framebuffer cuesta una lectura de RDRAM por pixel, asi que solo se hace cuando
+  // algo la consume: el mux (CLR_MEM / MEM_alpha), COLOR_ON_CVG, o la cobertura de memoria
+  // -- que hace falta para el desbordamiento (AA_EN) y para todos los CVG_DEST menos ZAP.
+  p.needMem  = p.usesMem || p.colorOnCvg || p.aaEn || p.cvgDst != 2;
   p.keyHi = other_hi; p.keyLo = other_lo;
   blendPlan = p;
 }
 
-auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
+auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
   // Blend mux from the render-mode word (other_lo). 1-cycle mode evaluates the FIRST
   // blender cycle's config (GBL_c1: m1a<<30, m1b<<26, m2a<<22, m2b<<18); 2-cycle mode's
   // final write uses the SECOND cycle (GBL_c2: <<28/24/20/16). P/M pick a colour
@@ -328,6 +379,11 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn) -> u32 {
     switch(sel) { case 0: return src; case 1: return memc; case 2: return blend_color; default: return fog_color; }
   };
   u32 P = pick(Psel), M = pick(Msel);
+  // COLOR_ON_CVG: cuando la cobertura del pixel NO desborda, el ciclo final del blender
+  // devuelve el color M tal cual, sin mirar coeficientes ni siquiera si el blender esta
+  // encendido (parallel-rdp `blender()`: el retorno va ANTES de la prueba de blend_en).
+  // Es como los juegos pintan "solo donde el borde no esta lleno".
+  if(bp.colorOnCvg && !cvgWrap) return (M & ~0xffu) | (src & 0xff);
   int a0;                             // A mux: IN alpha / FOG alpha / SHADE alpha / 0
   switch(Asel) { case 0: a0 = src & 0xff; break; case 1: a0 = fog_color & 0xff; break;
                  case 2: a0 = src & 0xff; break; default: a0 = 0; }
@@ -408,7 +464,7 @@ auto SoftRdp::ditherRgb(int x, int y, u32 c) const -> u32 {
   return out;
 }
 
-auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> void {
+auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
   // The blender runs in every 1-/2-cycle primitive — it is not gated on IM_RD. IM_RD
   // (bit 0x40) only enables READS of the framebuffer, i.e. it matters solely when the mux
@@ -419,45 +475,51 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge) -> voi
   const BlendPlan& bp = blendPlan;
   if(g_noBlend || bp.passthru) { storePixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
   if(bp.usesMem && !bp.imRd) { storePixel(mem, x, y, ditherRgb(x, y, src)); return; }
-  // blend_en = FORCE_BLEND || (ANTIALIAS_EN && the pixel is not fully covered). That is
-  // the hardware rule verbatim ("if not force blend, allow blend enable - use CVG bits"):
-  // with neither bit set the blender is bypassed and the P colour is written as-is.
-  bool blendEn = bp.force || (aaEdge && bp.aaEn);
-  // El blender tiene dos atajos que devuelven el color P intacto (blender deshabilitado, y
-  // el caso opaco clasico A=IN alpha, B=1-A, alpha==0xff). Ambos se deciden con datos que
-  // ya estan aqui, y en ese caso el color de memoria SOLO se usa si P es CLR_MEM. Leer el
-  // framebuffer por pixel para tirarlo despues es trafico de RDRAM gratuito: se elide.
-  // Cuando el color de memoria si cuenta, la regla es la misma de siempre
-  // (`usesMem ? readFb : 0`), asi que el resultado no cambia en ningun caso.
-  const bool shortcut = !blendEn || (bp.asel == 0 && bp.bsel == 0 && (src & 0xff) == 0xff);
-  const bool memUnused = shortcut && bp.psel != 1;
-  u32 memc = (bp.usesMem && !memUnused) ? readFb(mem, x, y) : 0;
-  storePixel(mem, x, y, ditherRgb(x, y, blendColor(src, memc, blendEn)));
-}
 
-// Edge anti-aliasing. When AA_EN (other_lo bit 0x08) is set and a pixel is only
-// partially covered by the primitive (cvg < 1), the RDP folds the pipeline colour
-// against the framebuffer weighted by coverage: out = pipe*cvg + fb*(1-cvg). This is
-// the coverage-based silhouette AA — the soft one-pixel edge on N64 polygons. Interior
-// pixels (cvg>=1) take the normal blend/write path. `src` is the pipeline RGBA.
-auto SoftRdp::coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void {
-  if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
-  if(blendPlan.keyHi != other_hi || blendPlan.keyLo != other_lo) buildBlendPlan();
-  if(g_noAA || !blendPlan.aaEn || cvg >= 0.999) { blendPixel(mem, x, y, src); return; }
-  if(cvg < 0.0) cvg = 0.0;
-  u32 fb = readFb(mem, x, y);
-  // Pipeline colour first through the blender (if IM_RD), then coverage-fold vs the
-  // original framebuffer. On an edge the two references coincide closely enough. A
-  // partially covered pixel is exactly the case ANTIALIAS_EN enables the blender for.
-  u32 base = blendPlan.imRd ? blendColor(src, fb, true) : src;
-  auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
-  u32 out = 0;
-  for(int i = 0; i < 3; i++) {
-    int v = (int)(ch(base, i) * cvg + ch(fb, i) * (1.0 - cvg) + 0.5);
-    v = v < 0 ? 0 : v > 255 ? 255 : v;
-    out |= (u32)v << (24 - i * 8);
+  // --- color y cobertura de memoria -------------------------------------------------
+  // IM_RD deshabilitado no significa "cobertura cero": el hardware entrega 7 (pixel lleno),
+  // que es lo que hace que un primitivo sin lecturas se comporte como opaco
+  // (parallel-rdp `decode_memory_color`: `image_read_en ? current.a : 0xe0`).
+  u32 memc = 0; int memCvg = 7;
+  if(bp.imRd && bp.needMem) { memc = readFb(mem, x, y); memCvg = (int)((memc & 0xff) >> 5); }
+
+  // --- salida de alfa del combinador: CVG_TIMES_ALPHA / ALPHA_CVG_SELECT ------------
+  // El RDP expande 0xff a 0x100 para poder dividir por potencias de dos, multiplica la
+  // cobertura por el alfa cuando CVG_TIMES_ALPHA (y ESA es la cobertura que se guarda), y
+  // con ALPHA_CVG_SELECT sustituye el alfa del pixel por la cobertura modulada.
+  {
+    int a = (int)(src & 0xff);
+    int expanded = a + ((a + 1) >> 8);
+    int modulated;
+    if(bp.cvgXAlpha) { modulated = (expanded * cvg + 4) >> 3; cvg = modulated >> 5; }
+    else             { modulated = cvg << 5; }
+    if(bp.alphaCvgSel) expanded = modulated;
+    src = (src & ~0xffu) | (u32)(expanded < 0 ? 0 : expanded > 255 ? 255 : expanded);
   }
-  storePixel(mem, x, y, out | (src & 0xff));
+  // Un pixel sin cobertura no existe. Solo con antialias encendido: con AA apagado el
+  // hardware ya decidio la vida del pixel con una sola toma en el recorte del tramo.
+  if(bp.aaEn && cvg == 0) return;
+
+  // --- blender ----------------------------------------------------------------------
+  // blend_en = FORCE_BLEND || (la cobertura no desborda && AA_EN). Desbordar (cobertura
+  // entrante + la que ya hay >= 8) significa que el pixel es de OTRA superficie, no del
+  // mismo borde, y entonces no se mezcla: se sobrescribe.
+  const bool overflow = (cvg + memCvg) >= 8;
+  const bool blendEn  = bp.force || (!overflow && bp.aaEn);
+  u32 out = blendColor(src, memc, blendEn, overflow);
+  out = ditherRgb(x, y, out);
+
+  // --- cobertura de salida: CVG_DEST -------------------------------------------------
+  // CLAMP suma coberturas cuando el blender esta encendido (mismo borde) y si no guarda
+  // cvg-1; WRAP suma en modulo 8; ZAP fuerza lleno; SAVE conserva la que hubiera.
+  int newCvg;
+  switch(bp.cvgDst) {
+    case 1:  newCvg = (cvg + memCvg) & 7; break;                       // WRAP
+    case 2:  newCvg = 7; break;                                        // ZAP
+    case 3:  newCvg = memCvg; break;                                   // SAVE
+    default: newCvg = blendEn ? std::min(7, memCvg + cvg) : ((cvg - 1) & 7); break;  // CLAMP
+  }
+  storePixel(mem, x, y, (out & ~0xffu) | (u32)(newCvg << 5));
 }
 
 auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
@@ -471,6 +533,13 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   bool pipeMode = cycleType() < 2;
   u64 npx = u64(std::max(0, x1 - x0)) * u64(std::max(0, y1 - y0));
   u64 w0 = pxWrites, z0 = pxZWrites;
+  // Solo-coste (ver SoftRdp::costOnly): el area ya esta recortada al scissor, que es
+  // exactamente lo que entra al pipeline. Un relleno solo toca el z si corre en 1/2 ciclos
+  // con Z_UPDATE; en FILL/COPY el z ni se mira.
+  if(costOnly) {
+    accountPixels(mem, npx, npx, (pipeMode && (other_lo & 0x20) && zi_addr) ? npx : 0);
+    return;
+  }
   for(int y = y0; y < y1; y++) {
     for(int x = x0; x < x1; x++) {
       if(pipeMode) {
@@ -501,7 +570,13 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
       } else {
         // FILL cycle: the 32-bit fill color packs two 16bpp pixels; pick by x parity.
         u16 px = (x & 1) ? u16(fill_color & 0xffff) : u16(fill_color >> 16);
-        wr16(m, ci_addr + (u32(y) * ci_width + u32(x)) * 2, px);
+        u32 a  = ci_addr + (u32(y) * ci_width + u32(x)) * 2;
+        wr16(m, a, px);
+        // Un relleno tambien deja cobertura: el hardware toma el bit 0 del color de relleno
+        // como pixel lleno o vacio (parallel-rdp `fill_color`: `a = (col & 1) * 0xe0`), o
+        // sea 7 o 0. Sin esto el borrado de pantalla dejaria la cobertura del frame anterior
+        // y el filtro AA del VI trabajaria sobre bordes fantasma.
+        if(a + 1 < m.size()) hiddenBits(mem)[a >> 1] = (px & 1) ? 3 : 0;
         pxWrites++;
       }
     }
@@ -634,6 +709,10 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     if(xLeft > xRight) std::swap(xLeft, xRight);
     int xs = std::max((int)std::ceil(xLeft), sx0);
     int xe = std::min((int)std::ceil(xRight), sx1);
+    // Solo-coste: el tramo entero de una vez. Mismos `xs`/`xe` que el bucle largo, asi que
+    // la cuenta de pixeles es IDENTICA a la del rasterizado; lo unico que se salta es el
+    // trabajo por pixel (cobertura, textura, combinador, mezcla), que no cambia el coste.
+    if(costOnly) { int b = xs < 0 ? 0 : xs; if(xe > b) rasterPx += (u64)(xe - b); continue; }
     // Values at the major edge for this scanline (start advances by Dc/De per +y).
     double eR = R + dRde * (y - yh), eG = G + dGde * (y - yh);
     double eB = B + dBde * (y - yh), eA = A + dAde * (y - yh);
@@ -681,7 +760,15 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     };
 #endif
     static const double subY[4] = {0.125, 0.375, 0.625, 0.875};
-    static const double subX[2] = {0.25, 0.75};
+    // Las dos tomas de cada sub-scanline NO estan en la misma columna: el RDP las alterna
+    // media cuarta de pixel fila a fila. En octavos de pixel las compensaciones son
+    // (0,4) en las filas pares y (2,6) en las impares, o sea 0 / 0,5 y 0,25 / 0,75.
+    // Oraculo: `compute_coverage()` de parallel-rdp (`xshift = u16x4(0,4,2,6) + (x<<3)`,
+    // comparado contra `xleft.xxyy` y luego `xleft.zzww`, con pesos (1,2,4,8) y
+    // (16,32,64,128)) y `raster_coverage.c` de softrdp, que documenta el mismo reparto.
+    // Con las cuatro filas en (0,25 / 0,75) los bordes casi verticales quedaban graduados
+    // en pasos que el hardware no da.
+    static const double subX[4][2] = {{0.0, 0.5}, {0.25, 0.75}, {0.0, 0.5}, {0.25, 0.75}};
     // Las cuatro sub-scanlines no dependen de x: se evaluan UNA vez por linea, no por
     // pixel. Y con el mayor de los bordes izquierdos y el menor de los derechos se
     // reconoce el pixel enteramente dentro (cobertura 8/8) sin tocar los 8 subsamples,
@@ -697,20 +784,31 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       if(x < 0) continue;
       rasterPx++;      // DPC counters: pixel entered the pipeline (may still be killed)
       int hits;
-      if((double)x + subX[0] >= Lmax && (double)x + subX[1] < Rmin) hits = 8;
+      // La toma mas a la izquierda es la 0,0 y la mas a la derecha la 0,75: si esas dos
+      // caen dentro de TODAS las filas, las ocho estan dentro.
+      if((double)x >= Lmax && (double)x + 0.75 < Rmin) hits = 8;
       else {
         hits = 0;
         for(int sy = 0; sy < 4; sy++)
           for(int sx = 0; sx < 2; sx++) {
-            double px = (double)x + subX[sx];
+            double px = (double)x + subX[sy][sx];
             if(px >= sL[sy] && px < sR[sy]) hits++;
           }
       }
-      double cvg = hits / 8.0;
+      // Que un pixel EXISTA no se decide aqui. El hardware, con el antialias apagado, mira
+      // una sola toma y el pixel vive o muere con ella (`if (!aa_enable && (coverage & 1) ==
+      // 0) return false;` en `shading.h` de parallel-rdp); eso ya lo hace el recorte del
+      // tramo de arriba (`xs = ceil(xLeft)` con los bordes evaluados en la linea), y anadir
+      // aqui una segunda prueba con la toma de la sub-scanline 0 lo aplicaba DOS veces --
+      // medido: `RSPPlotTriangle` caia de 100,000 a 99,740 y `Cycle1FillZBufferTriangle` de
+      // 98,150 a 97,950. El escalonado de arriba solo cambia el reparto de `cvg`, que es lo
+      // que el borde suavizado usa cuando el juego SI pide antialias.
       if(fillMode) {   // raw packed fill color straight to the color image (no AA)
         if(ci_size == 3) wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, fill_color);
         else { u16 px = (x & 1) ? u16(fill_color & 0xffff) : u16(fill_color >> 16);
-               wr16(m, ci_addr + (u32(y) * ci_width + u32(x)) * 2, px); }
+               u32 a = ci_addr + (u32(y) * ci_width + u32(x)) * 2;
+               wr16(m, a, px);
+               if(a + 1 < m.size()) hiddenBits(mem)[a >> 1] = (px & 1) ? 3 : 0; }
         pxWrites++;
       } else if(textured) {
         double dx = x - xA;
@@ -737,7 +835,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // threshold. Disabled → texel drawn regardless of its 5551 transparency bit.
         bool apass = !alphaCmpEn ||
                      (copyCy ? (c & 0xff) != 0 : ((c & 0xff) >= (blend_color & 0xff)));
-        if(apass && zPass(x, dx)) coverPixel(mem, x, y, c, cvg);
+        if(apass && zPass(x, dx)) blendPixel(mem, x, y, c, hits);
       } else if(gouraud) {
         double dx = x - xA;
 #if defined(__SSE4_1__)
@@ -747,7 +845,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                 | (clamp8(eB + dBdx * dx) << 8)  |  clamp8(eA + dAdx * dx);
 #endif
         u32 c = combProg ? combineColor(0, 0, shd) : shd;
-        if(zPass(x, dx)) coverPixel(mem, x, y, c, cvg);
+        if(zPass(x, dx)) blendPixel(mem, x, y, c, hits);
       } else { double dx = x - xA;
         // Flat (no shade/tex coords) but the combiner may still select TEXEL0/1. The RDP
         // has no per-vertex S/T here, so it samples the current tile at its origin (0,0) —
@@ -755,10 +853,11 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // the Krom fill tests) picks up that texel. If the combiner ignores texel this is
         // harmless. Sampled once (constant across the primitive).
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : flat;
-        if(zPass(x, dx)) coverPixel(mem, x, y, c, cvg); }
+        if(zPass(x, dx)) blendPixel(mem, x, y, c, hits); }
     }
   }
-  accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
+  if(costOnly) accountPixels(mem, rasterPx, rasterPx, zUpd ? rasterPx : 0);
+  else         accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
 auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
@@ -1334,6 +1433,14 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   int X0 = std::max((int)std::ceil(xh), sx0), X1 = std::min((int)std::ceil(xl), sx1);
   int Y0 = std::max((int)std::ceil(yh), sy0), Y1 = std::min((int)std::ceil(yl), sy1);
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
+  // Solo-coste: un texrect es un rectangulo recortado al scissor y NUNCA escribe el z
+  // (no lleva pendiente de profundidad), asi que su coste sale del area sin rasterizar.
+  if(costOnly) {
+    int bx = X0 < 0 ? 0 : X0, by = Y0 < 0 ? 0 : Y0;
+    u64 npx = u64(std::max(0, X1 - bx)) * u64(std::max(0, Y1 - by));
+    accountPixels(mem, npx, npx, 0);
+    return;
+  }
   for(int y = Y0; y < Y1; y++) {
     if(y < 0) continue;
     for(int x = X0; x < X1; x++) {

@@ -60,7 +60,7 @@ auto defaultProfile() -> Profile {
   }
   for(int i = 0; i < padControlCount(); i++) {
     const PadCtl& b = padControls()[i];
-    p.pad[b.id] = {b.key ? b.key : "", b.gp ? b.gp : ""};
+    for(int q = 0; q < 4; q++) p.pad[q][b.id] = {b.key ? b.key : "", b.gp ? b.gp : ""};
   }
   return p;
 }
@@ -144,7 +144,9 @@ auto loadProfile() -> Profile {
     if(!j.value(key)) break;
     if(!j.lit(':')) break;
     j.ws();
-    if(key == "pad" && *j.s == '{') {
+    int padPort = key == "pad" ? 0 : (key.size() == 4 && !key.compare(0, 3, "pad")
+                                     && key[3] >= '2' && key[3] <= '4') ? key[3] - '1' : -1;
+    if(padPort >= 0 && *j.s == '{') {
       j.lit('{');
       while(true) {
         j.ws();
@@ -170,7 +172,7 @@ auto loadProfile() -> Profile {
         } else {
           j.skip();
         }
-        p.pad[id] = {k, g};
+        p.pad[padPort][id] = {k, g};
         j.lit(',');
       }
     } else if(*j.s == '{' || *j.s == '[') {
@@ -223,15 +225,22 @@ auto saveProfile(const Profile& p) -> bool {
                  jval(findOption(kv.first.c_str()), kv.second).c_str());
     first = false;
   }
-  std::fprintf(f, "%s  \"pad\": {\n", first ? "" : ",\n");
-  bool pf = true;
-  for(const auto& kv : p.pad) {
-    std::fprintf(f, "%s    \"%s\": {\"key\": \"%s\", \"gp\": \"%s\"}", pf ? "" : ",\n",
-                 jesc(kv.first).c_str(), jesc(kv.second.first).c_str(),
-                 jesc(kv.second.second).c_str());
-    pf = false;
+  for(int q = 0; q < 4; q++) {
+    char key[8];
+    if(q == 0) std::snprintf(key, sizeof key, "pad");
+    else std::snprintf(key, sizeof key, "pad%d", q + 1);
+    std::fprintf(f, "%s  \"%s\": {\n", first ? "" : ",\n", key);
+    first = false;
+    bool pf = true;
+    for(const auto& kv : p.pad[q]) {
+      std::fprintf(f, "%s    \"%s\": {\"key\": \"%s\", \"gp\": \"%s\"}", pf ? "" : ",\n",
+                   jesc(kv.first).c_str(), jesc(kv.second.first).c_str(),
+                   jesc(kv.second.second).c_str());
+      pf = false;
+    }
+    std::fprintf(f, "\n  }");
   }
-  std::fprintf(f, "\n  }\n}\n");
+  std::fprintf(f, "\n}\n");
   std::fclose(f);
 #ifdef _WIN32
   // Reemplazo atomico: si el proceso muere a mitad, el perfil viejo sigue entero.
@@ -244,15 +253,49 @@ auto saveProfile(const Profile& p) -> bool {
 
 // ------------------------------------------------------------------ perfil -> entorno
 
-auto writePadFile(const Profile& p) -> std::string {
-  if(p.pad.empty()) return {};
+// ------------------------------------------------------------------ ajustes por conector
+
+namespace {
+auto padKey(int port, const char* what) -> std::string {
+  return "pad" + std::to_string(port + 1) + "_" + what;
+}
+}  // namespace
+
+auto padOn(const Profile& p, int port) -> bool {
+  auto it = p.v.find(padKey(port, "on"));
+  if(it == p.v.end()) return port == 0;   // de fabrica solo el mando 1
+  return !it->second.empty() && it->second != "0" && it->second != "false";
+}
+
+auto padAcc(const Profile& p, int port) -> int {
+  auto it = p.v.find(padKey(port, "acc"));
+  if(it == p.v.end()) return 1;           // Controller Pak, como hacia el puerto unico
+  int a = std::atoi(it->second.c_str());
+  return (a >= 0 && a <= 2) ? a : 0;
+}
+
+auto padDevice(const Profile& p, int port) -> std::string {
+  auto it = p.v.find(padKey(port, "dev"));
+  // "auto" = teclado y el primer mando a la vez, que es el comportamiento de siempre. Para
+  // los conectores 2-4 no vale (el teclado moveria a dos jugadores a la vez), asi que de
+  // fabrica no traen aparato elegido.
+  if(it == p.v.end()) return port == 0 ? "auto" : "";
+  return it->second;
+}
+
+auto setPadOn(Profile& p, int port, bool on) -> void { p.v[padKey(port, "on")] = on ? "1" : "0"; }
+auto setPadAcc(Profile& p, int port, int acc) -> void { p.v[padKey(port, "acc")] = std::to_string(acc); }
+auto setPadDevice(Profile& p, int port, const std::string& dev) -> void { p.v[padKey(port, "dev")] = dev; }
+
+auto writePadFile(const Profile& p, int port) -> std::string {
+  if(port < 0 || port > 3 || p.pad[port].empty()) return {};
   std::string dir = profilePath();
   size_t slash = dir.find_last_of('/');
   dir = slash == std::string::npos ? std::string(".") : dir.substr(0, slash);
-  std::string path = dir + "/pad1.cfg";
+  std::string path = dir + "/pad" + std::to_string(port + 1) + ".cfg";
   std::FILE* f = std::fopen(path.c_str(), "w");
   if(!f) return {};
-  for(const auto& kv : p.pad) {
+  for(const auto& kv : p.pad[port]) {
     std::fprintf(f, "%s %s %s\n", kv.first.c_str(),
                  kv.second.first.empty() ? "-" : kv.second.first.c_str(),
                  kv.second.second.empty() ? "-" : kv.second.second.c_str());
@@ -323,6 +366,16 @@ auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& e
   }
   if(p.get("throttle") == "auto") drop("KESTREL_THROTTLE");
 
+  // Fiel a consola: ni multiplicadores ni CPI a mano viajan en el entorno. El emulador ya los
+  // ignora en este modo (system.cpp), pero dejarlos puestos haria creer que siguen valiendo.
+  if(p.get("speedmode") == "hw") {
+    drop("KESTREL_OC"); drop("KESTREL_OC_CPU"); drop("KESTREL_OC_RSP"); drop("KESTREL_OC_RDRAM");
+    drop("KESTREL_CPI");
+    // El limitador queda en automatico: con ventana clava los 59.94 Hz y sin ella corre a
+    // ciegas a tope (ver rt::speedModeHw). Lo fiel es lo que ve el juego, no el ritmo de pared.
+    drop("KESTREL_THROTTLE");
+  }
+
   std::string plug = p.get("plugin");
   if(plug == "prdp") put("KESTREL_PRDP", "1");
   else if(plug == "soft") put("KESTREL_PRDP", "0");
@@ -343,8 +396,23 @@ auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& e
   argv.push_back("--port");
   argv.push_back(port);
 
-  std::string padFile = writePadFile(p);
-  if(!padFile.empty()) put("KESTREL_PAD1", padFile);
+  // Mandos: un fichero de mapeo por conector, mas el resumen de que puertos estan
+  // enchufados y con que accesorio (lo lee Memory::reset) y con que aparato juega cada uno
+  // (lo resuelve present.cpp cuando ya sabe que mandos ve Windows).
+  std::string pads, accs;
+  for(int q = 0; q < 4; q++) {
+    pads += padOn(p, q) ? '1' : '0';
+    accs += (char)('0' + padAcc(p, q));
+    std::string padFile = writePadFile(p, q);
+    char var[20];
+    std::snprintf(var, sizeof var, "KESTREL_PAD%d", q + 1);
+    if(!padFile.empty()) put(var, padFile);
+    std::string dev = padDevice(p, q);
+    std::snprintf(var, sizeof var, "KESTREL_PADDEV%d", q + 1);
+    if(!dev.empty()) put(var, dev);
+  }
+  put("KESTREL_PADS", pads);
+  put("KESTREL_PADACC", accs);
 }
 
 }  // namespace kestrel::ui

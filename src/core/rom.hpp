@@ -23,6 +23,24 @@ struct RomHeader {
   u8   version = 0;          // 0x3F
 };
 
+// Norma de television que espera el cartucho. En la consola de verdad la region del
+// cartucho y la de la maquina coinciden siempre (un cartucho PAL se juega en una consola
+// PAL), y libultra publica la norma de la maquina como `osTvType` en 0x80000300. Los
+// juegos actuan sobre ese valor: el SDK de Nintendo pedia expresamente negarse a
+// funcionar con la norma equivocada, y Perfect Dark (PAL) se queda en un bucle infinito
+// dentro de mainInit() cuando lee NTSC ahi. Fijarlo a NTSC pase lo que pase deja negros
+// todos los cartuchos PAL.
+enum class TvType : u32 { Pal = 0, Ntsc = 1, Mpal = 2 };   // valores OS_TV_* de libultra
+
+// Norma que corresponde al codigo de pais del encabezado (offset 0x3E).
+auto tvTypeForCountry(char code) -> TvType;
+// Campos de video por segundo de esa norma.
+auto tvFieldHz(TvType t) -> double;
+// Reloj de video del RCP de esa norma, en hercios (de el cuelga el DAC de audio).
+auto tvVidClock(TvType t) -> u32;
+// Nombre corto para los mensajes.
+auto tvName(TvType t) -> const char*;
+
 struct Rom {
   std::vector<u8> data;      // normalized big-endian image
   RomHeader header;

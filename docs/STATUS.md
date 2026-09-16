@@ -2835,10 +2835,12 @@ Primera capa de producto por encima del nucleo. Detalle completo en `docs/LAUNCH
 
 - **Lanzador** (`tools/launcher/`): servidor HTTP de biblioteca estandar de Python + interfaz
   web servida en ventana `--app` de Edge/Chrome. Cero dependencias nuevas en el build de C++.
-  `options.py` es el esquema unico: **101 opciones en 9 categorias** que cubren ~110 banderas
+  `options.py` es el esquema unico: **116 opciones en 11 categorias** que cubren ~110 banderas
   `KESTREL_*`; anadir una bandera al emulador = anadir una fila.
-- **Biblioteca de ROMs** con cinco vistas (coverflow 3D, filas estilo Netflix, rejilla, rueda
-  estilo Hyperspin, tabla), cabecera de cartucho leida de verdad (z64/v64/n64 normalizados) y
+- **Biblioteca de ROMs** con seis vistas, tres de ellas en 3D de verdad sobre WebGL propio
+  (coverflow, carrusel de anillo al estilo USB Loader GX y pared de cajas; las otras tres son
+  filas estilo Netflix, tabla y estante), cabecera de cartucho leida de verdad
+  (z64/v64/n64 normalizados) y
   caratulas de libretro-thumbnails con cache local. (NNID resulto ser un identificador de
   cuenta de Wii U / 3DS, no tiene arte de N64.)
 - **Overclock** (`src/core/system.cpp`): `KESTREL_OC` global y `KESTREL_OC_CPU/_RSP/_RDRAM`
@@ -3851,3 +3853,1950 @@ un colchon de NOPs que no existe. Ahora traduce por `cpu.tlbProbePhys`, igual qu
 
 Puertas: `gate_all` 375 s, `gate_prdp` 307 s, 15/15 + prdp 3/3, `regress=0` y `nodump=0` en los
 dos krom (mean_exact interp 88,71 / prdp 89,26), md5 de sm64 sin cambio en los siete modos.
+
+## 2026-09-04 — los cuatro mandos, con accesorio de verdad y dialogo nuevo
+
+Hasta ahora el emulador tenia UN mando. El joybus servia el canal 0 y contestaba
+`NO_DEVICE` (0x80) en 1..3, el Controller Pak era una variable global y el Rumble Pak no
+existia. Cerrado entero:
+
+**Nucleo (joybus, `src/core/memory.cpp`).** `padPort[4]`, cada uno con `connected`,
+`accessory`, `mempak`/`mempakPath`, `rumble`. `pifProcessJoybus` sirve cualquier puerto
+conectado (`if(channel < 4)`), no solo el 0; un puerto desconectado contesta ausente y el
+resto del paquete sigue. El estado (cmd 0x00/0xFF) devuelve `0x05,0x00, accessory?1:0` —
+CONT_CARD_PULL (0x02) queda a cero a proposito: los dos bits juntos son «el pak acaba de
+cambiar» y la libultra lo traduce en `PFS_ERR_NEW_PACK`.
+
+**Accesorio por puerto.** Cable de direcciones `(bloque << 5) | CRC5(bloque)`, bloques de
+32 B, 64 KiB de espacio. Controller Pak = 32 KiB de RAM en las direcciones bajas, con su
+`.mpk` propio por puerto (`rom.mpk`, `rom.mpk2`..`rom.mpk4`), formateado y resuelto en
+`attachSaveFile` para los cuatro aunque ahora mismo no lleven pak — el accesorio se puede
+cambiar en marcha desde el dialogo, y sin la ruta resuelta ese puerto volcaria un pak
+recien formateado encima del fichero que ya existia. **Rumble Pak** = sin RAM: la ventana
+0x8000-0x8FFF se lee como 0x80 (identificacion) y una escritura a 0xC000 enciende o apaga
+el motor. Ranura vacia = CRC de datos **invertido**, que es como el SDK detecta la
+ausencia.
+
+**Entrada (`src/video/present.cpp`).** Bucle de los cuatro puertos. Cada uno elige su
+aparato: teclado, un mando concreto de Windows, o el mixto de siempre (teclado + primer
+mando) que sigue siendo el defecto del puerto 1. Mando via `glfwGetGamepadState`
+(stick izquierdo → analogico con zona muerta 0,2 y tope ±80, stick derecho → botones C,
+gatillos como ejes). **La identidad del aparato se guarda por NOMBRE, no por indice**:
+Windows renumera los joysticks al enchufar y desenchufar, y un indice guardado apuntaria
+al mando de otro jugador. Un nombre sin resolver se reintenta en cada barrido (0,5 s), asi
+que enchufar el mando a medio juego reclama su puerto solo. Las consultas de GLFW solo son
+seguras desde el hilo del presentador, por eso hay instantanea publicada
+(`rt::joyName`/`rt::joyGen` bajo `rt::joyMx`) para la UI.
+
+**Vibracion real.** GLFW no tiene API de rumble: en Windows se carga XInput a mano
+(`xinput1_4` → `1_3` → `9_1_0`) y se llama `XInputSetState` solo en el flanco. GLFW no da
+la ranura de XInput, asi que se asume que el n-esimo gamepad es la ranura n — aproximacion
+documentada que como mucho pierde vibracion, nunca entrada.
+
+**Perfil y lanzador.** Un mapeo por conector (`pad` para el 1, `pad2`..`pad4`, que el
+lanzador conserva sin tocar), mas `padN_on` / `padN_acc` / `padN_dev`. `toEnv` emite
+`KESTREL_PAD1..4` (ficheros de mapeo), `KESTREL_PADDEV1..4` (`auto` / `kb` / nombre),
+`KESTREL_PADS` (4 digitos de conectado) y `KESTREL_PADACC` (4 digitos de accesorio).
+`tools/launcher/kestrel_launcher.py` escribe exactamente lo mismo.
+
+**Dialogo nuevo** (`src/ui/menu_win32.cpp`). Fuera el bloque de texto explicativo. Arriba:
+selector **Mando 1-4**, casilla Conectado, combo Accesorio (nada / Controller Pak / Rumble
+Pak) y combo Aparato, que lista los mandos que Windows tiene enchufados AHORA (por nombre,
+refrescado con un timer de 0,5 s; un mando guardado y desenchufado se queda como «(no
+conectado)»). A la izquierda, el mando de N64 **dibujado con GDI** (tres asas, cruceta,
+START rojo, B verde, A azul, diamante C amarillo, stick, L/R/Z) y **clicable**: pinchar un
+boton selecciona su fila y arranca la captura de tecla o despliega el combo de boton segun
+que columna este activa. La columna TECLA se apaga si el aparato no es teclado, y la
+columna MANDO si es teclado.
+
+Puertas: `gate_all` 356 s, `gate_prdp` 370 s, 15/15 + prdp 3/3, `regress=0` y `nodump=0` en los dos
+krom (mean_exact interp 88,71 / prdp 89,26), md5 de sm64 sin cambio en los siete modos.
+
+---
+
+## 2026-09-04 — Pantallas en negro: region del cartucho + CIC-NUS-6105
+
+Dos arranques rotos, dos causas distintas, ninguna parcheada por juego.
+
+### 1. osTvType por region del cartucho (Perfect Dark en negro)
+
+libultra publica el estandar de TV en RDRAM `0x300` y en `s4` al entregar el control al
+juego (`OS_TV_PAL=0`, `OS_TV_NTSC=1`, `OS_TV_MPAL=2`). El arranque HLE lo dejaba fijo, asi
+que a Perfect Dark (Europa, pais `'P'`) se le decia NTSC y `mainInit()` se quedaba en su
+`while(1)`. Ahora sale del byte de pais de la cabecera, y con el la tasa de campos
+(PAL 50 Hz, NTSC/MPAL 59,94 Hz) y el reloj de video del RCP que fija la tasa del DAC del AI
+(NTSC 48 681 812, PAL 49 656 530, MPAL 48 628 316 Hz; `dac = vidClock / (dacrate + 1)`).
+El arranque lo dice en claro: `[system] region 'P' -> PAL (50.00 campos/s)`.
+
+### 2. Las dos cosas que el IPL3 de CIC-NUS-6105 hace y ningun otro (DK64 en negro)
+
+Los cartuchos firmados con 6105 (Perfect Dark, Donkey Kong 64, Majora's Mask,
+Banjo-Tooie...) comparten IPL3, y ese IPL3 deja dos rastros en RDRAM que los juegos
+comprueban. Si faltan, el juego gira para siempre — no es un cuelgue del emulador:
+
+- **Etapa 1 — imagen del propio IPL3 en RDRAM baja.** El bucle `lw`/`sw` de DMEM
+  `0x524..0x538` copia DMEM `0x554..0x888` a RDRAM `0x004..0x338` (sesgo fijo `-0x550`) y
+  sigue ejecutando desde la copia. Son los mismos bytes que el cartucho lleva en ROM
+  `0x554..0x888`. **Perfect Dark** gira salvo que `*(0xA00002E8) == 0xC86E2000`, que no es
+  mas que la palabra de codigo ROM `0x838` cayendo en RDRAM `0x2E8`.
+- **Etapa 2 — microcodigo de arranque del RSP.** El IPL3 arranca el RSP (`SP_STATUS = 0xAD`,
+  DMEM `0x550`) con un microcodigo que **descifra por XOR dentro de IMEM a partir del codigo
+  de IPL2 que la PIF ROM dejo ahi** (tabla de claves en DMEM `0x84`). Ese microcodigo hace
+  DMA de RDRAM `0x1E8` (`0x1F0` bytes) a IMEM `0x120` y emite UN solo DMA de escritura con
+  paso: `SP_DRAM_ADDR = 0x2FB1F0`, `SP_WR_LEN = 0xFE817000` (largo 8, cuenta 24, salto
+  `0xFE8`) — 24 filas de 8 bytes separadas `0xFF0`. **Donkey Kong 64** comprueba la fila 3:
+  `*(0xA02FE1C0) == 0xAD170014`, o sea RDRAM `0x200` (el `sw s7,0x14(t0)` del IPL3) en
+  `0x2FB1F0 + 3*0xFF0`.
+
+El microcodigo no se puede ejecutar de verdad sin la PIF ROM (su texto sale del residuo de
+IPL2 en IMEM, que un arranque HLE nunca deja), pero su efecto en memoria es **fijo**, asi
+que se reproduce el efecto. Se aplica a **cualquier cartucho 6105**, y tambien en la ruta
+`KESTREL_LLE_IPL3` (donde el IPL3 real rehace la etapa 1 con los mismos bytes). Con esto
+desaparece el unico hardcode a un juego que quedaba en el arranque (la palabra `0x2E8` de
+Perfect Dark, que se escribia si la ROM contenia la magia en `0x838`).
+
+Ademas se escribe RDRAM `0x3F0` con el tamano de RDRAM: es donde la autoprueba de RDRAM de
+la PIF deja el resultado, y el IPL3 de 6105 lo lee (`lw t1,0xf0(t0)` con `t0 = 0xA0000300`)
+para rellenar `osMemSize` en `0x318` — sin el, la ruta LLE calcula `osMemSize = 0`.
+
+### Estado
+
+- **Donkey Kong 64 arranca y renderiza 3D** (intro de las lianas, «DONKEY KONG IS HERE!»).
+- **Perfect Dark arranca y renderiza** la intro sin ningun hardcode.
+- Retirado tambien el volcado de depuracion especifico de PD del manejador de `KESTREL_BP`
+  (escaneo de `0x70000000..0x70002000` buscando `c86e`); en su sitio queda un volcado
+  generico del bloque de arranque `0x2E0..0x320`.
+
+### Herramienta que lo resolvio
+
+Ejecutar el IPL3 real (`KESTREL_LLE_IPL3=1`) con `KESTREL_MEMDUMP` y comparar con el
+arranque HLE: bajo LLE aparecian `0x200 = AD170014` y `0x2E8 = C86E2000` pero `0x2FE1C0`
+seguia a cero — eso separo la etapa 1 (que el IPL3 sabe hacer solo) de la etapa 2 (que
+necesita la PIF ROM). El disassembly de DMEM `0x7D4..0x86C` en el punto del arranque del RSP
+da los tres inmediatos del DMA (`0x2FB1F0`, `0xFE817000`, `0x1E8`) sin ambiguedad.
+
+### Medida de timing en la intro de las lianas (DK64)
+
+Es la prueba que mejor separa un timing bueno de uno malo, porque la camara sube por la
+liana a ritmo fijo y cualquier desajuste CPU/RSP/RDP se ve como campos de video de mas.
+200 intercambios de buffer, mismo `origin` final (`0x0ca500`) en los dos modos, o sea que
+paran en el mismo punto de la intro:
+
+| Modo | Campos VI | Campos/intercambio | Sincronizaciones RDP | Pared |
+|---|---|---|---|---|
+| threaded-jit (uso real) | 610 | 3,05 | 156 | 3 s |
+| interp lockstep (oraculo) | 597 | 2,99 | 169 | 22 s |
+
+2,2 % de separacion frente al oraculo determinista, en la linea de Perfect Dark
+(4,08 vs 4,09). El arranque anuncia `[boot] CIC detected: 6105 (seed 0x91)` y
+`[system] region 'E' -> NTSC (59.94 campos/s)` — la ROM USA de DK64 lleva pais `'E'`,
+que es NTSC-America, no Europa.
+
+## 2026-09-04 — Particularidades de cada CIC-NUS
+
+El arranque rapido (`CPU::fastBoot`, `src/cpu/cpu.cpp`) ya no trata a todos los cartuchos
+igual. La tabla `kCicTable` identifica el chip por el **CRC32 de la imagen IPL3** del propio
+cartucho (ROM `0x40..0xFFF`) y de ahi salen cuatro cosas que el juego puede ver.
+
+Fuente: tabla CIC-NUS y PIF-NUS de n64brew (wikitexto crudo), `cic/cic.cpp` de ares para
+las semillas y `CRegisters::Reset` de Project64 para el estado de registros posterior al
+IPL3. La eleccion NTSC/PAL **no** sale del CRC: 6102/7101, 6103/7103, 6105/7105 y 6106/7106
+comparten imagen IPL3 byte a byte, asi que quien decide es el byte de pais del cartucho.
+6101 (solo NTSC) y 7102 (solo PAL) si son imagenes distintas.
+
+| CIC (NTSC/PAL) | CRC32 IPL3 | Semilla | Direccion de arranque |
+|---|---|---|---|
+| 6101 / — | `6170A4A1` | `0x3F` | cabecera (`u32@0x08`) |
+| 6102 / 7101 | `90BB6CB5` | `0x3F` | cabecera |
+| — / 7102 | `009E9EA3` | `0x3F` | **fija `0x80000480`** (ignora la cabecera) |
+| 6103 / 7103 | `0B050EE0` | `0x78` | cabecera **− 1 MB** |
+| 6105 / 7105 | `98BC2C86` | `0x91` | cabecera |
+| 6106 / 7106 | `ACC8580A` | `0x85` | cabecera **− 2 MB** |
+| 5101 (Aleck 64) | `0E018159` | `0xAC` | cabecera **− 1 MB** |
+
+La resta se aplica **tanto al destino del DMA del primer megabyte como al salto**: el IPL3
+lleva una sola direccion de arranque en un solo registro, y cargar el juego en otro sitio
+lo dejaria sin cargar donde fue enlazado. Es ofuscacion anticopia, no una funcion.
+
+### Estado de registros con el que el IPL3 entrega el control
+
+La mayoria de esos valores no son «inicializacion»: son los restos del checksum que el IPL3
+hace sobre el primer megabyte del cartucho, asi que dependen del **chip** (semilla y magia
+distintas) y de la **region** (la PIF ROM contra la que corre el checksum no es la misma).
+Para 6102 el checksum del IPL2 es `0xA536C0F1D859` y el arranque deja literalmente
+`a0 = 0xA536` y, en PAL, `a1 = 0xC0F1D859` — o sea que la tabla es estado real, no invento.
+Se dan v0/v1/a0/a1/at/t4/t5/t6/t7/t9 por CIC y region, mas los comunes: `s4 = osTvType`,
+`s6 = semilla del CIC`, `s7 = osVersion` (6 en PAL, 0 en NTSC), `t3 = 0xA4000040` (el propio
+IPL3 aun en DMEM), `ra = 0xA4001550` NTSC / `0xA4001554` PAL (la cola del IPL3 PAL cae una
+instruccion mas alla). En RDRAM `0x310` se escribe el `osCicId` ya en la variante correcta
+de region (6102 o 7101, etc.).
+
+De 6101, 7102 y 5101 solo se conoce la semilla con certeza, asi que ahi no se toca el resto
+de registros en vez de inventarlos.
+
+### Residuo del 6105 en IMEM
+
+El arranque en dos etapas del 6105 (ver seccion anterior) deja la primera palabra del
+microcodigo en IMEM `0x004`, y los juegos de ese chip la leen: `0x8DA807FC` en NTSC y
+`0xBDA807FC` en PAL. Depende de la region porque el microcodigo es el XOR de la tabla de
+claves del IPL3 con el residuo del IPL2 en la PIF ROM, y la PIF ROM PAL es otra imagen.
+
+### Lo que se decidio NO emular
+
+La PIF escribe region y semillas en la palabra de arranque de PIF RAM `0xBFC007E4`, pero
+`memSwapSecrets()` de la PIF de ares muestra que el hardware **las vuelve a esconder** antes
+de que corra el IPL3. Emular esa escritura seria dar al juego algo que en consola no ve.
+
+## 2026-09-04 -- Trucos (GameShark)
+
+`src/core/cheats.{hpp,cpp}` mete el motor de codigos que faltaba (GAPS P1 #4). Detalle
+completo, formato de fichero y tabla de familias en `docs/CHEATS.md`; aqui las dos
+decisiones que son semantica de hardware y no gusto:
+
+- **El ritmo es el campo de video.** El cartucho de verdad sustituia el arranque y
+  enganchaba la interrupcion del VI: su motor recorria la lista una vez por campo. Por eso
+  el enganche esta en `System::run`, pegado al `memory.viTick()` que cierra el campo y
+  dentro de `coreMutex`, y no en el intercambio de buffer del juego. Un juego a 20 fps
+  recibe el parche tres veces por fotograma suyo, que es lo que hace que "vidas infinitas"
+  gane la carrera contra el codigo que las resta.
+- **El nibble alto de la direccion es el segmento MIPS.** `0x80xxxxxx` = KSEG0 = escritura
+  cacheada (por `CPU::pokePhysCoherent` -> `dcWrite`): el juego la ve al momento aunque la
+  linea tarde en bajar a la RDRAM. `0xA0xxxxxx` = KSEG1 = escritura sin cache, directa a la
+  RDRAM, que **no** invalida la linea de D-cache -- igual que un store KSEG1 del VR4300. Esa
+  asimetria es justo por lo que las familias A0/A1 se publican como parche unico de
+  arranque, y esta fijada como invariante en `test/cheat_test.cpp`.
+
+Familias: 80/81 (byte/media palabra por campo), A0/A1 (una vez al arrancar), D0-D3
+(condiciones sobre la linea siguiente) y el repetidor `50 00CCII 0000VV`. Las lecturas de
+las condiciones usan una vista coherente que **no toca la cache** (ni rellena ni desaloja):
+armar un truco no debe mover el estado del juego mas alla de las escrituras que pide.
+
+No se aplican, y se avisa al cargar: 88/89 (solo mientras se pulsa el boton fisico del
+propio cartucho, que esta maquina no tiene) y CC/DE/EE/FF (control interno del aparato).
+
+Fuente: `.cht` con el nombre de la ROM al lado de la ROM, o `KESTREL_CHEATS`; opcion nueva
+en `tools/launcher/options.py` (Cartucho -> Fichero de trucos), o sea tambien en el menu de
+la ventana. Sin fichero no hay motor ni coste.
+
+Verificado: `cheat_test` ALL PASS (parser, las cuatro familias, condiciones, repetidor,
+truco apagado, asimetria cache/sin cache) y end-to-end sobre SM64 -- con `80700000 0064` +
+`A0700010 0077` la RDRAM queda con `64` en `0x700000` reescrito en cada campo y `77` en
+`0x700010` una sola vez.
+
+
+## 2026-09-04 -- ROMs comprimidas (.zip, .gz) y tests unitarios rescatados
+
+Hueco P1 #5. `src/core/archive.{hpp,cpp}`: el emulador abre una ROM metida en un zip o en un
+gzip tal como se descargo. Detalle completo en `docs/ROMS-COMPRIMIDAS.md`.
+
+Dos decisiones que no son de gusto:
+
+- **DEFLATE propio en vez de zlib.** El `.exe` que se publica se enlaza con
+  `-DKESTREL_STATIC=ON` para ser autocontenido (`docs/distribucion.md`). Anadir zlib al
+  enlace por un descompresor que corre UNA vez al abrir la ROM no sale a cuenta: son ~200
+  lineas, el formato lleva treinta anos congelado (RFC 1951) y el decodificador usa la forma
+  compacta de la propia norma (cuentas por longitud + simbolos ordenados), sin tablas.
+- **El desempaquetado va antes de normalizar el orden de bytes.** Lo que hay que reconocer
+  como z64/n64/v64 es la ROM de DENTRO, no la cabecera del contenedor; asi un `.v64` metido
+  en un zip se reordena igual que si estuviera suelto.
+
+Ademas: dentro del zip se elige la entrada con extension de ROM (o la mas grande, porque el
+reparto tipico es ROM + `.txt`), se comprueba el CRC-32 que traen los dos formatos, y 7z y
+rar se rechazan **con su nombre** en vez de con "unrecognized ROM magic", que hacia pensar
+que la ROM estaba rota. Los ficheros que viven al lado de la ROM (`.eep/.sra/.fla/.mpk`,
+`.st0`-`.st9`, `.cht`) ignoran la extension del contenedor, asi que `mario.z64.gz` y
+`mario.z64` comparten partida guardada. El lanzador lee la cabecera dentro del contenedor y
+el dialogo de abrir ROM ya ofrece `*.zip;*.gz`.
+
+Verificado: `archive_test` ALL PASS (tres clases de bloque DEFLATE, copia solapada de
+distancia 1, flujo truncado, CRC-32, gzip con FEXTRA/FNAME/FCOMMENT, eleccion de entrada,
+zip guardado, CRC roto en ambos formatos, metodo 12, firmas 7z/rar, ROM cruda intacta) y SM64
+arrancado 60 campos desde **siete** envoltorios distintos, los siete con el md5 del oraculo
+`466282775dbd0ac084946558a1c30771`.
+
+**Tests unitarios rescatados.** Al tocar `memory.cpp` salieron a la luz dos tests podridos que
+ningun gate compilaba: `rsp_test` (`sp_status` paso a `std::atomic` cuando el RSP se fue a su
+hilo -> copia implicita borrada; y el test daba por hecho que escribir CLEAR_HALT ejecuta el
+microcodigo, cuando en Lockstep esa escritura solo ARMA el nucleo y quien lo avanza es
+`System::run`) y `save_test` (el Controller Pak se mudo a `padPort[i]` al implementar los
+cuatro mandos). Los dos arreglados, y **`gate_all.sh` compila y ejecuta ahora los cuatro**
+(`rsp_test`, `save_test`, `cheat_test`, `archive_test`) antes de systemtest: cuestan segundos
+y era justo la falta de mirarlos lo que los pudrio.
+
+
+## Direcciones salvajes: el invitado puede pedir cualquier cosa (2026-09-04)
+
+Hueco de robustez de `docs/GAPS.md`: **el camino `fastmem` del JIT**. Cuando el codigo de
+invitado se descarrila -- un puntero corrupto, un indice negativo, una estructura leida con el
+desplazamiento equivocado -- la direccion que llega a la memoria no se parece a nada legal, y
+el emulador tiene dos obligaciones: levantar la excepcion que levantaria el VR4300, y no
+tocar ni un byte fuera de su propio bloque de RDRAM.
+
+Auditados los caminos, las guardas YA estaban: el camino rapido del JIT (`src/cpu/jit.cpp`)
+solo se dispara tras comprobar forma canonica de ckseg0 (`rax = a + 0x80000000` y
+`cmp < 0x20000000`), alineacion, modo kernel (KSU/EXL/ERL), tope `jitRdramSz`, la guardia de
+escritura `CPU::stGuard` y la etiqueta+valido de la linea de D-cache en una sola comparacion;
+`dcFill`/`dcFlush`/`dcMiss` caen a un bucle byte a byte si `base + 16 > rdram.size()`, y
+`Memory::spDma` corta cuando el destino se sale. Lo que faltaba no era codigo sino **prueba**:
+nadie ejercitaba esas guardas, y menos aun comprobaba que el dynarec y el interprete se
+comportan igual al dispararlas.
+
+**`test/wildmem_test.cpp`** (objetivo `wildmem_test`, ya dentro de `gate_all.sh` con los otros
+cuatro). Monta un `Memory` real, escribe un programa MIPS diminuto en la RDRAM en ckseg0 y lo
+corre DOS veces sobre CPUs recien reseteadas: una a pasos de `CPU::step()` y otra despachada
+por `CPU::jitTryBlock()`. De cada corrida saca ExcCode, EPC, BadVAddr y el registro destino, y
+exige que las dos coincidan. Ademas fija el valor absoluto alli donde la semantica del VR4300
+no admite discusion (AdEL=4 / AdES=5 con la VA salvaje **entera** en BadVAddr, TLBL=2 /
+TLBS=3 en los segmentos mapeados); los casos cuyo resultado es de bus abierto -- una lectura
+pasada del final de la RDRAM -- solo se cruzan entre motores, que es lo unico honesto: ahi lo
+que se afirma es "no revienta el anfitrion y los dos motores dicen lo mismo", no un numero
+inventado.
+
+Los 27 casos: desalineacion en `lw`/`lh`/`sw`/`ld`/`sd` y tambien en `lwc1`/`swc1` (el camino
+`fastmem` tiene entradas propias para COP1); accesos justo pasados el final de la RDRAM, en la
+ultima palabra valida, a caballo del limite, en la cima de ckseg0 y con `ldc1`; kuseg y ksseg
+sin ninguna entrada de TLB; huecos de MMIO en kseg1 (RI, hueco del RCP, pasado el PIF, DMEM);
+punteros de 64 bits NO canonicos (`0x12345678_80000000` y un ckseg0 sin extender el signo,
+que es lo que deja un registro medio pisado); y los mismos limites con una RDRAM de 4 MB, que
+de paso comprueba que `jitRdramSz` sigue al tamano real y no a un 8 MB fijo.
+
+Resultado: **el dynarec compilo y corrio los 27** (ninguno declinado) y coincide con el
+interprete en todos. Un detalle que salio del propio test y que conviene recordar: el
+programa se carga en `0xFFFFFFFF_80001000`, no en `0x80001000` -- en modo kernel de 32 bits
+toda VA valida es la extension de signo de sus 32 bits bajos, asi que un `pc` de 64 bits sin
+extender falla en el PROPIO FETCH con AdEL antes de ejecutar nada. El emulador lo hacia bien;
+el test estaba mal, y esa es exactamente la clase de detalle por la que el oraculo es el
+interprete y no lo que uno espera.
+
+
+## Una consola de serie tambien es una consola: 4 MB de verdad (2026-09-04)
+
+La N64 de fabrica trae 4 MB de RDRAM. El Expansion Pak sube a 8. Kestrel llevaba desde el
+principio el codigo para las dos -- `Memory::reset(bool expansionPak)` reserva
+`RDRAM_SIZE_EXPANDED` (0x0080'0000) o los 0x0040'0000 de serie, y `CPU::fastBoot` copia
+`rdram.size()` a las dos ventanas por las que el invitado pregunta el tamano (`osMemSize` en
+RDRAM 0x318 y la copia de 0x3F0) -- pero `System::init` la llamaba siempre con `true`. O sea:
+la mitad baja del parque de juegos nunca se habia visto tal y como se ve en una consola sin
+el cacharro.
+
+Ahora se elige: `KESTREL_RDRAM=4|8` (por defecto 8; el lanzador lo saca como "Memoria RDRAM"
+en el grupo Cartucho, con relanzado obligatorio porque el tamano se fija al arrancar y hay
+punteros del invitado colgando de el) y `System::init` lo anuncia en el log:
+`[system] RDRAM 4 MB (consola de serie)`. Lo unico que hace falta subrayar es POR QUE no
+puede ser en caliente: cambiar el tamano a medio juego no es "reasignar un vector", es mover
+el suelo debajo del mapa de memoria del invitado -- su heap, sus framebuffers y sus tablas
+estan colocados a partir de lo que le dijimos al arrancar.
+
+La prueba no es del emulador sino del invitado, que es la unica que vale:
+
+| ROM | RDRAM | md5 del framebuffer |
+|-----|-------|---------------------|
+| Super Mario 64 | 8 MB | `466282775dbd0ac084946558a1c30771` |
+| Super Mario 64 | 4 MB | `466282775dbd0ac084946558a1c30771` |
+| Donkey Kong 64 | 8 MB | `5683d22e66c393d50602b648b1ec660d` |
+| Donkey Kong 64 | 4 MB | `0d05190dc6efd189dcee266cc108827a` |
+
+SM64 no nota nada porque nunca pidio el Expansion Pak: mismo fotograma bit a bit con la
+mitad de memoria, que es exactamente lo que tiene que pasar. DK64 si: a 4 MB su fotograma es
+OTRO, y al volcarlo se lee "N64 EXPANSION PAK NOT INSTALLED / THE N64 EXPANSION PAK ACCESSORY
+MUST BE INSTALLED IN THE N64 FOR THIS GAME". Es decir, el numero que escribe `fastBoot`
+llega hasta el codigo del juego y le cambia el comportamiento -- no es una bandera decorativa
+en la configuracion. Las lecturas fisicas por encima del final de la RDRAM ya devolvian 0 y
+el `jitRdramSz` del dynarec ya se toma del tamano real por compilacion, ambas cosas cubiertas
+con casos propios de 4 MB en `wildmem_test`; y la cabecera del savestate lleva `rdramSize` y
+rechaza cargar en una maquina de otro tamano, asi que no hay forma de cruzar partidas.
+
+
+## El TLB vacio no falla: delata (2026-09-04)
+
+`KESTREL_EXCODD` existe para pillar el primer sintoma cuando el invitado se descarrila: filtra
+las excepciones que un juego sano toma a millones y vuelca contexto entero (EPC, BadVAddr, ra,
+sp, las 8 palabras que hay REALMENTE en la direccion que fallo y los 32 GPR) en las que no
+deberia ver nunca. El filtro era por numero: `excCode > 3 && != 8`, o sea fuera Int, TLBMod,
+TLBL, TLBS y Syscall.
+
+Meter TLBL/TLBS en la lista a secas seria falso -- un juego que use el TLB los toma a punta
+pala y son trabajo normal. Pero eso depende del ESTADO, no del codigo de excepcion: si el TLB
+no tiene ni una entrada con el bit V puesto, ninguna traduccion mapeada puede acertar jamas, y
+entonces un TLBL no es paginacion bajo demanda sino un puntero que se fue a kuseg por
+accidente -- exactamente igual de interesante que una instruccion reservada. Asi que el filtro
+pregunta por el TLB (`tlbAnyValid()`, un barrido de 32 entradas que sale al primer V y que solo
+corre en excepciones de TLB) en vez de por el nombre del juego.
+
+Comprobado en los DOS sentidos, que es lo unico que distingue un filtro de un ruido nuevo:
+`wildmem_test` con `KESTREL_EXCODD=4` pasa de cero volcados de TLB a cuatro de code=2 y dos de
+code=3 (sus casos de kuseg/ksseg sin mapear, con el TLB virgen); Super Mario 64 y Donkey Kong
+64 a 120 campos no ganan ni un aviso: siguen con los mismos code=11 de siempre.
+
+
+## IPL3 real contra IPL3 fingido: que dicen los cuatro cartuchos que hay (2026-09-04)
+
+Kestrel sabe arrancar de dos maneras: fingiendo el RESULTADO del IPL3 (`fastBoot`, el defecto)
+o ejecutando el IPL3 firmado que trae el propio cartucho (`KESTREL_LLE_IPL3=1`). La pregunta
+pendiente era si lo segundo debia pasar a ser el defecto.
+
+Primero hubo que arreglar el metodo. El A/B en el modo normal (con hilos) no vale para Perfect
+Dark: cuatro arranques identicos dan cuatro md5 distintos. No es un fallo del emulador ni un
+dato que se pueda leer -- PD anima el logo mientras arranca y el trabajo del RDP corre en un
+hilo del anfitrion, asi que el campo 150 cae en un punto distinto del fundido cada vez. La
+diferencia se ve exactamente donde se espera: un rectangulo dentro del logo, cero pixeles fuera.
+En lockstep (`KESTREL_THREADS=0`) el mismo arranque repetido da el mismo md5 dos de dos, asi
+que el A/B se hace ahi. SM64 y DK64 salen deterministas en los dos modos.
+
+| ROM (CIC) | HLE | LLE |
+|-----------|-----|-----|
+| n64-systemtest | 0/3721 · 0/2 · 0/6 | 0/3721 · 0/2 · 0/6 |
+| Super Mario 64 (6102) | `466282775dbd0ac084946558a1c30771` | igual |
+| Donkey Kong 64 (6105) | `5683d22e66c393d50602b648b1ec660d` | igual |
+| Perfect Dark (7105) | `2e385d1857e7388572b4bfc8677db154` | 1123 px de 331776, todos en el logo |
+
+O sea: el IPL3 real deja la maquina donde la deja el HLE. Aun asi el defecto NO cambia, y el
+motivo es lo que NO se ha medido: aqui hay cuatro ROMs que cubren tres CICs (6102, 6105, 7105)
+y ninguna firmada 6101, 6103, 6106 o 5101. Sus IPL3 reales no los ha ejecutado nadie en este
+emulador, y son justo los que se salen del guion (direcciones de arranque desplazadas, tablas
+propias). Cambiar como arranca TODO el parque apoyandose en tres CICs es lo contrario de
+verificar. `KESTREL_LLE_IPL3` se queda como opcion y la decision se revisa cuando haya ROMs de
+esos CICs con que probarlo.
+
+De paso queda cerrado el otro medio punto del hueco: el parche `0xC86E2000` ya no existe. Era
+el ultimo hardcode a un juego del arranque y murio cuando el 6105 paso a reproducirse entero
+(la copia de ROM 0x554..0x888 a RDRAM 0x004..0x338 y el DMA con paso del microcodigo) para
+cualquier cartucho de ese CIC. Lo unico que queda en `cpu.cpp` es una tabla indexada por el CRC
+de la imagen del IPL3, que identifica una FIRMA, no un titulo.
+
+## La cinta no graba al jugador: graba lo que el juego lee
+
+El hueco P2 #12 de `docs/GAPS.md` pedia dos cosas: grabar y reproducir entradas, y avanzar por
+fotogramas. Lo primero tiene una decision de diseno delante que lo decide todo, y es *que* se
+graba.
+
+Lo facil es apuntar el mando del anfitrion una vez por cuadro. Es mentira. Hay juegos que
+sondean el mando dos veces en un campo, otros que se saltan campos enteros, y el orden en que
+se leen los cuatro conectores no lo decide el emulador sino el bloque de comandos que el juego
+escribe en la PIF RAM. Una cinta hecha "por cuadro" reproduce bien mientras el emulador corra
+igual y se desmonta en cuanto cambie el ritmo.
+
+Lo que se graba aqui es la **respuesta al comando 0x01 del joybus**: leer botones, por
+conector, con el mando del anfitrion y el inyectado por telemetria ya resueltos. Es la unica
+frontera que el invitado percibe. El enganche es una linea en `Memory::pifProcessJoybus` justo
+antes de escribir la respuesta, y por eso una pelicula vale igual al 30% que al 200% de
+velocidad, y vale igual en interprete que en JIT: cuenta sondeos, no milisegundos.
+
+El formato (`.k64m`, cabecera de 64 bytes y muestras de 5) esta en `docs/TAS.md`. Lo unico que
+merece contarse aqui es que reproducir una pelicula de **otro cartucho** no se avisa: no se
+reproduce. Inyectar los botones de otra partida produce basura que parece un fallo del
+emulador, y perseguir ese fantasma cuesta mas que el mensaje: *"esta pelicula es de otro
+cartucho: grabada con crc 635a2bff/8b022326, cargado ec58eabf/ad7c7169"*.
+
+La prueba tenia que ser discriminante, y el primer intento no lo era. Grabar 60 campos de SM64
+con START pisado da el mismo md5 que sin tocar nada -- START no hace nada tan pronto -- asi
+que "graba y reproduce igual" no demostraba nada: una pelicula que no inyectase nada habria
+dado el mismo resultado. Con 600 campos si se separa: sin botones `109c2277…`, grabando con
+START `0ce65ed4…`, y la reproduccion (sin botones, solo la cinta) devuelve `0ce65ed4…` byte a
+byte con las mismas 471 muestras.
+
+La otra mitad, el avance por fotogramas, es `System::stepFields`: campos que el bucle corre
+**aunque la pausa este puesta**, descontados al cerrar cada campo. El cuanto es el campo de
+video y no la instruccion ni el volteo de buffer, porque el campo es donde el juego lee el
+mando: un avance = una muestra de la pelicula, que es lo que hace falta para colocar una
+pulsacion en el fotograma exacto. Teclas `P` (pausa) y `F` / `Shift+F` (uno / ocho campos) en
+la ventana, `frame.advance` por telemetria, y `emu.status` publica por donde va la cinta.
+
+Lo tercero salio de mirar el conjunto: guardar el estado y cargarlo rebobinaba el juego pero
+no la cinta. Con eso, el uso que junta las dos herramientas -- rehacer un tramo -- se desviaba
+siempre. El numero de sondeos consumidos es estado de la partida igual que la RDRAM, asi que
+va en el estado guardado (seccion `MOVI`) y al cargar la pelicula se rebobina con el. Medido
+por el contador que ahora publica `emu.status`: guardar en el sondeo 54, avanzar 40 campos
+(74), cargar, y vuelve a 54. El precio es la version del formato de estado, que pasa de 4 a 5.
+
+
+## El rebobinado no guarda fotos: guarda lo que cambio
+
+Rebobinar es tener estados guardados hechos de antemano. Lo obvio -- una foto entera cada
+pocos campos -- no vale: la RDRAM son 8 MB, treinta fotos por segundo es un gigabyte cada
+cuatro segundos. Y lo obvio-pero-listo, comprimir cada foto, tampoco: comprimir 8 MB por
+campo cuesta mas tiempo que el campo entero.
+
+Lo que se guarda es **una sola foto viva** (la mas reciente, entera) y detras una pila de
+**diferencias hacia atras**: cada entrada dice lo que hay que reescribir sobre la foto de
+ahora para recuperar la de antes. Es la direccion en la que se rebobina -- del final de la
+pila al principio -- y es la barata, porque entre dos campos seguidos el juego toca el
+framebuffer que dibuja y sus estructuras vivas, no los 8 MB. En la pantalla de titulo de SM64
+salen ~79 KB por paso de dos campos.
+
+Lo que **si** cuesta, y por eso viene apagado: parar el RCP en cada foto (drenar el RDP,
+terminar la tarea del RSP; el mismo serializado que en su dia costo 13-15 % en Perfect Dark),
+recorrer el estado entero y compararlo. Medido en SM64/200 intercambios: +45 % de pared con
+foto cada 2 campos y +24 % cada 6, contra una comparacion contra cero cuando esta apagado.
+El camino para bajarlo esta claro y es otra tarea: seguimiento de paginas sucias, que exige
+cazar todas las vias de escritura (CPU, DMA de RSP/PI/SI y el propio RDP).
+
+La prueba que vale no es "el fotograma se ve igual" sino que el FUTURO sea el mismo: rebobinar
+20 pasos desde el campo 240 devuelve el framebuffer del campo 200 exacto, y volver a correr
+esos 40 campos da otra vez el framebuffer del 240 byte a byte. Si algo del estado hubiera
+quedado viejo, el futuro que sale de el seria distinto aunque la foto pareciera igual.
+
+
+## Cuantas instrucciones caben en un cuadro (el CPI)
+
+Hay un numero del que cuelga todo lo demas y hasta ahora no se podia tocar: **cuantas
+instrucciones retira la CPU en un campo de video**. No salia de ninguna medida, salia de un
+atajo. El unico anclaje duro entre "instruccion retirada" y "ciclo de CPU" es el registro
+Count de COP0: en el VR4300 avanza a medio reloj, y aqui avanzaba exactamente un paso por
+instruccion. Eso equivale a decir que cada instruccion cuesta dos ciclos -- CPI 2 -- y de ahi
+sale, sin que nadie lo decidiera, que un campo NTSC son 782 032 instrucciones (937 488 en PAL).
+
+El VR4300 real no gasta dos ciclos por instruccion: gasta entre 1,2 y 1,4 en codigo de juego.
+Con CPI 2 el emulador le da al juego **la mitad del presupuesto** que tenia en la consola. En
+las escenas tranquilas da igual, porque el juego termina su cuadro y se queda girando en el
+hilo ocioso; en las pesadas no da igual en absoluto: es la diferencia entre llegar al cuadro
+y no llegar.
+
+Ahora el ratio es un numero explicito (`KESTREL_CPI`). Nacio valiendo 2 -- lo de siempre bit a
+bit -- y el 2026-09-08 el defecto se movio a **1,4** (ver el cierre de esta seccion); `KESTREL_CPI=2`
+devuelve el modelo historico. Por dentro no es un decimal sino un entero en 1/256 de tick con el resto
+acumulado, para que la division no se pierda por el camino y la secuencia de ticks sea la
+misma en cualquier maquina y en los dos motores (interprete y JIT). Se lee una sola vez y de
+ese unico numero cuelgan las dos cosas que dependen de el: el ritmo del reloj Count y el
+presupuesto de instrucciones por campo del bucle principal. Derivar la segunda de la primera
+no es elegancia: ya hubo una vez dos relojes distintos conviviendo en el emulador -- el tic
+del VI contaba 750 k instrucciones por campo y la lectura de VI_V_CURRENT contaba 1,56 M -- y
+un juego que mezclara interrupcion y sondeo veia dos campos por cada uno.
+
+Que pasa al moverlo, medido en DK64: en el arranque, que iba **ahogado** a 5,5 campos por
+cuadro mostrado (un cuadro cada 92 ms), pasa a 2,9. En regimen estable no cambia nada: los
+campos por cuadro se quedan clavados en 2,00 con CPI 2, 1,4 y 1,25, y el trabajo por campo
+converge al mismo numero en los tres; lo unico que sube es el ocio, del 62 % al 76 %. Eso es
+justo lo que tiene que pasar y es la prueba de que no es un truco de velocidad: el juego ya
+iba a sus 30 fps de diseno y el presupuesto extra se lo come el giro ocioso, igual que en la
+consola. Solo se nota donde el presupuesto era de verdad el limitante.
+
+El defecto NO se movio con una corazonada: se pusieron tres condiciones y se movio cuando las
+tres se cumplieron (2026-09-08). Los tests de temporizacion de n64-systemtest pasan igual con
+2, con 1,5, con 1,4 y con 1,25, o sea que no bloquean el cambio -- pero tampoco lo deciden.
+(1) Mas juegos: SM64 en arranque da campos por intercambio 3,41 / 2,84 / **2,76** / 2,69 con
+CPI 2 / 1,5 / 1,4 / 1,25 = rendimiento decreciente por debajo de 1,4, el mismo patron que
+DK64. (2) Audio: con 1,4, `KESTREL_AUDIOSTAT` da `silencio=0 (0.00%)` y `cortas=0` igual que
+con 2; el colchon minimo del anillo baja de 9504 a 3232 muestras de 22050, o sea se estrecha
+pero no pasa hambre. (3) El numero elegido es 1,4, la parte ALTA del rango real del VR4300,
+porque las dos medidas propias (DK64 1,19, PD 1,45) son cotas superiores de agresividad y lo
+honesto con evidencia asi es quedarse arriba. Sigue siendo una aproximacion de un solo numero
+a un CPI que en el silicio depende de fallos de cache y del mix de instrucciones: no es un
+modelo de ciclos, es un presupuesto menos falso que el 2. `KESTREL_CPI=2` restaura el
+comportamiento historico bit a bit y sigue siendo la herramienta de medida.
+
+
+## El mando de DK64 no lee mal: lee pocas veces (2026-09-08)
+
+El usuario apunto a la lectura del mando como causa de que la intro de DK64 falle la liana.
+Se comprobo antes que nada, y la medida deja el sitio exacto. Para poder medirlo, el corte de
+`[frames]` dice ahora tambien **cuantas veces ha leido el juego el mando** (comandos 0x01 del
+joybus en el conector 1): es la unica cuenta de tiempo del mando que el invitado percibe, y
+sin ella no hay forma de comparar su cadencia con los campos de video.
+
+Barrida la intro entera, las lecturas del mando **coinciden con los SYNC_FULL del RDP**: 1060
+lecturas frente a 1074 cuadros en la tanda de 1400 intercambios de buffer. O sea que DK64 lee
+el mando una vez por cuadro dibujado, que es lo que hace en la consola: el camino de lectura
+esta bien. Lo que no esta bien es cuantos cuadros hay. En hardware, a 30 fps, una lectura por
+cuadro son 0,5 lecturas por campo de video; aqui salen entre 0,11 y 0,42 segun el tramo.
+
+El A/B lo ata: con CPI 2 la intro da 0,201 lecturas por campo, con CPI 1,4 da 0,241, un 20 %
+mas por darle mas CPU al invitado y nada mas. La cadencia del mando es una funcion del
+presupuesto de instrucciones por campo, no un canal aparte. La intro avanza por cuadro, asi
+que si solo completa la mitad de los cuadros, todo lo que programa "dentro de N cuadros" cae
+en otro instante: eso es la liana. La intuicion era correcta en el sintoma -- el ritmo con el
+que la intro consume entradas -- y la causa es el mismo CPI de la seccion anterior.
+
+Queda ademas apuntado, como fallo real de otro orden, que nuestras DMA de SI se completan en
+la misma instruccion que las lanza: eso adelanta la FASE de cada lectura unos cientos de
+microsegundos frente al hardware, pero no cambia su RITMO. Ver `docs/GAPS.md`.
+**Hecho el mismo dia**: ver la seccion siguiente.
+
+## La lectura del mando cuesta tiempo (el SI ya no es instantaneo, 2026-09-08)
+
+Pregunta del usuario: como lee el mando el hardware, y si libultra hace algo que aqui no se
+tiene en cuenta. Se miro la fuente antes de tocar nada.
+
+En la consola el juego no habla con el mando: habla con la PIF. Escribe un bloque de 64 bytes
+de ordenes joybus en la PIF RAM (`0x1FC007C0`) y pide la DMA de lectura (`SI_PIF_ADDR_RD64B`).
+La PIF **corre el protocolo joybus antes de contestar**. Ese protocolo es un solo cable serie a
+**4 us por bit** -- 32 us por byte --, con una parada de la consola de 3 us al acabar de
+transmitir y una parada del mando de 4 us al acabar de responder. Una lectura de botones (1
+byte de orden, 4 de respuesta) sale sobre 167 us; los cuatro conectores, sobre 670 us; una
+transaccion de 64 bytes medida en hardware anda entre 170 y 340 us. Por eso `SI_STATUS` tiene
+bit de ocupado (bit 0 `DMA_BUSY`, bit 1 `IO_BUSY`) y por eso libultra hace lo que hace:
+`osContStartReadData` lanza la DMA y **duerme el hilo** en la cola de mensajes del SI;
+`osContGetReadData` recoge cuando el `MI_SI` despierta al hilo. Es decir, la lectura del mando
+es un punto de cesion del planificador del juego, y en la consola cede de verdad.
+
+Aqui no cedia: `siDma()` corria el bloque joybus entero, copiaba los 64 bytes y levantaba
+`MI_SI` en la misma instruccion, con `si_status` de vuelta a 0 sin haber estado ocupado ni un
+ciclo. El `osRecvMesg` volvia con el mensaje ya puesto y el hilo no soltaba la CPU. Cambiado:
+
+- `siDma()` factura el tiempo de linea **leyendo el bloque de ordenes de verdad** -- cuenta los
+  bytes de transmision y de respuesta de cada orden del bloque, a 4 us por bit, mas 3 us de
+  parada de consola por orden transmitida y 4 us de parada del mando por cada una que responde,
+  mas ~5 us por el traslado de los 64 bytes entre RDRAM y PIF RAM. Una orden a un conector
+  vacio no cobra respuesta, que es lo que pasa en el aparato.
+- Deja `SI_STATUS = DMA_BUSY` y arma un plazo `siDoneAt` en el reloj de invitado
+  (microsegundos convertidos a instrucciones con el presupuesto por campo, el mismo que fija
+  `KESTREL_CPI`). `siFinish()` copia la respuesta a la RDRAM y levanta `MI_SI` al vencer.
+
+Lo delicado no es el retardo: es que venza en **el mismo instante en los siete modos**, porque
+de eso vive el md5 de lockstep. Vence contra `cpu.retired`, que es la misma cuenta en todos:
+el interprete lo comprueba por instruccion en `System::stepCpu()`, y el JIT tiene prohibido
+compilar un bloque que se tragaria el vencimiento -- `jitTryBlock` consulta `siDueIn()` igual
+que ya hacia con el borde de `Count`==`Compare`, y recorta ademas el permiso de encadenado.
+El estado en vuelo (`siBusy`, `siToPif`, `siDram`, `siDoneAt`) va en la foto de estado, que
+sube a version 7. `KESTREL_SIINSTANT=1` recupera el final instantaneo para comparar.
+
+El A/B en la intro de DK64, 400 intercambios de buffer: con final instantaneo, 1719 campos y
+255 lecturas de mando; con el retardo puesto, 1760 campos y 243 lecturas. El coste aparece,
+que es justo lo que hace la consola. No es una mejora de exactitud medible en las suites --
+`systemtest`, el md5 de SM64 en los siete modos y las 371 de krom salen igual -- sino la
+mitad que faltaba del modelo de reloj: `KESTREL_CPI` arreglo cuantas instrucciones caben en un
+cuadro, esto arregla que las transferencias ocupen su parte de ese cuadro.
+
+Queda por hacer lo mismo con el PI (`PI_BSD_DOM*`), y cuando haya un tercer plazo, unificar los
+tres en una agenda de eventos en vez de seguir sumando guardas en `jitTryBlock`. Ver
+`docs/GAPS.md`.
+
+## Fiel a consola: un solo interruptor para la velocidad del N64 real (2026-09-09)
+
+El menu `Velocidad` de la ventana solo ofrecia tres formas de LIMITAR (automatico, siempre
+59,94, sin limite), y el overclock vivia en otro sitio. El usuario pidio lo que faltaba: un
+modo que signifique «la velocidad que tiene la maquina de verdad», sin tener que saber que
+tres o cuatro variables hay que dejar quietas para conseguirlo.
+
+`KESTREL_SPEEDMODE=hw` -- en la interfaz, **Fiel a consola (velocidad del N64 real)**, primer
+elemento del menu `Velocidad` y opcion nueva en la categoria de relojes del lanzador. Lo que
+hace, y por que cada cosa:
+
+- **Ignora `KESTREL_OC`, `KESTREL_OC_CPU`, `KESTREL_OC_RSP` y `KESTREL_OC_RDRAM`.** No avisa
+  del conflicto ni los respeta: un multiplicador heredado del entorno o de un perfil viejo
+  falsearia la velocidad sin que se note, que es justo lo que el modo existe para impedir.
+- **Ignora `KESTREL_CPI`** y vuelve al calibrado de fabrica (1,3984). Es la otra mitad del
+  presupuesto de tiempo del invitado: de nada sirve el reloj nativo si las instrucciones que
+  caben en un campo salen de un numero puesto a mano.
+- **Deja el limitador en automatico**, que ya significa «limitar solo si hay ventana»: con
+  ventana clava los 59,94 campos/s, sin ventana corre a ciegas a tope. **Corregido 2026-09-09**
+  (antes lo clavaba tambien headless). Lo que el JUEGO ve es el reparto de trabajo por campo, y
+  eso sale de los relojes y del CPI, no del ritmo al que corra el anfitrion: sin pantalla no hay
+  nada que respetar, y clavar un gate o un bench a 59,94 Hz solo los hace tardar en tiempo real
+  lo que dura la partida sin cambiar ni un bit del resultado. Una peticion EXPLICITA
+  (`KESTREL_THROTTLE=0/1`) sigue mandando sobre el modo: quien la escribe lo hace a proposito.
+
+Los gates y el banco NO lo ponen, y por eso siguen corriendo headless a toda velocidad: el
+modo es del usuario, no del arnes. El valor de fabrica del perfil sigue siendo `libre`.
+
+El limitador se aplica en caliente; los relojes y el CPI se montan al arrancar, asi que el
+menu solo ofrece relanzar cuando el perfil traia overclock de verdad (algun multiplicador
+distinto de 1,00). Sin overclock guardado no hay nada que anular y el cambio es instantaneo:
+no se molesta al usuario con un dialogo que no cambia nada.
+
+Para que sirve, ademas de por gusto: es el modo con el que hay que medir contra hardware. La
+prueba de la liana de DK64 -- la intro reproduce entradas contando campos -- no significa nada
+si el emulador va con la CPU dopada o con el limitador suelto.
+
+## El RDP no costaba tiempo de invitado: `Memory::rdpPace` (2026-09-09)
+
+El freno entre dominios del RCP solo existia para el RSP. `Memory::rcpPace` acoplaba la CPU
+emulada al RSP (`Rsp::cyclesRun`) y **al RDP no le acoplaba nada**: el worker del RDP tardaba
+lo que tardase el rasterizador del anfitrion, y mientras tanto la CPU emulada seguia retirando
+instrucciones en su bucle de espera del `DP_DONE`. Como el reloj de video del invitado se
+deriva de las instrucciones retiradas (`Memory::viTick(cpu.retired)`), esas vueltas de espera
+**se cobraban como tiempo del juego**: pasaban campos de video sin que saliera un cuadro.
+
+Medido en Donkey Kong 64, escena del rap, 3000 intercambios de buffer:
+
+| modo | campos VI | instrucciones |
+|---|---|---|
+| lockstep + jit | 6153 | 6881 M |
+| `KESTREL_SYNCRDP=1` (RDP en linea) | 6153 | — |
+| enhebrado + jit + **SoftRDP** | **10830** | 12112 M |
+| enhebrado + jit + parallel-RDP | 6161 | — |
+| enhebrado + jit + SoftRDP, **con `rdpPace`** | **6174** | — |
+
+El `SYNCRDP` identico al lockstep exculpa al RSP: el desvio era del RDP y solo del RDP. 10830
+campos para 3000 cuadros son 18,0 fps de invitado contra los 30 de la consola — el juego
+perdia la mitad de los cuadros, y **cuanto mas lento el anfitrion, mas perdia**. Tres
+consecuencias, todas malas: las demos que cuentan campos (la liana de DK64) se desincronizan,
+la velocidad del invitado depende de la maquina del usuario, y `bench` sobre enhebrado+SoftRDP
+*infra-mide* porque el juego hace menos trabajo real del que dice.
+
+El arreglo: el RDP tiene el MISMO reloj que el RSP (GCLK = reloj del RCP = 62,5 MHz), asi que
+el ratio `paceCpuNum/paceCpuDen` ya calculado para el RSP vale tal cual. La medida de trabajo
+sale del modelo de coste que ya existia (`SoftRdp::accountPixels` / `accountTmem`, calibrado
+contra hardware por `scripts/rdptiming.py`), publicada en un espejo **monotono**
+`rcp.rdpGclk` — `dpc_clock` no sirve porque el invitado lo puede borrar (DPC_STATUS bits 6..9).
+`Memory::rcpPace` pasa a ser el combinador de los dos frenos y devuelve el permiso mas corto:
+la CPU no puede adelantar ni al RSP ni al RDP mas de lo que permite el hardware.
+
+Queda abierto (etapa 2): `DP_DONE` todavia no se entrega sobre un plazo de tiempo de invitado,
+y parallel-RDP no tiene estimador de coste porque la GPU no alimenta `accountPixels` — con
+PRDP el freno no actua, que es por lo que sus 6161 campos ya salian bien por otro camino (la
+GPU va tan sobrada que el bucle de espera casi no da vueltas). Un estimador sobre el flujo de
+ordenes le daria la misma temporizacion de invitado.
+
+## El stick del mando no tenia puerta octogonal (2026-09-09)
+
+El usuario pregunto si la lectura del mando estaba bien hecha. El joybus si: orden `0x01` con
+respuesta de 4 bytes (dos de botones, uno por eje), bits en su sitio (A `0x8000` ... C-derecha
+`0x0001`), coste de linea facturado a 4 us por bit y plazo del SI en tiempo de invitado. La
+cadencia tambien: DK64 lee el mando **una vez por cuadro** (15000 intercambios de buffer ->
+14802 lecturas), que es lo correcto para un juego de 30 fps.
+
+El fallo estaba en el **stick**. El tope del stick de la N64 es fisico: el anillo tiene ocho
+lados, ~85 en los cuatro ejes y solo ~69 en las cuatro diagonales. Kestrel recortaba **por
+ejes a +-80**, o sea una puerta CUADRADA:
+
+| entrada | Kestrel (antes) | consola |
+|---|---|---|
+| teclado en diagonal | (80, 80), modulo 113 | (69, 69), modulo 97 |
+| mando moderno de recorrido cuadrado | (80, 80) | imposible pasar de ~85 |
+
+Los juegos que sacan la velocidad de andar del **modulo** del stick (Mario, DK64, Zelda)
+corrian en diagonal un 33% mas rapido de lo que jamas corrieron en hardware.
+
+`padOctagon` (`src/video/present.cpp`) recorta **a lo largo del rayo**, que es lo que hace el
+anillo de plastico: se respeta la DIRECCION que pide el jugador y solo se acorta el alcance.
+Borde del octante `u + v*(C-D)/D = C`, con `C=85`, `D=69`, `u=max(|x|,|y|)`, `v=min(|x|,|y|)`.
+Es lo ultimo que toca la senal, igual que en la consola. Calibracion contrastada con ares
+(`controller/gamepad/gamepad.cpp:372`), que usa los mismos 85/69.
+
+De paso la zona muerta del mando del anfitrion pasa de ser por ejes a ser **radial y con
+reescalado desde su borde**: la de ejes recortaba un cuadrado y dejaba colar la esquina (un
+stick con deriva en las dos direcciones entregaba un diagonal fantasma), y sin reescalar el
+valor saltaba de 0 a 17 al cruzar el umbral en vez de arrancar desde cero.
+
+## Con la GPU el RDP no costaba tiempo de invitado ni movia DPC_CLOCK (2026-09-09)
+
+`Memory::rdpPace` (del cambio anterior) frena a la CPU del invitado contra el reloj de coste
+del RDP, `rcp.rdpGclk`. Ese reloj -- y `DPC_CLOCK`, que es el registro que los juegos LEEN
+para medirse -- solo los alimenta `SoftRdp::accountPixels`. Y `Memory::rdpRunJob`, cuando
+parallel-RDP esta vivo, entrega el tramo de FIFO a `vrdp::runFifo` y **vuelve antes de pasar
+por ahi**. Resultado: con la GPU activa el rasterizado le salia GRATIS al juego. `DPC_CLOCK`
+clavado a cero y el freno del dominio RDP sin frenar jamas.
+
+Es un hueco de semantica de hardware por si solo, y ademas el emulador corria mas suelto de
+lo que corrio la consola justo en el modo que es la direccion del proyecto.
+
+**Arreglo: un paseo de solo-coste sobre el mismo FIFO.** `SoftRdp::costOnly` (nuevo) hace que
+el decodificador recorra los comandos y mantenga todo el estado (scissor, modos, imagenes,
+tiles) pero **no escriba un solo byte de RDRAM** -- los pixeles buenos son los de la GPU. El
+bucle por pixel no se ejecuta: cada tramo de scanline aporta su anchura de una vez, con los
+mismos `xs`/`xe` que usa el rasterizado, asi que la cuenta de pixeles es IDENTICA y el paseo
+cuesta O(altura) por primitiva en vez de O(area). Triangulos, `FILL_RECTANGLE` y
+`TEXTURE_RECTANGLE` tienen los tres su atajo; las cargas de TMEM ya eran internas y siguen
+cobrando por `accountTmem`.
+
+Los pixeles se cobran como **escritos**. Sin z-buffer fiable en RDRAM (lo tiene la GPU) no se
+puede saber cuales moririan en el test de profundidad, y el modelo de coste calibrado paga casi
+lo mismo por un pixel muerto que por uno escrito (la diferencia es un trozo de escritura).
+`Memory::rdpCostPass` lo engancha en la rama de la GPU, justo tras `vrdp::runFifo` y con el
+MISMO punto de parada que devolvio la GPU, para que un comando partido por el borde del tramo
+se cobre una sola vez. `KESTREL_RDPCOST=0` lo apaga para el A/B.
+
+Medido en DK64 bajo parallel-RDP, durante la intro y la demo de atraccion:
+
+| | antes | ahora |
+|---|---|---|
+| `DPC_CLOCK` por campo | 0 | 192.586 GCLK |
+| ocupacion del RDP por campo | no medible | 18,5 % (de 1.042.709 GCLK a 62,5 MHz / 59,94 Hz) |
+
+Ese 18,5 % contesta de paso una pregunta de la prueba de la liana: en esa escena el RDP **no**
+es el palo largo, asi que cobrarlo no hace que DK64 pierda fotogramas ahi.
+
+## Estado de la prueba de la liana de DK64 (2026-09-09)
+
+Secuencia correcta, corregida por el usuario: los logos, el rap de DK, **UNA sola pulsacion de
+START salta el rap**, y al poco arranca la demo de atraccion; la primera es la de las lianas.
+Una segunda pulsacion en el titulo entra en el menu de partida, y ahi no salen demos nunca.
+`scripts/dk_demo_hunt.py` lleva esa nota y el guion de caza reproduce el arranque completo.
+
+Reproducido bajo parallel-RDP: tras el titulo, Donkey Kong aparece **nadando**, o sea que ha
+caido al agua en vez de cruzar por las lianas. Se reproduce igual con SoftRDP.
+
+Lo que este barrido DESCARTA, con medida:
+
+| sospecha | medida | veredicto |
+|---|---|---|
+| el juego pierde fotogramas y la demo se desplaza | campos/flip = **2,00** sostenido (231 campos / 115 flips en la ventana de la demo, PRDP; 617/308 con SoftRDP) | descartada: 30 fps clavados, el arreglo de CPI de 2026-09-08 ya hizo su trabajo |
+| el RDP no cuesta y por eso va suelto | ocupacion del RDP 18,5 % del campo (arriba) | no es el limite en esa escena |
+| la lectura del mando | joybus 0x01 correcto y una lectura por cuadro (2026-09-08); puerta octogonal del stick arreglada (2026-09-09) | correcta |
+
+Queda abierto. Lo siguiente a medir es si hay fotogramas perdidos **sueltos** que la media de
+2,00 tapa: un solo cuadro de 3 campos ya desplaza el resto de la demo. `<scratchpad>/lag.py`
+cuenta las transiciones de flip una a una en vez de promediarlas.
+
+## La demo de DK64 NO pierde fotogramas: medido uno a uno (2026-09-09)
+
+La media de campos por intercambio ya salia 2,00, pero una media tapa justo lo que importa:
+a la demo de la liana le basta **un** cuadro de tres campos para que el resto de la
+reproduccion se desplace. Asi que se ha contado cada intercambio por separado con
+`KESTREL_FLIPLOG=1`, que imprime el campo de video exacto de cada escritura de `VI_ORIGIN`
+desde DENTRO del emulador (sondear el contador por telemetria tiene jitter de +-1 campo y
+falsearia precisamente los deltas de 1 y 3 que se buscaban).
+
+Corrida de 330 s con parallel-RDP, un solo START en el campo 1523 para saltarse el rap:
+
+| tramo | intercambios | 2 campos/cuadro | anomalias |
+|---|---|---|---|
+| logos + rap (campos 39..1522) | 685 | 88,91 % | 76 (66 de ellas de **1** campo) |
+| titulo + demos DK TV (campos 1524..2695) | 547 | **99,45 %** | 3 |
+
+Las tres anomalias de la demo son la entrada al titulo (delta=60, pantalla fija, y el delta=4
+siguiente) y el ultimo intercambio al matar el proceso. Dentro de la demo la cadencia es
+**exactamente 2 campos por cuadro, 30 fps clavados, cero fotogramas perdidos**.
+
+Conclusion: el desfase de la demo de la liana **no** es perdida de fotogramas. Junto con lo
+ya medido (ocupacion del RDP 18,5 %, lectura del mando correcta), la causa tiene que ser una
+divergencia de LOGICA del juego, no de ritmo: la demo de atraccion es una grabacion de mandos
+y algo que el juego lee vale distinto que en la consola.
+
+Suelto, para mirar aparte: los 66 intercambios de **1 campo** durante el rap salen en parejas
+cada ~10 campos. Huele a que ahi el juego mueve `VI_ORIGIN` por el desplazamiento de linea del
+entrelazado (mismo buffer, direccion distinta), con lo que `viFlips` cuenta un intercambio que
+no lo es. No afecta al invitado, pero si a la metrica.
+
+## El RSP tenia un tope de instrucciones por tarea: era una suposicion de libultra (2026-09-10)
+
+`junkrunner64` (SpellCraft, hecho con **libdragon**) se congelaba al empezar partida. En el
+log salia esto en bucle:
+
+```
+[rsp] WARNING: budget exhausted at pc=0x244 (microcode hang?)
+[dma!] SP->RDRAM sobre vectores: dram=0x000000/0x000040 len=64
+```
+
+Lo segundo es consecuencia de lo primero, y lo primero era **nuestro**.
+
+`Rsp::start()` ponia `budget = 40'000'000` y `step()` corria
+`while(!halt && maxInsns && budget)`. Al agotarse el saldo el nucleo metia un **BREAK
+forzado** (HALT|BROKE + MI_SP). Eso da por bueno el modelo de libultra: *una tarea = un
+BREAK*, el microcodigo arranca, hace su trabajo y para. Con ese modelo, 40 M instrucciones
+sin parar solo puede ser un microcodigo colgado.
+
+libdragon no funciona asi. `rspq` es una **cola persistente**: el planificador del RSP vive
+en IMEM y su `RSPQCmd_WaitNewInput` (`include/rsp_queue.inc:417`) solo hace `break` cuando
+la cola se **vacia**. Un juego que la mantiene alimentada encadena decenas de campos de
+video sin que el RSP pare ni una vez, y se come el tope. Ahi le metiamos el BREAK: la CPU
+veia una tarea terminada que no lo estaba, `rspq` perdia su estado, y los DMA siguientes
+salian con la cabecera de tarea ya basura -- de ahi los `SP->RDRAM` a `dram=0x000000`.
+
+En hardware real **no existe ningun tope de instrucciones**. El RSP corre hasta que su
+microcodigo hace BREAK o hasta que la CPU le escribe HALT en `SP_STATUS`. Y quien devuelve
+el control al llamante ya era `maxInsns`, no `budget`: Lockstep llama `step(1)` por
+instruccion de CPU, el worker en modo hilos llama `step(~0)` con la tarea entera.
+
+Asi que el saldo pasa a ser un **vigilante que solo avisa**. `Rsp::watchdog()` (rsp.cpp) se
+llama cuando el saldo llega a cero, imprime una linea, vuelca la escena si
+`KESTREL_RSPHANG=1` y **re-arma** otros 40 M. El tope duro sigue disponible a mano con
+`KESTREL_RSPBUDGET=<instrucciones>` para bisecar un microcodigo de verdad colgado; por
+defecto esta apagado. El aviso va limitado (los 4 primeros y luego 1 de cada 64) porque un
+`rspq` vivo lo dispara cada ~0,6 s de tiempo invitado.
+
+Medido en `junkrunner64` a 600 flips, las cuatro combinaciones de RCP x RDP:
+
+| KESTREL_THREADS | parallel-RDP | antes | ahora |
+|---|---|---|---|
+| 1 | si | 27 s limpio | 23 s limpio |
+| 1 | no | 37 s limpio | 34 s limpio |
+| 0 | si | **rc=124, colgado** | 135 s, 4 avisos, **rc=0** |
+| 0 | no | (colgaba a ratos) | 146 s, 4 avisos, **rc=0** |
+
+Los avisos solo salen en Lockstep, y tiene sentido: ahi el RDP tambien lo mueve el hilo de
+la CPU, asi que el `mfc0 DP_STATUS` / `bnez` de libdragon gira muchas mas instrucciones
+esperando al RDP que en modo hilos, donde el RDP va en paralelo y contesta enseguida.
+
+### De propina: `[dma!] ... sobre vectores` era un falso positivo
+
+"Los vectores de excepcion (0x0-0x400) no son destino legitimo de ningun DMA" tambien es un
+invariante de **libultra**, no del hardware: ahi el kernel del juego pone sus manejadores y
+pisarlos es un fallo real. El N64 no protege esa zona de ninguna manera, y libdragon mete
+estructuras suyas en RDRAM baja (`dram=0x0001a0` / `0x0001a8` en junkrunner64), disparando
+el aviso decenas de veces por campo. Pasa a ser opt-in con `KESTREL_DMAWARN=1` y cortado a
+16 lineas: es diagnostico para depurar un kernel libultra, no una condicion de error.
+
+## `PI_STATUS` IO_BUSY se apaga solo: snapper64 no arrancaba (2026-09-10)
+
+`snapper64` (bateria de tests RDP de HailToDodongo, hecha con **libdragon**) no llegaba ni a
+configurar el VI: tras 1151 campos seguia con `origin=0, width=0, ctrl=0, flips=0`. La CPU
+estaba clavada en `pc=0x8005b6c8`, que es el `dma_wait()` de libdragon:
+
+```mips
+    lw   v0, 16(v1)        # v1 = 0xA4600000, +0x10 = PI_STATUS
+    andi v0, v0, 0x3       # DMA_BUSY | IO_BUSY
+    bnez v0, -8
+```
+
+El bit que no bajaba era **IO_BUSY** (`PI_STATUS` bit 1). Lo ponia `Memory::cartWrite` cuando
+una escritura de la CPU se engancha al bus del PI, y lo bajaba **solo** `Memory::cartRead`.
+Es otra suposicion de libultra: alli el patron es escribir y despues leer del cartucho, asi
+que el latch siempre encontraba quien lo caducase. libdragon escribe y despues espera en
+`PI_STATUS` sin tocar el cartucho: el bit se quedaba puesto para siempre.
+
+En hardware la escritura pendiente dura lo que dura el ciclo del bus del PI y despues el bit
+cae; **nadie tiene que leer el cartucho para que baje**. El plazo ya existia en el nucleo
+(`CART_LATCH_TTL`, medido en reloj de invitado), solo faltaba dejarlo vencer tambien por el
+camino de lectura del registro. `Memory::piIoDecay()` (memory.cpp) hace exactamente eso y se
+llama desde `mmioRead32` case 0x10 y desde `cartRead`, que antes repetia el codigo inline.
+Una lectura de `PI_STATUS` inmediatamente despues de la escritura sigue viendo IO_BUSY
+puesto, igual que en HW: el plazo no cambia, solo deja de depender de que alguien lea el
+cartucho.
+
+Con el arreglo, snapper64 arranca y renderiza: `fields=4440, flips=4025, origin=6651904,
+width=320` en menos de 15 s. `gate_all` 430 s y `gate_prdp` 323 s, ambos rc=0: systemtest
+0/3721 en los siete modos, md5 sm64 `d35bd8aa9b13d459ce9332c07a79a53a` (soft) y
+`b5521b24d8fc280fbf102df22d7d30cb` (prdp) sin cambio, krom 371/371 con regress=0 y nodump=0
+en los dos (mean_exact 88,73 interp / 89,27 prdp).
+
+## Por que las ROMs de libdragon iban lentas: dos causas, ninguna era el RDP (2026-09-10)
+
+Medido a 600 intercambios en `junkrunner64` (libdragon) contra `Super Mario 64` (libultra),
+modo por defecto (hilos + parallel-RDP):
+
+| | antes | tras LDL/LDR | tras `wasHalted` |
+|---|---|---|---|
+| pared (junkrunner64, 600 flips) | 21 s | 21 s | **17 s** |
+| Mips emulados | 64,7 | 66,4 | **82,6** |
+| velocidad N64 (CPU) | 89,3% | 90,7% | **115,9%** |
+| `cpuWait` | 37% | 36% | **5%** |
+
+SM64 tambien sube de paso: 151 -> 161 Mips, 172% -> 186%, `cpuWait` 17% -> 10%.
+
+Antes de encontrarlas se descarto el sospechoso obvio: el **regulador del RDP**
+(`Memory::rdpPace`). Con `KESTREL_PACESLACK` gigante (freno desactivado de hecho) el tiempo de
+pared no se movia -- 21 s las dos veces, `cpuWait` seguia en 36%. No era el freno.
+
+### 1. El JIT de CPU no absorbia LDL/LDR/SDL/SDR
+
+`emitInterpOp` (`jit.cpp`) admitia LWL/LWR/SWL/SWR pero no sus versiones de 64 bits, asi que
+el bloque se declinaba entero en la primera. No es un caso raro: **GCC (libdragon) resuelve
+una copia desalineada de 64 bits con `ldl`/`ldr` + `sdl`/`sdr`, mientras que IDO (libultra)
+usa las de 32.** El perfil de junkrunner64 daba el 52% de las muestras en un bucle de
+`0x8001b184` que las lleva cada cuatro instrucciones:
+
+```mips
+    ldl v1,0(v0)
+    ldr v1,7(v0)
+    sdl v1,8(s2)
+    sdr v1,15(s2)
+```
+
+Van por el mismo trampolin de interprete que las de 32 (memoria, sin control de flujo); el
+volcado dirigido ya nombraba `rs` y `rt`, solo faltaba anadir LDL/LDR a las que escriben
+`gpr[rt]`. **+4,8%** en junkrunner64, sin cambio en SM64 (no emite ninguna).
+
+### 2. `rspAwaitIdle()` bloqueaba en CLEAR_HALT aunque el RSP ya estuviese corriendo
+
+La escritura de `SP_STATUS` (`memory.cpp`) llamaba a `rspAwaitIdle()` ante **cualquier**
+CLEAR_HALT suelto, en modo hilos. El motivo era real pero solo aplica a un LANZAMIENTO: la
+tarea anterior tiene que publicar su estado antes de que la CPU vea "terminada". Con el nucleo
+**ya corriendo**, un CLEAR_HALT es un no-op en hardware -- limpia un bit que ya esta limpio, no
+lanza nada, no hay nada que ordenar.
+
+Y libdragon lo escribe constantemente. `rspq_flush_internal()` (`src/rspq/rspq.c:1165`), en
+CADA vaciado de cola y **dos veces seguidas a proposito**:
+
+```c
+*SP_STATUS = SP_WSTATUS_SET_SIG_MORE | SP_WSTATUS_CLEAR_HALT | SP_WSTATUS_CLEAR_BROKE;
+__asm("nop; nop; nop; b 1f; 1:nop; nop; nop; nop; nop; nop;");
+*SP_STATUS = SP_WSTATUS_SET_SIG_MORE | SP_WSTATUS_CLEAR_HALT | SP_WSTATUS_CLEAR_BROKE;
+```
+
+Como `rspq` es cola persistente y solo hace break cuando se **vacia** (ver la seccion del
+vigilante del RSP), cada uno de esos avisos clavaba a la CPU emulada hasta que el worker se
+comiese la cola entera: **37% del tiempo de pared**, con el worker del RSP ocupado solo un 30%.
+El comentario del propio libdragon lo dice ahi mismo: un emulador deberia *resincronizar* CPU
+y RSP en `SP_STATUS`, no bloquear hasta el BREAK.
+
+El arreglo ata la espera a `wasHalted`, la MISMA condicion que ya usaba el lanzamiento tres
+lineas mas abajo. Lockstep no se toca (133 s a 600 flips, igual que antes).
+
+Los dos cambios pasan `gate_all` y `gate_prdp` con systemtest 0/3721 en los siete modos, md5
+de SM64 sin cambio en las dos ramas y krom 371/371 con regress=0 y nodump=0.
+
+## La captura de telemetria metia la cobertura en el canal alfa (2026-09-10)
+
+`capture_framebuffer` sobre snapper64 devolvia una pantalla **en blanco**: el menu no salia
+por ningun lado. En RDRAM estaba dibujado perfectamente -- se leia letra por letra con
+`mem.read` -- y aun asi el PNG salia vacio. La sospecha inicial (que el modo repeat del MI,
+que snapper64 usa via `__mi_memset64` de libdragon, no estuviera emulado y las escrituras de
+64 bits de la CPU se perdieran) era **falsa**: `Memory::miRepeatStore` + el armado en
+`MI_MODE` coinciden instruccion a instruccion con `libdragon/src/mi_memset.S`, y snapper64 no
+imprime su aviso "MI-Rep. not emulated, using fallback".
+
+El fallo estaba en el **visor**, no en el emulador. `cmdViCapture` (`src/telemetry/server.cpp`)
+copiaba el ultimo byte del pixel de 32bpp al canal alfa del PNG. Ese byte **no es alfa**: es
+la **cobertura** (`coverage`) que el VI usa para el antialias de bordes, y el DAC del N64 saca
+siempre imagen opaca. Todo lo que dibuja la CPU deja cobertura 0, asi que salia con alfa 0 --
+transparente -- y el visor lo componia sobre blanco. Solo se veia lo que habia pintado el RDP,
+que si deja cobertura. En 16bpp era todavia peor: ahi la cobertura es el bit 0 del pixel, asi
+que desaparecia cualquier pixel cuyo bit menos significativo fuera 0.
+
+La captura pasa a salir **opaca** siempre. La cobertura, si algun dia hace falta, es un plano
+aparte, no el alfa. La rama de GPU (`vrdp::scanout()`) no se toca: parallel-RDP ya entrega
+RGBA opaco.
+
+Tras el arreglo el menu de snapper64 se captura tal cual:
+
+```
+             < Failed [ALL] Options >
+  Run All                          Results
+  RAM 9th Bit - CPU->CPU           ----/0004
+  RDP Fill Mode Tri (Sweep)        ----/2048
+  ...
+  C: Select / A: Run Test / B: Dump Test / S: Stop Test
+```
+
+Es un arreglo de **clase**: explica todas las "capturas en blanco" anteriores, que se venian
+achacando al nucleo. Cambio de telemetria puro, sin efecto en emulacion (systemtest 0/3721 en
+los siete modos, md5 de sm64 identico en interp y prdp, krom regress=0).
+
+## Los registros DPS (0x0420_0000) no existian: el puerto de test del RDP (2026-09-10)
+
+`snapper64` trae un grupo entero, `RDP Test-Mode - Span R/W`, que daba **0 de 32**. No era
+precision: era que el bloque de registros **DPS** (Display Processor Span) sencillamente no
+estaba mapeado. Lo comprobado antes de tocar nada: no lo implementan ni kestrel64, ni ares, ni
+libdragon, ni parallel-rdp (barrido local exhaustivo, cero resultados).
+
+Que es. El RDP guarda internamente un **buffer de tramos** (spans) y `0x0420_0000` es el puerto
+por el que la CPU puede leerlo y escribirlo:
+
+| Registro | Desplazamiento | Que hace |
+|---|---|---|
+| `DPS_TBIST` | +0x00 | autotest de la TMEM (11 bits) |
+| `DPS_TEST_MODE` | +0x04 | abre el puerto (1 bit) |
+| `DPS_BUFTEST_ADDR` | +0x08 | elige la palabra, **7 bits** |
+| `DPS_BUFTEST_DATA` | +0x0C | mueve el dato de/hacia esa palabra |
+
+La forma del RAM interno es lo interesante, y es lo que mide el test: el registro de direccion
+es de **7 bits**, asi que la ventana da la vuelta cada **128 palabras**. Esas 128 palabras son
+**32 entradas de tramo de 4 ranuras**, y de las cuatro ranuras solo tres tienen registro fisico
+detras:
+
+- ranura 0 y 1: palabra completa de 32 bits,
+- ranura 2: **solo 8 bits** -- es la cobertura del tramo, el resto se pierde,
+- ranura 3: **no existe** -- se lee como cero y las escrituras se van a la nada.
+
+snapper64 escribe 1024 palabras seguidas con cuatro patrones distintos y comprueba las 4096
+lecturas contra exactamente ese enmascarado (`maskValue()` en `RDPTestModeRW.cpp`: `i%4==2` ->
+`& 0xFF`, `i%4==3` -> `0`). Cualquier programa que barra la ventana ve ese patron, no solo un
+test: es la forma real de la memoria interna del RDP.
+
+Implementado en `src/core/memory.{hpp,cpp}` como almacenamiento mas los dos ayudantes
+`dpsSpanRead()` / `dpsSpanWrite()` que aplican el enmascarado, y anadido a la foto de estado
+(`savestate.cpp`, version 8 -> **9**). Lo que **no** se modela es que el rasterizador alimente
+ese buffer al dibujar: eso es estado interno del RDP que parallel-RDP no expone, y es
+justamente el otro grupo (`Test-Mode Span Tri`, 216 tests) -- queda anotado en `docs/GAPS.md`.
+
+Resultado: `RDP Test-Mode - Span R/W` pasa de **0000/0032** a **0032/0032**.
+
+### El marcador completo de snapper64, y que dice
+
+Aprovechando la bateria entera en `build-prdp`: **4182 / 6632**. Dos conclusiones que valen mas
+que el numero:
+
+1. **parallel-RDP puntua exactamente igual que nuestro SoftRDP, grupo a grupo.** Los mismos
+   2450 fallos en los mismos sitios. Eso descarta de golpe "precision del rasterizador": son
+   **funciones que faltan** en los dos.
+2. **Casi nada de esto es un problema de tiempos.** El unico bloque que mide latencia del cauce
+   del RDP es `Rect No-Sync` (60 tests de 6632), y ahi parallel-RDP no puede ganar por
+   construccion: aplica cada orden de forma atomica.
+
+El bloque gordo que **si** es arreglable es el triangulo en ciclo FILL (2055 tests): comparando
+pixel a pixel con la referencia de consola (los modos `Ref` de snapper64 copian la captura de
+hardware dentro de la superficie) sale que la consola escribe **bytes parciales** en los bordes
+del tramo -- pixeles con solo el byte R puesto. El tramo en FILL se calcula en bytes/palabras de
+64 bits, no en pixeles. Ese es el siguiente objetivo.
+
+## La cache estaba emulada pero no costaba nada (2026-09-10)
+
+Pregunta del usuario: *"y no tendras que meter eso igual de cache i?? como el otro emulador
+para corregir las lianas??"*. La respuesta corta es **la cache ya esta, lo que falta es su
+coste**, y ahora ya se puede cobrar.
+
+Lo que habia desde hace mucho, y sigue estando:
+
+| pieza | donde |
+|---|---|
+| `ICacheLine icache[512]` (16 KB, linea de 32 B) | `src/cpu/cpu.hpp` |
+| `DCacheLine dcache[512]` (8 KB, linea de 16 B, bit sucio) | `src/cpu/cpu.hpp` |
+| `dcRead`/`dcWrite` en linea con comparacion de tag | `src/cpu/cpu.hpp` |
+| `dcMiss` (write-back + relleno), `dcFlush`, `dcFill` | `src/cpu/cpu.cpp` |
+| `icFetch`/`icFill` -- ejecuta codigo *stale* si un DMA pisa RDRAM sin invalidar, como el HW | `src/cpu/cpu.cpp` |
+| la instruccion `CACHE` completa (`cacheOp`) | `src/cpu/cpu.cpp` |
+| integracion en el dynarec (`kestrel_jitCACHE`, `dcOff`) | `src/cpu/jit.cpp` |
+| las dos caches en el savestate | `src/core/savestate.cpp` |
+
+Lo que NO habia: **ni un ciclo de coste**. `dcMiss()` empezaba con `dcMisses++;` y ahi se
+acababa. El reloj era plano -- `cpi256 = 179` (CPI 1,4) para toda instruccion, pasee por RDRAM
+o no. Es justo el agujero que m64p cerro para las lianas de DK64: la fase del juego respecto al
+VI depende de donde caen los fallos, y con un CPI constante no cae en ningun sitio.
+
+### Los dos obstaculos, que no eran la cache
+
+**1. El latch del timer era una igualdad.** `if(Count == Compare) timerIntr = true` solo funciona
+mientras Count avanza 0 o 1 por instruccion. Un fallo cuesta ~60 ciclos de CPU = ~30 ticks de
+Count *de golpe*: Count pasaria POR ENCIMA de Compare y la interrupcion del temporizador se
+perderia entera. Ahora lo hace `CPU::countAdd()`, que comprueba si Compare cae DENTRO del tramo
+`(old, old+ct]`; con `ct == 1` es exactamente la igualdad de antes, bit a bit.
+
+**2. Las guardas de borde del dynarec comparaban ops contra ticks.** En `jitTryBlock`:
+
+```cpp
+u32 d = cmp - cnt;                 // ticks hasta Count==Compare
+if(d <= K) { JDECL(DR_TIMER); return 0; }   // K = OPS del bloque
+```
+
+Eso solo es conservador mientras `ticks(ops) <= ops` -- y por eso `cpiFromEnv()` acota
+`cpi256 <= 256` con un comentario que lo dice. Ahora se compara contra `countTicksMax(K)`, la
+cota superior de ticks que puede costar el bloque (peor racha: 2 fallos por op). Con el coste
+apagado `countTicksMax(K) == K` y las guardas quedan **byte a byte** como estaban. El permiso
+de la cadena, que se descuenta en ops pero lo acota un margen en ticks, se convierte con
+`opsForTicks()`, la inversa conservadora.
+
+### Y el reloj no se parte en dos
+
+El campo de video (`Memory::viTick` / `viFieldInsns`), la lectura de `VI_V_CURRENT`, el plazo
+del SI y el decaimiento del pestillo del PI (`Memory::cartNow`) miden el tiempo en
+**instrucciones retiradas**. Si las paradas solo movieran Count, el reloj del invitado y el del
+video correrian a ritmos distintos -- que es el bug de "dos relojes" que documenta
+`Clocks::cyclesPerInsn` y que ya paso una vez (750 k instrucciones por campo en el tick contra
+1,56 M en la lectura). Por eso las paradas se traducen tambien a **ops equivalentes**
+(`stallOps`, con `1 op = cpi256/128 ciclos`) y las suman `viTick` y `cartNow`. Un campo con
+muchos fallos hace MENOS trabajo de CPU, que es lo que pasa en la consola.
+
+### Lo que mide
+
+`KESTREL_CACHECOST=<ciclos>` (`1`/`on` = 60 ciclos = ~640 ns de latencia de RDRAM a 93,75 MHz;
+`0` = apagado = **defecto**). Al cortar, el emulador imprime `[cpi] base X real Y`. Con 400
+intercambios por juego:
+
+| juego | fallos D$ | fallos I$ | CPI que anaden | total con base 1,0 | CPI medido aparte |
+|---|---|---|---|---|---|
+| SM64 | 0,745 % | 0,006 % | +0,451 | 1,451 | -- |
+| DK64 | 0,399 % | 0,006 % | +0,243 | 1,243 | **1,19** |
+| Perfect Dark | 0,250 % | 0,013 % | +0,158 | 1,158 | **1,45** |
+
+Esto es lo que hacia falta para poder *justificar* el numero en vez de elegirlo: el CPI deja de
+ser un gusto y pasa a ser "1,0 de canalizacion mas lo que la cache le cueste a ESE juego". DK64
+cuadra con su medida independiente (1,243 contra 1,19). Perfect Dark no: sale demasiado barato.
+
+### Por que sigue apagado de fabrica
+
+El `kCpiDefault256 = 179` de hoy **no es** el CPI de canalizacion del VR4300, es un CPI
+*efectivo* medido sobre juegos: ya lleva dentro el coste medio de los fallos, promediado.
+Encender el coste sin bajar antes la base a la canalizacion pura contaria la penalizacion dos
+veces. Y bajarla a 1,0 hoy dejaria a Perfect Dark por debajo de su propia cota inferior.
+
+Lo que falta esta en `docs/GAPS.md`, por orden: (1) cobrar los accesos **no cacheados** -- un
+load a KSEG1 paga la latencia entera de RDRAM y aqui no cuesta nada, y Perfect Dark corre
+mapeado por TLB usando KSEG1 a manos llenas; (2) la asociatividad (aqui las dos caches son de
+mapeo directo, en la VR4300 son de 2 vias, o sea aqui se falla de MAS); (3) recalibrar la base
+y rehacer entero el barrido de "que falta para mover el defecto".
+
+Con el defecto (`KESTREL_CACHECOST=0`) el emulador se comporta exactamente como antes.
+`systemtest` da `0/3721 · 0/2 · 0/6` en interprete y dynarec **con el coste apagado y tambien
+encendido a 60**. El savestate sube a version 10 (`stallCycles`, `stallOps`, `stallOpsRem`: son
+reloj de invitado a medio consumir, igual que `countFrac`).
+
+## Los accesos no cacheados SI cuestan, pero NO son la explicacion (2026-09-10)
+
+Con la cache ya cobrando ciclos ([[seccion anterior]]) el CPI de Perfect Dark se quedaba en
+1,158 contra un suelo medido de 1,45. El sospechoso obvio: **KSEG1**. Un load a memoria no
+cacheada no mira la cache, va al bus y paga la latencia entera de RDRAM (~640 ns = ~60
+ciclos a 93,75 MHz). PD toca registros del RCP constantemente. Parecia cerrado.
+
+Se implemento con su propia perilla, `KESTREL_UNCACHEDCOST` (`0`/`off` por defecto,
+`1`/`on` = 60 ciclos, o un numero), separada de `KESTREL_CACHECOST` a proposito: aunque la
+cifra coincida son dos costes DISTINTOS, y solo con perillas separadas se puede medir uno
+sin el otro.
+
+**Solo se cobran las LECTURAS.** En la VR4300 los stores no cacheados son *posted*: el bufer
+de escritura se los queda y la CPU sigue; solo para si llega otro store antes de que el
+anterior drene. Cobrar cada store como si fuera sincrono seria inventarse una parada que el
+hardware no tiene, y falsearia al alza justo los juegos que mas escriben en registros del
+RCP -- es decir, justo el caso que se queria medir.
+
+Puntos de cobro (`chargeUncached()`): las cuatro entradas `CPU::read8/16/32/64` cuando el
+destino no es cacheable, `LL` y `LLD`, y los dos ayudantes de memoria del dynarec. El camino
+rapido que emite el JIT no hace falta tocarlo: solo cubre ckseg0 dentro de RDRAM
+(`cmp eax, jitRdramSz` / `jae`), asi que todo lo no cacheado cae ya en los ayudantes en C.
+
+### El resultado mata la hipotesis
+
+| Juego | lecturas no cacheadas / retiradas | +CPI que aportan | CPI final | suelo medido |
+|---|---|---|---|---|
+| SM64 | 0,021 % | +0,013 | 1,463 | ~1,45 |
+| DK64 | 0,005 % | +0,003 | 1,244 | ~1,19 |
+| Perfect Dark | 0,032 % | +0,019 | 1,199 | **~1,45** |
+
+Dos por diez mil. El "nunca en bucles calientes" de la guia de optimizacion funciona: los
+juegos comerciales ya evitan KSEG1 en lo que se ejecuta mucho. Perfect Dark sigue a 1,199
+contra 1,45. **KSEG1 no explica nada.** Queda implementado igual porque es semantica real
+del hardware y suma cuando se enciende, pero como hipotesis esta refutada, y asi consta en
+`docs/GAPS.md` -- refutada, no callada.
+
+### Sesgo conocido que queda
+
+`SWL`/`SWR`/`SDL`/`SDR` se emulan como lectura-modificacion-escritura. Sobre memoria
+cacheada eso es correcto (un store parcial que falla en D-cache rellena la linea de verdad),
+pero sobre memoria NO cacheada se cobra una lectura que el hardware no hace. Con tasas de
+0,03 % es ruido; anotado por si algun dia deja de serlo.
+
+
+## Dos relojes, un plazo: el cuelgue del SI con el coste de cache (2026-09-10)
+
+Al intentar medir el CPI de la FPU con `KESTREL_CACHECOST=60` salio una regresion que las
+puertas no cogian, porque `gate_all` nunca enciende esa perilla: **SM64 arrancaba y no
+dibujaba nada**. 300 campos de video, 0 intercambios de buffer, 0 syncs del RDP, **0 lecturas
+de mando**, `vi_origin=0x27f`. El perfilador decia que el 99,04 % de las muestras estaban en
+`0x80246DD8 beq zero,zero,80246dd8`, justo detras de un `jal 803236f0` (`osSetThreadPri(NULL,0)`):
+el hilo ocioso de SM64. Los campos del VI SI avanzaban y la interrupcion del VI SI llegaba;
+lo que no corria nunca era el hilo principal.
+
+Era dependiente de la magnitud (`=2` -> 87 intercambios, `=8` -> 1, `=30`/`=60` -> 0) y no era
+cosa del dynarec (el interprete se colgaba igual). Para partirlo en dos hicieron falta dos
+herramientas nuevas:
+
+* **`KESTREL_MAXFIELDS=<n>`** (`src/core/system.cpp`): tope de parada por CAMPOS de video. Los
+  otros dos topes (`MAXFLIPS`, `MAXSYNCS`) cuentan trabajo del RCP, o sea que no sirven justo
+  cuando mas falta hacen -- un juego que arranca y nunca dibuja no se para solo y hay que
+  matarlo por timeout a ciegas, sin la telemetria de cierre.
+* **`KESTREL_STALLCLOCK`** (`src/cpu/cpu.{hpp,cpp}`): perilla de biseccion del ACOPLE de las
+  paradas al reloj de invitado. `1` (defecto) los dos acoples; `vi` solo `guestOps()` ->
+  `viTick`; `cart` solo `cartNow()` -> PI/SI; `0` ninguno. No apaga el cobro de ciclos ni la
+  telemetria: separa "cobrar mal" de "acoplar mal".
+
+La biseccion dio el culpable en un paso: `vi` funcionaba (95 intercambios), `cart` no (0).
+
+### La raiz
+
+`Memory::siDma()` arma el plazo de la transaccion del joybus en el reloj de invitado:
+
+```cpp
+siDoneAt = cartNow() + usToInsns(us);   // cartNow() = retired + jitPending + stallOps
+```
+
+y el bucle principal lo vencia en OTRO reloj:
+
+```cpp
+if(memory.siBusy && cpu.retired >= memory.siDoneAt) memory.siFinish();   // <- solo retired
+```
+
+Con el coste de cache apagado los dos relojes son el mismo y no se nota. Encendido, `siDoneAt`
+nace desplazado por **todas las paradas acumuladas desde el arranque**, no por lo que dura la
+transaccion: cuanto mas lleva corriendo el juego, mas lejos queda el plazo. `retired` acaba
+alcanzandolo, pero cientos de miles de instrucciones tarde, asi que `SI_STATUS.DMA_BUSY` se
+queda pegado, la interrupcion del SI no llega, `osContStartReadData` no vuelve nunca y el
+kernel de libultra no despierta al hilo del juego. De ahi las 0 lecturas de mando y el hilo
+ocioso al 99 %.
+
+**Arreglo**: vencer el plazo en el reloj en que se arma (`memory.cartNow() >= memory.siDoneAt`).
+Una linea, y es la semantica correcta con o sin la perilla: un plazo tiene que nacer y morir en
+el mismo reloj. La guarda del JIT (`jit.cpp`, `mem->siDueIn(mem->cartNow())`) ya usaba
+`cartNow()`, o sea que ademas los siete modos vuelven a estar de acuerdo en el instante exacto
+de `MI_SI`.
+
+Verificado: SM64 con `KESTREL_CACHECOST=60` pasa de 0 a **95 intercambios / 96 syncs / 96
+lecturas de mando** en 300 campos, identico a la corrida sin coste, y `STALLCLOCK=1` y
+`STALLCLOCK=cart` dan ya el mismo resultado.
+
+### Leccion para las puertas
+
+Ningun gate enciende `KESTREL_CACHECOST`, asi que este fallo podia vivir indefinidamente. El
+patron -- "plazo armado en un reloj, vencido en otro" -- hay que buscarlo tambien en el PI
+(`cartLatchExpiry`, que si usa `cartNow()` en los dos lados) y en cualquier plazo futuro del
+planificador de eventos.
+
+
+## El audio de DK64: el ritmo era exacto, el hipo era del cebado (2026-09-10)
+
+Reporte del usuario: "el audio se entrecorta, se hace mas grave" y, en DK64, "va acelerado".
+Medido en vez de supuesto, con `KESTREL_AUDIOSTAT=1` y el limitador puesto:
+
+**1. El ritmo de produccion es exacto.** DK64 es PAL (`region 'P' -> PAL (50.00 campos/s)`,
+bien detectado) y el AI abre el sumidero a 22 049 Hz. Restando tandas para quitar el silencio
+del arranque:
+
+| tramo | campos | segundos de invitado | fotogramas empujados | Hz efectivos |
+|---|---|---|---|---|
+| 250 -> 500 | 250 | 5,0 | 110 216 | 22 043 |
+| 500 -> 1000 | 500 | 10,0 | 220 432 | 22 043 |
+
+22 043 contra 22 049 = **0,03 % de desviacion**. No hay deriva de tono ni de velocidad en el
+audio; el juego produce exactamente lo que le toca.
+
+**2. "Acelerado" es correr sin limitador.** 500 campos PAL = 10,0 s de invitado; medido:
+`KESTREL_THROTTLE=1` -> 10,48 s de pared (los 0,48 son el arranque), `KESTREL_THROTTLE=0` ->
+**5,70 s = 1,76x tiempo real**. El automatico (`rt::throttle == -1`) limita solo si hay ventana,
+asi que una sesion con ventana ya va bien; una corrida sin ventana va a 1,76x y suena rapida.
+
+**3. El hipo SI era nuestro, y estaba en el cebado del sumidero.** `feederLoop` esperaba un
+colchon de `kPrimeSamples = kBufSamples * 2` (dos bufers) y, en cuanto lo tenia, encolaba los
+**cuatro** bufers del dispositivo de golpe. Los dos ultimos salian a medias: `ringPull` rellena
+de ceros lo que no hay. Y la comprobacion de "se acabo el colchon" estaba DESPUES de servir el
+hueco, o sea que el silencio ya iba encolado. Medido en DK64: **9 616 muestras de silencio por
+arranque, la misma cifra corriera 250, 500 o 1000 campos** -- un hipo fijo al empezar a sonar,
+no hambre continua.
+
+Arreglo, dos piezas:
+* `kPrimeSamples = kBufSamples * kNumBufs`: el colchon minimo es lo que el alimentador va a
+  encolar de golpe, no la mitad.
+* Antes de cada `ringPull`, si no hay bufer ENTERO se descebra y se sale del bucle. Lo ya
+  encolado sigue sonando mientras se rehace el colchon, y nunca se encola un bufer medio mudo.
+
+Resultado, con el limitador puesto:
+
+| ROM | antes | despues |
+|---|---|---|
+| DK64 250/500/1000 campos | silencio 5,69 % / 2,61 % / 1,17 %, cortas 17 | **0,00 % / 0,00 % / 0,00 %, cortas 0** |
+| SM64 600 campos (32 006 Hz) | -- | **0,00 %, cortas 0** |
+
+Es cambio del anfitrion: no toca ni un bit de estado de invitado.
+
+## El RSP tambien corre mientras la CPU esta parada en la cache (2026-09-10)
+
+Segunda entrega de "un plazo nace y muere en el mismo reloj", esta vez sin cuelgue: el
+acoplamiento CPU:RSP media la CPU en **instrucciones retiradas** y no en tiempo de invitado.
+
+**Donde.** Dos sitios, el mismo error:
+
+- Lockstep, `src/core/system.cpp`: `rspPhase += rspStepNum` una vez por instruccion retirada.
+- Threaded, `Memory::rcpPace` / `rspPace` / `rdpPace` (y la llamada del prologo del dynarec en
+  `jit.cpp`): la base del episodio y el adelanto se tomaban de `cpu.retired`.
+
+**Por que esta mal.** El ratio que sale de `Clocks` es pasos de RSP por instruccion-equivalente
+de CPU. Una instruccion que falla en la D$ cuesta ~60 ciclos de latencia de RDRAM, y durante
+esos 60 ciclos el RSP **sigue corriendo a 62,5 MHz**. Contando solo retiradas, al RSP le tocan
+menos pasos de los que le tocan de verdad, y el sesgo aprieta justo en las escenas con mas
+fallos de cache. En Threaded era ademas coherente consigo mismo pero con un reloj distinto del
+de Lockstep, y que los dos modos den el MISMO md5 es una invariante de las puertas.
+
+**Arreglo.** Los dos lados miden ya en `cpu.guestOps()` = retiradas + paradas convertidas a
+instrucciones-equivalentes (`stallOps`), que es el mismo reloj en que nacen y vencen el campo
+de video, el plazo del SI y el latch del PI:
+
+```cpp
+u64 nowGuestOps = cpu.guestOps();
+u64 dGuestOps   = nowGuestOps - lastGuestOps;
+lastGuestOps    = nowGuestOps;
+if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running && dGuestOps) {
+  rspPhase += rspStepNum * dGuestOps;
+```
+
+La referencia se reengancha al salir de un bloque del dynarec: ese camino solo se toma con el
+RSP parado, asi que lo que avance el reloj ahi dentro no le toca al RSP y no debe acumular
+fase. Con `KESTREL_CACHECOST` apagado `dGuestOps` vale 1 por instruccion y el binario se
+comporta byte a byte como antes.
+
+**Medido** (DK64 PAL, 300 campos de video, `KESTREL_MAXFIELDS=300`):
+
+| coste | modo | intercambios | syncs RDP | retiradas |
+|---|---|---|---|---|
+| 0  | Lockstep | 74 | 56 | 402M |
+| 0  | Threaded | 74 | 56 | 402M |
+| 60 | Lockstep (antes) | 74 | 31 | 316M |
+| 60 | Lockstep (ahora) | **76** | 31 | 320M |
+
+Sin coste los dos modos coinciden EXACTO. Con coste, Lockstep sigue siendo determinista (3 de 3
+corridas identicas antes y despues) y el RSP recibe ahora los pasos que le tocan durante las
+paradas.
+
+**De paso, y esto es lo gordo del dia: el modo Threaded NO es determinista.** No lo trae este
+cambio y no tiene que ver con el coste de cache -- la primera version de esta nota decia lo
+contrario porque se escribio con UNA corrida por configuracion. Con cuatro, DK64 PAL a 300
+campos y `CACHECOST=0` da **72 / 70 / 73 / 73** intercambios y 56 / 53 / 55 / 56 syncs, con
+`origin` alternando entre `0283c0` y `0be3c0`, mientras Lockstep clava 74 / 56 las tres veces.
+SM64 igual: 71 / 95 / 95 en Threaded contra 95 fijo en Lockstep. Tampoco es el acople de las
+paradas: con `CACHECOST=60 STALLCLOCK=0` sigue bailando.
+
+Las retiradas SI son estables (402M) porque el bucle pide exactamente `viFieldInsns` por campo;
+lo que baila es donde caen las cosas dentro del campo. La causa es que los workers levantan
+`MI_SP` (`src/rsp/rsp.cpp`, al llegar al BREAK) y `MI_DP` cuando terminan en tiempo de **pared**:
+el invitado ve la interrupcion en una instruccion distinta cada corrida y el hilo que esperaba
+despierta antes o despues. Las puertas no lo cazan porque validan "Lockstep == Threaded" con
+SM64 a 60 campos, que aun no ha divergido.
+
+**Threaded determinista (2026-09-10, docs/GAPS.md 3b -- RESUELTO).** En Threaded los workers
+levantaban `MI_SP`/`MI_DP` en tiempo de PARED: dos corridas del mismo binario daban partidas
+distintas (DK64 a 300 campos: 72/70/73/73 intercambios contra 74 fijo de Lockstep; SM64
+71/95/95 contra 95). Arreglado con dos piezas que aplican la regla de siempre -- *un plazo nace
+y muere en el mismo reloj*: (1) el **paseo de coste del RDP va delante del dibujado**, asi que
+`rcp.rdpGclk` lleva el coste del tramo desde el principio en vez de saltar al final; (2)
+**barreras de invitado** para los dos dominios (`dpBarrierOps`, `spBarrierAt`, bits 2 y 3 de
+`rcpPend`, metidas en `rcpDueIn` y con salvavidas de 20 ms): la CPU no puede pasar del instante
+de invitado en que la tarea en vuelo termina. Resultado: `spLate`/`dpLate` = **0** -- ningun
+plazo nace vencido --, DK64 clava la traza por campo 13 corridas de 13 y SM64 4 de 4, y las dos
+coinciden con Lockstep linea a linea a 300 campos. Cuesta ~10 % de pared en DK64 (barrera del
+RDP; la del RSP es gratis) y sigue por encima de tiempo real. Perillas `KESTREL_DPBARRIER=0` /
+`KESTREL_SPBARRIER=0` / `KESTREL_FIELDTRACE=1` (traza por campo, para bisecar).
+
+**Verificacion.** `gate_all` rc=0 en 460 s y `gate_prdp` rc=0 en 368 s: siete modos
+`Base 0/3721 Timing 0/2 Cycle 0/6`, md5 de sm64 `d35bd8aa9b13d459ce9332c07a79a53a` (interp) y
+`b5521b24d8fc280fbf102df22d7d30cb` (parallel-RDP) sin cambio, krom interp 371/371
+`88,73`/`92,08` con regress=0 improve=0 new=0, krom prdp 371/371 `89,27`/`92,56` con regress=0
+improve=2 (los dos Cube animados de siempre, desfase de cuadro), nodump=0.
+
+
+## 2026-09-11 — Threaded determinista de verdad: horario del RDP en tiempo de envio + aparcamiento del RSP
+
+Lo de arriba (2026-09-10) dejaba clavadas todas las columnas que el invitado puede ver, pero
+quedaba una que no: `rsp=` (los ciclos del RSP). Derivaba sobre 104-115 M y las columnas de
+invitado de DK64 solo cuadraban hasta el campo 206. Cerrado hoy. Detalle completo en
+`docs/wip/README.md`; resumen:
+
+- **Horario del RDP en tiempo de envio.** `rdpSubmit` corre el modelo de coste bajo `rdpMx` y
+  archiva el tramo entero (`dpScheduleSpan`) con instante de arranque y de cierre en un anillo
+  de 256; el worker solo pinta. Ocupado/libre, `DPC_CURRENT` y `END_VALID` salen de ese anillo
+  y del reloj de QUIEN pregunta, nunca del estado del anfitrion.
+- **Reloj exacto del RSP** (`exactCycles`/`publishExact`, `Memory::rspGuestNowAt`): el lado del
+  RSP pregunta con su propio instante de invitado.
+- **La fuga que quedaba no era desorden de envio** (`ooo=0` en todas las corridas: la barrera de
+  invitado del SP ya ata la CPU por detras del RSP) sino **lecturas de horario rancias**: el
+  microcodigo sondea `DPC_CURRENT` desde un instante POSTERIOR al de la CPU, y la CPU archiva
+  despues el siguiente buffer con `kick = cartNow()`, o sea ANTES de instantes ya contestados.
+  42-47 por cada 300 campos, todos del hilo de la CPU.
+- **Aparcamiento del RSP** (`Rsp::idleSkip` + `Memory::rspParkWait`). El bucle de espera del
+  FIFO de F3DEX2 (IMEM 0x2a0, cinco instrucciones) no tiene efecto lateral y con el motor
+  drenado `DPC_CURRENT` es constante. Se reconoce por su firma leida del flujo -- mismo PC,
+  mismo FNV-1a de `r[1..31]`, mismo valor devuelto, misma distancia en ciclos, cuerpo de 2 a 64
+  ciclos, `dpDrainedAt(now)` -- sin hardcodear nada. Aparcado, el RSP no puede levantar
+  interrupcion ni escribir `DPC_END` ni tocar memoria, asi que la barrera del SP se levanta y la
+  CPU corre libre; lo despierta el `kick` del tramo siguiente (instante de invitado) y se le
+  cobran las iteraciones enteras que caben. **Solo en Threaded**: en Lockstep los dos chips
+  comparten hilo y aparcar al RSP para la maquina entera (DK64 se quedaba muerto en f=67).
+  `KESTREL_RSPIDLE=0` lo apaga sin mover el md5 del framebuffer.
+- **La cita de lectura del FIFO** (`dpReadSync`, `KESTREL_DPRDV`) resolvia lo mismo por la via
+  cara y pasa a nacer APAGADA: su ventana `kRdvLead` era la unica causa de que 10-13 fechas de
+  fin de SP nacieran tarde. Se deja a mano porque cubre un caso que el aparcamiento no toca
+  (sondear `DPC_CURRENT` con un tramo ABIERTO y por delante de la CPU).
+- **Dos carreras mas**, que a 3 corridas no se veian y a 6 divergian 1 de cada 3-4: el aviso de
+  despertar se perdia si el tramo se archivaba entre que `idleSkip` veia el motor drenado y que
+  `rspParkWait` publicaba el aparcamiento (ahora se comprueba a mano con `dpSubSeq`/`seq0`), y
+  la barrera del SP se quedaba abierta durante toda la latencia de despertar del anfitrion
+  (ahora se cierra en cuanto hay fecha de despertar publicada, que la pone el propio hilo de
+  CPU). Y el `[ft]` se escribia con `fprintf` y salia partido entre hilos: ahora es un solo
+  `fwrite`.
+- **Savestates**: el horario no se serializa (es derivado, y el estado se toma con el RCP en
+  reposo) sino que se REINICIA al cargar con `Memory::rcpSchedReset` desde `afterLoad`.
+  `System::quiesceRcp` despierta antes al RSP aparcado (`rspParkNudge`).
+
+**Medida** (DK64 PAL, 300 campos, traza por campo entera, columna `rsp=` incluida):
+
+| build | corridas | md5 de la traza |
+|---|---|---|
+| `build-prdp/` Threaded | 6/6 | `d3bee5263f26e4dca3519e277220e090` |
+| `build/` (SoftRDP) Threaded | 4/4 | `b43236f9c027f4a0cbaf19df040e0ffc` |
+| `build-prdp/` Lockstep | 2/2 | `ce4ec2bc2d6298cb69d270607db199ee`, identico con `KESTREL_RSPIDLE=0` |
+
+`[det]` clavado: `rspCycles=60771479`, `spArm=173/0 tarde`, `dpArm=56/0 tarde`, `stale=0`,
+`ooo=0`, `park=48/0`, `idle=48/6621806`, `dpcRd=5658`.
+
+**Coste**: 13,9 M sondeos emulados pasan a 5,7 k, pero el aparcamiento serializa los dos hilos a
+grano de tarea: la corrida de 300 campos va de 6 s (no determinista) a 9 s SoftRDP / 8 s
+Parallel-RDP. Recuperar ese solape es el siguiente punto de rendimiento y es independiente de la
+correccion.
+
+**Verificacion.** `gate_all` rc=0 en 468 s y `gate_prdp` rc=0 en 334 s (linea base 481 / 376):
+ocho modos `Base 0/3721 Timing 0/2 Cycle 0/6`, `rsp_test`/`save_test`/`cheat_test`/
+`archive_test`/`wildmem_test`/`rewind_test` ALL PASS, md5 de sm64
+`d35bd8aa9b13d459ce9332c07a79a53a` (interp) y `b5521b24d8fc280fbf102df22d7d30cb` (parallel-RDP)
+sin cambio -- tambien con `KESTREL_RSPIDLE=0` --, krom interp 371/371 `88,73`/`92,08` regress=0,
+krom prdp 371/371 `89,27`/`92,56` regress=0 improve=2 (los dos Cube animados de siempre).
+
+## 2026-09-11 — Medidor de ocupacion del bus de RDRAM (se acabo el `RAM0%`)
+
+El pie de velocidad de la ventana enseña `CPU% RSP% RAM%` y el tercero salia SIEMPRE 0:
+`System::rdramSpeedPct` nacia `{0.0}` y no lo escribia nadie ("RDRAM has no per-transaction
+cycle model yet"). Ya lo hay, y no como estimacion: se cuentan bytes donde el trafico ocurre.
+
+**Que se cuenta y donde.**
+
+| maestro | contador | de donde salen los bytes |
+|---|---|---|
+| CPU | `CPU::ramCpuBytes` | relleno de linea de D$ 16 B (`dcMiss`/`dcFill`), volcado de linea sucia 16 B (`dcFlush` y la rama sucia de `dcMiss`), relleno de I$ 32 B (`icFill`), y accesos NO cacheados -- KSEG1 o pagina de TLB con C=2 -- que caen dentro de la RDRAM (`CPU::ramUncached`, en el interprete y en los dos ayudantes de memoria del dynarec) |
+| RSP | `Memory::ramBytesRsp` | `spDma`: `length * count`; el salto entre filas no se transfiere |
+| RDP | `Memory::ramBytesRdp` | derivado de la MISMA lista de transacciones que ya usa el modelo de coste calibrado (`SoftRdp::accountPixels`): por chunk, `ciBpp` si hay IM_RD mas 2 B si hay Z_CMP, y encima la escritura de color mas la de z para los pixeles que no mueren en alfa/profundidad. Mas `accountTmem` en bytes directos. **Ninguna constante nueva que calibrar** |
+| VI | `Memory::ramBytesVi` | el VI no tiene memoria propia: relee la imagen de RDRAM cada campo, una linea por linea de salida. `vi_width * lines * bpp`, con `lines` sacado de `VI_V_START` (va en medias lineas) y `bpp` del tipo de `VI_CONTROL` |
+| PI | `Memory::ramBytesPi` | las tres ramas de `piDma`, incluida RDRAM -> ROM (en la consola el motor LEE la RDRAM aunque no aterrice nada: el bus se ocupa igual) |
+| AI | `Memory::ramBytesAi` | el buffer al aceptarlo en `AI_LEN`; el DAC acaba leyendolo entero |
+| SI | `Memory::ramBytesSi` | los 64 B del bloque del PIF por DMA |
+
+**El divisor es tiempo de INVITADO, no de pared.** `retiradas / Clocks::insnTarget()`. El bus de
+la consola es de 562,5 MB/s (2 chips de 9 bits a 250 MHz DDR = 4,5 Gbit/s) pase lo que pase, asi
+que el porcentaje tiene que salir igual corra el emulador al 20 % o al 300 %: es una propiedad
+del juego. Con la ventana parada (cero instrucciones) se conserva el valor anterior en vez de
+dividir por cero.
+
+**Es un SUELO declarado, no una cota** (`Memory::kRdramPeakBps` lo dice en el codigo): no entran
+el refresco de RDRAM, el noveno bit (paridad / cobertura oculta) ni las lecturas del latch del
+cartucho, que no tocan RDRAM.
+
+**Salida nueva.** Linea `[rdram]` al terminar la corrida y otra igual en el `[hb]` cada 5 s, con
+el reparto por maestro en MB/s de invitado:
+
+```
+[rdram] 7.8% del bus (43.8 MB/s de invitado en 6.67 s): cpu 8.3 rdp 20.3 vi 9.1 rsp 5.7 pi 0.3 ai 0.1 si 0.0   <- SM64, titulo, 400 campos
+[rdram] 11.4% del bus (64.3 MB/s de invitado en 8.00 s): cpu 7.5 rdp 30.2 vi 21.8 rsp 4.2 pi 0.2 ai 0.0 si 0.0  <- DK64 PAL, 400 campos
+```
+
+La comprobacion de que el numero no esta inventado es el VI: 320x237x2 a 60 Hz son ~9 MB/s con
+la pantalla quieta, y eso es exactamente lo que mide en SM64. En DK64 sube a 21,8 porque el
+scanout es de 640 de ancho.
+
+Tambien: `rspParkMiss` (las carreras de publicacion del aparcamiento cazadas a mano) ya sale en
+`[det]`, que pasa a `park=aparcadas/salvavidas/carreras`.
+
+**Verificacion.** Nada de esto es entrada de control -- atomicos `relaxed` y, en la CPU, un
+contador liso que solo escribe su propio hilo --, y se comprueba en vez de suponerse: DK64 PAL
+Threaded en `build-prdp`, 300 campos, 3/3 `d3bee5263f26e4dca3519e277220e090`, el MISMO md5 que
+antes del cambio. `gate_all` rc=0 en 484 s y `gate_prdp` rc=0 en 343 s: ocho modos
+`Base 0/3721 Timing 0/2 Cycle 0/6`, sm64 `d35bd8aa9b13d459ce9332c07a79a53a` (interp) y
+`b5521b24d8fc280fbf102df22d7d30cb` (parallel-RDP), krom interp 371/371 `88,73` regress=0, krom
+prdp 371/371 `89,27` regress=0 improve=2.
+
+## 2026-09-11 — El plazo de la barrera del SP se media con el reloj equivocado (DK64 7,4 s → 2,83 s)
+
+La fila de arriba dejaba el aparcamiento del RSP correcto pero **caro**: DK64 PAL a 300 campos
+pasaba de 6 s (no determinista, sin aparcamiento) a 8-9 s. Se atribuyo a "el aparcamiento
+serializa los dos hilos a grano de tarea". Era falso: el aparcamiento no serializaba nada, lo
+que se caia era el **dynarec**, y por un error de una linea.
+
+`Memory::rcpDueIn(now)` devuelve el plazo del RCP mas cercano en unidades de reloj de invitado,
+y `CPU::jitTryBlock` lo usa para recortar el bloque para que ninguno se trague un evento. Para
+el bit 8 (`rcpPend`, fin de barrera del SP) usaba `spBarrierAt()`:
+
+```cpp
+spBarrierAt() = spKickOps + rcpCyclesToOps(rsp.cyclesRun - spKickCycles);
+```
+
+Con el RSP **aparcado** su `cyclesRun` esta congelado por definicion, asi que `spBarrierAt()` se
+queda clavado detras del invitado y `rcpDueIn` devolvia **0** durante todo el aparcamiento. En
+`jitTryBlock`, `if(siDue <= kTicks) return 0;` declinaba entonces *cada* bloque, la concesion
+encadenada (`jitGuard`) se venia abajo y la CPU bajaba a interpretar de una en una --
+exactamente en la ventana en la que es el unico hilo que puede desatascar la escena, porque el
+RSP esta esperando el buffer que ella tiene que instalar.
+
+Pero quien decide de verdad donde se para la CPU no es `spBarrierAt()` sino `spBarrierWait`, y
+`spBarrierWait` mira `spBarrierEff()`, que con el RSP aparcado y sin fecha de despertar
+publicada vale `rspPark + kParkLead`. Un plazo tiene que ser el instante en que la CPU se va a
+PARAR de verdad. Arreglo, una linea:
+
+```cpp
+if(pend & 8u) {
+  u64 b = spBarrierEff();          // antes: spBarrierAt()
+  u64 e = b > now ? b - now : 0;
+  if(e < d) d = e;
+}
+```
+
+**Cadena de diagnostico** (las tres piezas de telemetria que la cerraron se quedan):
+
+1. Linea `[block]` nueva al terminar: reparto del tiempo de PARED entre espera de CPU (freno /
+   barrera SP / barrera DP), ocupacion del RSP, **aparcamiento** del RSP y ocupacion del RDP,
+   mas el tiempo de CPU REAL de los tres hilos (`GetThreadTimes`). Decia que con el
+   aparcamiento puesto no habia nada ocupado y aun asi sobraba un 63 % de pared.
+2. `rspParkNs`: el sueno del aparcamiento cae DENTRO de `rsp.step()`, asi que sin descontarlo
+   `rspBusyNs` contaba como trabajo un hilo dormido -- DK64 marcaba "rsp 92 % ocupado" con un
+   2 % de CPU real. Se descuenta en `rspWorkerLoop`.
+3. `cpuCpuNs` (mismo muestreo para el hilo de CPU) daba `cpu 99,8 %`: el hilo de CPU estaba
+   QUEMANDO ciclos de anfitrion, no durmiendo. Y `KESTREL_JIT_STATS` remataba: **43 M** entradas
+   al driver del JIT con `cover=3,9 % avgK=0,08` contra **menos de 1 M** sin aparcamiento, con
+   las dos corridas retirando las MISMAS 402 M instrucciones.
+4. `KESTREL_PARKLOG` (opt-in, clase `KESTREL_DPSYNCLOG`) imprime `[pk]` por aparcamiento: via de
+   salida, salto, `cartNow()` y vueltas. Los 48 salian `via=wake` con `spins=3..10`, o sea la
+   CPU tardaba 60-300 ms de pared en avanzar 520 k-1,2 M ops de invitado.
+
+**Medida** (DK64 PAL, 300 campos, `build-prdp`, Threaded):
+
+| | antes del arreglo | despues |
+|---|---|---|
+| aparcamiento ON | 7,33-7,71 s | **2,83 s** |
+| aparcamiento OFF (`KESTREL_RSPIDLE=0`) | 4,0-4,5 s | 4,01 s |
+| `[block]` con ON | `cpuWait 2,7 % / rsp ocupado 2,2 % aparcado 76,5 % / rdp 3,9 % / CPU real cpu 99,8 %` | `cpuWait 7,3 % (freno 0,0 barSP 0,3 barDP 2,2) / rsp ocupado 5,6 % aparcado 47,0 % / rdp 10,0 % / CPU real cpu 100,3 %` |
+
+El aparcamiento ya no cuesta: sale **mas rapido que apagarlo** (2,83 s vs 4,01 s) y mas rapido
+que la linea base de 6 s de antes de todo esto. El solape perdido no se recupera, se invierte.
+
+**Determinismo**. 3/3 trazas byte-identicas, md5 `ccf3fd5bf216c429db341ddc5164df31`, `[det]`
+clavado (`rspCycles=60771443`, `spArm=173/0 tarde`, `dpArm=56/0 tarde`, `ooo=0`, `stale=0`,
+`idle=48/6621800`, `park=48/0/0`). Contra un binario de antes del arreglo reconstruido a
+proposito (`d3bee5263f26e4dca3519e277220e090`, `rspCycles=60771479`, `idle=48/6621806`):
+difieren **44 lineas de 300, desde f=257, y SOLO en la columna `rsp=`**; quitando esa columna
+las dos corridas dan el mismo md5 `417ae0aa5c60abf6dae491c9cd4af994`. Todas las columnas que el
+invitado puede ver (`ret`, `ops`, `gclk`, `sp`, `dp`, `flips`, `syncs`, `org`, `mi`) son
+identicas byte a byte. El desplazamiento de 36 ciclos viene de que el largo del bloque del JIT
+cambia la cuantizacion del instante `kick` que la CPU estampa en los tramos que archiva, y ese
+`kick` entra en `k = rcpOpsToCycles(tgt - now) / len` dentro de `idleSkip`.
+
+**Verificacion.** `gate_all` rc=0 en 466 s y `gate_prdp` rc=0 en 344 s (linea base 481 / 376 y
+468 / 334): ocho modos `Base 0/3721 Timing 0/2 Cycle 0/6`, sm64
+`d35bd8aa9b13d459ce9332c07a79a53a` (interp, los seis modos) y
+`b5521b24d8fc280fbf102df22d7d30cb` (parallel-RDP), krom interp 371/371 `mean_exact` 88,73 /
+`mean_close` 92,08 regress=0 improve=0 new=0, krom prdp 371/371 89,27 / 92,56 regress=0
+improve=2 (los dos Cube animados de siempre), nodump=0 en ambos.
+
+## 2026-09-11 — El freno del dynarec frenaba tambien al RSP aparcado (DK64 2,98 s → 1,71 s)
+
+El camino rapido del prologo del dynarec (`src/cpu/jit.cpp`, ~1181-1245) comprueba cuatro cosas
+antes de saltar al cuerpo del bloque y encadenar con el siguiente: el permiso restante
+(`jitGuard`), `MI_INTR & MI_MASK`, el pestillo de `timerIntr` y un byte del RSP. Si alguna falla
+devuelve el control al trampolin, que es una llamada Win64 por bloque. El byte del RSP era
+`Rsp::running`.
+
+`[tramp] guard/MI/timer/rsp/otro` lo delato: **22 M** rebotes por el RSP en una corrida de 300
+campos de DK64, y el `[block]` de la misma corrida decia que el RSP estaba **aparcado el 47,1 %
+del tiempo de pared**. `Rsp::running` sigue puesto durante todo el aparcamiento
+(`Memory::rspParkWait`), asi que la cadena se rompia en cada eslabon justo en la ventana en la
+que la CPU es el unico hilo que puede desatascar la escena: es ella quien archiva el tramo cuyo
+`kick` despierta al RSP.
+
+Y ahi el freno no regula NADA. Un RSP aparcado no ejecuta microcodigo, no escribe MMIO y no
+puede levantar interrupcion; a la CPU la siguen acotando la barrera de invitado del SP
+(`spBarrierEff()` → `rspPark + kParkLead`) y `rcpPace`, las dos en reloj de invitado. El freno
+del prologo hace falta cuando el RSP **si** corre — ver la nota larga del prologo en `jit.cpp` —
+y solo entonces.
+
+**El cambio.** Bandera nueva `Rsp::brake` = `running` MENOS el aparcamiento. Vive en la misma
+linea fria de 64 bytes que `running` (que esta `alignas(64)` y aislada a proposito: el hilo de
+CPU la lee sin parar y la invalidacion entre nucleos costo una vez el 18 % del emulador entero).
+Se pone y se quita en los cinco sitios donde `running` cambia de verdad — `Rsp::start`, el
+camino de BREAK, el de presupuesto agotado, el `mtc0` de SP_STATUS y la lambda del banco de
+pruebas — y ademas `rspParkWait` la SUELTA antes de publicar el aparcamiento y la vuelve a poner
+antes de retirarlo. El prologo y la clasificacion del trampolin miran `brake`. La comprobacion
+de Lockstep en `jitReenterProceed` sigue mirando `running`, que es lo que quiere saber ahi.
+
+**Medida** (DK64 PAL, 300 campos, `build-prdp/`, Threaded + JIT):
+
+| | antes | despues |
+|---|---|---|
+| pared | 2,98 s | **1,71 s** (−43 %) |
+| `[tramp] rsp=` | 22 M | 0 |
+| rastro de campos | `ccf3fd5bf216c429db341ddc5164df31` | **el mismo**, 3/3 byte a byte |
+| Lockstep | `ce4ec2bc2d6298cb69d270607db199ee` | **el mismo**, 2/2 |
+
+`[block]` despues: `pared 1.71 s | cpuWait 14.4% (freno 0.0% barSP 0.6% barDP 4.3%) | rsp
+ocupado 9.6% aparcado 10.8% | rdp ocupado 16.8% | CPU real: cpu 99.5% rsp 6.3% rdp 14.6%`. El
+`[det]` no se mueve en ninguna columna salvo `await=`, que es un contador de telemetria.
+
+Esto cierra el apunte "recuperar el solape CPU/RSP que se perdio con el aparcamiento" que dejo
+la entrada del 2026-09-10: el aparcamiento ya no cuesta nada, es la mas rapida de las tres
+configuraciones.
+
+## 2026-09-11 — El rastro por campo llevaba cuatro columnas medidas en tiempo de anfitrion
+
+`KESTREL_FIELDTRACE=1` existe para una cosa: comparar por md5 dos corridas del mismo binario y
+encontrar el primer campo que difiere. Cuatro de sus once columnas no podian usarse para eso.
+
+**`sp=` y `dp=` eran ARMADOS, no retiros.** Salian de `spArms`/`dpArms`, que suben en
+`Memory::spEndArm` y `Memory::dpEndArmAt` — y en Threaded a esas dos las llama el hilo del
+RSP/RDP cuando *termina el trabajo en tiempo de pared*. El plazo que arman si esta en reloj de
+invitado y lo publica el hilo de CPU en el instante exacto que le toca, asi que el invitado
+nunca ve nada distinto; pero el contador sube en un campo o en el siguiente segun como se
+crucen los hilos. Contadores nuevos `spRets`/`dpRets`, que suben SIEMPRE donde la interrupcion
+se hace visible al invitado: `Memory::rcpFlushPending` (el camino normal, hilo de CPU) y los
+cuatro sitios de publicacion directa (`rsp.cpp` para el camino sin plazo, los dos caminos de
+SYNC_FULL sin diferir). `[ft]` mira los retiros; `[det]` sigue enseñando `spArm=`/`dpArm=`,
+que es donde ese dato tiene sentido.
+
+**`rsp=` y `gclk=` son avance real de los workers y no se pueden arreglar**, porque son
+justamente eso: `Rsp::cyclesRun` y `rcp.rdpGclk` muestreados en el limite de campo valen lo que
+valgan segun donde estuviera cada hilo en ese instante. Pasan a `KESTREL_FIELDTRACE=2`. El
+nivel 1, que es el que se difunde y se compara, solo lleva columnas que el invitado puede ver.
+
+**Resultado.** Con el nivel 1, DK64 PAL 300 campos da `4fc7dc59e262d5a8a0cd2c89712b8ae3`
+**3/3 en Parallel-RDP y 2/2 en SoftRDP — el mismo md5 en los dos motores**, y SM64 NTSC
+`a022f09184a1fa61917565cc7909630f` **6/6**.
+
+De paso, una falsa alarma que conviene dejar escrita: SM64 parecia no determinista con 2 trazas
+distintas en 6 corridas, y no lo era. La primera corrida no encontraba
+`Super Mario 64 (USA).eep` (lo crea al salir) y la segunda si, o sea que arrancaban con estado
+inicial distinto: sin partida guardada el juego tarda 72 campos mas en llegar a la primera tarea
+grafica (71 intercambios contra 95 en 300 campos). **Borrar el fichero de guardado antes de cada
+corrida forma parte del experimento.** Y `ret`/`ops` NO sirven para ver si el invitado progresa:
+son `viFields * instrucciones-por-campo`, o sea el reloj, y salen identicos aunque el juego se
+quede parado.
+
+**Abierto.** DK64 en Lockstep y en Threaded no dan el mismo rastro: divergen desde f=191 y la
+columna que se mueve primero es `syncs=` (`rcp.dpSyncs`), que este cambio no toca. Es anterior a
+el. Apuntado en `docs/GAPS.md`.
+
+## 2026-09-11 — El hilo ocioso del invitado se cobra de golpe (SM64 threaded-jit -14 %)
+
+`beq $0,$0,-1` con `nop` en la ranura de retardo es el hilo ocioso de libultra. Ese bucle no
+escribe ningun registro, no toca memoria y lo unico que produce es Count: el VR4300 no sale de
+ahi mas que por una excepcion. Medido con `KESTREL_PCSAMPLE=0x80000000` (que ahora, cuando el
+valor es una direccion de KSEG0, anade un histograma por instruccion de 1024 ranuras de esa
+pagina ademas del de paginas): en DK64 son **251,5 M de las 402,3 M** instrucciones de invitado
+de los primeros 300 campos, el **62,5 %**, todas en `0x80000a08`.
+
+Emular esas vueltas una a una no produce NADA observable. `CPU::jitIdleSkip(u32 phys)` las cobra
+de golpe: reconoce la firma en el flujo (BEQ rX,rX,-1 o REGIMM BGEZ $0,-1, mas ranura de retardo
+= NOP exacto) y suma `retired`, Count y Random igual que hace el commit del trampolin.
+
+**Lo que hace que esto NO sea un atajo que cambie el emulador es el limite.** El salto es
+EXACTAMENTE el permiso que `jitReenterProceed` le concede a una cadena enlazada, calculado con
+la misma aritmetica: borde de Compare, plazo del SI (`siDueIn`), plazo del RCP (`rcpDueIn`),
+`jitOpsBudget` (la ventana de campo del bucle del sistema), el regulador `rcpPace` en Threaded y
+el tope `kGuardMaxOps` = 4096. O sea que **no se cambia CUANDO se vuelve a mirar cada evento**,
+solo se deja de emular lo que hay entre dos miradas. Y se redondea a iteraciones ENTERAS
+(`k & ~1`) para que el pc no se quede a medias del par salto+ranura.
+
+Dos negativas que son parte de la semantica, no prudencia:
+
+- **`Status[2:0] != 1` (IE=0, o EXL/ERL puestos): no se salta.** Ahi ninguna interrupcion puede
+  sacar al invitado del bucle, o sea que el juego esta colgado DE VERDAD; saltarle el reloj
+  esconderia el cuelgue en vez de ensenarlo. Que lo ejecute el camino normal, que es donde
+  estan el watchdog y los volcados.
+- **Threaded SIN plazos (`KESTREL_RCPDEADLINE=0`): no se salta.** Es el unico modo en el que un
+  worker publica `MI_SP`/`MI_DP` por su cuenta en tiempo de PARED, sin plazo de invitado que
+  acote el salto; la interrupcion se veria hasta 4096 ops tarde.
+
+`KESTREL_CPUIDLE=0` lo apaga, y con el apagado tiene que salir todo identico: es atajo de
+anfitrion, no de semantica. `KESTREL_JIT_STATS` saca ademas la linea `[ocioso] saltos=N ops=NM
+(x% de las retiradas)`.
+
+**Medido** (SM64, `bench` de 200 intercambios = 597 campos VI = 9,96 s de video, minimo de tres
+corridas, `threaded-jit`): **5,13 s con el salto contra 5,98 s sin el**, o sea **-14,2 % de
+pared**, 194,2 % de tiempo real contra 166,6 %. En DK64 el techo teorico es mayor (62,5 % de las
+instrucciones contra ~20 % en SM64) pero ahi manda el RCP.
+
+**Certificacion.** `gate_all` rc=0 en **458 s** (linea base 473-488) y `gate_prdp` rc=0 en
+**350 s** (linea base 347). Seis `*_test` ALL PASS; ocho modos `systemtest Base 0/3721 Timing
+0/2 Cycle 0/6`; sm64 `d35bd8aa9b13d459ce9332c07a79a53a` en interp / jit / jit-nolink / threaded
+/ threaded-jit / rspinterp / rspnolink y `b5521b24d8fc280fbf102df22d7d30cb` en prdp y prdp-jit;
+krom interp 371/371 `mean_exact` 88,73 / `mean_close` 92,08 regress=0; krom prdp 371/371 89,27 /
+92,56 regress=0 improve=2 (los dos `CubeFillTriangle` animados, 53,09 -> 55,27, fase de
+animacion); nodump=0 en ambas.
+
+## 2026-09-11 — La biblioteca del lanzador web pasa a 3D de verdad (carrusel, coverflow, pared)
+
+Las caratulas del lanzador eran laminas con `transform: perspective()` de CSS. Ahora son
+**cajas de carton con volumen** en el motor WebGL propio (`web/gl.js` + `MODELS.buildBox`), y el
+selector de vista ofrece las tres colocaciones al estilo de USB Loader GX: anillo giratorio,
+coverflow y pared de rejilla. Detalle de diseno en `docs/LAUNCHER.md`; lo que importa aqui es
+que lo hace posible:
+
+- **Matriz por tramo de malla** (`part.mat`, `part.dim`, `part.hidden` y `Scene.order` en
+  `gl.js`). Las K cajas se suben a la GPU UNA vez; moverse por la biblioteca o cambiar de
+  colocacion no reconstruye geometria ni buffers, solo cambia K uniformes por cuadro. 25 cajas =
+  2900 vertices, 2500 triangulos. `Scene.order` permite reordenar el dibujo de atras hacia
+  delante cada cuadro, que es lo que hace que la caja elegida tape a las vecinas.
+- **Casillas recicladas por modulo** (`SCENE3D.slotItem`, funcion pura). Solo hay K = 25 cajas y
+  el juego `i` vive siempre en la casilla `i % K`: al desplazarse la unica casilla que cambia de
+  juego -- y por tanto de textura -- es la que acaba de salir de la ventana. Mil cartuchos
+  cuestan por cuadro lo mismo que veinticinco.
+
+Pruebas: `node tools/launcher/carousel_test.js` (sin navegador) comprueba, para listas de 0 a
+397 juegos, que ninguna casilla repite juego, que el juego elegido SIEMPRE tiene casilla (si no,
+el centro del carrusel saldria vacio), que la ventana no tiene huecos, que un centro fraccionario
+reparte como el entero, y que la malla de 25 cajas cabe en `Uint16` con una portada por casilla
+con su id de seleccion. `web/smoke_car.html` monta las tres colocaciones con caratulas pintadas
+al vuelo, sin servidor ni ROMs; verificado sin ventana con Edge headless + SwiftShader
+(`--virtual-time-budget=4000`, que hace falta porque el dibujo va por `requestAnimationFrame`).
+
+Sin WebGL las tres vistas caen a las de CSS de antes, que se quedan justo para eso.
+
+## 2026-09-11 — El orden de las optimizaciones vuelve a salir de una medida, no de la memoria
+
+La lista de "Rendimiento" de `docs/GAPS.md` estaba ordenada por una medida vieja que ya no era
+cierta: encabezaba `dcFill`/`dcFlush`, que en un perfil de anfitrion de hoy **no aparecen**. Se
+ha vuelto a medir y se ha reescrito el orden entero.
+
+**Como se midio.** `KESTREL_HOSTPROF=1` sobre SM64, `build-prdp`, `threaded-jit`, PRDP, 400
+intercambios: 906 muestras del hilo de CPU, 769 dentro de la imagen, simbolizadas contra
+`llvm-nm --numeric-sort` con `ImageBase 0x140000000`. Reparto:
+
+| % | funcion |
+|---|---------|
+| 43,43 | `Memory::spBarrierWait` |
+| 34,46 | `Memory::dpBarrierWait` |
+| 6,63 | `kestrel_jitProceedTramp` |
+| 5,72 | `Memory::rspPace` |
+| 5,07 | `CPU::jitIdleSkip` |
+| 1,30 | `Memory::rdpPace` |
+| 0,65 | `Memory::rcpPace` |
+| 0,65 | `CPU::jitTryBlock` |
+
+Cruzado con `[block]` (`cpuWait 20,2 % — freno 0,0 % barSP 1,2 % barDP 31,5 %`, `rsp ocupado
+65,7 %`, `rdp ocupado 16,8 %`), la lectura es que **ese 43 % NO es tiempo bloqueado**: `barSP`
+bloquea el 1,2 % del `cpuWait`. Es la espera ACTIVA de 2048 vueltas girando sobre lineas de
+cache que escribe el hilo del RSP. El palo largo de verdad es el RSP.
+
+**Pista `PAUSE` en las tres esperas activas** (`Memory::spBarrierWait` y las dos fases de
+`dpReadSync`). `_mm_pause` le dice al nucleo que la vuelta es una espera: no le roba la linea en
+exclusiva al que la va a soltar ni le quita ranuras de emision al hermano SMT. Va a **una de cada
+16 vueltas** a proposito, porque PAUSE no cuesta lo mismo en todos los anfitriones (~9 ciclos en
+Nehalem, ~140 de Skylake en adelante) y una por vuelta estiraria un giro de 2048 dos ordenes de
+magnitud en una maquina moderna. Apagable con `KESTREL_SPINPAUSE=0` y largo del giro con
+`KESTREL_BARSPIN=<n>` (0 = el defecto, 2048); las dos salen en el lanzador (avanzadas).
+
+**Medida honesta: en ESTE anfitrion es NEUTRA.** Un primer A/B de 3 corridas daba -2,3 %, pero
+al repetirlo intercalado (dos rondas de 5 corridas, `bench --mode threaded-jit`) el minimo sale
+OFF 4,93 s / 5,04 s contra ON 4,98 s / 4,98 s: ruido. Se queda puesta igual porque es la
+semantica correcta de una espera activa y porque el i7-870 es justo el caso donde menos da (SMT
+viejo, PAUSE barato); lo que NO se hace es apuntarse una ganancia que no existe.
+
+**`[det] idle=` ya dice POR QUE no se aparca el RSP.** El desglose nuevo es
+`idle=saltos/vueltas(sigN/drnN/roomN)`: firma distinta, motor del RDP sin drenar, o sin hueco
+donde aparcar. Con el queda **contestado y cerrado** el `idle=0/0` de SM64: los 1 041 389 sondeos
+de `DPC_CURRENT` se van ENTEROS por `sig`. Desglosada la firma, el PC si se repite (1 038 015) y
+la longitud del cuerpo cae en [2,64] en 665 177, pero la huella de `r[1..31]` **no coincide ni
+una vez** y el valor leido solo 1 356. Es decir: el RSP sondea mientras el RDP esta MASTICANDO
+(`rdp ocupado 54,5 %`, `open=317 k`), asi que el valor se mueve en cada vuelta y no hay bucle de
+espera con valor fijo que aparcar — que es exactamente la condicion del aparcamiento. En DK64 si
+se cumple porque alli el microcodigo espera con el motor drenado. **No es un fallo.** Y el sondeo
+tampoco es el gasto: ~5 M de instrucciones de RSP sobre 291 M de ciclos, un 1,7 %. Lo que cuesta
+es el trabajo vectorial, y eso lo ataca el JIT del RSP.
+
+Los contadores nuevos (`idleNoSig`, `idleNoDrain`, `idleNoRoom`) los toca solo el hilo del RSP,
+por eso no son atomicos, y los lee el volcado final con el RCP ya parado. `rcpSchedReset` los
+pone a cero con el resto del aparcamiento.
+
+**Certificacion.** `gate_all` rc=0 en **473 s** (linea base 458-488) y `gate_prdp` rc=0 en
+**381 s** (linea base 347-350; el krom de GPU sube a 315 s). Seis `*_test` ALL PASS; ocho modos
+`systemtest Base 0/3721 Timing 0/2 Cycle 0/6`; sm64 `d35bd8aa9b13d459ce9332c07a79a53a` en
+interp / jit / jit-nolink / threaded / threaded-jit / rspinterp / rspnolink y
+`b5521b24d8fc280fbf102df22d7d30cb` en prdp y prdp-jit; krom interp 371/371 `mean_exact` 88,73 /
+`mean_close` 92,08 regress=0 improve=0; krom prdp 371/371 89,27 / 92,56 regress=0 improve=2 (los
+dos `CubeFillTriangle` animados, 53,09 -> 55,27, fase de animacion); nodump=0 en ambas.
+
+## 2026-09-11 — `PaceDiv`: el freno del RCP deja de dividir (exacto, no aproximado)
+
+`Memory::rspPace` y `Memory::rdpPace` calculan el permiso de la CPU con
+`(trabajo_del_RCP * paceCpuNum) / paceCpuDen`, y eso es una **division entera de 64 bits por
+llamada** al trampolin. El divisor no cambia nunca en toda la ejecucion: `System` fija el modelo
+de reloj una vez (`setPaceRatio(rspStepDen, rspStepNum)`, o sea 65536/43691 — y **no** es 3/4,
+como decia el valor inicial de la cabecera). Con divisor fijo se puede precalcular el reciproco.
+
+**Lo que hace exacto el reciproco** (`struct PaceDiv` en `memory.hpp`): con `m = ceil(2^79/d)` y
+`e = m*d - 2^79` (que cumple `0 <= e <= d`), `floor(x*m >> 79) == floor(x/d)` **exactamente** para
+todo `x <= floor(2^79/e)`. Ese `maxX` se guarda con el multiplicador. Si `m` no cabe en 64 bits, o
+si el `x` que llega se pasa de `maxX`, se divide de verdad. No es una aproximacion con error
+acotado: o da el MISMO numero que la division, o no se usa. Comprobado a mano en una prueba
+aparte, 32 000 070 casos y 0 fallos, con los bordes metidos a proposito (`maxX-1`, `maxX`,
+`maxX+1`, `2^63`, `~0ull`) y barriendo todos los divisores que el modelo de reloj puede producir.
+`d` potencia de dos da `e == 0` y vale para todo `x`.
+
+Lo tocan `rspPace`, `rdpPace`, `rcpCyclesToOps` y `rcpOpsToCycles`; `setPaceRatio` es ahora el
+UNICO sitio que fija el ratio, para que el multiplicador no pueda quedarse viejo.
+
+**Medida honesta: NEUTRA en este anfitrion.** A/B intercalado de dos rondas de 5 corridas
+(`bench --mode threaded-jit`, minimo de cada ronda): con reciproco 4,95 s / 4,96 s, con division
+4,93 s / 4,98 s. Ruido. El perfil daba `rspPace` 5,72 % + `rdpPace` 1,30 % del hilo de CPU, pero
+ese tiempo **no era la division**: es la lectura de `rspBusy` y `rsp.cyclesRun`, dos lineas de
+cache que el worker del RSP reescribe sin parar. `paceGrant` ya esta escrito para pagarlas una
+sola vez por vuelta y `kPaceGrain` ya evita la cola de permisos que encogen; lo que queda es el
+fallo de cache compartida, que es inherente al acoplamiento CPU-RCP. Se queda el reciproco porque
+es estrictamente menos trabajo y esta probado exacto, pero **no se le apunta ninguna ganancia**.
+
+## 2026-09-11 — El lanzador tiene temas, y el primero replica WonderMenu
+
+Peticion del usuario: *"este proyecto que es un menu/lanzador de flashcart N64 que quiero
+replicar la estetica para el lanzador del emulador: https://github.com/lmcd/WonderMenu"*.
+
+**Lo que se ha hecho no es una piel pegada encima sino una capa de tokens.** Todo el aspecto
+de `tools/launcher/web/style.css` ya salia de variables de `:root`; faltaban las que hacian
+falta para que un tema pueda cambiar algo mas que colores planos, y siete sitios que todavia
+tenian un color a pelo. Ahora hay `--font-display` (con `--disp-track`/`--disp-weight`),
+`--bgimg`, `--glass`/`--glass2`, `--onacc` y `--selbg`/`--seltxt`/`--selr`. Un tema es un
+bloque `:root[data-theme="..."]` y nada mas; `applyTheme()` en `app.js` solo pone el atributo
+en `<html>` y el navegador reevalua los tokens solo --- no repinta nada a mano, no vuelve a
+montar las escenas 3D. Tema desconocido cae al de fabrica. Se guarda en el perfil como
+`theme`, con el mismo camino que `viewmode`.
+
+**Tema WonderMenu** (`docs/LAUNCHER.md` lleva el detalle). Sale de leer la fuente del
+original, no de mirar capturas: su `util/Color.h` solo define `CLEAR`/`BLACK`/`WHITE`/`RED`/
+`GREEN`/`BLUE` (de ahi el monocromo), el subtitulo es el MISMO blanco del titulo con el alfa a
+la mitad (`a *= 0.5`), lo elegido es una pastilla MACIZA de radio 17 expandida y 8 normal que
+sobresale por los dos lados y crece 5 px de alto, la etiqueta de una fila arranca a 112 px
+del borde con el subtitulo 20 px por debajo, los accesorios van a 12 px de separacion con 15
+de margen y el contador ocupa 50 px, y los titulares van en Unbounded 900. **No se copia ni
+un recurso**: el proyecto es AGPLv3. La fuente va en pila con caida (`Unbounded`, `Archivo
+Black`, `Segoe UI Variable Display`, ...) porque el lanzador tiene que funcionar sin red.
+
+Un desvio a proposito: **el fondo no es negro**. La pastilla del original es negra maciza con
+letra blanca y sobre negro no se ve; medido en la captura sin cabeza, con `--bg:#08080b` la
+pastilla salia `(0,0,0)` sobre `(8,8,11)`. Se subio a gris carbon `#2b2b32`, que la deja
+resaltar sin salirse del monocromo.
+
+**Vista nueva "Lista Wonder"** (`wmrows`, septimo modo de biblioteca): una fila alta por
+cartucho con la caratula pequena a la izquierda, titulo en la letra de titular, subtitulo a
+media tinta y los datos del cartucho a la derecha, con la pastilla de lo elegido. Sale entera
+de tokens, asi que **funciona igual con los dos temas** (con el de fabrica la pastilla es el
+ambar al 10 % y el radio 0, con el de WonderMenu negra y de radio 17) sin una sola regla
+duplicada.
+
+**Verificacion** (`web/smoke_theme.html`, Edge sin cabeza): selector presente con dos
+opciones, `applyTheme()` cambia el atributo, `--selr` 0px contra 17px, `--bg` `#0b0d12` ->
+`#2b2b32`, `--acc` `#ffab2e` -> `#ffffff`, `--font-display` con Unbounded, el selector se
+sincroniza, un tema inventado cae a `kestrel`, `body` pinta fondo propio `rgb(43,43,50)` (si
+fuera transparente tomaria el del anfitrion) y el evento `change` aplica el tema: **TODO
+BIEN**. La persistencia se mira desde fuera, porque `CFG` es un `let` de guion clasico y no
+cuelga de `window`: tras la pasada, `tools/launcher/profile.json` tiene `theme: "wonder"` (el
+fichero se salva y se restaura alrededor de la prueba). Capturas de los dos temas en las dos
+vistas. `node --check web/app.js` limpio y `node tools/launcher/carousel_test.js` TODO BIEN.
+
+**GOTCHA que costo un rato**: `--use-gl=swiftshader --disable-gpu` revienta el render sin
+cabeza de Edge en cuanto la pagina lleva un iframe que hace `fetch` (`Abnormal renderer
+termination`, volcado vacio). Sin esas dos banderas va bien. Y `--dump-dom` vuelca en el
+evento `load`, asi que sin `--virtual-time-budget` no se ve nada de lo que escriben los
+`setTimeout`.
+
+Cero cambios en el emulador: no toca gates.
+
+## 2026-09-16 — Ficha de juego en el lanzador (info, manual, trucos, partidas)
+
+Elegir un juego ya no lo arranca: abre una ficha con cuatro pestanas. Detalle y API en
+`docs/LAUNCHER.md` "Ficha de juego". Doble clic sigue lanzando; `select_action: "play"`
+devuelve el comportamiento viejo.
+
+- `tools/launcher/gamecard.py`: nombres de fichero iguales a los del emulador, lector de
+  `.cht` igual al de `cheats.cpp`, reescritura que solo toca el `-` de las cabeceras
+  (conserva comentarios y CRLF), manuales por nombre de fichero o nombre interno, subida de
+  manual a `manuals/`, metadatos por CRC con estadisticas de juego.
+- Rutas nuevas en `kestrel_launcher.py`, todas con validacion de ROM previa; manuales
+  servidos solo por indice. `scripts/gui.sh` congela el modulo nuevo.
+- `web/card.js` + modal `#m-game` + bloque CSS solo de tokens (vale para los dos temas).
+
+**Verificacion.** `gamecard_test.py` ALL PASS. Prueba de API contra el servidor real
+(copias de SM64 y DK64): cabecera y CRC `635A2BFF8B022326`, `.st3` detectado, anadir y
+apagar truco, codigo invalido rechazado, manual subido y servido `text/plain`, `.exe`
+rechazado, rutas fuera de la ficha 404, meta guardada. **El exe real carga el `.cht` que
+escribio la ficha**: `2 trucos (1 encendidos, 1 lineas sin efecto, 0 ilegibles)`, lo mismo
+que muestra la ficha. `web/smoke_card.html` en Edge sin cabeza: TODO BIEN (ficha abierta,
+titulo, cuatro pestanas pintan), capturas de info/trucos/manual/partidas revisadas.
+
+Cero cambios en el emulador: no toca gates.
+
+## 2026-09-16 — Hilos del RCP: menos viajes por el kernel (giro del RDP, avisos al RSP)
+
+Perfil de anfitrion de los tres hilos (SM64, Parallel-RDP, threaded-jit, 400 intercambios)
+y tres cambios, todos solo de anfitrion: el invitado sale identico en todos los modos.
+
+- **Giro del worker del RDP ocioso** (`KESTREL_RDPSPIN`, defecto 32768). Antes de dormir en
+  `rdpCv` gira sobre `dpPending`. Bench SM64 200 intercambios: prdp-jit 3,98 -> 3,45 s
+  (**-13 %**), threaded-jit (SoftRDP) 4,93 -> 4,63 s (-6 %).
+- **Avisos al RSP solo si alguien duerme**: `rspSubmitKick` mira `rspIdleWaiting` (con
+  `rspMx`) y el fin de tarea mira `rspWaiters`. 3,55 -> 3,51 s. Giro del worker del RSP
+  (`KESTREL_RSPSPIN`) medido neutro, defecto 0.
+- **Giro previo en las esperas del RDP** (`KESTREL_DPSPIN`, defecto 2048): `dpBarrierWait`
+  (CPU) y `rdpAwaitGuest` (RSP) miran `rcpPend&4`/`dpSchedEnd`/`dpCompSeq` antes de dormir.
+  ~-1,5 % (3/3 rondas).
+- Descartado por medida: memorizar la division del giro de `spBarrierWait` (12 % del perfil
+  de CPU). Neutro: el giro gasta el mismo tiempo de pared, solo da mas vueltas.
+
+Las tres variables salen en el lanzador (avanzadas). Gates: gate_all 445 s / gate_prdp
+339 s, todos los modos PASS y md5 iguales, krom interp regress=0, prdp regress=0 improve=2.
+Lo siguiente del perfil: contencion de `rdpMx` (el `rdpSubmit` fecha el tramo con el mutex
+cogido y el worker se bloquea al publicar DPC_CURRENT), `jitIdleSkip`, COP0 del RSP en el JIT.
+
+- Giro de quien espera al RDP (`KESTREL_DPSPIN`) sube a 262144 vueltas por defecto: -1 % mas en los dos RDP (meseta medida). `KESTREL_BARSPIN` medido plano, sin cambio.
+- Perfil tras esto: en el hilo de CPU `jitIdleSkip` pesa 0,4 % (no es palanca); la CPU gira esperando al RSP (`spBarrierWait` ~35 %), y en el hilo del RSP el codigo emitido es el 43 %. La palanca que queda es el coste del microcodigo compilado.
+- Dynarec del RSP: MFC0/MTC0 ya no cortan el bloque (puente `Rsp::jitCop0`, reloj exacto, corte si SET_HALT o DMA a IMEM). Interprete 8,26 M -> 0,70 M instrucciones en SM64; pared neutra. Gates verdes.
+- DESCARTADO por medida: envio adelantado a la GPU con Parallel-RDP (`CommandProcessor::flush()` cada N primitivas, sin esperar). SM64 prdp-jit min de 5, 2 rondas: N=0 3,43/3,44 s, 32 4,18/4,17, 128 3,48/3,48, 512 3,48/3,48. Partir el cuadro en mas envios cuesta mas de lo que gana la GPU pintando antes. Perfil tras MTC0-en-JIT: el hilo del RSP gasta ~16 % girando en `dpSpinUntil` (espera al RDP en el sondeo de DPC), la CPU ~35 % en `spBarrierWait` y ~16 % en `dpSpinUntil`: la cadena acaba en el fence de la GPU.
+- Parallel-RDP con procesado de comandos DIRECTO en el worker del RDP (`PARALLEL_RDP_SINGLE_THREADED_COMMAND=1` por defecto desde `vrdp::init`): se quita el hilo `CommandRing` y un salto entre hilos por comando. El aviso de ocio del anillo (`Op::MetaIdle`) lo da `vrdp::idle()`: el worker al irse a dormir tras el giro, o el cierre de campo en lockstep / `KESTREL_RDPINLINE`. Sin el, `HelloWorldRDP16BPP` (lista sin SYNC_FULL) quedaba negra (100 -> 1). SM64 prdp-jit min de 5, 4 rondas: 3,41-3,45 s -> 3,38-3,39 (-1,6 %). gate_prdp regress=0, md5 iguales. `PARALLEL_RDP_SINGLE_THREADED_COMMAND=0` vuelve al anillo.
+- Medido y NO adoptado: saltarse el fence de SYNC_FULL (no esperar a la GPU) da techo 3,43 -> 3,14 s (-9 %), pero deja la CPU leer RDRAM (framebuffer, texturas escritas por el RDP) antes de que la GPU acabe = infiel al HW. Un fence perezoso por proteccion de paginas lo haria fiel, pero es cirugia grande; queda anotado como palanca.

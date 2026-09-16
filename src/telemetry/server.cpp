@@ -1,6 +1,8 @@
 #include "server.hpp"
 #include "../core/savestate.hpp"
 #include "../core/system.hpp"
+#include "../core/movie.hpp"
+#include "../vrdp/vrdp.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -13,6 +15,40 @@ namespace kestrel::telemetry {
 auto Server::stop() -> void {
   stopping.store(true);
   tcp.close();
+  // Cerrar tambien las conexiones vivas: sus hilos estan bloqueados en recv y solo
+  // despiertan si el socket se les cae debajo.
+  std::vector<std::shared_ptr<net::TcpConn>> snap;
+  { std::lock_guard<std::mutex> lk(clientsMx); snap = clients; }
+  for(auto& c : snap) c->close();
+}
+
+auto Server::serveClient(std::shared_ptr<net::TcpConn> conn) -> void {
+  for(;;) {
+    std::string reqJson;
+    std::vector<u8> reqBlob;
+    if(!conn->recvFrame(reqJson, reqBlob)) break;
+
+    bool ok = false;
+    json::Value req = json::parse(reqJson, ok);
+    json::Value reply = json::Value::object();
+    std::vector<u8> blob;
+
+    if(!ok || !req.isObject()) {
+      reply.set("ok", false).set("error", "malformed request JSON");
+    } else {
+      reply.set("id", req.get("id"));
+      // Una orden cada vez contra el estado vivo, igual que cuando solo se atendia a un
+      // cliente: lo unico que pasa a ir en paralelo es esperar en la red.
+      std::lock_guard<std::mutex> lk(dispatchMx);
+      dispatch(req, reply, blob);
+    }
+
+    if(!conn->sendFrame(json::dump(reply), blob.empty() ? nullptr : blob.data(), (u32)blob.size()))
+      break;
+  }
+  conn->close();
+  std::lock_guard<std::mutex> lk(clientsMx);
+  clients.erase(std::remove(clients.begin(), clients.end(), conn), clients.end());
 }
 
 auto Server::serve(u16 port) -> void {
@@ -23,34 +59,21 @@ auto Server::serve(u16 port) -> void {
   std::printf("[telemetry] listening on 127.0.0.1:%u\n", port);
   std::fflush(stdout);
 
+  // Un hilo por cliente. Hacen falta varios a la vez porque el puente MCP deja su
+  // conexion abierta toda la sesion: con un solo cliente, cualquier otra herramienta
+  // (scripts/pad.py, el lanzador) se quedaba esperando en el accept para siempre.
+  std::vector<std::thread> workers;
   while(!stopping.load() && !system.shutdown.load()) {
-    if(!tcp.accept()) break;  // listen socket closed → shutting down
+    net::TcpConn c = tcp.accept();
+    if(!c.valid()) break;  // listen socket closed -> shutting down
 
-    // Serve this client until it disconnects.
-    for(;;) {
-      std::string reqJson;
-      std::vector<u8> reqBlob;
-      if(!tcp.recvFrame(reqJson, reqBlob)) break;
-
-      bool ok = false;
-      json::Value req = json::parse(reqJson, ok);
-      json::Value reply = json::Value::object();
-      std::vector<u8> blob;
-
-      if(!ok || !req.isObject()) {
-        reply.set("ok", false).set("error", "malformed request JSON");
-      } else {
-        reply.set("id", req.get("id"));
-        dispatch(req, reply, blob);
-      }
-      // Carry request blob into write handlers by stashing it before dispatch:
-      // handled inline in dispatch() via a member is avoided; write cmd re-reads.
-
-      if(!tcp.sendFrame(json::dump(reply), blob.empty() ? nullptr : blob.data(), (u32)blob.size()))
-        break;
-    }
-    tcp.dropClient();
+    auto conn = std::make_shared<net::TcpConn>(std::move(c));
+    { std::lock_guard<std::mutex> lk(clientsMx); clients.push_back(conn); }
+    workers.emplace_back([this, conn] { serveClient(conn); });
   }
+
+  stop();
+  for(auto& t : workers) if(t.joinable()) t.join();
 }
 
 auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8>& blob) -> void {
@@ -81,6 +104,10 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     if(cmdCpuDisasm(args, data)) done(); else fail("cpu.disasm: bad range");
   } else if(cmd == "pause" || cmd == "resume" || cmd == "reset") {
     cmdRunControl(cmd, data); done();
+  } else if(cmd == "frame.advance") {
+    cmdFrameAdvance(args, data); done();
+  } else if(cmd == "rewind.step") {
+    if(cmdRewind(args, data)) done(); else fail(data.has("msg") ? data.get("msg").asString() : "rewind");
   } else if(cmd == "rcp.regs") {
     cmdRcpRegs(args, data); done();
   } else if(cmd == "rsp.regs") {
@@ -128,6 +155,10 @@ auto Server::cmdStatus(const json::Value&, json::Value& data) -> void {
     oc.set("rsp",   system.clocks.rspOc);
     oc.set("rdram", system.clocks.rdramOc);
     sp.set("overclock", oc);
+    // CPI del modelo: ciclos de CPU por instruccion retirada. 2 = de fabrica (Count avanza un
+    // tick por op). Se publica porque cambia el significado de "instrucciones por campo", que
+    // es la unidad de todas las medidas de presupuesto.
+    sp.set("cpi", (double)system.cpu.cpi256 / 128.0);
     // Ocupacion de los workers: en modo threaded el % de CPU sube cuando la CPU gira
     // esperando al RCP, asi que sin esto el estado enganaria. cpuWait alto = el palo
     // largo es un worker; rdp/rsp altos dicen cual.
@@ -138,6 +169,50 @@ auto Server::cmdStatus(const json::Value&, json::Value& data) -> void {
     oc2.set("fps", system.fieldsPerSec.load(std::memory_order_relaxed));
     sp.set("occupancy", oc2);
     data.set("speed", sp);
+  }
+  // Pelicula TAS en marcha, si la hay. El contador de sondeos es el "numero de fotograma"
+  // de una repeticion: sin el, quien graba no puede decir en que punto de la cinta esta ni
+  // comprobar que un estado guardado la rebobino con el juego.
+  if(system.rewinder.enabled) {
+    json::Value rw = json::Value::object();
+    rw.set("steps", (u64)system.rewinder.steps());
+    rw.set("bytes", (u64)system.rewinder.bytes());
+    rw.set("interval", (u64)system.rewinder.interval);
+    rw.set("budget", (u64)system.rewinder.budget);
+    data.set("rewind", rw);
+  }
+  if(movie::mode != movie::Mode::Off) {
+    json::Value mv = json::Value::object();
+    mv.set("mode", std::string(movie::mode == movie::Mode::Rec ? "rec" : "play"));
+    mv.set("polls", (u64)movie::polls.load(std::memory_order_relaxed));
+    mv.set("total", (u64)movie::total);
+    mv.set("ended", movie::ended.load(std::memory_order_relaxed));
+    mv.set("path", movie::path);
+    data.set("movie", mv);
+  }
+  // Mando: estado publicado del mando 1 y cuantas veces lo ha leido el juego. La cuenta de
+  // sondeos es la unica forma de ver desde fuera si una pulsacion corta se pierde porque el
+  // juego no esta preguntando, en vez de suponerlo.
+  {
+    json::Value pd = json::Value::object();
+    pd.set("buttons", (u64)system.memory.padPort[0].buttons);
+    pd.set("stickX", (s64)system.memory.padPort[0].stickX);
+    pd.set("stickY", (s64)system.memory.padPort[0].stickY);
+    pd.set("polls", (u64)system.memory.padPolls.load(std::memory_order_relaxed));
+    // Los cuatro conectores, para ver de un vistazo quien esta enchufado y con que.
+    json::Value ports = json::Value::array();
+    for(const auto& pp : system.memory.padPort) {
+      json::Value e = json::Value::object();
+      e.set("connected", pp.connected);
+      e.set("accessory", (s64)pp.accessory);
+      e.set("buttons", (u64)pp.buttons);
+      e.set("stickX", (s64)pp.stickX);
+      e.set("stickY", (s64)pp.stickY);
+      e.set("rumble", pp.rumble);
+      ports.push(e);
+    }
+    pd.set("ports", ports);
+    data.set("pad", pd);
   }
   if(system.rom.valid()) {
     json::Value g = json::Value::object();
@@ -326,6 +401,78 @@ auto Server::cmdRunControl(const std::string& cmd, json::Value& data) -> void {
   data.set("paused", (bool)system.paused.load());
 }
 
+// Avanza N campos de video y vuelve a parar. Es el gemelo de cpu.step para TAS: la unidad
+// no es la instruccion sino el campo, que es donde el juego lee el mando, asi que un
+// avance = una entrada de la pelicula y una pulsacion se coloca en el campo exacto.
+//
+// Bloquea hasta que el nucleo termina (o hasta el plazo) por la misma razon que cpu.run_until:
+// quien lo llama quiere mirar el estado DESPUES, y sin bloquear tendria que sondear.
+// No se coge coreMutex mientras se espera -- el hilo del nucleo lo necesita para correr.
+auto Server::cmdFrameAdvance(const json::Value& args, json::Value& data) -> void {
+  u32 n = args.has("fields") ? args.get("fields").asU32() : 1;
+  if(n == 0) n = 1;
+  if(n > 100000) n = 100000;
+  u32 timeoutMs = args.has("timeout_ms") ? args.get("timeout_ms").asU32() : 5000;
+  {
+    std::lock_guard<std::mutex> lk(system.coreMutex);
+    if(system.cpu.halted) { system.cpu.halted = false; system.cpu.haltReason.clear(); }
+    system.paused.store(true);                 // el avance manda por encima de la pausa
+    system.stepFields.store(n, std::memory_order_relaxed);
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  bool timedOut = false;
+  for(;;) {
+    if(system.stepFields.load(std::memory_order_relaxed) == 0) break;
+    if(system.cpu.halted || system.shutdown.load()) break;
+    auto el = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if(el >= (double)timeoutMs) { timedOut = true; break; }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  {
+    std::lock_guard<std::mutex> lk(system.coreMutex);
+    u32 left = system.stepFields.exchange(0, std::memory_order_relaxed);
+    data.set("fields", (u64)(n - left));
+    data.set("timedOut", timedOut);
+    data.set("paused", (bool)system.paused.load());
+    data.set("halted", system.cpu.halted);
+    data.set("viFields", (u64)system.memory.rcp.viFields);
+    data.set("viFlips", (u64)system.memory.rcp.viFlips);
+    data.set("pc", system.cpu.pc);
+  }
+}
+
+// rewind.step {steps}. Como state.load: el rebobinado mete un estado entero en la maquina,
+// asi que no se hace aqui sino en el bucle de ejecucion, con el RCP parado. Se deja la
+// peticion en el contador y se espera al parte, que el bucle publica en stateMsg.
+auto Server::cmdRewind(const json::Value& args, json::Value& data) -> bool {
+  u32 n = args.has("steps") ? args.get("steps").asU32() : 1;
+  if(n == 0) n = 1;
+  if(n > 10000) n = 10000;
+  if(!system.rewinder.enabled) {
+    data.set("msg", std::string("el rebobinado no esta activo (KESTREL_REWIND=1)"));
+    return false;
+  }
+  const u64 seq0 = system.stateSeq.load(std::memory_order_acquire);
+  system.rewindReq.fetch_add(n, std::memory_order_release);
+  for(int i = 0; i < 1000; i++) {
+    if(system.stateSeq.load(std::memory_order_acquire) != seq0) {
+      std::string msg;
+      { std::lock_guard<std::mutex> ml(system.stateMsgMutex); msg = system.stateMsg; }
+      std::lock_guard<std::mutex> lk(system.coreMutex);
+      data.set("msg", msg);
+      data.set("steps", (u64)system.rewinder.steps());
+      data.set("bytes", (u64)system.rewinder.bytes());
+      data.set("interval", (u64)system.rewinder.interval);
+      data.set("viFields", (u64)system.memory.rcp.viFields);
+      data.set("pc", system.cpu.pc);
+      return msg.rfind("rebobinado", 0) == 0 && msg.find(": ") == std::string::npos;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  data.set("msg", std::string("el bucle de ejecucion no atendio la peticion (10 s)"));
+  return false;
+}
+
 // Dump the RCP MMIO register file (memory.rcp). This is the state the boot code /
 // scheduler polls: MI mask/intr drive CPU IP2; VI current/intr drive the retrace
 // interrupt; SP status/pc the RSP; DPC the RDP FIFO. interruptPending() folds MI.
@@ -338,9 +485,10 @@ auto Server::cmdState(const std::string& cmd, const json::Value& args, json::Val
   int slot = (int)args.get("slot").asInt();
   if(slot < 0 || slot > 9) { data.set("msg", "slot fuera de rango (0..9)"); return false; }
   auto& box = (cmd == "state.save") ? system.stateSaveReq : system.stateLoadReq;
+  const u64 seq0 = system.stateSeq.load(std::memory_order_acquire);
   box.store(slot, std::memory_order_release);
   for(int i = 0; i < 500; i++) {
-    if(box.load(std::memory_order_acquire) < 0) {
+    if(system.stateSeq.load(std::memory_order_acquire) != seq0) {
       std::string msg;
       { std::lock_guard<std::mutex> ml(system.stateMsgMutex); msg = system.stateMsg; }
       data.set("slot", (u64)slot);
@@ -429,6 +577,26 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
 // 8/8/8/8 for 32bpp. Height is not a hardware register — it falls out of the active
 // scan window, so we accept an optional `height` arg and default to 240 (NTSC).
 auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool {
+  // Con el backend de GPU vivo, la imagen BUENA no esta en la RDRAM: parallel-rdp rasteriza
+  // y escanea por su cuenta, y lo que se ve en la ventana sale de vrdp::scanout() ya con el
+  // filtrado del VI aplicado. Leer la RDRAM aqui daba una foto a medio hacer y sin filtro --
+  // parecia SoftRDP con los bordes rotos --, asi que cuando hay GPU se captura SU imagen.
+  if(vrdp::active()) {
+    u32 w = 0, h = 0;
+    const u8* rgba = vrdp::scanout(w, h);
+    if(rgba && w && h) {
+      blob.assign(rgba, rgba + (usize)w * h * 4);
+      vrdp::scanoutDone();
+      data.set("width", (u64)w);
+      data.set("height", (u64)h);
+      data.set("format", "rgba8888");
+      data.set("source", "gpu");
+      std::lock_guard<std::mutex> lk(system.coreMutex);
+      data.set("origin", (u64)(system.memory.rcp.vi_origin & 0x00FFFFFF));
+      return true;
+    }
+    vrdp::scanoutDone();   // simetrico: scanout() deja el cerrojo cogido aunque no haya foto
+  }
   u32 origin, width, ctrl;
   {
     std::lock_guard<std::mutex> lk(system.coreMutex);
@@ -446,28 +614,34 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
   u64 need = (u64)origin + (u64)width * height * bpp;
   if(need > ram.size()) return false;
 
+  // El ultimo byte (32bpp) / el bit 0 (16bpp) del pixel NO es alfa: es la COBERTURA que el
+  // VI usa para el antialias de bordes, y el DAC saca siempre imagen opaca. Meterlo en el
+  // canal alfa del PNG hacia invisible todo lo que dibuja la CPU (que deja cobertura 0):
+  // el menu de snapper64 salia en blanco -- fondo negro con alfa 0 -- y solo se veia lo que
+  // habia pintado el RDP. La captura va opaca; la cobertura, si algun dia hace falta, es un
+  // plano aparte, no el alfa.
   blob.resize((usize)width * height * 4);
   usize o = 0;
   for(u32 i = 0; i < width * height; i++) {
     u32 p = origin + i * bpp;
-    u8 R, G, B, A;
+    u8 R, G, B;
     if(type == 3) {
-      R = ram[p]; G = ram[p+1]; B = ram[p+2]; A = ram[p+3];
+      R = ram[p]; G = ram[p+1]; B = ram[p+2];
     } else {
       u16 px = (u16)((ram[p] << 8) | ram[p+1]);   // big-endian halfword
       u8 r5 = (px >> 11) & 0x1f, g5 = (px >> 6) & 0x1f, b5 = (px >> 1) & 0x1f;
       R = (r5 << 3) | (r5 >> 2);
       G = (g5 << 3) | (g5 >> 2);
       B = (b5 << 3) | (b5 >> 2);
-      A = (px & 1) ? 0xff : 0x00;
     }
-    blob[o++] = R; blob[o++] = G; blob[o++] = B; blob[o++] = A;
+    blob[o++] = R; blob[o++] = G; blob[o++] = B; blob[o++] = 0xff;
   }
   data.set("width", (u64)width);
   data.set("height", (u64)height);
   data.set("origin", (u64)origin);
   data.set("bpp", (u64)(bpp * 8));
   data.set("format", "rgba8888");
+  data.set("source", "rdram");
   return true;
 }
 
@@ -661,14 +835,23 @@ auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
 //                  -1 = hasta nueva orden. Por defecto 6 (~6 cuadros = una pulsacion).
 auto Server::cmdPad(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
   Memory& m = system.memory;
+  // `pad` elige el conector, 1..4. Por defecto el 1, que es lo que quiere quien solo
+  // conduce un mando y no quiere saber que hay cuatro.
+  int idx = args.has("pad") ? args.get("pad").asInt() : 1;
+  if(idx < 1 || idx > 4) { data.set("msg", "pad: el conector va de 1 a 4"); return false; }
+  idx -= 1;
   if(cmd == "pad.get") {
-    s32 left = m.padRemotePolls.load();
-    s32 st   = m.padRemoteStick.load();
+    s32 left = m.padRemotePolls[idx].load();
+    s32 st   = m.padRemoteStick[idx].load();
+    data.set("pad", (s64)(idx + 1));
+    data.set("connected", m.padPort[idx].connected);
+    data.set("accessory", (s64)m.padPort[idx].accessory);
+    data.set("rumble", m.padPort[idx].rumble);
     data.set("remote", left != 0);
     data.set("polls_left", (s64)left);
-    data.set("buttons", (u64)(left != 0 ? m.padRemoteButtons.load() : m.padButtons));
-    data.set("stick_x", (s64)(left != 0 ? (s8)(st & 0xff) : m.padStickX));
-    data.set("stick_y", (s64)(left != 0 ? (s8)((st >> 8) & 0xff) : m.padStickY));
+    data.set("buttons", (u64)(left != 0 ? m.padRemoteButtons[idx].load() : m.padPort[idx].buttons));
+    data.set("stick_x", (s64)(left != 0 ? (s8)(st & 0xff) : m.padPort[idx].stickX));
+    data.set("stick_y", (s64)(left != 0 ? (s8)((st >> 8) & 0xff) : m.padPort[idx].stickY));
     return true;
   }
   // Nombres tal y como los llama el SDK (CONT_*), en minusculas y sin prefijo.
@@ -701,9 +884,10 @@ auto Server::cmdPad(const std::string& cmd, const json::Value& args, json::Value
   if(sy >  80) sy =  80; else if(sy < -80) sy = -80;
   s32 polls = args.has("polls") ? args.get("polls").asInt() : 6;
 
-  m.padRemoteButtons.store(btn, std::memory_order_relaxed);
-  m.padRemoteStick.store(((s32)(u8)(s8)sy << 8) | (u8)(s8)sx, std::memory_order_relaxed);
-  m.padRemotePolls.store(polls, std::memory_order_release);   // publica el resto antes
+  m.padRemoteButtons[idx].store(btn, std::memory_order_relaxed);
+  m.padRemoteStick[idx].store(((s32)(u8)(s8)sy << 8) | (u8)(s8)sx, std::memory_order_relaxed);
+  m.padRemotePolls[idx].store(polls, std::memory_order_release);   // publica el resto antes
+  data.set("pad", (s64)(idx + 1));
   data.set("buttons", (u64)btn);
   data.set("stick_x", (s64)sx);
   data.set("stick_y", (s64)sy);

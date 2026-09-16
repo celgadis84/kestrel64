@@ -150,6 +150,9 @@ auto R128::operator()(u32 e) const -> R128 {
 }
 
 Rsp::Rsp() {
+  // Salto del bucle de espera del FIFO (ver Rsp::idleSkip). KESTREL_RSPIDLE=0 lo apaga y el
+  // md5 del framebuffer tiene que salir igual: es un atajo de anfitrion, no de semantica.
+  { const char* v = std::getenv("KESTREL_RSPIDLE"); idleOn = !(v && v[0] == '0'); }
   // Dynarec del RSP. Por defecto encendido, igual que el de la CPU, y con el interprete
   // como oraculo: KESTREL_RSPJIT=0 lo apaga y el md5 del framebuffer tiene que salir igual.
   {
@@ -278,11 +281,15 @@ auto Rsp::jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void {
   // reconocerla. Con el nucleo corriendo es un overlay sobre la imagen viva y hay que
   // invalidar en el acto, antes de volver a entrar en ningun bloque.
   if(!running) return;
+  // Un bloque que este corriendo el MTC0 que lanzo este DMA lo ve al volver (Rsp::jitCop0)
+  // y corta detras de esa instruccion, sin tocar nada mas del bloque ni de su tabla.
+  jitImemGen++;
   // Corriendo y desde el hilo del nucleo: es el propio microcodigo cargandose (el stub de
-  // arranque DMAea el ucode de la tarea) o un overlay. Estamos entre instrucciones
-  // interpretadas -- el DMA se pide por COP0, que nunca entra en un bloque -- asi que cambiar
-  // de imagen aqui es tan seguro como en start(), y es DONDE de verdad pasa el cambio de
-  // tarea: si se invalida a ciegas se tira la tabla de la tarea anterior cada vez.
+  // arranque DMAea el ucode de la tarea) o un overlay. El DMA sale de un MTC0; si ese MTC0
+  // iba dentro de un bloque, el bloque corta al volver (ver arriba) y el codigo emitido no
+  // se libera -- solo se marca muerto en la tabla --, asi que cambiar de imagen aqui es tan
+  // seguro como en start(), y es DONDE de verdad pasa el cambio de tarea: si se invalida a
+  // ciegas se tira la tabla de la tarea anterior cada vez.
   if(std::this_thread::get_id() == rspThread) { jitSelectImage(imem); return; }
   jc->syncImem(imem);
   // El codigo emitido de los bloques muertos se queda en el buffer hasta el siguiente
@@ -394,6 +401,55 @@ auto Rsp::accSat(int n, bool slice, u16 neg, u16 pos) const -> u16 {
   return !slice ? accl.uc(n) : accm.uc(n);
 }
 
+// El microcodigo espera al FIFO del RDP dando vueltas a un bucle de cuatro o cinco
+// instrucciones que solo lee DPC_CURRENT y salta atras. En una corrida de 300 campos de DK64
+// salen 13,9 millones de sondeos y apenas ~235 pillan una tanda abierta: el resto ven el
+// motor drenado. Ese bucle no tiene efecto lateral ninguno -- ni escribe memoria ni toca
+// registros -- y lo unico que produce es avance del reloj del RSP.
+//
+// Con el motor drenado DPC_CURRENT es una CONSTANTE, y no puede dejar de serlo hasta que la
+// CPU meta la siguiente tanda; como el envio la fecha con kick = cartNow() y cartNow solo
+// crece, ninguna tanda futura puede empezar antes del instante al que la CPU ha llegado ya.
+// O sea que el valor esta fijado en todo [now, cartNow]. Entonces emular las vueltas una a
+// una no aporta semantica: se cobra de golpe el numero ENTERO de vueltas que caben en ese
+// hueco -- exactamente los ciclos que habria dado emularlas -- y se salta ahi. El resultado
+// es el mismo reloj, y es determinista porque solo depende de instantes de invitado.
+//
+// La firma del bucle se saca de la propia corriente: mismo PC, misma huella de los 31
+// registros escalares, mismo valor devuelto y misma distancia en ciclos que la vuelta
+// anterior. Si algo de eso cambia, no es un bucle de espera y no se salta nada.
+auto Rsp::idleSkip(u64 now, u32 val) -> void {
+  // Solo en Threaded. En Lockstep los dos chips comparten hilo y se turnan por construccion:
+  // aparcar al RSP ahi es aparcar al unico hilo que hay, y el que tendria que despertarlo --
+  // la CPU -- no puede correr hasta que el RSP vuelva. El microcodigo se quedaba dando vueltas
+  // al bucle del FIFO desde el campo 67 de DK64 sin que entrara un solo buffer mas.
+  if(!idleOn || !mem || mem->rcpMode != Memory::RcpMode::Threaded) return;
+  const u64 cyc = exactCycles();
+  u32 h = 0x811c9dc5u;
+  for(int i = 1; i < 32; ++i) h = (h ^ r[i]) * 0x01000193u;
+  const u64 len = cyc - idleAt;
+  const bool same = idlePc == pc && idleHash == h && idleVal == val && idleLen == len;
+  idlePc = pc; idleHash = h; idleVal = val; idleLen = len; idleAt = cyc;
+  if(!same || len < 2 || len > 64) { idleNoSig++; return; }
+  const u64 seq0 = mem->dpSubSeq.load(std::memory_order_acquire);
+  if(!mem->dpDrainedAt(now)) { idleNoDrain++; return; }
+  // El destino del salto NO puede ser `cartNow()`: es tiempo de anfitrion puro y meteria en el
+  // reloj del RSP lo lejos que la CPU hubiera llegado a correr en esa corrida. Con el motor
+  // drenado en `now` no hay ningun tramo lanzado con fecha posterior, asi que el siguiente nace
+  // forzosamente donde la CPU este o mas alla: aterrizar en SU lanzamiento es correcto y ademas
+  // es un instante de invitado. Eso es lo que devuelve rspParkWait.
+  const u64 tgt = mem->rspParkWait(now, seq0);
+  if(tgt <= now) { idleNoRoom++; return; }
+  u64 k = mem->rcpOpsToCycles(tgt - now) / len;
+  if(!k) { idleNoRoom++; return; }
+  if(k > (1u << 20)) k = 1u << 20;
+  publishExact();
+  cyclesRun.fetch_add(k * len, std::memory_order_relaxed);
+  idleAt += k * len;
+  idleSkips.fetch_add(1, std::memory_order_relaxed);
+  idleIters.fetch_add(k, std::memory_order_relaxed);
+}
+
 // --- COP0 register access (SP + DPC) ----------------------------------------
 auto Rsp::mfc0(int rt, int rd) -> void {
   if((rd & 0xf) == 10) mem->rcp.dpcCurReads.fetch_add(1, std::memory_order_relaxed);  // DPC_CURRENT
@@ -402,11 +458,37 @@ auto Rsp::mfc0(int rt, int rd) -> void {
   // estas dos bases SIEMPRE caen fuera de todas ellas, asi que el valor es el mismo. El
   // microcodigo sondea SP_DMA_BUSY/SP_STATUS en bucle, asi que ese recorrido salia el
   // 32 % del hilo del RSP en el perfil.
+  // DPC lo lee el RSP en SU propio instante de invitado, no en el del hilo de CPU: los dos
+  // chips van al mismo reloj y el microcodigo sondea el FIFO en bucle. Ver Memory::dpcCurrentFor.
+  if(rd & 8) {
+    const u32 r = rd & 7;
+    if(r == 2 || r == 3) {
+      mem->dpcRdRsp.fetch_add(1, std::memory_order_relaxed);
+      // El sondeo del FIFO del RDP se responde en el instante de invitado del RSP, asi que
+      // ese instante tiene que ser el de ESTA instruccion, no el de la ultima frontera de
+      // tanda: cuantas vueltas da el bucle de espera es justo lo que cambiaba entre corridas.
+      const u64 now = mem->rspGuestNowAt(exactCycles());
+      // El RSP no puede leer el FIFO en un instante al que la CPU aun no ha llegado: es
+      // la otra escritora del FIFO. Publicar primero el reloj exacto es lo que permite que
+      // la barrera del SP la deje llegar hasta aqui. Ver Memory::dpReadSync.
+      if(mem->dpReadAhead(now)) { publishExact(); mem->dpReadSync(now); }
+      mem->rdpAwaitGuest(now);
+      const u32 val = r == 2 ? mem->dpcCurrentFor(now) : mem->dpcStatusFor(now);
+      setR(rt, val);
+      idleSkip(now, val);
+      return;
+    }
+  }
   u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
                                       : PHYS_SP  + ((rd & 7) << 2));
   setR(rt, data);
 }
 auto Rsp::mtc0(int rd, u32 v) -> void {
+  // Es la unica puerta del microcodigo al MMIO del RCP, y por ella salen los lanzamientos de
+  // DMA y las escrituras de DPC_END. Todo lo que hay detras sella eventos con el reloj de
+  // invitado del RSP, asi que aqui ese reloj tiene que estar exacto, no redondeado a la
+  // ultima frontera de tanda. Un fetch_add por MTC0 -- unas pocas por tarea.
+  publishExact();
   // Directo al decodificador de MMIO, por lo mismo que `mfc0` (ver alli). El microcodigo
   // programa cada DMA con cuatro MTC0 seguidos, asi que el prologo de `Memory::write32`
   // -- IS-Viewer, cart, dominio de save y el recorrido entero de regiones de `resolve`,
@@ -1704,7 +1786,7 @@ auto Rsp::benchStep(u64 iters) -> void {
   for(u32 g = 1; g < 32; g++) r[g] = g * 0x40;
 
   auto runOnce = [&]() -> double {
-    pc = 0; halt = false; running = true; branch = false; inDelay = false;
+    pc = 0; halt = false; running = true; brake = true; branch = false; inDelay = false;
     budget = iters + 16;
     auto t0 = std::chrono::steady_clock::now();
     step(iters);
@@ -1726,12 +1808,90 @@ auto Rsp::start() -> void {
   // que recarga su propio microcodigo no invalida nada. Cubre a CUALQUIER escritor (DMA,
   // tienda de la CPU, escritura por MCP) sin poner un gancho en ningun camino caliente.
   jitSelectImage(imp);
-  running = true;
+  running = true; brake = true;
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;
   halt = false; broke = false;
   inDelay = false; pendingTarget = 0;
-  budget = 40'000'000;
+  budget = kWatchdogQuantum;
+  hangTicks = 0;
+}
+
+// --- vigilante de microcodigo ------------------------------------------------
+// Aviso, NO tope. En el N64 real el RSP corre hasta que su microcodigo hace BREAK o hasta
+// que la CPU le pone HALT: no hay ningun limite de instrucciones por tarea. El tope de 40 M
+// que habia aqui nacio como red contra un microcodigo colgado, pero da por supuesto el
+// modelo libultra "una tarea = un BREAK". libdragon corre `rspq` como cola PERSISTENTE: su
+// RSPQCmd_WaitNewInput solo hace break cuando la cola se VACIA, asi que un juego que la
+// mantiene alimentada encadena decenas de campos sin parar y se comia el tope. El BREAK
+// forzado destruia el estado de la cola -> congelacion (junkrunner64/SpellCraft, y detras
+// los DMA SP->RDRAM a dram=0x000000 con la cabecera de tarea ya basura).
+// Ahora esto solo avisa y se re-arma. El tope duro sigue disponible a mano con
+// KESTREL_RSPBUDGET=<instrucciones> para bisecar un microcodigo de verdad colgado.
+auto Rsp::watchdog() -> u64 {
+  static const u64 hardCap = [] {
+    const char* e = std::getenv("KESTREL_RSPBUDGET");
+    return e ? std::strtoull(e, nullptr, 0) : 0ull;
+  }();
+  static const bool dumpOn = std::getenv("KESTREL_RSPHANG") != nullptr;
+  hangTicks++;
+  // Un rspq vivo dispara esto cada ~0.6 s de tiempo invitado: los 4 primeros avisos y
+  // luego uno de cada 64, o el log se convierte en ruido.
+  if(hangTicks <= 4 || (hangTicks & 63) == 0)
+    std::fprintf(stderr, "[rsp] microcodigo lleva %lluM instrucciones sin BREAK (pc=0x%03x)\n",
+                 (unsigned long long)((hangTicks * kWatchdogQuantum) / 1'000'000), curpc);
+  if(dumpOn && hangTicks == 1) dumpHang();
+  // Estado del horario del RDP en CADA aviso: un bucle de espera de FIFO que no sale se
+  // distingue de un microcodigo persistente por si su reloj de invitado avanza y por si el
+  // puntero de lectura que ve llega alguna vez al final del tramo.
+  if(dumpOn && mem) dumpDpWait();
+  if(hardCap && hangTicks * kWatchdogQuantum >= hardCap) return 0;
+  return kWatchdogQuantum;
+}
+
+// Volcado de la escena del crimen. Un microcodigo colgado no dice nada por si mismo: lo
+// que hace falta es QUE tarea era (la cabecera OSTask que la CPU dejo en DMEM 0xFC0), en
+// que instruccion gira y con que registros.
+auto Rsp::dumpHang() const -> void {
+  auto dm = [&](u32 a) -> u32 { a &= 0xffc;
+    return ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3]; };
+  auto im = [&](u32 a) -> u32 { a &= 0xffc;
+    return ((u32)mem->imem[a]<<24)|((u32)mem->imem[a+1]<<16)|((u32)mem->imem[a+2]<<8)|mem->imem[a+3]; };
+  std::fprintf(stderr, "[rsphang] OSTask @DMEM 0xFC0: type=%u flags=%08x ucode=%08x size=%08x\n",
+               dm(0xfc0), dm(0xfc4), dm(0xfd0), dm(0xfd4));
+  std::fprintf(stderr, "[rsphang]   ucode_data=%08x/%08x dram_stack=%08x/%08x out_buf=%08x/%08x\n",
+               dm(0xfd8), dm(0xfdc), dm(0xfe0), dm(0xfe4), dm(0xfe8), dm(0xfec));
+  std::fprintf(stderr, "[rsphang]   data_ptr=%08x data_size=%08x yield=%08x/%08x\n",
+               dm(0xfc8), dm(0xfcc), dm(0xff0), dm(0xff4));
+  for(int i = 0; i < 32; i += 4)
+    std::fprintf(stderr, "[rsphang] r%-2d %08x  r%-2d %08x  r%-2d %08x  r%-2d %08x\n",
+                 i, r[i], i+1, r[i+1], i+2, r[i+2], i+3, r[i+3]);
+  for(s32 o = -8; o <= 8; o++) {
+    u32 a = (u32)(((s32)curpc + o * 4) & 0xffc);
+    std::fprintf(stderr, "[rsphang] imem %03x: %08x%s\n", a, im(a), o == 0 ? "   <-- pc" : "");
+  }
+  std::fflush(stderr);
+}
+
+auto Rsp::dumpDpWait() const -> void {
+  const u64 nw = mem->rspGuestNowAt(exactCycles());
+  const u64 sub = mem->dpSubSeq.load(std::memory_order_acquire);
+  const u64 comp = mem->dpCompletedAt(nw);
+  std::fprintf(stderr, "[dpwait] now=%llu cart=%llu schedEnd=%llu sub=%llu compAt=%llu"
+                       " rspBusy=%u pend4=%u cyc=%llu spK=%llu/%llu cur=%06x\n",
+               (unsigned long long)nw, (unsigned long long)mem->cartNow(),
+               (unsigned long long)mem->dpSchedEnd.load(), (unsigned long long)sub,
+               (unsigned long long)comp, (unsigned)mem->rspBusy.load(),
+               (unsigned)((mem->rcpPend.load() >> 2) & 1u),
+               (unsigned long long)exactCycles(), (unsigned long long)mem->spKickOps,
+               (unsigned long long)mem->spKickCycles, mem->dpcCurrentFor(nw));
+  for(u64 k = (sub >= 3 ? sub - 3 : 0); k < sub; ++k) {
+    const u32 i = (u32)(k & Memory::kDpRingM);
+    std::fprintf(stderr, "[dpwait]   span %llu a=%06x..%06x t=%llu..%llu\n",
+                 (unsigned long long)k, mem->dpJobAddr[i], mem->dpJobEndAddr[i],
+                 (unsigned long long)mem->dpJobStartG[i], (unsigned long long)mem->dpJobEndG[i]);
+  }
+  std::fflush(stderr);
 }
 
 __attribute__((flatten))
@@ -1739,7 +1899,8 @@ auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
   bindMem();
   rspThread = std::this_thread::get_id();
-  u64 ran = 0, pub = 0;
+  u64 ran = 0;
+  exactPub = 0;
   // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo CPU
   // (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final. Publicar cada
   // 8K instrucciones (~200 us de RSP emulado) cuesta un fetch_add y un notify por bloque:
@@ -1753,7 +1914,7 @@ auto Rsp::step(u64 maxInsns) -> void {
   // uno solo -- el cuerpo se queda con las cargas que de verdad hacen falta.
   // La tanda es la misma que ya usaba la publicacion al regulador (8K instrucciones), asi
   // que tampoco se retrasa nada de lo que el hilo CPU necesita ver.
-  while(!halt && maxInsns && budget) {
+  while(!halt && maxInsns && budget && !hostStop.load(std::memory_order_relaxed)) {
     u64 chunk = maxInsns < budget ? maxInsns : budget;
     if(chunk > 8192) chunk = 8192;
     const bool prof = profOn;
@@ -1761,6 +1922,9 @@ auto Rsp::step(u64 maxInsns) -> void {
     const bool jitStats = statsOn;
     const u8* const limp = imp;
     u64 c = chunk;
+    // Ventana viva de la tanda: con esto publishExact() puede dar el contador EXACTO en
+    // cualquier instruccion de dentro. Ver la nota en rsp.hpp.
+    exactEnd = ran + chunk; exactLeft = chunk; exactOn = true;
     while(c && !halt) {
       // Dynarec: si en este PC hay un bloque compilado y cabe en lo que queda de tanda, se
       // ejecuta entero y el bucle se salta sus instrucciones. Nunca dentro de un delay-slot
@@ -1805,6 +1969,7 @@ auto Rsp::step(u64 maxInsns) -> void {
       u32 w; std::memcpy(&w, limp + (pc & 0xffc), 4);
       u32 op = bswap32(w);
       curpc = pc;
+      exactLeft = c;   // copia del saldo: `c` sigue viviendo en un registro
       if(prof) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
       u32 nextpc = (pc + 4) & 0xfff;
       branch = false;
@@ -1816,11 +1981,15 @@ auto Rsp::step(u64 maxInsns) -> void {
       else             { pc = nextpc; }
     }
     u64 done = chunk - c;
+    exactOn = false;    // fuera del bucle no hay saldo vivo que mirar
     maxInsns -= done; budget -= done; ran += done;
+    // El saldo llega a 0 exacto: chunk nunca supera budget. Re-armar (avisando) mantiene
+    // viva la tarea; solo devuelve 0 si el usuario pidio un tope duro (KESTREL_RSPBUDGET).
+    if(budget == 0 && !halt) budget = watchdog();
     if(pubMid) {
       // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo
       // CPU (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final.
-      cyclesRun.fetch_add(ran - pub, std::memory_order_relaxed); pub = ran;
+      cyclesRun.fetch_add(ran - exactPub, std::memory_order_relaxed); exactPub = ran;
       // Notificar solo si hay alguien dormido. Sin esperador, notify_all sigue siendo
       // una llamada a la CRT y un candado; con esperador, una llamada al kernel. El
       // fetch_add anterior publica cyclesRun ANTES de leer el contador (ver rspWaiters).
@@ -1831,7 +2000,8 @@ auto Rsp::step(u64 maxInsns) -> void {
   // Threaded el worker llama a step() con la tarea entera y nadie los contaba: el heartbeat
   // decia "RSP 0.0%" justo cuando el RSP es el palo largo. Se publica una vez por llamada,
   // no por instruccion, asi que no toca la linea de cache en el bucle caliente.
-  cyclesRun.fetch_add(ran - pub, std::memory_order_relaxed);
+  cyclesRun.fetch_add(ran - exactPub, std::memory_order_relaxed);
+  exactPub = ran;
   mem->rcp.sp_pc = pc & 0xffc;
   if(halt) {
     // PC is final; now let the CPU see the task end. The release in the fetch_or
@@ -1846,39 +2016,29 @@ auto Rsp::step(u64 maxInsns) -> void {
           "[rsp] END #%u pc=0x%03x cycles=%llu type=%u flags=%08x dl=%08x dlsz=%08x dpc=%06x..%06x\n",
           n, mem->rcp.sp_pc, (unsigned long long)ran, dm(0xfc0), dm(0xfc4), dm(0xff0), dm(0xff4),
           mem->rcp.dpc_current.load(), mem->rcp.dpc_end); }
-      mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
-      if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
-    }
-    running = false; return;
-  }
-  if(budget == 0) {                            // microcode hang: force a break
-    std::fprintf(stderr, "[rsp] WARNING: budget exhausted at pc=0x%03x (microcode hang?)\n", curpc);
-    // Volcado de la escena del crimen. Un microcodigo colgado no dice nada por si mismo: lo
-    // que hace falta es QUE tarea era (la cabecera OSTask que la CPU dejo en DMEM 0xFC0), en
-    // que instruccion gira y con que registros. Sin esto el aviso solo dice "algo va mal".
-    if(std::getenv("KESTREL_RSPHANG")) {
-      auto dm = [&](u32 a) -> u32 { a &= 0xffc;
-        return ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3]; };
-      auto im = [&](u32 a) -> u32 { a &= 0xffc;
-        return ((u32)mem->imem[a]<<24)|((u32)mem->imem[a+1]<<16)|((u32)mem->imem[a+2]<<8)|mem->imem[a+3]; };
-      std::fprintf(stderr, "[rsphang] OSTask @DMEM 0xFC0: type=%u flags=%08x ucode=%08x size=%08x\n",
-                   dm(0xfc0), dm(0xfc4), dm(0xfd0), dm(0xfd4));
-      std::fprintf(stderr, "[rsphang]   ucode_data=%08x/%08x dram_stack=%08x/%08x out_buf=%08x/%08x\n",
-                   dm(0xfd8), dm(0xfdc), dm(0xfe0), dm(0xfe4), dm(0xfe8), dm(0xfec));
-      std::fprintf(stderr, "[rsphang]   data_ptr=%08x data_size=%08x yield=%08x/%08x\n",
-                   dm(0xfc8), dm(0xfcc), dm(0xff0), dm(0xff4));
-      for(int i = 0; i < 32; i += 4)
-        std::fprintf(stderr, "[rsphang] r%-2d %08x  r%-2d %08x  r%-2d %08x  r%-2d %08x\n",
-                     i, r[i], i+1, r[i+1], i+2, r[i+2], i+3, r[i+3]);
-      for(s32 o = -8; o <= 8; o++) {
-        u32 a = (u32)(((s32)curpc + o * 4) & 0xffc);
-        std::fprintf(stderr, "[rsphang] imem %03x: %08x%s\n", a, im(a), o == 0 ? "   <-- pc" : "");
+      // En Threaded el fin NO se publica aqui: el worker termina en tiempo de PARED y el
+      // invitado veria la interrupcion en una instruccion distinta en cada corrida. Se arma
+      // un plazo en el reloj de invitado con los ciclos que ha costado la tarea y lo publica
+      // el hilo de CPU (Memory::rcpRetire). Ver la nota larga en memory.hpp.
+      if(mem->rcpMode == Memory::RcpMode::Threaded && Memory::rcpDeadlineOn()) {
+        mem->spEndArm(cyclesRun.load(std::memory_order_relaxed) - mem->spKickCycles);
+      } else {
+        mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
+        mem->spRets.fetch_add(1, std::memory_order_relaxed);
+        if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
       }
-      std::fflush(stderr);
     }
+    running = false; brake = false; return;
+  }
+  if(budget == 0) {
+    // Solo se llega aqui con KESTREL_RSPBUDGET puesto a mano: el vigilante por defecto
+    // re-arma y nunca devuelve 0. Es una herramienta de bisecar, no semantica de HW.
+    std::fprintf(stderr, "[rsp] KESTREL_RSPBUDGET agotado en pc=0x%03x (microcode hang?)\n", curpc);
+    dumpHang();
     mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);
+    mem->spRets.fetch_add(1, std::memory_order_relaxed);
     if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
-    running = false;
+    running = false; brake = false;
   }
 }
 

@@ -7,7 +7,11 @@
 # dist/ se queda con el .exe de hace semanas y lo que se prueba desde el lanzador no es
 # el codigo actual. Un solo comando para que no vuelva a desincronizarse.
 #
-# Uso:  sh scripts/pack.sh            (build-prdp-static: GPU + enlazado estatico)
+# Van DOS ejecutables en el paquete: el de parallel-RDP (GPU), que es el recomendado y el
+# que se llama kestrel64.exe, y el de SoftRDP (kestrel64-soft.exe), que no necesita Vulkan.
+#
+# Uso:  sh scripts/pack.sh            (build-prdp-static + build-static, ambos estaticos)
+#       SOFTBUILD=- sh scripts/pack.sh  (solo el de GPU)
 #       NOISS=1 sh scripts/pack.sh    (sin instalador, solo dist/ + zip)
 set -e
 cd "$(dirname "$0")/.."
@@ -25,6 +29,17 @@ taskkill //F //IM kestrel64-gui.exe >/dev/null 2>&1 || true
   cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
 cmake --build "$BUILD" -j8
+
+# Segundo ejecutable: el mismo emulador con el rasterizador por software. parallel-RDP cae
+# a SoftRDP solo si Vulkan no arranca, pero eso es una caida en caliente y no da a elegir;
+# una maquina sin GPU decente, o quien quiera el rasterizador de referencia para comparar,
+# necesita el .exe compilado asi. Es el mismo codigo con otra opcion de cmake.
+SOFTBUILD=${SOFTBUILD:-build-static}
+if [ "$SOFTBUILD" != "-" ]; then
+  [ -f "$SOFTBUILD/CMakeCache.txt" ] ||     cmake -S . -B "$SOFTBUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DKESTREL_STATIC=ON
+  cmake --build "$SOFTBUILD" -j8
+fi
+export SOFTBUILD
 
 sh scripts/dist.sh "$BUILD" dist
 

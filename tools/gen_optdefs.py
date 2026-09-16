@@ -14,7 +14,7 @@ import options as OPT
 # Opciones que el emulador sabe cambiar EN CALIENTE. El resto exige relanzar el proceso, y el
 # menu lo dice en vez de fingir que se aplico.
 LIVE = {
-  "winscale", "winsize", "fullscreen", "hud", "audio", "volume", "throttle",
+  "winscale", "winsize", "fullscreen", "hud", "audio", "volume", "throttle", "aspect",
 }
 
 TYPE = {"bool": "Bool", "int": "Int", "float": "Float", "text": "Text",

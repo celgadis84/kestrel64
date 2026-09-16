@@ -66,9 +66,13 @@ int main() {
   mem.rcp.sp_pc = 0;
   mem.rcp.sp_status = 1;                 // halted
   mem.rsp.mem = &mem;
-  mem.write32(0x0404'0010, 1);           // SP_STATUS: clear HALT -> run to BREAK
+  mem.write32(0x0404'0010, 1);           // SP_STATUS: clear HALT -> arma el nucleo
+  // En modo Lockstep (el de este test, sin System) la escritura solo ARMA el RSP: quien
+  // lo hace avanzar es System::run intercalando pasos. Aqui no hay System, asi que se le
+  // da un paso sin tope, que es lo que hace KESTREL_RSPINLINE: corre hasta su BREAK.
+  mem.rsp.step(~0ull);
 
-  std::printf("sp_status after run = 0x%08x (expect HALT|BROKE = 0x3)\n", mem.rcp.sp_status);
+  std::printf("sp_status after run = 0x%08x (expect HALT|BROKE = 0x3)\n", mem.rcp.sp_status.load());
   chk("halt+broke", mem.rcp.sp_status & 3, 3);
 
   // --- expected results -----------------------------------------------------

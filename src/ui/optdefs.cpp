@@ -4,6 +4,10 @@
 
 namespace kestrel::ui {
 
+static const Choice kCh_speedmode[] = {
+  {"libre", "Libre - manda lo que se elija aqui debajo"},
+  {"hw", "Fiel a consola - relojes N64 exactos y 59.94 campos/s"},
+};
 static const Choice kCh_throttle[] = {
   {"auto", "Automatico - limita si hay ventana"},
   {"1", "Siempre limitado a 59.94 campos/s"},
@@ -23,6 +27,17 @@ static const Choice kCh_winscale[] = {
   {"6", "6x - 1920x1440"},
   {"8", "8x - 2560x1920"},
 };
+static const Choice kCh_aspect[] = {
+  {"4:3", "4:3 - la senal que saca el VI (fiel)"},
+  {"16:9", "16:9 - estirar la imagen anamorfica"},
+  {"estirar", "Llenar la ventana (deforma)"},
+};
+static const Choice kCh_upscale[] = {
+  {"1", "1x - resolucion nativa"},
+  {"2", "2x"},
+  {"4", "4x"},
+  {"8", "8x"},
+};
 static const Choice kCh_savetype[] = {
   {"auto", "Automatico - por ID de cartucho"},
   {"none", "Ninguno"},
@@ -31,6 +46,16 @@ static const Choice kCh_savetype[] = {
   {"sram256k", "SRAM 256 kbit"},
   {"sram768k", "SRAM 768 kbit"},
   {"flash1m", "FlashRAM 1 Mbit"},
+};
+static const Choice kCh_tvtype[] = {
+  {"auto", "Automatico - por region del cartucho"},
+  {"ntsc", "NTSC (60 Hz)"},
+  {"pal", "PAL (50 Hz)"},
+  {"mpal", "PAL-M (60 Hz)"},
+};
+static const Choice kCh_rdram[] = {
+  {"8", "8 MB - con Expansion Pak"},
+  {"4", "4 MB - consola de serie"},
 };
 
 static const Option kOpt_cpu[] = {
@@ -47,6 +72,7 @@ static const Option kOpt_cpu[] = {
   {"jit_nobranch", "KESTREL_JIT_NOBRANCH", "Sin absorcion de saltos", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"jit_nojmp", "KESTREL_JIT_NOJMP", "Sin absorcion de J/JAL/JR", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"jit_nofast", "KESTREL_JIT_NOFAST", "Sin prologo rapido", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
+  {"cpuidle", "KESTREL_CPUIDLE", "Salto del bucle ocioso de la CPU", OType::Bool, "1", "El hilo ocioso de libultra es un salto a si mismo con NOP en la ranura de retardo: no observa nada mas que Count, asi que se cobra de golpe hasta el mismo instante en que la cadena del JIT habria vuelto a mirar los eventos. Apagarlo tiene que dar el mismo resultado, solo mas lento.", false, false, true, 0, 0, 0, nullptr, 0, false},
   {"lle_ipl3", "KESTREL_LLE_IPL3", "IPL3 real (LLE)", OType::Bool, "0", "Arranca ejecutando el IPL3 del cartucho en vez del arranque HLE.", true, false, false, 0, 0, 0, nullptr, 0, false},
 };
 
@@ -56,6 +82,12 @@ static const Option kOpt_rcp[] = {
   {"rspjit_stats", "KESTREL_RSPJIT_STATS", "Estadisticas del RSP JIT", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"rspsse", "KESTREL_NORSPSSE", "VU por SSE", OType::Bool, "1", "Unidad vectorial del RSP con instrucciones SSE del anfitrion en vez de escalar.", false, true, false, 0, 0, 0, nullptr, 0, false},
   {"vecfast", "KESTREL_NOVECFAST", "Cargas vectoriales rapidas", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, false},
+  {"rspidle", "KESTREL_RSPIDLE", "Aparcar el RSP en la espera del FIFO", OType::Bool, "1", "Con el motor del RDP drenado, el sondeo del microcodigo sobre DPC_CURRENT no puede cambiar de respuesta: se aparca el RSP hasta que la CPU archiva el siguiente tramo. Apagarlo tiene que dar el mismo resultado.", false, false, true, 0, 0, 0, nullptr, 0, false},
+  {"spinpause", "KESTREL_SPINPAUSE", "Pista PAUSE en las esperas activas", OType::Bool, "1", "La CPU y el RSP se vigilan girando sobre contadores que escribe el otro. PAUSE le dice al nucleo que eso es una espera, para que no le robe la linea de cache ni las ranuras de emision al hermano. Es solo una pista de anfitrion: el resultado sale identico.", true, false, true, 0, 0, 0, nullptr, 0, false},
+  {"barspin", "KESTREL_BARSPIN", "Vueltas de la barrera del SP", OType::Int, "0", "0 = por defecto (2048). Cuanto gira la CPU en la barrera del RSP antes de dormir.", true, false, false, 0, 1e+06, 0, nullptr, 0, false},
+  {"rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", OType::Int, "32768", "Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo con Parallel-RDP.", true, false, false, 0, 1e+07, 0, nullptr, 0, false},
+  {"rspspin", "KESTREL_RSPSPIN", "Vueltas del RSP ocioso", OType::Int, "0", "Cuanto gira el hilo del RSP entre tareas antes de dormir. Medido neutro; 0 = dormir enseguida.", true, false, false, 0, 1e+07, 0, nullptr, 0, false},
+  {"dpspin", "KESTREL_DPSPIN", "Vueltas esperando al RDP", OType::Int, "262144", "Cuanto gira la CPU (y el RSP) esperando a que el RDP cierre un tramo antes de dormir. 0 = dormir enseguida.", true, false, false, 0, 1e+07, 0, nullptr, 0, false},
   {"rspinline", "KESTREL_RSPINLINE", "RSP en linea", OType::Bool, "0", "Ejecuta la tarea del RSP dentro del hilo de CPU en vez de cederla al hilo del RCP.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"rdpinline", "KESTREL_RDPINLINE", "RDP en linea", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"rdpdrain", "KESTREL_RDPDRAIN", "Drenar RDP en cada sync", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
@@ -64,6 +96,7 @@ static const Option kOpt_rcp[] = {
 };
 
 static const Option kOpt_oc[] = {
+  {"speedmode", "KESTREL_SPEEDMODE", "Modo de velocidad", OType::Choice, "libre", "Fiel a consola ignora los multiplicadores y el CPI puesto a mano, y con ventana clava el campo de video a 59.94 Hz: el juego ve el mismo tiempo que veria en la maquina real. Sin ventana no limita el ritmo de pared, porque no hay pantalla que respetar y el resultado no cambia. Es lo que hay que poner para las demos que cuentan campos (la liana de Donkey Kong 64) y para comparar contra hardware.", false, false, false, 0, 0, 0, kCh_speedmode, 2, false},
   {"oc_link", nullptr, "Ligar los tres dominios", OType::Bool, "1", "Un solo mando para CPU, RSP y RDRAM.", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"oc_all", "KESTREL_OC", "Multiplicador global", OType::Float, "1", "", false, false, false, 0.25, 8, 0.05, nullptr, 0, false},
   {"oc_cpu", "KESTREL_OC_CPU", "CPU - R4300i 93.75 MHz", OType::Float, "1", "", false, false, false, 0.25, 8, 0.05, nullptr, 0, false},
@@ -79,6 +112,9 @@ static const Option kOpt_video[] = {
   {"winscale", "KESTREL_WINSCALE", "Escala de ventana", OType::Choice, "2", "", false, false, false, 0, 0, 0, kCh_winscale, 7, true},
   {"winsize", "KESTREL_WINSIZE", "Tamano exacto WxH", OType::Text, "", "Vacio = usar la escala. Ejemplo: 1600x900. Manda sobre la escala.", false, false, false, 0, 0, 0, nullptr, 0, true},
   {"fullscreen", "KESTREL_FULLSCREEN", "Pantalla completa", OType::Bool, "0", "Usa el modo actual del monitor primario; no cambia la resolucion del escritorio.", false, false, true, 0, 0, 0, nullptr, 0, true},
+  {"aspect", "KESTREL_ASPECT", "Relacion de aspecto", OType::Choice, "4:3", "El N64 saca SIEMPRE 4:3. 16:9 no ensancha el campo de vision -- eso solo lo puede hacer el juego -- sino que estira la imagen que ya generan aplastada los juegos con modo panoramico propio (Perfect Dark, GoldenEye, Turok, Rush 2).", false, false, false, 0, 0, 0, kCh_aspect, 3, true},
+  {"upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", OType::Choice, "1", "Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con paraLLEl-RDP; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen.", false, false, false, 0, 0, 0, kCh_upscale, 4, false},
+  {"ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", OType::Bool, "0", "Con escalado interno, al devolver la imagen ampliada al framebuffer del juego promedia las NxN muestras en vez de coger una. Antialiasing gratis en los efectos que releen el framebuffer, a cambio de una pasada mas.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"hud", "KESTREL_HUD_OFF", "HUD de telemetria sobre la imagen", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, true},
   {"noaa", "KESTREL_NOAA", "Antialiasing del RDP", OType::Bool, "1", "SoftRDP. Apagarlo sube el relleno y cambia el borde de los poligonos.", false, true, false, 0, 0, 0, nullptr, 0, false},
   {"nofilter", "KESTREL_NOFILTER", "Filtrado de texturas", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, false},
@@ -98,6 +134,20 @@ static const Option kOpt_audio[] = {
 
 static const Option kOpt_save[] = {
   {"savetype", "KESTREL_SAVETYPE", "Tipo de guardado", OType::Choice, "auto", "Se resuelve por ID de cartucho; esto lo fuerza cuando la ROM no esta en la tabla.", false, false, false, 0, 0, 0, kCh_savetype, 7, false},
+  {"tvtype", "KESTREL_TVTYPE", "Norma de television", OType::Choice, "auto", "Lo que el juego lee en osTvType, y de donde sale el ritmo de campo. En la consola de verdad lo fija la maquina, y la region del cartucho coincide con ella; algunos juegos se niegan a funcionar con la norma equivocada.", false, false, false, 0, 0, 0, kCh_tvtype, 4, false},
+  {"rdram", "KESTREL_RDRAM", "Memoria RDRAM", OType::Choice, "8", "La N64 trae 4 MB y el Expansion Pak la sube a 8. Los juegos lo leen en osMemSize y algunos cambian de comportamiento: reservan menos buferes o bajan la resolucion con 4 MB, y Donkey Kong 64 y el modo de un jugador de Perfect Dark EXIGEN los 8. La RDRAM se dimensiona una sola vez, asi que cambiarlo pide relanzar, y un estado guardado con un tamano no se puede cargar con el otro.", false, false, false, 0, 0, 0, kCh_rdram, 2, false},
+  {"cheats", "KESTREL_CHEATS", "Fichero de trucos (.cht)", OType::Path, "", "Codigos tipo GameShark, aplicados en cada campo de video igual que el cartucho de verdad. Sin fichero se usa el .cht que haya al lado de la ROM con su mismo nombre. Formato: [Nombre] abre un truco ([-Nombre] lo deja apagado) y debajo van las lineas AAAAAAAA VVVV tal como se publican.", false, false, false, 0, 0, 0, nullptr, 0, false},
+};
+
+static const Option kOpt_movie[] = {
+  {"movie_rec", "KESTREL_MOVIE_REC", "Grabar entradas en", OType::Path, "", "Fichero .k64m donde apuntar cada lectura de botones. Se graba desde el arranque en frio: una repeticion vale desde el encendido, no desde media partida.", false, false, false, 0, 0, 0, nullptr, 0, false},
+  {"movie_play", "KESTREL_MOVIE_PLAY", "Reproducir entradas de", OType::Path, "", "Sustituye el mando por el de la pelicula. Se comprueban los CRC del cartucho y no se reproduce una pelicula de otro juego. Al acabar la cinta vuelve a mandar el mando del anfitrion. Con las dos casillas puestas manda esta.", false, false, false, 0, 0, 0, nullptr, 0, false},
+};
+
+static const Option kOpt_rewind[] = {
+  {"rewind", "KESTREL_REWIND", "Activar rebobinado", OType::Bool, "0", "Con la tecla de retroceso el juego va hacia atras mientras se mantenga apretada. Apagado no cuesta nada; encendido, el emulador fotografia la maquina cada pocos campos (parando el RDP y el RSP en cada foto) y guarda solo las diferencias.", false, false, false, 0, 0, 0, nullptr, 0, false},
+  {"rewind_fields", "KESTREL_REWIND_FIELDS", "Campos entre fotos", OType::Int, "2", "Cada cuantos campos de video se toma una foto. Menos = rebobinado mas fino y mas caro; mas = mas barato y a saltos mas gordos. 2 son unas 30 fotos por segundo, que es el paso con el que se juega.", false, false, false, 1, 60, 0, nullptr, 0, false},
+  {"rewind_mb", "KESTREL_REWIND_MB", "Memoria para la cinta (MB)", OType::Int, "256", "Tope de memoria de las diferencias. Al llenarse se tira el pasado LEJANO, que es lo que no se va a pedir. Cuanto dura depende del juego: lo que ocupa una foto es lo que el juego cambia entre foto y foto.", false, false, false, 8, 4096, 0, nullptr, 0, false},
 };
 
 static const Option kOpt_mcp[] = {
@@ -169,6 +219,8 @@ static const Category kCats[] = {
   {"video", "Video", "Rasterizador, ventana y presentacion.", kOpt_video, (int)(sizeof kOpt_video / sizeof(Option))},
   {"audio", "Audio", "Salida de sonido del anfitrion.", kOpt_audio, (int)(sizeof kOpt_audio / sizeof(Option))},
   {"save", "Cartucho", "Dispositivo de guardado del cartucho.", kOpt_save, (int)(sizeof kOpt_save / sizeof(Option))},
+  {"movie", "Peliculas", "Grabacion y reproduccion de entradas (.k64m). Lo que se graba no es lo que aprieta el jugador sino lo que el JUEGO LEE en cada lectura del joybus, que es la unica frontera que el invitado percibe.", kOpt_movie, (int)(sizeof kOpt_movie / sizeof(Option))},
+  {"rewind", "Rebobinado", "Deshacer lo que acaba de pasar. Cuesta CPU y memoria: cada foto obliga a parar el RCP y a recorrer el estado entero, asi que viene apagado y solo se paga si se enciende.", kOpt_rewind, (int)(sizeof kOpt_rewind / sizeof(Option))},
   {"mcp", "Telemetria y MCP", "Servidor TCP+JSON propio del emulador. Es la via por la que el MCP lee registros, memoria, framebuffer y perfiles.", kOpt_mcp, (int)(sizeof kOpt_mcp / sizeof(Option))},
   {"batch", "Limites y lote", "Topes de ejecucion. Imprescindibles para no dejar nunca un proceso colgado.", kOpt_batch, (int)(sizeof kOpt_batch / sizeof(Option))},
   {"debug", "Depuracion", "Trazas y trampas. Todas cuestan rendimiento; ninguna esta activa de fabrica.", kOpt_debug, (int)(sizeof kOpt_debug / sizeof(Option))},

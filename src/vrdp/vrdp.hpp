@@ -14,6 +14,16 @@
 
 namespace kestrel::vrdp {
 
+// Si ESTE .exe lleva el backend dentro se decidio al compilar, y el nucleo necesita
+// distinguirlo de "lo lleva pero no ha levantado todavia": sin backend no hay nada que
+// esperar, y esperar igualmente es lo que dejaba al .exe de SoftRDP quince segundos
+// parado y luego sin ventana (ver System::runLoop).
+#ifdef KESTREL_PRDP
+inline constexpr bool built = true;
+#else
+inline constexpr bool built = false;
+#endif
+
 #ifndef KESTREL_PRDP
 // Backend not built: every entry point is an inline no-op so core code can call
 // vrdp::* unconditionally without link errors or #ifdef clutter at the call sites.
@@ -23,6 +33,7 @@ inline auto active() -> bool { return false; }
 inline auto runFifo(const u8*, u32, const u8*, u32, u32, bool, u32* stop) -> bool { if(stop) *stop = 0; return false; }
 inline auto viWrite(u32, u32) -> void {}
 inline auto frameBegin() -> void {}
+inline auto idle() -> void {}
 inline auto scanout(u32& w, u32& h) -> const u8* { w = h = 0; return nullptr; }
 inline auto scanoutDone() -> void {}
 struct SharedVk { void* instance; void* gpu; void* device; u32 queueFamily; void* queue; };
@@ -58,6 +69,11 @@ auto viWrite(u32 index, u32 value) -> void;
 
 // Per-emulated-field frame boundary (rotates Granite frame contexts).
 auto frameBegin() -> void;
+
+// El worker del RDP se queda sin trabajo y va a dormir. Con el procesado de comandos en su
+// propio hilo, parallel-rdp mandaba a la GPU lo acumulado cuando el anillo pasaba 500 us sin
+// comandos (Op::MetaIdle); en procesado directo ese aviso lo da este hilo. SOLO hilo del RDP.
+auto idle() -> void;
 
 // Produce the current scanned-out image as host RGBA8888. Returns nullptr if none is ready.
 // Call scanoutDone() when finished reading the returned pointer.

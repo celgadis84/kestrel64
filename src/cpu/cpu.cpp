@@ -2,6 +2,7 @@
 #include "cpu.hpp"
 #include "jit.hpp"          // CodeCache completo: cacheOp desenlaza las cadenas del dynarec
 #include "../core/memory.hpp"
+#include "../video/vifilter.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -96,11 +97,26 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   if(h == 0 || h > 576) h = baseH;
   const auto& ram = mem->rdram;
   auto exp5 = [](u32 v){ return (v << 3) | (v >> 2); };
+  // Filtros del VI (AA de cobertura, divot, de-dither) SOLO bajo peticion. Este volcado es
+  // el framebuffer tal cual lo escribio el RDP, que es lo que son las referencias de
+  // PeterLemon: pasarles el filtro del VI las empeora (medido: RSPGradient 100 -> 95,4,
+  // FillRectangle 98,6 -> 97,5), porque el barrido filtrado es otra cosa que el contenido
+  // de la RDRAM. El filtro de verdad vive en el presentador, que es lo que se ve. Aqui
+  // queda como A/B con KESTREL_VIFILTER=1.
+  const u32 viCtrl = mem->rcp.vi_ctrl;
+  static const bool viFilt = std::getenv("KESTREL_VIFILTER") != nullptr;
+  std::vector<u32> filt;
+  if(viFilt && vi::active(viCtrl)) {
+    filt.resize((usize)w * h);
+    vi::fetchFiltered(ram.data(), ram.size(), mem->rdramHidden.data(), mem->rdramHidden.size(),
+                      origin, srcW, w, h, viCtrl, filt.data());
+  }
   std::vector<u8> rgb((usize)w * h * 3, 0);
   for(u32 y = 0; y < h; y++) for(u32 x = 0; x < w; x++) {
     u32 R=0,G=0,B=0;
     u32 sx = x;
-    if(type == 2) { u32 p = origin + (y*srcW+sx)*2; if(p+1 < ram.size()) { u32 px=((u32)ram[p]<<8)|ram[p+1]; R=exp5((px>>11)&0x1f); G=exp5((px>>6)&0x1f); B=exp5((px>>1)&0x1f); } }
+    if(!filt.empty()) { u32 c = filt[(usize)y*w+x]; R=c>>16; G=(c>>8)&0xff; B=c&0xff; }
+    else if(type == 2) { u32 p = origin + (y*srcW+sx)*2; if(p+1 < ram.size()) { u32 px=((u32)ram[p]<<8)|ram[p+1]; R=exp5((px>>11)&0x1f); G=exp5((px>>6)&0x1f); B=exp5((px>>1)&0x1f); } }
     else if(type == 3) { u32 p = origin + (y*srcW+sx)*4; if(p+3 < ram.size()) { R=ram[p]; G=ram[p+1]; B=ram[p+2]; } }
     usize o = ((usize)(h-1-y)*w + x)*3;             // BMP is bottom-up; store BGR
     rgb[o]=(u8)B; rgb[o+1]=(u8)G; rgb[o+2]=(u8)R;
@@ -130,15 +146,33 @@ static inline auto sext8 (u8  v) -> u64 { return (u64)(s64)(s8)v; }
 // variant matters at hand-off: each leaves a different seed in s6 (and games
 // keyed to it check osCicId). We identify the chip by CRC32 of the IPL3 image
 // (0xFC0 bytes) against the well-known community table, then pick the seed.
-struct CicInfo { u32 crc; int id; u8 seed; };
+// Every field below is a property of the IPL3 image itself, so the CRC identifies
+// all of them at once:
+//   seed       the byte the CIC feeds the PIF as the IPL2/IPL3 checksum seed. IPL3
+//              leaves it in s6, and games keyed to their chip check it.
+//   entryDelta what this IPL3 subtracts from the boot address in the ROM header
+//              before using it. 6103/7103 and 5101 take off 1 MB, 6106/7106 take off
+//              2 MB — obfuscation, per n64brew's CIC-NUS table. The subtraction hits
+//              the DMA destination as well as the jump: IPL3 keeps one boot address
+//              in one register, and loading the megabyte anywhere else would leave
+//              the game unloaded at the address it was linked for.
+//   entryFixed non-zero when this IPL3 ignores the header outright (only 7102 does,
+//              hardwired to 0x80000480).
+//   idNtsc/idPal  the chip's part number. Most NTSC/PAL pairs SHARE one IPL3 image
+//              (6102/7101, 6103/7103, 6105/7105, 6106/7106), so the CRC alone cannot
+//              tell them apart — the cart's region byte does. 6101 and 7102 are the
+//              exception: different images, and 7102 is PAL-only.
+struct CicInfo { u32 crc; int idNtsc, idPal; u8 seed; u32 entryDelta; u32 entryFixed; };
 static const CicInfo kCicTable[] = {
-  { 0x6170A4A1, 6101, 0x3f },  // NTSC 6101 (Star Fox 64)
-  { 0x90BB6CB5, 6102, 0x3f },  // NTSC 6102 (the common one)
-  { 0x009E9EA3, 7102, 0x3f },  // PAL 7102 (Lylat Wars)
-  { 0x0B050EE0, 6103, 0x78 },  // 6103 / 7103
-  { 0x98BC2C86, 6105, 0x91 },  // 6105 / 7105 (Perfect Dark, Zelda OoT/MM, Banjo)
-  { 0xACC8580A, 6106, 0x85 },  // 6106 / 7106
+  { 0x6170A4A1, 6101, 6101, 0x3f,        0, 0 },           // 6101 (Star Fox 64), NTSC only
+  { 0x90BB6CB5, 6102, 7101, 0x3f,        0, 0 },           // 6102 / 7101, ~88% of the library
+  { 0x009E9EA3, 7102, 7102, 0x3f,        0, 0x8000'0480 }, // 7102 (Lylat Wars), PAL only
+  { 0x0B050EE0, 6103, 7103, 0x78, 0x10'0000, 0 },          // 6103 / 7103 (Banjo-Kazooie, DKR)
+  { 0x98BC2C86, 6105, 7105, 0x91,        0, 0 },           // 6105 / 7105 (Perfect Dark, DK64, OoT/MM)
+  { 0xACC8580A, 6106, 7106, 0x85, 0x20'0000, 0 },          // 6106 / 7106 (F-Zero X, Yoshi's Story)
+  { 0x0E018159, 5101, 5101, 0xac, 0x10'0000, 0 },          // 5101 (Aleck 64 arcade)
 };
+static constexpr u32 kCrcCic6105 = 0x98BC2C86;  // the one IPL3 with an RSP boot stage
 
 static auto crc32(const u8* p, usize n) -> u32 {
   u32 c = 0xffff'ffffu;
@@ -154,7 +188,7 @@ static auto detectCic(const std::vector<u8>& rom) -> CicInfo {
     u32 c = crc32(rom.data() + 0x40, 0x1000 - 0x40);
     for(auto& e : kCicTable) if(e.crc == c) return e;
   }
-  return { 0, 6102, 0x3f };  // unknown → assume the common 6102
+  return { 0, 6102, 7101, 0x3f, 0, 0 };  // unknown → assume the common 6102/7101
 }
 
 // Instruction field extractors.
@@ -168,6 +202,112 @@ static auto detectCic(const std::vector<u8>& rom) -> CicInfo {
 #define SIMM  sext16(op & 0xffff)
 #define TARGET26 (op & 0x03ff'ffff)
 
+// KESTREL_CPI = ciclos de CPU por instruccion (1..2). Se lee UNA vez por proceso: es
+// configuracion de maquina, no estado de invitado.
+//
+// De fabrica vale 1,4 (kCpiDefault256 = 179 = 128 x 1,4), NO 2. El 2 historico no salia
+// de ninguna medida: salia de atar "instruccion retirada" a "tick de Count", y como
+// Count corre a medio reloj eso equivale a decir que cada instruccion cuesta dos ciclos.
+// El VR4300 real gasta 1,2-1,4 en codigo de juego, asi que con 2 el emulador le daba al
+// invitado LA MITAD del presupuesto que tenia en la consola y las escenas pesadas perdian
+// el cuadro (la liana de la intro de DK64). Por que 1,4 y no menos: es la parte alta del
+// rango real, y las dos medidas propias (DK64 1,19 y Perfect Dark 1,45, docs/GAPS.md) son
+// COTAS SUPERIORES de agresividad porque solo restan el giro ocioso de libultra; ademas
+// por debajo de 1,4 el rendimiento es decreciente (SM64 arranque: 3,41 campos por cuadro
+// con CPI 2, 2,76 con 1,4, 2,69 con 1,25). Sigue siendo una aproximacion de un solo
+// numero: el modelo fino es coste por instruccion (fallos de cache, multiciclo), que es
+// otra fase. `KESTREL_CPI=2` recupera el comportamiento historico bit a bit.
+auto CPU::cpiFromEnv() -> u32 {
+  static const u32 v = [] {
+    const char* e = std::getenv("KESTREL_CPI");
+    if(!e || !*e) return kCpiDefault256;
+    double d = std::strtod(e, nullptr);
+    if(!(d > 0.0)) return kCpiDefault256;
+    double t = 128.0 * d;                  // ticks x256 por op = 256 * (CPI/2)
+    if(t > 256.0) t = 256.0;               // >1 tick/op invalidaria las guardas del JIT
+    if(t < 1.0)   t = 1.0;
+    return (u32)(t + 0.5);
+  }();
+  return v;
+}
+
+// KESTREL_CACHECOST: ciclos de CPU que cuesta rellenar UNA linea de cache primaria desde
+// RDRAM. n64brew mide ~640 ns de latencia aleatoria en el RDRAM del N64, que a 93,75 MHz son
+// ~60 ciclos; ese es el valor que documenta CLAUDE.md y el que sale al pedir "1" o "on".
+//
+// Por que sigue apagado de fabrica: el CPI de 1,4 que hay hoy (kCpiDefault256) NO es el CPI de
+// canalizacion del VR4300, es un CPI *efectivo* medido sobre juegos reales -- o sea, ya lleva
+// dentro el coste medio de los fallos, promediado. Encender esto sin bajar antes el CPI base a
+// la canalizacion pura contaria la penalizacion DOS veces y el juego iria al ralenti. La
+// recalibracion (CPI base + presupuesto de campo) va aparte y se mide, no se adivina.
+auto CPU::missFromEnv() -> u32 {
+  static const u32 v = [] {
+    const char* e = std::getenv("KESTREL_CACHECOST");
+    if(!e || !*e) return 0u;
+    if(!std::strcmp(e, "0") || !std::strcmp(e, "off")) return 0u;
+    if(!std::strcmp(e, "1") || !std::strcmp(e, "on"))  return 60u;   // ~640 ns @ 93,75 MHz
+    unsigned long n = std::strtoul(e, nullptr, 0);
+    if(n > 1024) n = 1024;                 // cota de cordura: countTicksMax multiplica por esto
+    return (u32)n;
+  }();
+  return v;
+}
+
+// Ciclos que cuesta UNA lectura no cacheada. Misma latencia de RDRAM que un fallo de cache
+// (~640 ns = ~60 ciclos a 93,75 MHz) pero perilla separada: el fallo de cache y el acceso
+// KSEG1 son fenomenos distintos y hay que poder medirlos por separado. Apagado de fabrica
+// por el mismo motivo que KESTREL_CACHECOST -- el CPI por defecto ya lleva dentro la media.
+auto CPU::uncachedFromEnv() -> u32 {
+  static const u32 v = [] {
+    const char* e = std::getenv("KESTREL_UNCACHEDCOST");
+    if(!e || !*e) return 0u;
+    if(!std::strcmp(e, "0") || !std::strcmp(e, "off")) return 0u;
+    if(!std::strcmp(e, "1") || !std::strcmp(e, "on"))  return 60u;   // ~640 ns @ 93,75 MHz
+    unsigned long n = std::strtoul(e, nullptr, 0);
+    if(n > 1024) n = 1024;                 // misma cota de cordura: countTicksMax multiplica
+    return (u32)n;
+  }();
+  return v;
+}
+
+// Perilla del coste de multiplicar/dividir enteros. Ver el comentario largo de chargeMulDiv()
+// en cpu.hpp para el porque de cada numero (manual NEC VR4300, tabla 3-12).
+auto CPU::stallClockCart() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_STALLCLOCK");
+    if(!e || !*e) return true;
+    return (bool)(std::strcmp(e, "0") && std::strcmp(e, "off") && std::strcmp(e, "vi"));
+  }();
+  return v;
+}
+auto CPU::stallClockOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_STALLCLOCK");
+    return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off") && std::strcmp(e, "cart"));
+  }();
+  return v;
+}
+auto CPU::fpuFromEnv() -> u8 {
+  static const u8 v = [] -> u8 {
+    const char* e = std::getenv("KESTREL_FPUCOST");
+    if(!e || !*e) return 0;
+    if(!std::strcmp(e, "stat")) return 1;                        // contar sin cobrar
+    if(!std::strcmp(e, "0") || !std::strcmp(e, "off")) return 0;
+    return 2;                                                     // block / 1 / on
+  }();
+  return v;
+}
+auto CPU::mulDivFromEnv() -> u8 {
+  static const u8 v = [] -> u8 {
+    const char* e = std::getenv("KESTREL_MULDIVCOST");
+    if(!e || !*e) return 0;
+    if(!std::strcmp(e, "stat")) return 1;                       // contar sin cobrar
+    if(!std::strcmp(e, "0") || !std::strcmp(e, "off")) return 0;
+    return 2;                                                    // 1 / on / cualquier otra cosa
+  }();
+  return v;
+}
+
 auto CPU::reset() -> void {
   for(auto& r : gpr) r = 0;
   hi = lo = 0;
@@ -177,6 +317,11 @@ auto CPU::reset() -> void {
   cop0[C0_PRId]   = 0x0000'0b22;   // R4300i revision
   cop0[C0_Count]  = 0;
   cop0[C0_Compare]= 0;
+  countFrac = 0;
+  stallCycles = 0;          // resto de paradas: estado de invitado, como countFrac
+  stallOps = 0; stallOpsRem = 0;
+  uncachedReads = 0; ramCpuBytes = 0; mulDivOps = 0; mulDivStall = 0;
+  fpuOps = 0; fpuStall = 0; fpuNested = 0;
   cop0[C0_Random] = 31;            // Random resets to the top TLB index
   fcr0  = 0x0000'0a00;             // FCR0: VR4300 FPU implementation/revision (CFC1 $0)
   fcr31 = 0;
@@ -186,6 +331,7 @@ auto CPU::reset() -> void {
   retired = 0; lastUnimplemented = 0;
   llbit = false;
   if(mem) mem->cartClock = &retired;   // PI write-latch decay clock (retired-instr count)
+  if(mem) mem->cartStall = stallClockCart() ? &stallOps : nullptr;  // + las ops equivalentes a las paradas de cache
   if(mem) mem->cartClockPend = &jitPending;   // + lo que la cadena del JIT aun no ha commiteado
 }
 
@@ -193,11 +339,69 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
   reset();
   // Identify the cart's CIC boot chip from its IPL3 image — sets the correct
   // hand-off seed (s6) and osCicId. PD NTSC is 6105 (seed 0x91), not 6102.
-  CicInfo cic = mem ? detectCic(mem->rom) : CicInfo{ 0, 6102, 0x3f };
+  CicInfo cic = mem ? detectCic(mem->rom) : CicInfo{ 0, 6102, 7101, 0x3f, 0, 0 };
+  bool pal = (bootTvType == 0);                     // 0 PAL / 1 NTSC / 2 MPAL (MPAL carts use NTSC chips)
+  int  cicId = pal ? cic.idPal : cic.idNtsc;
+  bool is6105 = (cic.crc == kCrcCic6105);
+  // Arrancar por IPL3 real o emular su resultado. El camino HLE no es generico: sabe
+  // reproducir el efecto de los IPL3 que CONOCE (direccion de arranque propia de cada CIC,
+  // la etapa RSP del 6105, la copia del primer megabyte desde ROM+0x1000). Un cartucho con
+  // un IPL3 que no esta en la tabla -- homebrew con bootcode propio, y en particular el IPL3
+  // libre de libdragon, que es un trampolin firmado en ROM 0x40 que carga el IPL3 de verdad
+  // desde ROM 0x1040 y luego un cargador ELF -- no tiene nada que emular en alto nivel: lo
+  // unico fiel es EJECUTARLO, que es lo que hace la consola. Con HLE ese cartucho se comia
+  // como codigo de juego el IPL3 que hay en ROM+0x1000 y descarrilaba.
+  // KESTREL_HLE_IPL3=1 fuerza el camino viejo (bisecar); KESTREL_LLE_IPL3=1 lo fuerza al reves.
   bool lle = std::getenv("KESTREL_LLE_IPL3") != nullptr;
+  if(!lle && cic.crc == 0 && !std::getenv("KESTREL_HLE_IPL3")) lle = true;   // IPL3 desconocido
+  // Where this IPL3 actually boots the cart. Only 7102, 6103/7103, 6106/7106 and 5101
+  // differ from the header word; for everyone else this is the header word verbatim.
+  u32 bootAddr = cic.entryFixed ? cic.entryFixed : (entryPoint - cic.entryDelta);
   std::fprintf(stderr, "[boot] CIC detected: %d (seed 0x%02x)%s\n",
-               cic.id, cic.seed, lle ? " [LLE IPL3]" : "");
+               cicId, cic.seed, lle ? " [LLE IPL3]" : "");
+  if(bootAddr != entryPoint)
+    std::fprintf(stderr, "[boot] CIC-%d boot address: header 0x%08x -> 0x%08x\n",
+                 cicId, entryPoint, bootAddr);
   std::fflush(stderr);
+
+  // --- CIC-6105 IPL3 low-RDRAM image + boot microcode ------------------------
+  // Carts signed with CIC-NUS-6105 (Perfect Dark, Donkey Kong 64, Majora's Mask,
+  // Banjo-Tooie...) all ship the same IPL3, and that IPL3 does two things no other
+  // CIC's does before handing control to the game. Games check the result and spin
+  // forever if it is missing, so both have to happen on every 6105 boot.
+  //
+  // Stage 1 — the IPL3 copies a slice of its OWN image out of DMEM into low RDRAM
+  // (`lw`/`sw` loop at DMEM 0x524..0x538: DMEM 0x554..0x888 -> RDRAM 0x004..0x338, a
+  // fixed -0x550 skew) and carries on executing from that copy. The image is the very
+  // bytes the cart holds at ROM 0x554..0x888. Perfect Dark's bootloader spins unless
+  // *(0xA00002E8) == 0xC86E2000 — that is just IPL3 code word ROM 0x838 landing at
+  // RDRAM 0x2E8.
+  //
+  // Stage 2 — the IPL3 then starts the RSP (SP_STATUS = 0xAD, DMEM 0x550) on a
+  // microcode it XOR-decrypts into IMEM from the IPL2 code the PIF ROM left there.
+  // That microcode DMAs RDRAM 0x1E8 (0x1F0 bytes) into IMEM 0x120 and issues ONE
+  // strided SP write DMA: SP_DRAM_ADDR = 0x2FB1F0, SP_WR_LEN = 0xFE817000 (length 8,
+  // count 24, skip 0xFE8), scattering 24 8-byte rows 0xFF0 apart. Donkey Kong 64
+  // checks row 3: *(0xA02FE1C0) == 0xAD170014, i.e. RDRAM 0x200 (the IPL3's
+  // `sw s7,0x14(t0)`) at 0x2FB1F0 + 3*0xFF0. The microcode itself cannot be run
+  // without the PIF ROM's IMEM residue, and its memory effect is entirely fixed, so
+  // reproduce the effect. Same bytes for every 6105 cart; nothing game-specific.
+  auto cic6105Ipl3 = [&]() {
+    if(!mem || !is6105) return;
+    if(mem->rom.size() < 0x888 || mem->rdram.size() < 0x313000 || mem->imem.size() < 0x310) return;
+    for(u32 i = 0x554; i < 0x888; i++) mem->rdram[i - 0x550] = mem->rom[i];
+    // The first instruction word of that microcode stays behind at IMEM 0x004 once the
+    // RSP halts, and 6105 games do read it back. It differs by console region because
+    // the microcode is the XOR of the IPL3 key table with the PIF ROM's IPL2 residue,
+    // and the PAL PIF ROM is a different image.
+    { u32 w = pal ? 0xbda8'07fcu : 0x8da8'07fcu;
+      mem->imem[4]=w>>24; mem->imem[5]=w>>16; mem->imem[6]=w>>8; mem->imem[7]=w; }
+    for(u32 i = 0; i < 0x1f0; i++)     mem->imem[0x120 + i]  = mem->rdram[0x1e8 + i];
+    for(u32 row = 0; row < 24; row++) {
+      u32 dst = 0x2fb1f0 + row * 0xff0, src = 0x120 + row * 8;
+      for(u32 i = 0; i < 8; i++) mem->rdram[dst + i] = mem->imem[src + i];
+    }
+  };
 
   if(lle && mem && mem->rom.size() >= 0x1000) {
     // LLE boot: run the cart's OWN CIC-signed IPL3 instead of faking its result.
@@ -209,10 +413,10 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
       mem->dmem[0x40 + i] = mem->rom[0x40 + i];
     // IPL2 -> IPL3 register hand-off (what the PIF/IPL2 leave for IPL3).
     gpr[19] = 0;                              // s3 = osRomType (cart)
-    gpr[20] = 0x0000'0000'0000'0001ull;      // s4 = osTvType (1 = NTSC)
+    gpr[20] = (u64)bootTvType;                // s4 = osTvType (0 PAL / 1 NTSC / 2 MPAL)
     gpr[21] = 0;                              // s5 = osResetType (cold)
     gpr[22] = (u64)cic.seed;                 // s6 = CIC seed
-    gpr[23] = 0;                              // s7 = CIC version
+    gpr[23] = pal ? 6u : 0u;                  // s7 = osVersion (PAL PIF ROM reports 6)
     // t3 apunta al PROPIO IPL3 ya copiado en DMEM. No es decorativo: el IPL3 de los
     // cartuchos CIC-6105 (Perfect Dark, Zelda, Banjo) arranca con un descifrador que lee
     // su tabla con `lw t2, 0x44(t3)`, es decir DMEM+0x84, justo detras del stub. Sin ese
@@ -227,20 +431,29 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
     if(mem->rdram.size() >= 0x400) {
       auto putw = [&](u32 p, u32 v) {
         mem->rdram[p]=v>>24; mem->rdram[p+1]=v>>16; mem->rdram[p+2]=v>>8; mem->rdram[p+3]=v; };
+      putw(0x300, bootTvType);               // osTvType (region del cartucho)
       putw(0x318, (u32)mem->rdram.size());   // osMemSize (IPL3 probes RDRAM for this)
+      // The PIF's RDRAM self test leaves the size here too; the 6105 IPL3 reads it back
+      // (`lw t1,0xf0(t0)`, t0 = 0xA0000300) and is what actually fills osMemSize at 0x318.
+      putw(0x3f0, (u32)mem->rdram.size());
     }
+    // The real IPL3 redoes stage 1 itself (identical bytes), but stage 2 needs the RSP
+    // microcode that only exists once the PIF ROM's IPL2 residue is in IMEM — which no
+    // HLE PIF leaves behind. Seed both here so LLE lands on the same memory state.
+    cic6105Ipl3();
     goto envflags;
   }
   // HLE IPL3: copy the boot segment (up to 1 MB from ROM+0x1000) to RDRAM at the
   // entry's physical address, then jump to the entry point.
   if(mem && !mem->rom.empty()) {
-    u32 phys = entryPoint & 0x1fff'ffff;
+    u32 phys = bootAddr & 0x1fff'ffff;
     usize count = mem->rom.size() > 0x1000 ? mem->rom.size() - 0x1000 : 0;
     if(count > 0x0010'0000) count = 0x0010'0000;
     for(usize i = 0; i < count && phys + i < mem->rdram.size(); i++) {
       mem->rdram[phys + i] = mem->rom[0x1000 + i];
     }
   }
+  cic6105Ipl3();               // 6105 low-RDRAM image + boot-microcode scatter (see above)
   // PIF boot globals the OS/game spin-wait on (physical 0x300..0x3FF in RDRAM).
   // Real IPL3/PIF populates these; the HLE boot must too or osInitialize hangs.
   if(mem && mem->rdram.size() >= 0x400) {
@@ -248,33 +461,76 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
       mem->rdram[phys+0]=v>>24; mem->rdram[phys+1]=v>>16;
       mem->rdram[phys+2]=v>>8;  mem->rdram[phys+3]=v;
     };
-    putw(0x300, 1);            // osTvType: 1 = NTSC
+    putw(0x300, bootTvType);   // osTvType (0 PAL / 1 NTSC / 2 MPAL), segun la region del cart
     putw(0x304, 0);            // osRomType (0 = cart)
     putw(0x308, 0xb000'0000);  // osRomBase (cart domain-1, KSEG1)
     putw(0x30c, 0);            // osResetType: 0 = cold boot
-    putw(0x310, (u32)cic.id);  // osCicId (6101/6102/6103/6105/6106)
+    putw(0x310, (u32)cicId);   // osCicId (6101/6102/6103/6105/6106, PAL 71xx)
     putw(0x314, 0);            // osVersion
     putw(0x318, (u32)mem->rdram.size());  // osMemSize (RDRAM bytes)
     putw(0x31c, 0);            // osAppNMIBuffer[0]
-
-    // CIC-6105 IPL3 side effect: PD's signed IPL3 (which the real PIF runs from
-    // DMEM before the game boots) deposits a fixed signature word into low RDRAM,
-    // and PD's bootloader spins forever unless *(0xA00002E8) == 0xC86E2000. Our
-    // HLE boot fakes IPL3 and so never runs that code. Until the LLE IPL3 path
-    // (KESTREL_LLE_IPL3) is solid, reproduce the result directly — gated on the
-    // ROM actually containing PD's 6105 IPL3 (the magic lives at ROM 0x838) so
-    // this never perturbs any other title's boot. See docs perf notes.
-    if(mem->rom.size() >= 0x83c) {
-      u32 romMagic = (u32(mem->rom[0x838])<<24)|(u32(mem->rom[0x839])<<16)|(u32(mem->rom[0x83a])<<8)|mem->rom[0x83b];
-      if(romMagic == 0xC86E2000) putw(0x2e8, 0xC86E2000);
+    // The PIF's RDRAM power-on self test leaves the measured size at 0x3F0 as well;
+    // the 6105 IPL3 reads it back (`lw t1,0xf0(t0)` with t0 = 0xA0000300) and forwards
+    // it to osMemSize. Under HLE nothing reads it, but the word is part of the boot
+    // state a game may inspect, and the LLE IPL3 path needs it to compute 0x318.
+    putw(0x3f0, (u32)mem->rdram.size());
+  }
+  // --- register hand-off, exactly as the real IPL3 leaves it ------------------
+  // Most of these are not "initialisation": they are the leftovers of the checksum
+  // work IPL3 does over the first megabyte of the cart, so they depend on BOTH the
+  // CIC variant (each one uses a different seed and magic) and the console region
+  // (the PIF ROM the checksum runs against differs). v0/v1/a0 and, on PAL, a1 are
+  // literally pieces of the IPL2 checksum for that chip — for 6102 the checksum is
+  // 0xA536C0F1D859 and the boot leaves a0 = 0xA536 with PAL a1 = 0xC0F1D859.
+  // A game that reads them (a few anti-piracy checks do) sees the same values a
+  // console would. Table cross-checked against Project64's post-IPL3 state.
+  gpr[ 6] = 0xffff'ffff'a400'1f0cull;      // a2
+  gpr[ 7] = 0xffff'ffff'a400'1f08ull;      // a3
+  gpr[ 8] = 0x0000'0000'0000'00c0ull;      // t0
+  gpr[10] = 0x0000'0000'0000'0040ull;      // t2
+  gpr[11] = 0xffff'ffff'a400'0040ull;      // t3 = the IPL3 image still in DMEM
+  gpr[20] = (u64)bootTvType;               // s4 = osTvType
+  gpr[22] = (u64)cic.seed;                 // s6 = CIC seed
+  gpr[23] = pal ? 6u : 0u;                 // s7 = osVersion
+  gpr[24] = pal ? 0u : 3u;                 // t8 (6105/6106 override it below on PAL)
+  gpr[29] = 0xffff'ffff'a400'1ff0ull;      // sp
+  gpr[31] = pal ? 0xffff'ffff'a400'1554ull // ra: the PAL IPL3 tail is one instruction later
+                : 0xffff'ffff'a400'1550ull;
+  {
+    auto set = [&](u64 v0, u64 a0, u64 t4, u64 t5, u64 t7, u64 t9, u64 at) {
+      gpr[2] = gpr[3] = v0; gpr[4] = a0; gpr[12] = t4; gpr[13] = t5;
+      gpr[15] = t7; gpr[25] = t9; gpr[1] = at;
+    };
+    switch(cic.crc) {
+      case 0x90BB6CB5:  // 6102 / 7101
+        set(0x0000'0000'0ebd'a536ull, 0xa536, 0xffff'ffff'ed10'd0b3ull, 0x0000'0000'1402'a4ccull,
+            0x0000'0000'3103'e121ull, 0xffff'ffff'9deb'b54full, 1);
+        gpr[5]  = pal ? 0xffff'ffff'c0f1'd859ull : 0xffff'ffff'c959'73d5ull;   // a1
+        gpr[14] = pal ? 0x0000'0000'2de1'08eaull : 0x0000'0000'2449'a366ull;   // t6
+        break;
+      case 0x0B050EE0:  // 6103 / 7103
+        set(0x0000'0000'49a5'ee96ull, 0xee96, 0xffff'ffff'ce9d'fbf7ull, 0xffff'ffff'ce9d'fbf7ull,
+            0x0000'0000'18b6'3d28ull, 0xffff'ffff'825b'21c9ull, 1);
+        gpr[5]  = pal ? 0xffff'ffff'd464'6273ull : 0xffff'ffff'9531'5a28ull;
+        gpr[14] = pal ? 0x0000'0000'1af9'9984ull : 0x0000'0000'5bac'a1dfull;
+        break;
+      case kCrcCic6105:  // 6105 / 7105
+        set(0xffff'ffff'f58b'0fbfull, 0x0fbf, 0xffff'ffff'9651'f81eull, 0x0000'0000'2d42'aac5ull,
+            0x0000'0000'5658'4d60ull, 0xffff'ffff'cdce'565full, 0);
+        gpr[5]  = pal ? 0xffff'ffff'deca'aad1ull : 0x0000'0000'5493'fb9aull;
+        gpr[14] = pal ? 0x0000'0000'0cf8'5c13ull : 0xffff'ffff'c2c2'0384ull;
+        if(pal) gpr[24] = 2;
+        break;
+      case 0xACC8580A:  // 6106 / 7106
+        set(0xffff'ffff'a959'30a4ull, 0x30a4, 0xffff'ffff'bcb5'9510ull, 0xffff'ffff'bcb5'9510ull,
+            0x0000'0000'7a3c'07f4ull, 0x0000'0000'465e'3f72ull, 0);
+        gpr[5]  = pal ? 0xffff'ffff'b04d'c903ull : 0xffff'ffff'e067'221full;
+        gpr[14] = pal ? 0x0000'0000'1af9'9984ull : 0x0000'0000'5cd2'b70full;
+        if(pal) gpr[24] = 2;
+        break;
+      default: break;   // 6101, 7102, 5101 and unknown images: only the seed is known
     }
   }
-  // CIC register hand-off (the common subset games rely on); s6 carries the
-  // per-CIC seed (6102=0x3f, 6105=0x91, ...).
-  gpr[20] = 0x0000'0000'0000'0001ull;      // s4
-  gpr[22] = (u64)cic.seed;                 // s6 (CIC seed)
-  gpr[29] = 0xffff'ffff'a400'1ff0ull;      // sp
-  gpr[31] = 0xffff'ffff'a400'1550ull;      // ra
   // COP0 state the real IPL3 leaves at game entry (CIC-6102 hand-off, matches krom
   // COP0Register + n64brew "initial register state"): Status has CU1|FR|SR and 64-bit
   // addressing enabled in all modes (KX|SX|UX); EPC and ErrorEPC keep their power-on
@@ -282,7 +538,7 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
   cop0[C0_Status]   = 0x2410'00e0;
   cop0[C0_EPC]      = sext32(0xffff'ffff);
   cop0[C0_ErrorEPC] = sext32(0xffff'ffff);
-  pc = sext32(entryPoint);
+  pc = sext32(bootAddr);
   nextPc = pc + 4;
 envflags:
   if(const char* b = std::getenv("KESTREL_BP")) bpAddr = sext32((u32)std::strtoul(b, nullptr, 0));
@@ -315,20 +571,20 @@ auto CPU::refreshDebugArmed() -> void {
 // --- memory (segment rules + TLB translation via translate()) ----------------
 // Cached data accesses route through the write-back D-cache; uncached (KSEG1) and
 // non-RDRAM targets go straight to the bus. `pe` is the reverse-endian-adjusted phys.
-auto CPU::read8 (u64 v) -> u8  { u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()) return (u8)dcRead(pe,1); return mem->read8 (pe); }
-auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); return mem->read16(pe); }
-auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); return mem->read32(pe); }
-auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); return mem->read64(pe); }
-auto CPU::write8 (u64 v, u8  x) -> void { u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } mem->write8 (pe, x); }
-auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } mem->write16(pe, x); }
+auto CPU::read8 (u64 v) -> u8  { u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()) return (u8)dcRead(pe,1); chargeUncached(); ramUncached(pe, 1); return mem->read8 (pe); }
+auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); chargeUncached(); ramUncached(pe, 2); return mem->read16(pe); }
+auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); chargeUncached(); ramUncached(pe, 4); return mem->read32(pe); }
+auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); chargeUncached(); ramUncached(pe, 8); return mem->read64(pe); }
+auto CPU::write8 (u64 v, u8  x) -> void { u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } ramUncached(pe,1); mem->write8 (pe, x); }
+auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } ramUncached(pe,2); mem->write16(pe, x); }
 auto CPU::seenWatch(u64 p, u32 size) -> void {
   if(!mem || !(p <= 0x1acfa4 && p + size > 0x1acfa4)) return;
   u32 cur = mem->read32(0x1acfa4);
   if(cur != g_seenPrev) { int i=g_seenIdx%kSeenRing; g_seenRet[i]=retired; g_seenOld[i]=g_seenPrev; g_seenNew[i]=cur; g_seenIdx++; g_seenPrev=cur; }
 }
-auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,4); else mem->write32(pe, x); seenWatch(p&0x1fffffff,4);
+auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,4); else { ramUncached(pe,4); mem->write32(pe, x); } seenWatch(p&0x1fffffff,4);
   if(pcRingOn && (u32)v==0x807ffc98 && retired>=8195000 && retired<=8225000) std::fprintf(stderr,"[STORE 0x807ffc98] <- 0x%08x pc=0x%08x ret=%llu\n",x,(u32)curPc,(unsigned long long)retired); }
-auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else mem->write64(pe, x); seenWatch(p&0x1fffffff,8); }
+auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else { ramUncached(pe,8); mem->write64(pe, x); } seenWatch(p&0x1fffffff,8); }
 
 auto CPU::connect(Memory* m) -> void {
   mem = m;
@@ -362,8 +618,13 @@ auto CPU::storeCart(u32 phys, u64 reg, u32 width) -> bool {
 // --- primary caches ----------------------------------------------------------
 // (cacheable() vive ahora en linea en cpu.hpp: se llama una vez por acceso a memoria.)
 
+auto CPU::ramUncached(u32 pe, u32 size) -> void {
+  if(mem && pe < (u32)mem->rdram.size()) ramCpuBytes += size;
+}
+
 auto CPU::dcFill(u32 idx, u32 base) -> void {
   DCacheLine& l = dcache[idx];
+  ramCpuBytes += 16;
   l.tagv = base | 1u; l.dirty = 0;
   // Camino normal: la línea entera cae dentro de RDRAM → una copia de 16 B en vez de 16
   // lecturas con comprobación de rango. El borde (línea a caballo del final) mantiene la
@@ -375,6 +636,7 @@ auto CPU::dcFill(u32 idx, u32 base) -> void {
 auto CPU::dcFlush(u32 idx) -> void {
   DCacheLine& l = dcache[idx];
   if(!l.valid() || !l.dirty) return;
+  ramCpuBytes += 16;
   u32 tag = l.ptag();
   // El volcado de una linea sucia es la unica forma en que un store CACHEADO de la CPU
   // llega a RDRAM, asi que sin esto KESTREL_WATCH no ve el 99% de lo que escribe el juego.
@@ -383,6 +645,31 @@ auto CPU::dcFlush(u32 idx) -> void {
   if(tag + 16 <= mem->rdram.size()) std::memcpy(&mem->rdram[tag], l.data, 16);
   else for(u32 i = 0; i < 16; i++) if(tag + i < mem->rdram.size()) mem->rdram[tag + i] = l.data[i];
   l.dirty = 0;
+}
+
+// Fallo de linea: volcado de la vieja + relleno de la nueva en una sola llamada. Es
+// exactamente dcFlush(idx) seguido de dcFill(idx, base) -- misma semantica, mismo orden --
+// pero resolviendo la linea, el puntero de RDRAM y su tamano una sola vez. La rama de
+// volcado es la unica forma en que un store CACHEADO llega a RDRAM, asi que conserva el
+// tag de ultimo escritor y el punto de vigilancia.
+auto CPU::dcMiss(u32 idx, u32 base) -> void {
+  dcMisses++;
+  chargeMiss();     // el relleno de linea paga la latencia de RDRAM (ver countTicks)
+  DCacheLine& l = dcache[idx];
+  u8* const ram = mem->rdram.data();
+  const u32  sz = (u32)mem->rdram.size();
+  ramCpuBytes += 16;                 // relleno de la linea nueva
+  if(l.dirty && l.valid()) {
+    ramCpuBytes += 16;               // ... mas el volcado de la vieja
+    u32 tag = l.ptag();
+    wrtag::mark(tag, wrtag::kDcache, (u32)pc);
+    if(mem->watchAddr) mem->watchHit(tag, 16, 0, false);
+    if(tag + 16 <= sz) std::memcpy(ram + tag, l.data, 16);
+    else for(u32 i = 0; i < 16; i++) if(tag + i < sz) ram[tag + i] = l.data[i];
+  }
+  l.tagv = base | 1u; l.dirty = 0;
+  if(base + 16 <= sz) std::memcpy(l.data, ram + base, 16);
+  else for(u32 i = 0; i < 16; i++) l.data[i] = (base + i < sz) ? ram[base + i] : 0;
 }
 
 // (dcRead/dcWrite viven ahora en linea en cpu.hpp.) Cola de depuracion del store: punto de
@@ -405,7 +692,21 @@ auto CPU::peekPhysCoherent(u32 phys) -> u8 {
   return phys < mem->rdram.size() ? mem->rdram[phys] : 0;
 }
 
+auto CPU::peekPhysCoherent(u32 phys, u32 size) -> u64 {
+  u64 v = 0;
+  for(u32 i = 0; i < size; i++) v = (v << 8) | peekPhysCoherent(phys + i);   // big-endian
+  return v;
+}
+
+auto CPU::pokePhysCoherent(u32 phys, u32 size, u64 val) -> void {
+  if(!mem || phys + size > mem->rdram.size()) return;
+  dcWrite(phys, val, size);
+}
+
 auto CPU::icFill(u32 idx, u32 base) -> void {
+  icMisses++;
+  ramCpuBytes += 32;
+  chargeMiss();     // idem: un fallo de I cuesta lo mismo que uno de D
   ICacheLine& l = icache[idx];
   l.ptag = base; l.valid = true; l.seq = ++icSeq;
   if(base + 32 <= mem->rdram.size()) std::memcpy(l.data, &mem->rdram[base], 32);
@@ -574,9 +875,17 @@ auto CPU::unimplemented(u32 op) -> void {
     }
   }
   static bool pcSample = std::getenv("KESTREL_PCSAMPLE") != nullptr;
+  // Pagina que ademas se desglosa instruccion a instruccion, 0 = ninguna.
+  static const u32 pcSampFineBase = [] {
+    const char* e = std::getenv("KESTREL_PCSAMPLE");
+    if(!e) return 0u;
+    u32 v = (u32)std::strtoull(e, nullptr, 0);
+    return v >= 0x8000'0000u ? (v & ~0xfffu) : 0u;
+  }();
   if(pcSample) {
     u32 p = (u32)pc;
     if(p >= 0x8000'0000 && p < 0x8100'0000) { sampCount[(p >> 12) & (kSampPages-1)]++; sampTotal++; }
+    if(pcSampFineBase && (p & ~0xfffu) == pcSampFineBase) { sampFine[(p >> 2) & (kSampFine-1)]++; sampFineTotal++; }
   }
   if(maxInsn && retired >= maxInsn) {
     if(pcSample) {
@@ -587,6 +896,21 @@ auto CPU::unimplemented(u32 op) -> void {
         if(best < 0 || bv == 0) break;
         std::fprintf(stderr, "  0x%08x  %8u  %.1f%%\n", 0x8000'0000u + (best << 12), bv, 100.0 * bv / sampTotal);
         sampCount[best] = 0;
+      }
+      if(pcSampFineBase && sampFineTotal) {
+        std::fprintf(stderr, "[pcsample] fine 0x%08x total=%llu (%.1f%% of all):\n",
+                     pcSampFineBase, (unsigned long long)sampFineTotal,
+                     100.0 * (double)sampFineTotal / (double)sampTotal);
+        for(int rank = 0; rank < 24; rank++) {
+          int best = -1; u32 bv = 0;
+          for(int i = 0; i < kSampFine; i++) if(sampFine[i] > bv) { bv = sampFine[i]; best = i; }
+          if(best < 0 || bv == 0) break;
+          u32 a = pcSampFineBase + ((u32)best << 2);
+          u32 w = mem ? mem->read32(a & 0x1fff'ffff) : 0u;
+          std::fprintf(stderr, "  0x%08x  %8u  %5.1f%%  op %08x\n",
+                       a, bv, 100.0 * bv / sampTotal, w);
+          sampFine[best] = 0;
+        }
       }
       std::fflush(stderr);
     }
@@ -619,6 +943,28 @@ auto CPU::unimplemented(u32 op) -> void {
       std::fprintf(stderr, "[rcp] mi_intr=%02x mi_mask=%02x sp_status=%08x sp_pc=%03x dpc_status=%08x rspRun=%u\n",
                    mem->rcp.mi_intr.load(), mem->rcp.mi_mask, mem->rcp.sp_status.load(), mem->rcp.sp_pc,
                    mem->rcp.dpc_status.load(), (unsigned)mem->rsp.running);
+    if(mem)
+      std::fprintf(stderr, "[det] rspCycles=%llu rdpGclk=%llu spArm=%u/%u tarde dpArm=%u/%u tarde"
+                           " dpcRd=%u/%u rsp=%u open=%u busy=%u endv=%u await=%u lateMax=%llu waiv=%u/%u wv=%u/%u/%u ooo=%u(C%u/R%u) stale=%u(C%u/R%u) rdv=%llu/%u idle=%llu/%llu(sig%llu/drn%llu/room%llu) park=%u/%u/%u\n",
+                   (unsigned long long)mem->rsp.cyclesRun.load(),
+                   (unsigned long long)mem->rcp.rdpGclk.load(),
+                   mem->spArms.load(), mem->spLate.load(),
+                   mem->dpArms.load(), mem->dpLate.load(),
+                   mem->dpcRdCur.load(), mem->dpcRdSt.load(),
+                   mem->dpcRdRsp.load(), mem->dpcRdOpen.load(),
+                   mem->dpcRdBusy.load(), mem->dpcRdEndV.load(), mem->dpAwaits.load(),
+                   (unsigned long long)mem->dpLateMax.load(),
+                   mem->dpBarWaives.load(), mem->spBarWaives.load(),
+                  mem->dpWvBar.load(), mem->dpWvAwait.load(), mem->dpWvSched.load(),
+                  mem->dpOoo.load(), mem->dpOooC.load(), mem->dpOooR.load(),
+                  mem->dpStale.load(), mem->dpStaleC.load(), mem->dpStaleR.load(),
+                  (unsigned long long)mem->dpRdv.load(), mem->dpRdvWaives.load(),
+            (unsigned long long)mem->rsp.idleSkips.load(),
+            (unsigned long long)mem->rsp.idleIters.load(),
+            (unsigned long long)mem->rsp.idleNoSig,
+            (unsigned long long)mem->rsp.idleNoDrain,
+            (unsigned long long)mem->rsp.idleNoRoom,
+            mem->rspParks.load(), mem->rspParkWv.load(), mem->rspParkMiss.load());
     // Antes de mirar el framebuffer hay que dejar quieto al RCP. En modo threaded el
     // hilo del RDP puede tener la lista de comandos todavia sin consumir cuando la CPU
     // llega al tope de instrucciones: el volcado saldria de un frame a medio pintar, o
@@ -774,17 +1120,11 @@ auto CPU::unimplemented(u32 op) -> void {
                    (u32)gpr[4],(u32)gpr[5],(u32)gpr[6],(u32)gpr[2],(u32)gpr[3],(u32)gpr[26],(u32)gpr[27],
                    (u32)cop0[C0_Cause],(u32)cop0[C0_EPC],(u32)cop0[C0_BadVAddr],(u32)gpr[31]);
       disHere((gpr[31] & 0xffffffff) - 0x30, 16);
+      // Boot block the IPL3/PIF leaves at physical 0x300 (osTvType..osAppNMIBuffer) plus
+      // the words just below it, which the CIC-6105 IPL3 fills with its own image: a game
+      // stuck early is nearly always spinning on one of these.
       { memAbort=false;
-        for(u64 a=0xa00002e0; a<0xa0000300; a+=4){ u32 w=read32(a); std::fprintf(stderr, "    [phys %03x] = %08x\n", (u32)(a&0x1fffffff), w); }
-        std::fprintf(stderr, "    regs: t6(0x2e8 read)=%08x  expect=c86e2000  a2=%08x t5=%08x\n", (u32)gpr[14], (u32)gpr[6], (u32)gpr[13]);
-        std::fprintf(stderr, "  --- scan bootloader 0x70000000..0x70002000 for c86e / off 0x2e8 ---\n");
-        for(u64 a=0x70000000; a<0x70002000; a+=4){ memAbort=false; u32 w=read32(a); if(memAbort) continue;
-          bool luiC86e = (w>>26)==0x0f && (w&0xffff)==0xc86e;
-          bool oriC86e = (w>>26)==0x0d && (w&0xffff)==0xc86e;
-          bool off2e8  = ((w>>26)==0x2b||(w>>26)==0x28||(w>>26)==0x29) && (w&0xffff)==0x02e8; // SW/SB/SH ...,0x2e8(x)
-          bool luiA400 = (w>>26)==0x0f && (w&0xffff)==0xa400; // lui x,0xa400 (DMEM base)
-          bool luiA000 = (w>>26)==0x0f && (w&0xffff)==0xa000; // lui x,0xa000 (KSEG1 low RAM)
-          if(luiC86e||oriC86e||off2e8||luiA400||luiA000) std::fprintf(stderr, "    0x%08x: %08x  %s\n", (u32)a, w, disasm(w,a).c_str()); } }
+        for(u64 a=0xa00002e0; a<0xa0000320; a+=4){ u32 w=read32(a); std::fprintf(stderr, "    [phys %03x] = %08x\n", (u32)(a&0x1fffffff), w); } }
       memAbort = false;
       std::fflush(stderr);
       halted = true;
@@ -932,8 +1272,11 @@ auto CPU::step() -> void {
     return;
   }
   // Count runs at ~half CPU clock; Compare match latches the timer interrupt (IP7).
-  cop0[C0_Count] = (u32)(cop0[C0_Count] + 1);
-  if((u32)cop0[C0_Count] == (u32)cop0[C0_Compare]) timerIntr = true;
+  // countTicks(1) es 1 con el factor de fabrica; con CPI<2 hay pasos que no mueven Count, y con
+  // el coste de fallos de cache encendido puede saltar decenas de ticks de golpe -- por eso el
+  // latch lo hace countAdd() por CRUCE (Compare dentro del tramo) y no por igualdad: con un
+  // salto, Count pasaria POR ENCIMA de Compare y la interrupcion del timer se perderia.
+  if(countAdd(countTicks(1))) timerIntr = true;
   // Random counts down each cycle, snapping back to 31 only when it exactly equals
   // Wired (HW model). With Wired>31 this makes Random sweep the full [0..63] range,
   // since it decrements past 0 to 63 before ever meeting Wired again.
@@ -1027,7 +1370,14 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
     u64 n = v ? std::strtoull(v, nullptr, 0) : 0;
     return (v && n < 1) ? 20ull : n;
   }();
-  if(excCode > 3 && excCode != 8 && kOddMax && oddExc < kOddMax) {
+  // TLBL(2)/TLBS(3) son pan de cada dia en un juego que use el TLB, pero si el invitado no
+  // tiene NI UNA entrada valida instalada el TLB no puede acertar jamas: ese fallo no es
+  // paginacion bajo demanda sino un puntero que se fue a kuseg por accidente, y entonces
+  // interesa tanto como una instruccion reservada. Se comprueba el estado real del TLB, no
+  // el nombre del juego.
+  bool oddCode = (excCode > 3 && excCode != 8)
+              || ((excCode == 2 || excCode == 3) && !tlbAnyValid());
+  if(oddCode && kOddMax && oddExc < kOddMax) {
     oddExc++;
     std::fprintf(stderr, "[excodd] #%llu code=%u epc=0x%llx badv=0x%llx curPc=0x%llx bd=%u "
                          "ra=0x%llx sp=0x%llx status=0x%08x retired=%llu\n",
@@ -1374,6 +1724,11 @@ static auto normPageMask(u64 pm) -> u64 {
   return (u64)out << 13;
 }
 
+auto CPU::tlbAnyValid() const -> bool {
+  for(const TlbEntry& e : tlb) if((e.lo0 | e.lo1) & 0x2) return true;
+  return false;
+}
+
 auto CPU::tlbWrite(u32 index) -> void {
   index &= 0x3f;
   if(index >= 32) return;
@@ -1538,11 +1893,11 @@ auto CPU::execute(u32 op) -> void {
     if(cpuMode() != 0 && !((u32)cop0[C0_Status] & 0x1000'0000u)) { takeException(11); break; }
     { u64 a=gpr[RS]+SIMM; translate(a,AccRead); if(memAbort) break; cacheOp((op >> 16) & 0x1f, a); } break;
   case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
-              u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : mem->read32(pe);
+              u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : (chargeUncached(), ramUncached(pe,4), mem->read32(pe));
               set(RT, sext32(val)); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x31: /*LWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet32(RT, read32(gpr[RS]+SIMM)); break;
   case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
-              u32 pe=(u32)pa; u64 val = (cacheable(va)&&pe<mem->rdram.size()) ? dcRead(pe,8) : mem->read64(pe);
+              u32 pe=(u32)pa; u64 val = (cacheable(va)&&pe<mem->rdram.size()) ? dcRead(pe,8) : (chargeUncached(), ramUncached(pe,8), mem->read64(pe));
               set(RT, val); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x35: /*LDC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet64(RT, read64(gpr[RS]+SIMM)); break;
   case 0x37: /*LD*/  set(RT, read64(gpr[RS]+SIMM)); break;
@@ -1844,7 +2199,9 @@ auto CPU::jitCop1CvtChk(u32 op, u32 off) -> u8 {
 
 #define KC1C(name, kind) \
   extern "C" u8 name(void* c, u32 op, u32 off) { \
-    return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CvtChk<kind>(op, off); }
+    auto* p = reinterpret_cast<kestrel::CPU*>(c); \
+    kestrel::CPU::FpuCharge g(p, op); \
+    return p->jitCop1CvtChk<kind>(op, off); }
 KC1C(kestrel_jitCVTWS, 0) KC1C(kestrel_jitTRUNCWS, 1)
 KC1C(kestrel_jitCVTWD, 2) KC1C(kestrel_jitTRUNCWD, 3)
 KC1C(kestrel_jitCVTDS, 4) KC1C(kestrel_jitCVTSD, 5)
@@ -1913,9 +2270,13 @@ auto CPU::jitCop1CmpChk(u32 op, u32 off) -> u8 {
   return slow;
 }
 extern "C" u8 kestrel_jitCMPS(void* c, u32 op, u32 off) {
-  return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CmpChk<0x10>(op, off); }
+  auto* p = reinterpret_cast<kestrel::CPU*>(c);
+  kestrel::CPU::FpuCharge g(p, op);
+  return p->jitCop1CmpChk<0x10>(op, off); }
 extern "C" u8 kestrel_jitCMPD(void* c, u32 op, u32 off) {
-  return reinterpret_cast<kestrel::CPU*>(c)->jitCop1CmpChk<0x11>(op, off); }
+  auto* p = reinterpret_cast<kestrel::CPU*>(c);
+  kestrel::CPU::FpuCharge g(p, op);
+  return p->jitCop1CmpChk<0x11>(op, off); }
 
 // Oraculo diferencial (KESTREL_FPORACLE), igual que conversiones y comparaciones: el camino
 // rapido calcula, se rebobina fd y fcr31, y el interprete ejecuta la MISMA op. La aritmetica
@@ -1949,7 +2310,9 @@ auto CPU::jitCop1AluChk(u32 op, u32 off) -> u8 {
 
 #define KC1A(name, fn, fmt) \
   extern "C" u8 name(void* c, u32 op, u32 off) { \
-    return reinterpret_cast<kestrel::CPU*>(c)->jitCop1AluChk<fn, fmt>(op, off); }
+    auto* p = reinterpret_cast<kestrel::CPU*>(c); \
+    kestrel::CPU::FpuCharge g(p, op); \
+    return p->jitCop1AluChk<fn, fmt>(op, off); }
 KC1A(kestrel_jitADDS, 0, 0x10) KC1A(kestrel_jitSUBS, 1, 0x10) KC1A(kestrel_jitMULS, 2, 0x10)
 KC1A(kestrel_jitADDD, 0, 0x11) KC1A(kestrel_jitSUBD, 1, 0x11) KC1A(kestrel_jitMULD, 2, 0x11)
 KC1A(kestrel_jitDIVS, 3, 0x10) KC1A(kestrel_jitDIVD, 3, 0x11)
@@ -2075,7 +2438,8 @@ auto CPU::jitMem(u32 op) -> u8 {
   bool inRdram = cacheable(a) && pe < mem->rdram.size();
   if(!store) {
     u64 raw = inRdram ? dcRead(pe, sz)
-            : (sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
+            : (chargeUncached(), ramUncached(pe, sz),
+               sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
              : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe));
     switch(OPc) {
       case 0x20: set(RT, sext8 ((u8) raw)); break;
@@ -2096,6 +2460,7 @@ auto CPU::jitMem(u32 op) -> u8 {
   if(sz == 1 || sz == 2) { if(storeCart(pm, rt, sz)) return 1; }
   if(sz != 4)            { if(mem->wordStoreQuirk(pm, rt, sz)) return 1; }
   if(inRdram) { dcWrite(pe, rt, sz); return 1; }
+  ramUncached(pe, sz);
   switch(sz) {
     case 1: mem->write8 (pe, (u8) rt); break;
     case 2: mem->write16(pe, (u16)rt); break;
@@ -2150,7 +2515,8 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
   bool inRdram = cacheable(a) && pe < mem->rdram.size();
   if constexpr(!store) {
     u64 raw = inRdram ? dcRead(pe, sz)
-            : (sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
+            : (chargeUncached(), ramUncached(pe, sz),
+               sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
              : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe));
     if      constexpr(OPc == 0x20) set(rt, sext8 ((u8) raw));
     else if constexpr(OPc == 0x21) set(rt, sext16((u16)raw));
@@ -2169,6 +2535,7 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
     if constexpr(sz == 1 || sz == 2) { if(storeCart(pm, rtVal, sz)) return 1; }
     if constexpr(sz != 4)            { if(mem->wordStoreQuirk(pm, rtVal, sz)) return 1; }
     if(inRdram) { dcWrite(pe, rtVal, sz); return 1; }
+    ramUncached(pe, sz);
     if      constexpr(sz == 1) mem->write8 (pe, (u8) rtVal);
     else if constexpr(sz == 2) mem->write16(pe, (u16)rtVal);
     else if constexpr(sz == 4) mem->write32(pe, (u32)rtVal);
@@ -2219,24 +2586,24 @@ auto CPU::special(u32 op) -> void {
   case 0x14: /*DSLLV*/ set(RD, gpr[RT] << (gpr[RS] & 63)); break;
   case 0x16: /*DSRLV*/ set(RD, gpr[RT] >> (gpr[RS] & 63)); break;
   case 0x17: /*DSRAV*/ set(RD, (u64)((s64)gpr[RT] >> (gpr[RS] & 63))); break;
-  case 0x18: /*MULT*/ { s64 r=(s64)(s32)gpr[RS]*(s64)(s32)gpr[RT]; lo=sext32((u32)r); hi=sext32((u32)(r>>32)); break; }
-  case 0x19: /*MULTU*/{ u64 r=(u64)(u32)gpr[RS]*(u64)(u32)gpr[RT]; lo=sext32((u32)r); hi=sext32((u32)(r>>32)); break; }
+  case 0x18: /*MULT*/ { chargeMulDiv(5); s64 r=(s64)(s32)gpr[RS]*(s64)(s32)gpr[RT]; lo=sext32((u32)r); hi=sext32((u32)(r>>32)); break; }
+  case 0x19: /*MULTU*/{ chargeMulDiv(5); u64 r=(u64)(u32)gpr[RS]*(u64)(u32)gpr[RT]; lo=sext32((u32)r); hi=sext32((u32)(r>>32)); break; }
   // MIPS div never traps: divide-by-zero and INT_MIN/-1 overflow produce defined
   // R4300i results (host idiv WOULD trap on both — must guard). n64-systemtest checks these.
-  case 0x1a: /*DIV*/  { s32 a=(s32)gpr[RS], b=(s32)gpr[RT];
+  case 0x1a: /*DIV*/  { chargeMulDiv(37); s32 a=(s32)gpr[RS], b=(s32)gpr[RT];
       if(b==0){ lo=sext32(a<0?1u:0xffffffffu); hi=sext32((u32)a); }
       else if(a==(s32)0x80000000 && b==-1){ lo=sext32(0x80000000u); hi=0; }
       else { lo=sext32((u32)(a/b)); hi=sext32((u32)(a%b)); } break; }
-  case 0x1b: /*DIVU*/ { u32 a=(u32)gpr[RS], b=(u32)gpr[RT];
+  case 0x1b: /*DIVU*/ { chargeMulDiv(37); u32 a=(u32)gpr[RS], b=(u32)gpr[RT];
       if(b==0){ lo=sext32(0xffffffffu); hi=sext32(a); }
       else { lo=sext32(a/b); hi=sext32(a%b); } break; }
-  case 0x1c: /*DMULT*/ { __int128 r=(__int128)(s64)gpr[RS]*(s64)gpr[RT]; lo=(u64)r; hi=(u64)(r>>64); break; }
-  case 0x1d: /*DMULTU*/{ unsigned __int128 r=(unsigned __int128)gpr[RS]*gpr[RT]; lo=(u64)r; hi=(u64)(r>>64); break; }
-  case 0x1e: /*DDIV*/ { s64 a=(s64)gpr[RS], b=(s64)gpr[RT];
+  case 0x1c: /*DMULT*/ { chargeMulDiv(8); __int128 r=(__int128)(s64)gpr[RS]*(s64)gpr[RT]; lo=(u64)r; hi=(u64)(r>>64); break; }
+  case 0x1d: /*DMULTU*/{ chargeMulDiv(8); unsigned __int128 r=(unsigned __int128)gpr[RS]*gpr[RT]; lo=(u64)r; hi=(u64)(r>>64); break; }
+  case 0x1e: /*DDIV*/ { chargeMulDiv(69); s64 a=(s64)gpr[RS], b=(s64)gpr[RT];
       if(b==0){ lo=(u64)(a<0?1:-1); hi=(u64)a; }
       else if(a==(s64)0x8000000000000000ull && b==-1){ lo=0x8000000000000000ull; hi=0; }
       else { lo=(u64)(a/b); hi=(u64)(a%b); } break; }
-  case 0x1f: /*DDIVU*/{ u64 a=gpr[RS], b=gpr[RT];
+  case 0x1f: /*DDIVU*/{ chargeMulDiv(69); u64 a=gpr[RS], b=gpr[RT];
       if(b==0){ lo=~0ull; hi=a; }
       else { lo=a/b; hi=a%b; } break; }
   case 0x20: /*ADD*/  { s32 a=(s32)gpr[RS], b=(s32)gpr[RT], r=(s32)((u32)a+(u32)b); if(((a^r)&(b^r))<0){ takeException(12); break; } set(RD, sext32((u32)r)); break; }
@@ -2540,6 +2907,10 @@ auto CPU::cop1op(u32 op) -> void {
   }
   default: break;  // fall through to the format (arithmetic/convert/compare) ops
   }
+
+  // Latencia de la tabla 7-14. Solo si ningun trampolin COP1 del JIT la cobro ya (ver
+  // CPU::FpuCharge): ese camino puede acabar aqui via jitInterpOp y se contaria dos veces.
+  if(!fpuNested) chargeFpu(op);
 
   // fmt in rs: 0x10 S(single), 0x11 D(double), 0x14 W(int32), 0x15 L(int64).
   // Fields: ft=RT, fs=RD, fd=SA, funct.
@@ -2861,37 +3232,152 @@ static const char* gprName[32] = {
   "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
 
 auto CPU::disasm(u32 op, u64 pc) -> std::string {
-  char b[64];
+  // Telemetria, no una herramienta de matching: aqui solo importa que quien mira un cuelgue
+  // LEA lo que hay. La tabla estaba a medias y un `sb` salia como "op.28", que es justo el
+  // agujero que hace perder una hora en un diagnostico.
+  char b[80];
   u32 o = op >> 26 & 0x3f, rs = op>>21&0x1f, rt = op>>16&0x1f, rd = op>>11&0x1f, sa = op>>6&0x1f, fn = op&0x3f;
   s16 imm = (s16)(op & 0xffff);
   auto R = [](u32 i){ return gprName[i]; };
+  auto F = [](u32 i){ static char f[8]; std::snprintf(f,sizeof f,"f%u",i); return (const char*)f; };
+  auto target = [&]{ return (u32)((pc & 0xf0000000) | ((op & 0x3ffffff) << 2)); };
+  auto branch = [&]{ return (u32)(pc + 4 + ((s32)imm << 2)); };
+  auto mem  = [&](const char* n){ std::snprintf(b,sizeof b,"%s %s,%d(%s)",n,R(rt),imm,R(rs)); return b; };
+  auto memf = [&](const char* n){ std::snprintf(b,sizeof b,"%s %s,%d(%s)",n,F(rt),imm,R(rs)); return b; };
   if(op == 0) return "nop";
   switch(o) {
   case 0x00:
     switch(fn) {
     case 0x00: std::snprintf(b,sizeof b,"sll %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x02: std::snprintf(b,sizeof b,"srl %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x03: std::snprintf(b,sizeof b,"sra %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x04: std::snprintf(b,sizeof b,"sllv %s,%s,%s",R(rd),R(rt),R(rs)); return b;
+    case 0x06: std::snprintf(b,sizeof b,"srlv %s,%s,%s",R(rd),R(rt),R(rs)); return b;
+    case 0x07: std::snprintf(b,sizeof b,"srav %s,%s,%s",R(rd),R(rt),R(rs)); return b;
     case 0x08: std::snprintf(b,sizeof b,"jr %s",R(rs)); return b;
     case 0x09: std::snprintf(b,sizeof b,"jalr %s,%s",R(rd),R(rs)); return b;
+    case 0x0c: return "syscall";
+    case 0x0d: return "break";
+    case 0x0f: return "sync";
+    case 0x10: std::snprintf(b,sizeof b,"mfhi %s",R(rd)); return b;
+    case 0x11: std::snprintf(b,sizeof b,"mthi %s",R(rs)); return b;
+    case 0x12: std::snprintf(b,sizeof b,"mflo %s",R(rd)); return b;
+    case 0x13: std::snprintf(b,sizeof b,"mtlo %s",R(rs)); return b;
+    case 0x14: std::snprintf(b,sizeof b,"dsllv %s,%s,%s",R(rd),R(rt),R(rs)); return b;
+    case 0x16: std::snprintf(b,sizeof b,"dsrlv %s,%s,%s",R(rd),R(rt),R(rs)); return b;
+    case 0x17: std::snprintf(b,sizeof b,"dsrav %s,%s,%s",R(rd),R(rt),R(rs)); return b;
+    case 0x18: case 0x19: std::snprintf(b,sizeof b,"mult%s %s,%s",fn==0x19?"u":"",R(rs),R(rt)); return b;
+    case 0x1a: case 0x1b: std::snprintf(b,sizeof b,"div%s %s,%s",fn==0x1b?"u":"",R(rs),R(rt)); return b;
+    case 0x1c: case 0x1d: std::snprintf(b,sizeof b,"dmult%s %s,%s",fn==0x1d?"u":"",R(rs),R(rt)); return b;
+    case 0x1e: case 0x1f: std::snprintf(b,sizeof b,"ddiv%s %s,%s",fn==0x1f?"u":"",R(rs),R(rt)); return b;
     case 0x20: case 0x21: std::snprintf(b,sizeof b,"add%s %s,%s,%s",fn==0x21?"u":"",R(rd),R(rs),R(rt)); return b;
     case 0x22: case 0x23: std::snprintf(b,sizeof b,"sub%s %s,%s,%s",fn==0x23?"u":"",R(rd),R(rs),R(rt)); return b;
     case 0x24: std::snprintf(b,sizeof b,"and %s,%s,%s",R(rd),R(rs),R(rt)); return b;
     case 0x25: std::snprintf(b,sizeof b,"or %s,%s,%s",R(rd),R(rs),R(rt)); return b;
+    case 0x26: std::snprintf(b,sizeof b,"xor %s,%s,%s",R(rd),R(rs),R(rt)); return b;
+    case 0x27: std::snprintf(b,sizeof b,"nor %s,%s,%s",R(rd),R(rs),R(rt)); return b;
     case 0x2a: std::snprintf(b,sizeof b,"slt %s,%s,%s",R(rd),R(rs),R(rt)); return b;
     case 0x2b: std::snprintf(b,sizeof b,"sltu %s,%s,%s",R(rd),R(rs),R(rt)); return b;
+    case 0x2c: case 0x2d: std::snprintf(b,sizeof b,"dadd%s %s,%s,%s",fn==0x2d?"u":"",R(rd),R(rs),R(rt)); return b;
+    case 0x2e: case 0x2f: std::snprintf(b,sizeof b,"dsub%s %s,%s,%s",fn==0x2f?"u":"",R(rd),R(rs),R(rt)); return b;
+    case 0x38: std::snprintf(b,sizeof b,"dsll %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x3a: std::snprintf(b,sizeof b,"dsrl %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x3b: std::snprintf(b,sizeof b,"dsra %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x3c: std::snprintf(b,sizeof b,"dsll32 %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x3e: std::snprintf(b,sizeof b,"dsrl32 %s,%s,%u",R(rd),R(rt),sa); return b;
+    case 0x3f: std::snprintf(b,sizeof b,"dsra32 %s,%s,%u",R(rd),R(rt),sa); return b;
     default: std::snprintf(b,sizeof b,"special.%02x",fn); return b;
     }
-  case 0x02: std::snprintf(b,sizeof b,"j %08x",(u32)((pc&0xf0000000)|((op&0x3ffffff)<<2))); return b;
-  case 0x03: std::snprintf(b,sizeof b,"jal %08x",(u32)((pc&0xf0000000)|((op&0x3ffffff)<<2))); return b;
-  case 0x04: std::snprintf(b,sizeof b,"beq %s,%s,%08x",R(rs),R(rt),(u32)(pc+4+(imm<<2))); return b;
-  case 0x05: std::snprintf(b,sizeof b,"bne %s,%s,%08x",R(rs),R(rt),(u32)(pc+4+(imm<<2))); return b;
+  case 0x01: {  // REGIMM: el sub-opcode va en el campo rt
+    static const char* rn[32] = {
+      "bltz","bgez","bltzl","bgezl","?","?","?","?","tgei","tgeiu","tlti","tltiu","teqi","?","tnei","?",
+      "bltzal","bgezal","bltzall","bgezall","?","?","?","?","?","?","?","?","?","?","?","?"};
+    std::snprintf(b,sizeof b,"%s %s,%08x",rn[rt],R(rs),branch()); return b;
+  }
+  case 0x02: std::snprintf(b,sizeof b,"j %08x",target()); return b;
+  case 0x03: std::snprintf(b,sizeof b,"jal %08x",target()); return b;
+  case 0x04: std::snprintf(b,sizeof b,"beq %s,%s,%08x",R(rs),R(rt),branch()); return b;
+  case 0x05: std::snprintf(b,sizeof b,"bne %s,%s,%08x",R(rs),R(rt),branch()); return b;
+  case 0x06: std::snprintf(b,sizeof b,"blez %s,%08x",R(rs),branch()); return b;
+  case 0x07: std::snprintf(b,sizeof b,"bgtz %s,%08x",R(rs),branch()); return b;
   case 0x08: case 0x09: std::snprintf(b,sizeof b,"addi%s %s,%s,%d",o==0x09?"u":"",R(rt),R(rs),imm); return b;
+  case 0x0a: std::snprintf(b,sizeof b,"slti %s,%s,%d",R(rt),R(rs),imm); return b;
+  case 0x0b: std::snprintf(b,sizeof b,"sltiu %s,%s,%d",R(rt),R(rs),imm); return b;
   case 0x0c: std::snprintf(b,sizeof b,"andi %s,%s,0x%x",R(rt),R(rs),(u16)imm); return b;
   case 0x0d: std::snprintf(b,sizeof b,"ori %s,%s,0x%x",R(rt),R(rs),(u16)imm); return b;
+  case 0x0e: std::snprintf(b,sizeof b,"xori %s,%s,0x%x",R(rt),R(rs),(u16)imm); return b;
   case 0x0f: std::snprintf(b,sizeof b,"lui %s,0x%x",R(rt),(u16)imm); return b;
-  case 0x10: std::snprintf(b,sizeof b,"cop0.%02x",rs); return b;
-  case 0x11: std::snprintf(b,sizeof b,"cop1.%02x",rs); return b;
-  case 0x23: std::snprintf(b,sizeof b,"lw %s,%d(%s)",R(rt),imm,R(rs)); return b;
-  case 0x2b: std::snprintf(b,sizeof b,"sw %s,%d(%s)",R(rt),imm,R(rs)); return b;
+  case 0x10:   // COP0
+    switch(rs) {
+    case 0x00: std::snprintf(b,sizeof b,"mfc0 %s,r%u",R(rt),rd); return b;
+    case 0x01: std::snprintf(b,sizeof b,"dmfc0 %s,r%u",R(rt),rd); return b;
+    case 0x04: std::snprintf(b,sizeof b,"mtc0 %s,r%u",R(rt),rd); return b;
+    case 0x05: std::snprintf(b,sizeof b,"dmtc0 %s,r%u",R(rt),rd); return b;
+    case 0x10:
+      switch(fn) {
+      case 0x01: return "tlbr";
+      case 0x02: return "tlbwi";
+      case 0x06: return "tlbwr";
+      case 0x08: return "tlbp";
+      case 0x18: return "eret";
+      default:   std::snprintf(b,sizeof b,"cop0.co.%02x",fn); return b;
+      }
+    default: std::snprintf(b,sizeof b,"cop0.%02x",rs); return b;
+    }
+  case 0x11:   // COP1
+    switch(rs) {
+    case 0x00: std::snprintf(b,sizeof b,"mfc1 %s,%s",R(rt),F(rd)); return b;
+    case 0x01: std::snprintf(b,sizeof b,"dmfc1 %s,%s",R(rt),F(rd)); return b;
+    case 0x02: std::snprintf(b,sizeof b,"cfc1 %s,%u",R(rt),rd); return b;
+    case 0x04: std::snprintf(b,sizeof b,"mtc1 %s,%s",R(rt),F(rd)); return b;
+    case 0x05: std::snprintf(b,sizeof b,"dmtc1 %s,%s",R(rt),F(rd)); return b;
+    case 0x06: std::snprintf(b,sizeof b,"ctc1 %s,%u",R(rt),rd); return b;
+    case 0x08: std::snprintf(b,sizeof b,"bc1%s%s %08x",(rt&1)?"t":"f",(rt&2)?"l":"",branch()); return b;
+    default: {
+      static const char* fmt[32] = {"s","d","?","?","w","l","?","?","?","?","?","?","?","?","?","?",
+                                    "?","?","?","?","?","?","?","?","?","?","?","?","?","?","?","?"};
+      static const char* fop[64] = {
+        "add","sub","mul","div","sqrt","abs","mov","neg","round.l","trunc.l","ceil.l","floor.l",
+        "round.w","trunc.w","ceil.w","floor.w","?","?","?","?","?","?","?","?","?","?","?","?","?","?","?","?",
+        "cvt.s","cvt.d","?","?","cvt.w","cvt.l","?","?","?","?","?","?","?","?","?","?",
+        "c.f","c.un","c.eq","c.ueq","c.olt","c.ult","c.ole","c.ule",
+        "c.sf","c.ngle","c.seq","c.ngl","c.lt","c.nge","c.le","c.ngt"};
+      std::snprintf(b,sizeof b,"%s.%s %s,%s,%s",fop[fn],fmt[rs&0x1f],F(sa),F(rd),F(rt)); return b;
+    }
+    }
+  case 0x14: std::snprintf(b,sizeof b,"beql %s,%s,%08x",R(rs),R(rt),branch()); return b;
+  case 0x15: std::snprintf(b,sizeof b,"bnel %s,%s,%08x",R(rs),R(rt),branch()); return b;
+  case 0x16: std::snprintf(b,sizeof b,"blezl %s,%08x",R(rs),branch()); return b;
+  case 0x17: std::snprintf(b,sizeof b,"bgtzl %s,%08x",R(rs),branch()); return b;
+  case 0x18: case 0x19: std::snprintf(b,sizeof b,"daddi%s %s,%s,%d",o==0x19?"u":"",R(rt),R(rs),imm); return b;
+  case 0x1a: return mem("ldl");
+  case 0x1b: return mem("ldr");
+  case 0x20: return mem("lb");
+  case 0x21: return mem("lh");
+  case 0x22: return mem("lwl");
+  case 0x23: return mem("lw");
+  case 0x24: return mem("lbu");
+  case 0x25: return mem("lhu");
+  case 0x26: return mem("lwr");
+  case 0x27: return mem("lwu");
+  case 0x28: return mem("sb");
+  case 0x29: return mem("sh");
+  case 0x2a: return mem("swl");
+  case 0x2b: return mem("sw");
+  case 0x2c: return mem("sdl");
+  case 0x2d: return mem("sdr");
+  case 0x2e: return mem("swr");
+  case 0x2f: std::snprintf(b,sizeof b,"cache 0x%x,%d(%s)",rt,imm,R(rs)); return b;
+  case 0x30: return mem("ll");
+  case 0x31: return memf("lwc1");
+  case 0x34: return mem("lld");
+  case 0x35: return memf("ldc1");
+  case 0x37: return mem("ld");
+  case 0x38: return mem("sc");
+  case 0x39: return memf("swc1");
+  case 0x3c: return mem("scd");
+  case 0x3d: return memf("sdc1");
+  case 0x3f: return mem("sd");
   default: std::snprintf(b,sizeof b,"op.%02x",o); return b;
   }
 }

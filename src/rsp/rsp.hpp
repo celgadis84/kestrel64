@@ -125,6 +125,76 @@ struct Rsp {
   // el hilo RSP una vez por step(), lo lee el hilo CPU al refrescar el heartbeat.
   std::atomic<u64> cyclesRun{0};
 
+  // APAGON. No es HALT del invitado: es el anfitrion cerrando el emulador. Un microcodigo
+  // puede estar legitimamente girando en una espera (F3DEX2 sondea DPC_CURRENT hasta que la
+  // CPU le instala el siguiente buffer de comandos), y si la CPU ya no corre esa espera no
+  // termina nunca -- exactamente igual que en la consola si le cortas la corriente al R4300.
+  // Sin esto, stopRcpThreads() se queda en el join para siempre.
+  std::atomic<bool> hostStop{false};
+
+  // Ventana viva de la tanda en curso de step(). `cyclesRun` se publica UNA vez por tanda
+  // (8K instrucciones), y eso vale de sobra para telemetria y para el regulador -- pero no
+  // vale cuando el que pregunta es el PROPIO RSP. Al escribir DPC_END, el microcodigo sella
+  // el tramo con su instante de invitado (Memory::rspGuestNow -> spBarrierAt, que lee
+  // cyclesRun): con el valor publicado a saltos, ese sello sale redondeado a la ultima
+  // frontera de tanda, y donde caiga la frontera depende de como el anfitrion haya troceado
+  // la tarea. Medido en DK64: dos corridas del mismo binario sellaban el mismo DPC_END con
+  // cyclesRun 7460578 y 7468770 -- exactamente 8192, un cuanto de publicacion -- y a partir
+  // de ahi el horario entero del RDP se desplazaba. En hardware el contador del RSP no tiene
+  // cuantos: vale lo que vale en esa instruccion.
+  //
+  // `exactEnd - *exactC` son las instrucciones retiradas en esta llamada a step(); `exactPub`
+  // apunta a cuantas de ellas se han publicado ya. Se ponen una vez por tanda (dos tiendas
+  // cada 8K instrucciones, fuera del cuerpo del bucle) y solo los usa publishExact(), que se
+  // llama desde mtc0 -- el unico camino por el que el microcodigo puede tocar MMIO.
+  // NADA de punteros a los contadores del bucle: tomar la direccion de la variable de saldo
+  // la saca del registro y la manda a memoria, y el cuerpo del interprete pasa a cargarla y
+  // guardarla en CADA instruccion. Medido: gate_all 430 s -> 1060 s, con sm64[rspinterp]
+  // topando su limite de 600 s. Aqui solo se COPIA el saldo (una tienda a una linea que ya
+  // esta sucia, al lado de `curpc`, que se escribe igual por instruccion).
+  u64  exactEnd  = 0;    // ran + chunk: instrucciones retiradas al agotar la tanda
+  u64  exactLeft = 0;    // lo que le queda a la tanda AHORA MISMO
+  u64  exactPub  = 0;    // cuantas de esta llamada a step() estan ya en cyclesRun
+  bool exactOn   = false;
+  // Poner cyclesRun al dia EXACTO antes de que alguien lea el reloj de invitado del RSP.
+  // Solo suma: si el valor calculado se quedase por detras del publicado (el puente del
+  // dynarec cuenta el bloque entero por delante, ver jitExec), el reloj se para hasta que
+  // el otro camino lo alcanza, pero nunca retrocede.
+  // Ciclos de RSP AHORA MISMO, sin tocar el atomico. El sondeo de DPC del microcodigo pasa
+  // por aqui millones de veces por corrida (11,5 M en 300 campos de DK64): publicar con un
+  // fetch_add en cada una ensuciaria en cada vuelta una linea que lee el hilo de CPU. Leer y
+  // sumar el tramo pendiente da el MISMO numero sin escribir nada.
+  auto exactCycles() const -> u64 {
+    u64 c = cyclesRun.load(std::memory_order_relaxed);
+    if(exactOn) {
+      const u64 ranNow = exactEnd - exactLeft;
+      if(ranNow > exactPub) c += ranNow - exactPub;
+    }
+    return c;
+  }
+  // --- salto del bucle de espera del FIFO (ver Rsp::idleSkip en rsp.cpp) ---------------
+  auto idleSkip(u64 now, u32 val) -> void;
+  u32 idlePc = 0xffffffffu;   // firma de la ultima lectura de DPC_CURRENT
+  u32 idleHash = 0;           // huella de r[1..31] en esa lectura
+  u32 idleVal = 0;            // valor devuelto en esa lectura
+  u64 idleAt = 0;             // reloj exacto del RSP en esa lectura
+  u64 idleLen = 0;            // ciclos entre esa lectura y la anterior = cuerpo del bucle
+  bool idleOn = true;
+  std::atomic<u64> idleSkips{0}, idleIters{0};
+  // Por que NO se aparca. Solo los toca el hilo del RSP (por eso no son atomicos); los lee
+  // el volcado final, con el RCP ya parado. Sin esto, un `idle=0/0` no dice si es que la
+  // firma no se repite, si el motor no esta drenado o si es que no cabe ni una vuelta.
+  u64 idleNoSig = 0;     // firma distinta de la lectura anterior (o longitud fuera de [2,64])
+  u64 idleNoDrain = 0;   // motor del RDP sin drenar en `now`
+  u64 idleNoRoom = 0;    // aparcamiento sin hueco: destino <= now, o no cabe una vuelta entera
+  auto publishExact() -> void {
+    if(!exactOn) return;
+    const u64 ranNow = exactEnd - exactLeft;
+    if(ranNow <= exactPub) return;
+    cyclesRun.fetch_add(ranNow - exactPub, std::memory_order_relaxed);
+    exactPub = ranNow;
+  }
+
   // Base de DMEM/IMEM fijada en el objeto. Los dos viven en `Memory` como std::vector, y
   // el compilador no puede sacar el `.data()` del bucle del interprete: cualquier llamada
   // de dentro (execCop2, un DMA por MMIO) podria en teoria tocar el vector, asi que cada
@@ -136,6 +206,15 @@ struct Rsp {
   auto bindMem() -> void;
 
   alignas(64) bool running = false;    // reentrancy guard (microcode may poke SP_STATUS)
+  // Freno del prologo del dynarec: es `running` MENOS el aparcamiento. Un RSP aparcado
+  // (Memory::rspParkWait) no ejecuta microcodigo, no escribe MMIO y no puede levantar
+  // interrupcion, asi que mandar la cadena al trampolin en cada eslabon no regula NADA --
+  // solo cuesta una llamada Win64 por bloque justo en la ventana en la que la CPU es el unico
+  // hilo capaz de desatascar la escena (es ella quien archiva el tramo que despierta al RSP).
+  // Durante el aparcamiento a la CPU la acotan la barrera de invitado del SP
+  // (spBarrierEff -> rspPark + kParkLead) y rcpPace, las dos en reloj de invitado. Ver la
+  // nota larga del prologo en jit.cpp para POR QUE el freno hace falta cuando el RSP si corre.
+  bool brake = false;
 
   // Vector unit SSE fast path (8 lanes = 1 XMM). Bit-exact with the scalar reference
   // (proven by the differential fuzz, `--rspfuzz`). Disable with KESTREL_NORSPSSE for A/B.
@@ -144,7 +223,7 @@ struct Rsp {
   // mismos bytes que el camino byte a byte, en operaciones de 64 bits. Apagable para
   // bisecar y para que --rspldfuzz pueda usar el camino lento como oraculo.
   bool vecfast = true;
-  char coldPad_[62] = {};   // resto de la linea: nada mas debe caer aqui
+  char coldPad_[61] = {};   // resto de la linea: nada mas debe caer aqui
 
   // --- dynarec (src/rsp/rspjit.*) ------------------------------------------
   // Interruptor y tabla de bloques. La tabla vive en el heap y detras de un puntero para
@@ -202,7 +281,40 @@ struct Rsp {
   auto jitCop2 (u32 op) -> void { execCop2(op); }
   auto jitLoad (u32 op) -> void { execLoad(op); }
   auto jitStore(u32 op) -> void { execStore(op); }
-  auto jitExec (u32 op) -> void { exec(op); }
+  // Puente del dynarec para lo que no se emite en linea; por aqui sale el MFC0 que el
+  // microcodigo usa para sondear DPC_CURRENT. El saldo vivo de la tanda no lo lleva el
+  // bucle sino `jitBudget`, al que el prologo del bloque ya le ha restado el bloque ENTERO:
+  // o sea que todas las lecturas de un mismo bloque comparten instante de invitado. Es
+  // grueso (decenas de instrucciones) pero es una funcion DETERMINISTA del PC, que es lo
+  // que hace falta; el cuanto anterior era la tanda entera (8192) y lo decidia el anfitrion.
+  auto jitExec (u32 op) -> void {
+    exactLeft = jitBudget > 0 ? (u64)jitBudget : 0;
+    exec(op);
+  }
+  // COP0 (MFC0 y MTC0) desde dentro de un bloque, con el reloj EXACTO de esa instruccion.
+  // `rem` son las instrucciones del bloque que van DETRAS de esta: el prologo ya se ha
+  // cobrado el bloque entero, asi que el saldo que el interprete tendria aqui es
+  // jitBudget + rem -- el mismo numero, instruccion a instruccion, que pone step().
+  //
+  // Devuelve true si el bloque tiene que cortar YA, justo detras de esta instruccion:
+  //  * `halt`: un SET_HALT escrito a SP_STATUS para el nucleo en el acto, igual que en el
+  //    bucle del interprete (`while(c && !halt)`);
+  //  * `jitImemGen` cambio: un DMA hacia IMEM ha reescrito el microcodigo, y lo que queda del
+  //    bloque (y la tabla con la que enlaza) puede ser codigo de la imagen anterior.
+  // Al cortar devuelve al saldo lo que no se ejecuto y deja el PC en la siguiente instruccion;
+  // `nextPc` = ~0 si esta instruccion es la ranura de retardo, donde el salto ya lo escribio.
+  auto jitCop0(u32 op, u32 rem, u32 nextPc) -> bool {
+    const s64 left = (s64)jitBudget + (s64)rem;
+    exactLeft = left > 0 ? (u64)left : 0;
+    const u32 gen = jitImemGen;
+    exec(op);
+    if(!halt && gen == jitImemGen) return false;
+    jitBudget += (s32)rem;
+    if(nextPc != ~0u) pc = nextPc;
+    return true;
+  }
+  // Cuenta las escrituras de IMEM con el nucleo corriendo (ver jitInvalidate y jitCop0).
+  u32 jitImemGen = 0;
 
   Rsp();
   ~Rsp();
@@ -218,9 +330,9 @@ struct Rsp {
   auto benchVU(u64 iters) -> void;
   auto benchStep(u64 iters) -> void;   // mezcla real de opcodes en IMEM, mide el bucle entero
 
-  // Run the loaded microcode from the current SP_PC until it halts (BREAK) or a
-  // safety budget is exhausted, in one blocking call. Retained for callers that
-  // want the whole task at once; internally it is start() + step(budget).
+  // Run the loaded microcode from the current SP_PC until it halts (BREAK), in one
+  // blocking call. Retained for callers that want the whole task at once; internally
+  // it is start() + step(~0).
   auto run() -> void;
 
   // Interleaved execution: start() arms the core from SP_PC (clearing HALT/BREAK,
@@ -228,8 +340,8 @@ struct Rsp {
   // `maxInsns` instructions, persisting the branch-delay state across calls so the
   // RSP and CPU make progress together. The system run loop calls step() after each
   // CPU instruction while `running`, so a microcode that spins waiting on a SIGNAL
-  // the CPU sets (and vice versa) resolves exactly as on hardware. On BREAK (or a
-  // safety-budget hang) step() drops `running` and leaves SP_STATUS updated.
+  // the CPU sets (and vice versa) resolves exactly as on hardware. On BREAK step()
+  // drops `running` and leaves SP_STATUS updated.
   auto start() -> void;
   auto step(u64 maxInsns) -> void;
 
@@ -239,7 +351,14 @@ private:
   bool halt = false;
   bool broke = false;   // BREAK reached; HALT|BROKE published once the PC writeback is done
   bool inDelay = false; u32 pendingTarget = 0;   // persistent branch-delay latch
-  u64  budget = 0;                                // remaining safety budget for this task
+  // Cuenta atras hasta el siguiente aviso del vigilante, NO un tope de vida de la tarea:
+  // ver Rsp::watchdog() en rsp.cpp. En el N64 real no existe ningun tope de instrucciones.
+  u64  budget = 0;
+  u64  hangTicks = 0;                             // cuantos avisos lleva dados esta tarea
+  static constexpr u64 kWatchdogQuantum = 40'000'000;   // instrucciones entre avisos
+  auto watchdog() -> u64;                         // devuelve el nuevo saldo (0 = matar)
+  auto dumpHang() const -> void;
+  auto dumpDpWait() const -> void;
 
   // DMEM byte access (12-bit wrap), plus unaligned half/word big-endian helpers.
   auto rb(u32 a) const -> u8;

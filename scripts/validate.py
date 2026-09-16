@@ -207,6 +207,12 @@ def run_rom(rom, dump, mode, insn, timeout, extra_env=None, stable=None, frames=
     scores ROMs that decode an image on the CPU while they are still drawing it.
     """
     env = env_for(mode, extra_env)
+    # El lote no suena. Un gate son decenas de arranques seguidos, muchos en modos oraculo
+    # que van por debajo de tiempo real o sin regulador: lo que sale por los altavoces es
+    # ruido entrecortado que ademas no dice nada del emulador. Y el sumidero waveOut es
+    # trabajo del anfitrion que se cuela en la pared que mide `bench`. Se puede pedir lo
+    # contrario con KESTREL_AUDIO=1 en el entorno de quien lanza el script.
+    env.setdefault("KESTREL_AUDIO", "0")
     env["KESTREL_MAXINSN"] = str(insn)
     if stable:
         env["KESTREL_STABLE"] = stable

@@ -7,6 +7,7 @@
 #include "audio/audio.hpp"
 #include "core/runtime.hpp"
 #include "ui/menu.hpp"
+#include "ui/library.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -74,23 +75,12 @@ static auto launchedFromExplorer() -> bool {
 }
 
 // Sin ROM y sin consola donde leer un mensaje de error, la unica salida util es preguntar.
+// Y preguntar es la BIBLIOTECA (src/ui/library_win32.cpp): el carrusel de caratulas con la
+// carpeta que ya usa el lanzador, no un dialogo de fichero pelado. Desde dentro de ella
+// sigue estando el dialogo de siempre (F3 / Ctrl+O) para una ROM que este fuera de la
+// carpeta. Aqui se llama en el hilo principal, que todavia no presenta nada.
 static auto pickRomDialog() -> std::string {
-  wchar_t file[MAX_PATH] = {0};
-  OPENFILENAMEW ofn = {};
-  ofn.lStructSize = sizeof(ofn);
-  static const wchar_t kFilter[] =
-      L"ROM de Nintendo 64\0" L"*.z64;*.n64;*.v64\0" L"Todos los archivos\0" L"*.*\0";
-  ofn.lpstrFilter = kFilter;
-  ofn.lpstrTitle  = L"Elige una ROM de Nintendo 64";
-  ofn.lpstrFile   = file;
-  ofn.nMaxFile    = MAX_PATH;
-  ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-  if(!GetOpenFileNameW(&ofn)) return {};
-  // A la pagina de codigos ANSI y no a UTF-8: la ROM se acaba abriendo con fopen(), que en
-  // Windows interpreta el nombre en ANSI. Convertir a UTF-8 rompe cualquier ruta con acentos.
-  char out[MAX_PATH * 2] = {0};
-  int n = WideCharToMultiByte(CP_ACP, 0, file, -1, out, (int)sizeof(out), nullptr, nullptr);
-  return n > 0 ? std::string(out) : std::string();
+  return kestrel::ui::pickRomLibrary(nullptr);
 }
 
 // Un fprintf(stderr) en una consola que se cierra sola al terminar el proceso no lo lee nadie.
@@ -105,6 +95,7 @@ int main(int argc, char** argv) {
   kestrel::u16 port = 9128;
   bool freeRun = false;
   bool play = false;   // modo usuario final: corriendo Y con ventana
+  [[maybe_unused]] bool useLibrary = false;  // abrir la biblioteca aunque haya consola (--library)
 
   for(int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -113,6 +104,12 @@ int main(int argc, char** argv) {
     // --run solo significa "sin pausa", y ademas apaga la ventana porque nacio para el lote
     // (gates, bench, krom). --play es lo que quiere una persona: corriendo Y viendose.
     else if(a == "--play") { play = true; }
+#ifdef _WIN32
+    // Abre la BIBLIOTECA (el carrusel de caratulas) aunque haya consola. Es el modo de
+    // uso normal cuando se lanza a mano, y la unica forma de probar el lanzador desde una
+    // shell: al abrir con doble clic sale solo.
+    else if(a == "--library" || a == "--lib") { play = true; useLibrary = true; }
+#endif
     else if(a == "--rspfuzz") {                 // differential VU fuzz: scalar vs SSE, then exit
       unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != '-') ? std::strtoull(argv[++i], nullptr, 10) : 20000000ull;
       kestrel::Rsp rsp;
@@ -154,7 +151,8 @@ int main(int argc, char** argv) {
     else if(a == "--help" || a == "-h") {
       std::printf("kestrel64 %s\nusage: %s <rom> [--port N] [--run|--play]\n"
                   "  --run   sin pausa y sin ventana (lote: gates, bench)\n"
-                  "  --play  sin pausa y con ventana (uso normal; implicito al abrir desde el Explorador)\n",
+                  "  --play  sin pausa y con ventana (uso normal; implicito al abrir desde el Explorador)\n"
+                  "  --library  abre la biblioteca de ROMs (carrusel de caratulas)\n",
                   kestrel::System::kVersion, argv[0]);
       return 0;
     }
@@ -183,7 +181,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
   // Doble clic en el .exe: ni --play ni ROM en la linea de ordenes, y una consola que se cerrara
   // sola. Se asume el modo de uso normal y se pregunta por la ROM.
-  if(!freeRun && launchedFromExplorer()) {
+  if(useLibrary || (!freeRun && launchedFromExplorer())) {
     play = true;
     if(romPath.empty()) romPath = pickRomDialog();
     if(romPath.empty()) return 0;                    // el usuario cancelo: salir en silencio

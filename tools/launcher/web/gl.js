@@ -447,7 +447,7 @@ const FS = `
 precision mediump float;
 varying vec3 vN, vP, vC; varying vec2 vUV;
 uniform vec3 uEye, uTint, uPickCol;
-uniform float uMix, uPick, uUseTex, uGloss;
+uniform float uMix, uPick, uUseTex, uGloss, uDim;
 uniform sampler2D uTex;
 void main() {
   if (uPick > 0.5) { gl_FragColor = vec4(uPickCol, 1.0); return; }
@@ -463,7 +463,7 @@ void main() {
   float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
   vec3 c = base * (0.24 + 0.76 * d1) + vec3(0.18, 0.22, 0.32) * d2 * 0.5
          + vec3(1.0) * spec * (0.25 + 0.5 * uMix) + vec3(0.45, 0.55, 0.8) * rim * 0.15;
-  gl_FragColor = vec4(pow(clamp(c, 0.0, 1.0), vec3(0.4545)), 1.0);
+  gl_FragColor = vec4(pow(clamp(c * uDim, 0.0, 1.0), vec3(0.4545)), 1.0);
 }`;
 
 function compile(gl, type, src) {
@@ -487,12 +487,12 @@ class Scene {
     this.prog = p; gl.useProgram(p);
     this.loc = {};
     for (const k of ["uMVP", "uModel", "uNrmMat", "uEye", "uTint", "uMix", "uPick", "uPickCol",
-                     "uUseTex", "uTex", "uGloss"]) this.loc[k] = gl.getUniformLocation(p, k);
+                     "uUseTex", "uTex", "uGloss", "uDim"]) this.loc[k] = gl.getUniformLocation(p, k);
     for (const k of ["aPos", "aNrm", "aCol", "aUV"]) this.loc[k] = gl.getAttribLocation(p, k);
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     gl.uniform1i(this.loc.uTex, 0);
-    this.mesh = null; this.buf = {}; this.tex = {};
+    this.mesh = null; this.buf = {}; this.tex = {}; this.order = null;
     this.tint = [1, 0.67, 0.18];      // el acento del lanzador
     this.highlight = {};              // id -> 0..1
     this.gloss = 1;
@@ -556,21 +556,34 @@ class Scene {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const proj = M4.persp(0.62, asp, 0.5, 200);
     const view = M4.lookAt(this.eye[0], this.eye[1], this.eye[2], this.target[0], this.target[1], this.target[2]);
-    const mvp = M4.mul(M4.mul(proj, view), this.model);
-    gl.uniformMatrix4fv(l.uMVP, false, mvp);
-    gl.uniformMatrix4fv(l.uModel, false, this.model);
-    gl.uniformMatrix3fv(l.uNrmMat, false, M4.normal(this.model));
+    const pv = M4.mul(proj, view);
+    // Cada parte puede traer su propia matriz (`p.mat`): asi un carrusel de veinte cajas es
+    // UNA malla subida una vez y lo unico que cambia por cuadro son diecinueve uniformes.
+    let lastMat = undefined;
+    const setModel = mm => {
+      if (mm === lastMat) return;
+      lastMat = mm;
+      gl.uniformMatrix4fv(l.uMVP, false, M4.mul(pv, mm));
+      gl.uniformMatrix4fv(l.uModel, false, mm);
+      gl.uniformMatrix3fv(l.uNrmMat, false, M4.normal(mm));
+    };
     gl.uniform3fv(l.uEye, this.eye);
     gl.uniform3fv(l.uTint, this.tint);
     gl.uniform1f(l.uPick, pickMap ? 1 : 0);
     gl.uniform1f(l.uGloss, this.gloss);
     this.bind();
-    m.parts.forEach((p, i) => {
+    const order = this.order && this.order.length === m.parts.length ? this.order : null;
+    const seq = order ? order.map(i => m.parts[i]) : m.parts;
+    seq.forEach((p, j) => {
+      const i = order ? order[j] : j;
+      if (p.hidden) return;
+      setModel(p.mat ? M4.mul(this.model, p.mat) : this.model);
       if (pickMap) {
         pickMap[i + 1] = p.id;
         gl.uniform3f(l.uPickCol, ((i + 1) & 255) / 255, (((i + 1) >> 8) & 255) / 255, 0);
       } else {
         gl.uniform1f(l.uMix, p.id ? (this.highlight[p.id] || 0) : 0);
+        gl.uniform1f(l.uDim, p.dim === undefined ? 1 : p.dim);
         const t = p.tex && this.tex[p.tex];
         gl.uniform1f(l.uUseTex, t ? 1 : 0);
         if (t) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, t); }

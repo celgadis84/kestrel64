@@ -44,50 +44,47 @@ auto TcpServer::listen(u16 port) -> bool {
   addr.sin_port = htons(port);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // 127.0.0.1 only
   if(::bind((int)sock, (sockaddr*)&addr, sizeof addr) != 0) { closesock(sock); sock = BADSOCK; return false; }
-  // Cola de espera, no de uno. El servidor atiende a un cliente cada vez, y con backlog 1
-  // cualquier conexion nueva mientras el actual esta ocupado (una orden larga como
-  // cpu.run_until bloquea el unico hilo) sale rechazada con ECONNREFUSED, que parece que
-  // el emulador se ha muerto. Con la cola, el que llega espera su turno.
+  // Cola de espera holgada: cada cliente aceptado se va a su propio hilo, pero entre el
+  // accept y el arranque del hilo hay una ventana, y sin cola una conexion que caiga ahi
+  // sale rechazada con ECONNREFUSED, que parece que el emulador se ha muerto.
   if(::listen((int)sock, 8) != 0) { closesock(sock); sock = BADSOCK; return false; }
   return true;
 }
 
-auto TcpServer::accept() -> bool {
-  if(sock == BADSOCK) return false;
+auto TcpServer::accept() -> TcpConn {
+  if(sock == BADSOCK) return TcpConn{};
   long long c = (long long)::accept((int)sock, nullptr, nullptr);
-  if(c == BADSOCK) return false;
+  if(c == BADSOCK) return TcpConn{};
   int yes = 1;
   ::setsockopt((int)c, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof yes);
-  client = c;
-  return true;
+  return TcpConn{c};
 }
 
-auto TcpServer::dropClient() -> void {
-  if(client != BADSOCK) { closesock(client); client = BADSOCK; }
+auto TcpConn::close() -> void {
+  if(sock != BADSOCK) { closesock(sock); sock = BADSOCK; }
 }
 
 auto TcpServer::close() -> void {
-  dropClient();
   if(sock != BADSOCK) { closesock(sock); sock = BADSOCK; }
 #if defined(_WIN32)
   if(initialized) { WSACleanup(); initialized = false; }
 #endif
 }
 
-auto TcpServer::recvAll(u8* buf, u32 len) -> bool {
+auto TcpConn::recvAll(u8* buf, u32 len) -> bool {
   u32 got = 0;
   while(got < len) {
-    int n = ::recv((int)client, (char*)buf + got, (int)(len - got), 0);
+    int n = ::recv((int)sock, (char*)buf + got, (int)(len - got), 0);
     if(n <= 0) return false;
     got += (u32)n;
   }
   return true;
 }
 
-auto TcpServer::sendAll(const u8* buf, u32 len) -> bool {
+auto TcpConn::sendAll(const u8* buf, u32 len) -> bool {
   u32 sent = 0;
   while(sent < len) {
-    int n = ::send((int)client, (const char*)buf + sent, (int)(len - sent), 0);
+    int n = ::send((int)sock, (const char*)buf + sent, (int)(len - sent), 0);
     if(n <= 0) return false;
     sent += (u32)n;
   }
@@ -97,7 +94,7 @@ auto TcpServer::sendAll(const u8* buf, u32 len) -> bool {
 static auto rd32le(const u8* p) -> u32 { return (u32)p[0] | (u32)p[1]<<8 | (u32)p[2]<<16 | (u32)p[3]<<24; }
 static auto wr32le(u8* p, u32 v) -> void { p[0]=(u8)v; p[1]=(u8)(v>>8); p[2]=(u8)(v>>16); p[3]=(u8)(v>>24); }
 
-auto TcpServer::recvFrame(std::string& json, std::vector<u8>& blob) -> bool {
+auto TcpConn::recvFrame(std::string& json, std::vector<u8>& blob) -> bool {
   u8 hdr[4];
   if(!recvAll(hdr, 4)) return false;
   u32 total = rd32le(hdr);
@@ -111,7 +108,7 @@ auto TcpServer::recvFrame(std::string& json, std::vector<u8>& blob) -> bool {
   return true;
 }
 
-auto TcpServer::sendFrame(const std::string& json, const u8* blob, u32 blobLen) -> bool {
+auto TcpConn::sendFrame(const std::string& json, const u8* blob, u32 blobLen) -> bool {
   u32 jsonLen = (u32)json.size();
   u32 total = 4 + jsonLen + blobLen;
   std::vector<u8> frame(4 + total);

@@ -752,7 +752,7 @@ static auto emitAlu64(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap&
 //    codigo de N64) y cualquier otro caso -- incluido el legitimo de usuario CON CU0 -- sale
 //    por el bail, correcto siempre porque aun no se ha escrito nada.
 static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& snap,
-                     u32 idx) -> bool {
+                     u32 idx, u32 cpi256) -> bool {
   static const int off = std::getenv("KESTREL_JIT_NOCOP0") ? 1 : 0;   // bisector
   if(off || (op >> 26) != 0x10) return false;
   u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
@@ -777,7 +777,14 @@ static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& 
   // de arriba queda, solo desaparece el store.
   if(rt) {
     e.mov_r_m(RAX, RBX, (s32)(offsetof(CPU, cop0) + 8u * rd));
-    if(rd == CPU::C0_Count && idx) e.alu32_imm(0, RAX, idx);   // + ops ya retiradas del bloque
+    // Con el factor de fabrica (256) cada op vale un tick, luego "entrada + idx" es exacto.
+    // Con cualquier otro factor el numero de ticks de esas idx ops depende del resto
+    // acumulado (countFrac), que vive en el CPU y no en el bloque: se cede al interprete
+    // antes que emitir una aproximacion (JIT tiene que ser bit a bit igual al oraculo).
+    if(rd == CPU::C0_Count && idx) {
+      if(cpi256 != 256) return false;
+      e.alu32_imm(0, RAX, idx);                               // + ops ya retiradas del bloque
+    }
     e.movsxd(RAX, RAX);                              // MFC0 = sext32 de la palabra baja
     rc.st64(RAX, rt);
   }
@@ -800,7 +807,12 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 // contrato del bloque siga siendo "pc/nextPc no cambian salvo salida explícita".
 //   - COP1 (0x11) salvo BC1x (rs==8), que ES un branch.
 //   - LWC1/LDC1/SWC1/SDC1 — memoria FPU (el thunk incluye el fault → salida).
-//   - LWL/LWR/SWL/SWR — memoria desalineada, que emitMemOp no cubre.
+//   - LWL/LWR/SWL/SWR y LDL/LDR/SDL/SDR — memoria desalineada, que emitMemOp no cubre.
+//     Las de 64 bits faltaban y no son un caso raro: GCC (libdragon) resuelve una copia
+//     desalineada de 64 bits con LDL/LDR + SDL/SDR, mientras que IDO (libultra) usa las
+//     de 32. En junkrunner64 el bucle caliente las lleva cada pocas instrucciones, asi
+//     que el bloque se declinaba entero ahi y el juego corria casi entero en el
+//     interprete. Misma forma que las de 32: memoria, sin control de flujo.
 //   - SPECIAL DIV/DIVU/DMULT/DMULTU/DDIV/DDIVU — HI/LO, sin fault ni salto.
 // Excluidos a propósito: COP0 (0x10, cambia TLB/Status → puede vectorizar), CACHE, LL/SC,
 // SYSCALL/BREAK/TRAP y todo lo que salte. Si la op falla o vectoriza, el thunk devuelve 0 y
@@ -820,6 +832,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     case 0x11: ok = ((op >> 21) & 31) != 8; break;                   // COP1 salvo BC1x
     case 0x31: case 0x35: case 0x39: case 0x3d: ok = true; break;    // LWC1/LDC1/SWC1/SDC1
     case 0x22: case 0x26: case 0x2a: case 0x2e: ok = true; break;    // LWL/LWR/SWL/SWR
+    case 0x1a: case 0x1b: case 0x2c: case 0x2d: ok = true; break;    // LDL/LDR/SDL/SDR
     case 0x2f: ok = true; break;                                     // CACHE (ver kestrel_jitCACHE)
     case 0x00:
       switch(op & 63) {
@@ -842,7 +855,8 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   // son la inmensa mayoria de las que caen aqui en SM64. Volcar el cache entero por cada una
   // era pagar hasta cinco stores por op de FPU.
   //   COP1 rs=4/5/6 (MTC1/DMTC1/CTC1) leen gpr[rt]
-  //   LWC1/LDC1/SWC1/SDC1 leen gpr[base];  LWL/LWR/SWL/SWR leen base y rt (mezclan con el)
+  //   LWC1/LDC1/SWC1/SDC1 leen gpr[base];  LWL/LWR/SWL/SWR y LDL/LDR/SDL/SDR leen base y
+  //   rt (las de carga mezclan con el, las de tienda lo leen entero)
   //   DIV/DIVU/DMULT/DMULTU/DDIV/DDIVU leen gpr[rs] y gpr[rt]
   {
     u32 rsF = (op >> 21) & 31, rtF = (op >> 16) & 31;
@@ -912,17 +926,33 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   // excepcion y el manejador guarda el contexto leyendo cpu->gpr.
   //   COP1 rs=0/1/2 (MFC1/DMFC1/CFC1) escriben gpr[rt]
   //   COP1 rs=4/5/6 (MTC1/DMTC1/CTC1) y rs>=16 (formato) solo tocan FPR/FCR
-  //   LWL/LWR escriben gpr[rt];  SWL/SWR, LWC1/LDC1/SWC1/SDC1 no
+  //   LWL/LWR y LDL/LDR escriben gpr[rt];  SWL/SWR, SDL/SDR, LWC1/LDC1/SWC1/SDC1 no
   //   DIV/DIVU/DMULT/DMULTU/DDIV/DDIVU solo HI/LO, que no estan en el cache
   u32 wrGpr = 32;                                     // 32 = ninguno
   if(OP == 0x11 && ((op >> 21) & 31) <= 2)   wrGpr = (op >> 16) & 31;
-  else if(OP == 0x22 || OP == 0x26)          wrGpr = (op >> 16) & 31;
+  else if(OP == 0x22 || OP == 0x26 ||
+          OP == 0x1a || OP == 0x1b)          wrGpr = (op >> 16) & 31;
   if(wrGpr < 32) rc.forget(wrGpr);
   return true;
 }
 
 // Emite UNA op. Devuelve false si no es segura (fin del bloque). op ya validado != code
 // que cambie flujo. `c` solo se usa para leer palabras (icFetch) en el llamador.
+// El coste de MULT/MULTU se cobra AQUI porque el dynarec las emite en linea (DIV/DIVU y las
+// de 64 bits salen por el thunk del interprete, que ya llama a chargeMulDiv). Con la perilla
+// apagada no se emite ni un byte, asi que el codigo generado queda igual que siempre.
+static const u8 g_mulDivMode = CPU::mulDivFromEnv();
+
+// Traduccion literal de CPU::chargeMulDiv(total) a codigo emitido: RBX es el CPU.
+static auto emitMulDivCharge(Emitter& e, u32 total) -> void {
+  if(!g_mulDivMode) return;
+  e.add_m64_imm32(RBX, (s32)offsetof(CPU, mulDivOps), 1);
+  if(g_mulDivMode < 2) return;
+  e.add_m32_imm32(RBX, (s32)offsetof(CPU, stallCycles),  total - 1);
+  e.add_m64_imm32(RBX, (s32)offsetof(CPU, stallTotal),   total - 1);
+  e.add_m64_imm32(RBX, (s32)offsetof(CPU, mulDivStall),  total - 1);
+}
+
 static auto emitSafeOp(Emitter& e, RegCache& rc, u32 op) -> bool {
   u32 OP = op >> 26;
   u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31, sa = (op >> 6) & 31;
@@ -976,12 +1006,14 @@ static auto emitSafeOp(Emitter& e, RegCache& rc, u32 op) -> bool {
         // --- MULT/MULTU (32×32→64): LO=sext32(low32), HI=sext32(high32). imul64 low64 = producto
         //     exacto (operandos extendidos a 64b; signo por movsxd sí/no). NO escribe gpr → no rd. -
         case 0x18: /*MULT*/ {
+          emitMulDivCharge(e, 5);
           rc.ld32(RAX, rs); e.movsxd(RAX,RAX); rc.ld32(RCX, rt); e.movsxd(RCX,RCX);
           e.imul64(RAX,RCX);                                  // rax = (s32)rs * (s32)rt (64b)
           e.mov_r_r(RDX,RAX); e.movsxd(RDX,RDX); e.mov_m_r(RBX,loOff,RDX);   // lo = sext32(low32)
           e.shift64_imm(5,RAX,32); e.movsxd(RAX,RAX); e.mov_m_r(RBX,hiOff,RAX); // hi = sext32(high32)
           return true; }
         case 0x19: /*MULTU*/ {
+          emitMulDivCharge(e, 5);
           rc.ld32(RAX, rs); rc.ld32(RCX, rt);             // operandos zero-ext (u32)
           e.imul64(RAX,RCX);                                  // low64 = (u32)rs*(u32)rt (cabe en 64b)
           e.mov_r_r(RDX,RAX); e.movsxd(RDX,RDX); e.mov_m_r(RBX,loOff,RDX);
@@ -1199,7 +1231,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       // KESTREL_JIT_NORSPGUARD=1 la quita para poder medir el A/B.
       static const bool noRspGuard = std::getenv("KESTREL_JIT_NORSPGUARD") != nullptr;
       if(!noRspGuard) {
-        e.mov_r_imm64(RDX, (u64)&c.mem->rsp.running);
+        // `brake`, no `running`: es running MENOS el aparcamiento (ver Rsp::brake). Un RSP
+        // aparcado no corre microcodigo ni toca MMIO, y a la CPU la acotan igual la barrera de
+        // invitado del SP y rcpPace; devolver el control aqui durante el aparcamiento eran 22 M
+        // llamadas al trampolin por corrida de 300 campos de DK64 sin regular nada.
+        e.mov_r_imm64(RDX, (u64)&c.mem->rsp.brake);
         e.cmp_m8_imm(RDX, 0, 0);
         fastToSlow[nSlow++] = e.jne_rel32_placeholder();
       }
@@ -1313,7 +1349,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     }
     c.jitCache->buf.used = dBefore;
     usize csite; RcSnap csnap;
-    if(emitCop0(e, rc, dop, csite, csnap, idx + 1)) {   // la ranura va una op detras del salto
+    if(emitCop0(e, rc, dop, csite, csnap, idx + 1, c.cpi256)) {   // la ranura va una op detras del salto
       bailSites.push_back(csite); bailIdx.push_back(idx); bailSnap.push_back(csnap);
       return true;
     }
@@ -1454,7 +1490,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     }
     c.jitCache->buf.used = before;
     usize csite; RcSnap csnap;
-    if(emitCop0(e, rc, op, csite, csnap, i)) {
+    if(emitCop0(e, rc, op, csite, csnap, i, c.cpi256)) {
       bailSites.push_back(csite); bailIdx.push_back(b.nOps); bailSnap.push_back(csnap);
       b.src.push_back(op); b.nOps++; continue;
     }
@@ -2001,7 +2037,7 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   if(u32 p = jitPending) {
     jitPending = 0;
     retired += p;
-    cop0[C0_Count] = (u32)((u32)cop0[C0_Count] + p);
+    if(countAdd(countTicks(p))) timerIntr = true;   // cruce, no igualdad (ver CPU::countAdd)
     cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], p);
     if(jitCache) jitCache->hits += p;
     // Estas ops tienen que llegar a quien llamó al driver: el bucle del sistema mide la
@@ -2027,7 +2063,30 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   u32 status = (u32)cop0[C0_Status];
   if((status & 0x7) == 0x1 && (cause & status & 0xff00)) return 0;   // interrupt pendiente
   u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
-  if((u32)(cmp - cnt) <= K) return 0;                                // cruzaría borde de timer
+  // La distancia a Compare se mide en TICKS y el bloque en OPS. Con el coste de fallos de
+  // cache apagado la relacion es <=1 tick/op y comparar K basta; con el encendido un bloque
+  // puede costar mucho mas de K ticks, asi que se compara contra la COTA SUPERIOR de lo que
+  // puede costar (countTicksMax, que devuelve exactamente K cuando esta apagado).
+  u64 kTicks = countTicksMax(K);
+  if((u64)(u32)(cmp - cnt) <= kTicks) return 0;
+  // Mismo trato que el borde de timer para el plazo del SI (transaccion de la PIF en
+  // vuelo): el bloque no puede tragarselo, o la interrupcion del mando llegaria en un
+  // punto distinto al del interprete y los modos dejarian de ser el mismo emulador.
+  u64 siDue = ~0ull;
+  if(mem) {
+    u64 now = mem->cartNow();
+    siDue = mem->siDueIn(now);
+    // El fin de tarea del RCP en Threaded es otro plazo del mismo reloj: si el bloque se lo
+    // traga, MI_SP / MI_DP caen en una instruccion distinta a la del interprete. Se mete en
+    // el mismo cupo, que ya esta en unidades de cartNow().
+    u64 rcpDue = mem->rcpDueIn(now);
+    if(rcpDue < siDue) siDue = rcpDue;
+  }
+  // El plazo esta en el reloj de invitado (cartNow = retiradas + pendientes + paradas), no en
+  // ops, asi que se compara contra la MISMA cota superior que el borde de timer: con el coste
+  // de cache encendido un bloque de K ops adelanta el reloj mas de K y se tragaria el plazo.
+  // countTicksMax(K) == K con todos los costes apagados, luego esto queda igual byte a byte.
+  if(siDue <= kTicks) return 0;                                // cruzaria el plazo del SI
   // Permiso para el camino rápido del prólogo: cuántas ops MÁS puede encadenar la cadena sin
   // volver a preguntar. Lo acota lo mismo que acaba de comprobarse aquí — el borde de timer
   // (determinista: Count avanza 1 por op) y lo que queda de ventana del bucle del sistema —
@@ -2035,7 +2094,12 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   // no puede cambiar dentro de una cadena (Status/Cause por mtc0, halted: terminan bloque) o lo
   // re-comprueba el propio prólogo en línea (MI, latch de timer).
   {
-    u32 slack = (u32)(cmp - cnt) - K - 1;                 // > 0 garantizado por la línea de arriba
+    // El margen hasta el borde de timer esta en TICKS; el permiso se descuenta en OPS, asi
+    // que se convierte con la inversa conservadora (opsForTicks == identidad con el coste
+    // de cache apagado, luego esta linea queda byte a byte como estaba).
+    u32 slack = opsForTicks((u64)(u32)(cmp - cnt) - kTicks - 1ull);
+    // El permiso de la cadena tambien lo acota el plazo del SI, por lo mismo.
+    if(siDue != ~0ull) { u32 sl = (u32)(siDue - kTicks - 1); if(sl < slack) slack = sl; }                 // > 0 garantizado por la línea de arriba
     u32 budg  = (K >= jitOpsBudget) ? 0 : (jitOpsBudget - K);
     u32 g     = slack < budg ? slack : budg;
     // Regulador Threaded: duerme si la CPU emulada adelanta al RSP en vuelo y mete lo que
@@ -2043,7 +2107,7 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
     // y vuelve aqui justo cuando toca frenar otra vez — misma regulacion que la guarda
     // rsp.running, pero sin una llamada por bloque.
     if(mem && mem->rcpMode == Memory::RcpMode::Threaded) {
-      u32 pa = mem->rcpPace(retired);
+      u32 pa = mem->rcpPace(guestOps());   // mismo reloj que el interleave de Lockstep
       if(pa < g) g = pa;
       if(g_jitStats && pa <= g) g_guardWhy[2]++;
     }
@@ -2072,12 +2136,81 @@ extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
     if(c->jitGuard < K)                                          g_trampWhy[0]++;
     else if(c->mem && (c->mem->rcp.mi_intr & c->mem->rcp.mi_mask)) g_trampWhy[1]++;
     else if(c->timerIntr)                                        g_trampWhy[2]++;
-    else if(c->mem && c->mem->rsp.running)                       g_trampWhy[3]++;
+    else if(c->mem && c->mem->rsp.brake)                         g_trampWhy[3]++;
     else                                                         g_trampWhy[4]++;
   }
   u32 r = c->jitReenterProceed(K);
   if(g_jitStats && r == 0) g_trampBail++;
   return r;
+}
+
+
+// --- Bucle ocioso de la CPU --------------------------------------------------------------
+// Una rama SIEMPRE tomada a si misma con la ranura de retardo vacia (`b .`, que el ensamblador
+// monta como `beq $0,$0,-1`, o `bgez $0,-1`) es un bucle del que el VR4300 no puede salir mas
+// que por una excepcion: no escribe ningun registro, no toca memoria y lo unico que produce es
+// Count. Es el hilo ocioso de libultra y en DK64 se lleva el 62,5% de las instrucciones de
+// invitado de los primeros 300 campos (251,5 M de 402,3 M, medido con KESTREL_PCSAMPLE=
+// 0x80000000: 0x80000a08 op 1000ffff mas su NOP).
+//
+// Emular esas iteraciones una a una no produce nada observable, asi que se cobran de golpe. La
+// clave para que esto NO sea un atajo que cambie el emulador es el limite: es EXACTAMENTE el
+// mismo que jitReenterProceed le concede a una cadena enlazada -- borde de Compare, plazo del
+// SI, plazo del RCP, ventana de campo del bucle del sistema, regulador Threaded y el tope de
+// kGuardMaxOps. O sea que el instante en que se vuelve a mirar cada evento es el que ya era:
+// no se cambia CUANDO se mira, solo se deja de emular lo que hay entre dos miradas. El cobro
+// (retired, Count, Random) es el mismo que hace el commit del trampolin.
+//
+// KESTREL_CPUIDLE=0 lo apaga. Es un atajo de anfitrion: con el apagado tiene que salir todo
+// identico, trazas por campo y md5 de framebuffer incluidos.
+static const bool g_idleCpuOn = [] {
+  const char* e = std::getenv("KESTREL_CPUIDLE");
+  return !e || !*e || std::strcmp(e, "0") != 0;
+}();
+static u64 g_idleSkips = 0, g_idleOps = 0;
+
+auto CPU::jitIdleSkip(u32 phys) -> u32 {
+  if(jitPending) return 0;                       // el driver siempre entra con la cadena vacia
+  if((usize)phys + 8 > mem->rdram.size()) return 0;
+  u32 w0 = jitFetchWord(phys), op = w0 >> 26;
+  bool self = false;
+  if(op == 0x04)                                 // BEQ rX,rX,-1
+    self = ((w0 >> 21) & 31) == ((w0 >> 16) & 31) && (w0 & 0xffff) == 0xffff;
+  else if(op == 0x01)                            // REGIMM BGEZ $0,-1
+    self = ((w0 >> 21) & 31) == 0 && ((w0 >> 16) & 31) == 0x01 && (w0 & 0xffff) == 0xffff;
+  if(!self) return 0;
+  if(jitFetchWord(phys + 4) != 0u) return 0;     // ranura de retardo != NOP: el bucle hace algo
+  // Con IE=0 o dentro de una excepcion ninguna interrupcion puede sacar de aqui: el invitado
+  // esta colgado de verdad y saltarle el reloj lo esconderia en vez de arreglarlo. Que lo
+  // ejecute el camino normal, que es donde estan los vigilantes.
+  if(((u32)cop0[C0_Status] & 0x7) != 0x1) return 0;
+  // Threaded SIN plazos (KESTREL_RCPDEADLINE=0) es el unico modo en el que un worker publica
+  // MI_SP/MI_DP por su cuenta en tiempo de pared: ahi no hay plazo que acote el salto y la
+  // interrupcion se veria hasta 4096 ops tarde. Se queda fuera.
+  if(mem->rcpMode == Memory::RcpMode::Threaded && !Memory::rcpDeadlineOn()) return 0;
+
+  // Limite = el permiso de una cadena, calculado igual que en jitReenterProceed.
+  u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
+  u64 lim = opsForTicks((u64)(u32)(cmp - cnt));
+  u64 now = mem->cartNow();
+  u64 due = mem->siDueIn(now);
+  { u64 r = mem->rcpDueIn(now); if(r < due) due = r; }
+  if(due != ~0ull) { u64 d = opsForTicks(due); if(d < lim) lim = d; }
+  if((u64)jitOpsBudget < lim) lim = jitOpsBudget;
+  if(mem->rcpMode == Memory::RcpMode::Threaded) {
+    u32 pa = mem->rcpPace(guestOps());
+    if((u64)pa < lim) lim = pa;
+  }
+  if(lim > kGuardMaxOps) lim = kGuardMaxOps;
+  u32 k = (u32)lim & ~1u;                        // iteraciones enteras: el pc no se mueve
+  if(!k) return 0;
+
+  retired += k;
+  if(countAdd(countTicks(k))) timerIntr = true;
+  cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], k);
+  if(jitCache) jitCache->hits += k;
+  if(g_jitStats) { g_idleSkips++; g_idleOps += k; }
+  return k;
 }
 
 auto CPU::jitTryBlock() -> u32 {
@@ -2137,6 +2270,9 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)jit::g_retShort);
       std::fprintf(stderr, "[salidas] enlace=%u itc=%u lentaDirecta=%u lentaIndirecta=%u\n",
                    jit::g_xLink, jit::g_xItc, jit::g_xSlowDir, jit::g_xSlowInd);
+      std::fprintf(stderr, "[ocioso] saltos=%llu ops=%lluM (%.1f%% de las retiradas)\n",
+                   (unsigned long long)g_idleSkips, (unsigned long long)(g_idleOps / 1000000),
+                   retired ? 100.0 * (double)g_idleOps / (double)retired : 0.0);
       std::fprintf(stderr, "[cadena] rotasPorTramp=%llu (%.2f por entrada al driver)\n",
                    (unsigned long long)g_trampBail, (double)g_trampBail / (double)g_jitCalls);
       if(jitCache) std::fprintf(stderr,
@@ -2244,6 +2380,9 @@ auto CPU::jitTryBlock() -> u32 {
   }
   if((usize)phys + 4 > mem->rdram.size()) { JDECL(DR_MISC); return 0; }
 
+  // Hilo ocioso del invitado: se cobra entero sin emitir ni ejecutar nada. Ver jitIdleSkip.
+  if(g_idleCpuOn) { if(u32 kIdle = jitIdleSkip(phys)) return kIdle; }
+
   if(!jitCache) {
     auto* cc = new jit::CodeCache();
     if(!cc->init()) { delete cc; return 0; }
@@ -2344,8 +2483,10 @@ auto CPU::jitTryBlock() -> u32 {
   // Seguridad de timer: no atravesar una frontera Count==Compare dentro del bloque.
   {
     u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
-    u32 d = cmp - cnt;                 // pasos hasta Count==Compare (mod 2^32)
-    if(d <= K) { JDECL(DR_TIMER); return 0; }  // el intérprete maneja el borde del timer exacto
+    u32 d = cmp - cnt;                 // ticks hasta Count==Compare (mod 2^32)
+    // Contra la COTA SUPERIOR de ticks del bloque, no contra K: con el coste de fallos de
+    // cache encendido un bloque cuesta mas ticks que ops (ver countTicksMax).
+    if((u64)d <= countTicksMax(K)) { JDECL(DR_TIMER); return 0; }  // el intérprete maneja el borde del timer exacto
   }
 
   // Fetch+validación por op: mantiene el estado de I-cache exacto (fetch cuesta ~0, exp-B)
@@ -2415,13 +2556,14 @@ auto CPU::jitTryBlock() -> u32 {
     u64 pre[32]; for(int r = 0; r < 32; r++) pre[r] = gpr[r];
     u64 sHi = hi, sLo = lo, sPc = pc, sNext = nextPc;
     bool sIn = inDelay, sJb = justBranched;
-    u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random];
+    u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random], sFrc = countFrac, sStl = stallCycles;
+    u64 sUnc = uncachedReads, sMdo = mulDivOps, sMds = mulDivStall, sFpo = fpuOps, sFps = fpuStall;
     u32 Rd = blk.fn(gpr, this) & 0x7FFF'FFFFu; gpr[0] = 0;
     u64 tmp[32]; for(int r = 0; r < 32; r++) tmp[r] = gpr[r];
     // restaurar: a partir de aqui el estado del invitado es como si el bloque no hubiera corrido
     for(int r = 0; r < 32; r++) gpr[r] = pre[r];
     hi = sHi; lo = sLo; pc = sPc; nextPc = sNext; inDelay = sIn; justBranched = sJb;
-    cop0[C0_Count] = sCnt; cop0[C0_Random] = sRnd;
+    cop0[C0_Count] = sCnt; cop0[C0_Random] = sRnd; countFrac = sFrc; stallCycles = sStl; uncachedReads = sUnc; mulDivOps = sMdo; mulDivStall = sMds; fpuOps = sFpo; fpuStall = sFps;
     // El bloque lleva su propia guardia (presupuesto, MI, temporizador): cuando no pasa
     // vuelve con 0 ops SIN haber ejecutado nada. Compararlo entonces contra K pasos del
     // interprete acusa al JIT de un fallo que no ha cometido -- es el harness el que no ha
@@ -2459,7 +2601,8 @@ auto CPU::jitTryBlock() -> u32 {
   if((brdiff && blk.hasBranch && !blk.hasMem && !blk.hasTrap) || (brdiffPhys && phys == brdiffPhys)) {
     u64 sg[32]; for(int r = 0; r < 32; r++) sg[r] = gpr[r];
     u64 sPc = pc, sNext = nextPc; bool sIn = inDelay, sJb = justBranched;
-    u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random];
+    u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random], sFrc = countFrac, sStl = stallCycles;
+    u64 sUnc = uncachedReads, sMdo = mulDivOps, sMds = mulDivStall, sFpo = fpuOps, sFps = fpuStall;
     // Con BRDIFF_PHYS tambien se compara la RDRAM: un bloque puede dejar los gpr identicos y
     // escribir mal (dato o direccion), que es justo lo que hace un prologo de handler.
     static std::vector<u8> memPre, memPost;   // copias planas: GuestBytes usa otro allocador
@@ -2476,11 +2619,12 @@ auto CPU::jitTryBlock() -> u32 {
     u64 iG[32]; for(int r = 0; r < 32; r++) iG[r] = gpr[r];
     u64 iPc = pc, iNext = nextPc;
     bool iIn = inDelay, iJb = justBranched;
-    u32 iCnt = (u32)cop0[C0_Count], iRnd = (u32)cop0[C0_Random];
+    u32 iCnt = (u32)cop0[C0_Count], iRnd = (u32)cop0[C0_Random], iFrc = countFrac, iStl = stallCycles;
+    u64 iUnc = uncachedReads, iMdo = mulDivOps, iMds = mulDivStall, iFpo = fpuOps, iFps = fpuStall;
     // restaura y corre el bloque
     for(int r = 0; r < 32; r++) gpr[r] = sg[r];
     pc = sPc; nextPc = sNext; inDelay = sIn; justBranched = sJb;
-    cop0[C0_Count] = sCnt; cop0[C0_Random] = sRnd;
+    cop0[C0_Count] = sCnt; cop0[C0_Random] = sRnd; countFrac = sFrc; stallCycles = sStl; uncachedReads = sUnc; mulDivOps = sMdo; mulDivStall = sMds; fpuOps = sFpo; fpuStall = sFps;
     u32 Rr = blk.fn(gpr, this); gpr[0] = 0;
     u32 Rops = Rr & 0x7FFF'FFFFu; bool isCtrl = (Rr & 0x8000'0000u) != 0;
     if(!isCtrl) { pc = sPc + 4 * Rops; nextPc = pc + 4; }  // bail: avance secuencial
@@ -2488,7 +2632,7 @@ auto CPU::jitTryBlock() -> u32 {
     if(!isCtrl && Rops != K) {
       for(int r = 0; r < 32; r++) gpr[r] = iG[r];
       pc = iPc; nextPc = iNext; inDelay = iIn; justBranched = iJb;
-      cop0[C0_Count] = iCnt; cop0[C0_Random] = iRnd;
+      cop0[C0_Count] = iCnt; cop0[C0_Random] = iRnd; countFrac = iFrc; stallCycles = iStl; uncachedReads = iUnc; mulDivOps = iMdo; mulDivStall = iMds; fpuOps = iFpo; fpuStall = iFps;
       return K;                                  // manda el interprete, ya avanzado arriba
     }
     bool bad = (pc != iPc) || (nextPc != iNext);
@@ -2521,7 +2665,8 @@ auto CPU::jitTryBlock() -> u32 {
                      (unsigned long long)iG[r], (unsigned long long)gpr[r]);
       halt("brdiff mismatch");
     }
-    retired += Rops; cop0[C0_Count] = (u32)(sCnt + Rops);
+    retired += Rops; countFrac = sFrc; stallCycles = sStl; uncachedReads = sUnc; mulDivOps = sMdo; mulDivStall = sMds; fpuOps = sFpo; fpuStall = sFps; cop0[C0_Count] = sCnt;
+    if(countAdd(countTicks(Rops))) timerIntr = true;
     cc->hits += Rops; return Rops;
   }
 
@@ -2601,7 +2746,9 @@ auto CPU::jitTryBlock() -> u32 {
     inDelay = false; justBranched = false;
   }
   retired += R;
-  cop0[C0_Count] = (u32)((u32)cop0[C0_Count] + R);   // sin latch (garantizado: d>K≥R arriba)
+  // La guarda de arriba garantiza que no se cruza Compare aqui, pero el latch se hace igual:
+  // countAdd lo comprueba gratis y asi no hay un solo camino que pueda perderse el borde.
+  if(countAdd(countTicks(R))) timerIntr = true;   // antes: sin latch (garantizado: d>K≥R arriba)
 
   // Random cuenta atrás R pasos (randomReload==0 garantizado arriba).
   {
@@ -2614,7 +2761,7 @@ auto CPU::jitTryBlock() -> u32 {
   if(u32 p = jitPending) {
     jitPending = 0;
     retired += p;
-    cop0[C0_Count]  = (u32)((u32)cop0[C0_Count] + p);
+    if(countAdd(countTicks(p))) timerIntr = true;
     cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], p);
     cc->hits += p;
     jitChainOps += p;

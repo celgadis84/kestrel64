@@ -33,13 +33,17 @@ add_executable(kestrel64
   src/core/system.cpp
   src/core/memory.cpp
   src/core/rom.cpp
+  src/core/archive.cpp
   src/core/savestate.cpp
+  src/core/rewind.cpp
+  src/core/cheats.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/net/tcp.cpp
   src/telemetry/server.cpp
   src/telemetry/hostprof.cpp
   src/video/present.cpp
+  src/video/vifilter.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
@@ -47,6 +51,7 @@ add_executable(kestrel64
   src/ui/optdefs.cpp
   src/ui/profile.cpp
   src/ui/menu_win32.cpp
+  src/ui/library_win32.cpp
 )
 
 target_include_directories(kestrel64 PRIVATE src)
@@ -65,7 +70,9 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
@@ -82,7 +89,9 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
@@ -93,9 +102,64 @@ if(WIN32)
   target_link_libraries(save_test PRIVATE winmm)
 endif()
 
+# Wild-address unit test: direcciones de invitado imposibles (desalineadas, pasadas del
+# final de RDRAM, kuseg sin TLB, punteros de 64 bits no canonicos) deben dar excepcion de
+# invitado y el mismo resultado en interprete y dynarec, nunca un fallo de acceso del host.
+add_executable(wildmem_test EXCLUDE_FROM_ALL
+  test/wildmem_test.cpp
+  src/telemetry/hostprof.cpp
+  src/cpu/cpu.cpp
+  src/cpu/jit.cpp
+  src/video/vifilter.cpp
+  src/core/memory.cpp
+  src/core/archive.cpp
+  src/rdp/rdp.cpp
+  src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
+  src/audio/audio.cpp
+)
+target_include_directories(wildmem_test PRIVATE src)
+if(WIN32)
+  target_link_libraries(wildmem_test PRIVATE winmm)
+endif()
+
+# Cheat engine unit test (GameShark code families; no windowing deps).
+add_executable(cheat_test EXCLUDE_FROM_ALL
+  test/cheat_test.cpp
+  src/core/cheats.cpp
+  src/telemetry/hostprof.cpp
+  src/cpu/cpu.cpp
+  src/cpu/jit.cpp
+  src/video/vifilter.cpp
+  src/core/memory.cpp
+  src/core/archive.cpp
+  src/rdp/rdp.cpp
+  src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
+  src/audio/audio.cpp
+)
+target_include_directories(cheat_test PRIVATE src)
+if(WIN32)
+  target_link_libraries(cheat_test PRIVATE winmm)
+endif()
+
+# Descompresor de contenedores (.zip/.gz). No depende de nada del emulador: solo archive.cpp.
+add_executable(archive_test EXCLUDE_FROM_ALL
+  test/archive_test.cpp
+  src/core/archive.cpp
+)
+target_include_directories(archive_test PRIVATE src)
+
+# Codec de diferencias del rebobinado. Header-only a proposito: se prueba sin arrastrar el
+# resto del emulador.
+add_executable(rewind_test EXCLUDE_FROM_ALL
+  test/rewind_test.cpp
+)
+target_include_directories(rewind_test PRIVATE src)
+
 # Los tests compilan rsp.cpp, que usa SSSE3 en el difusor de banda: sin el mismo juego de
 # instrucciones que el binario principal no enlaza.
-foreach(t rsp_test save_test)
+foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test)
   if(NOT MSVC)
     if(KESTREL_BUILD_LOCAL)
       target_compile_options(${t} PRIVATE -march=native)
@@ -126,7 +190,8 @@ target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw3)
 
 if(WIN32)
   # comdlg32: el dialogo de "elige una ROM" cuando se abre el .exe desde el Explorador.
-  target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32)
+  # comctl32: las barras deslizantes de los numericos acotados del dialogo de opciones.
+  target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32 comctl32 shell32 ole32)
   if(KESTREL_STATIC AND NOT MSVC)
     # Un unico .exe sin DLL propias. Por defecto, libc++ y GLFW quedan como DLL y viven en
     # C:/msys64/clang64/bin: dentro de la shell de MSYS2 el PATH las encuentra, pero el

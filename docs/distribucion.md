@@ -33,6 +33,13 @@ transitivo con `ldd`, filtra lo que cuelga de `C:\WINDOWS` y deja en `dist/` el 
 DLL y un `LEEME.txt`; ademas empaqueta `kestrel64-<version>-win64.zip`, que es lo que se
 manda a otra maquina tal cual.
 
+`dist.sh` escribe tambien `dist/VERSION.txt` (version, fecha, commit + marca de arbol sucio,
+backend y md5 de los tres `.exe` ya empaquetados) **antes** del zip. El orden importa y costo un
+paquete: mientras el manifiesto lo escribia `release.sh` al final, se generaba despues de que
+`dist.sh` cerrara el zip y despues de que ISCC compilara el instalador, asi que el portable
+viajaba sin manifiesto y el instalador se llevaba el del paquete anterior. Quien lo escribe es
+quien cierra el paquete.
+
 Funciona con cualquier build y no exige recompilar. Es la red de seguridad: si algun dia
 entra una dependencia nueva (SDL para el audio, por ejemplo), `dist.sh` la recoge sola.
 
@@ -71,10 +78,28 @@ Lo unico que cambia en el codigo es donde vive cada cosa, y lo decide una consta
 | perfil, mando, caratulas | `tools/launcher/` | `%LOCALAPPDATA%\kestrel64` |
 
 La tercera fila no es un capricho: `Archivos de programa` no es escribible, y el perfil se
-guarda solo, sin boton de guardar. La segunda tampoco: instalado hay **un** emulador, no un
-menu de builds. Con que backend grafico se compilo ese emulador no se ve desde fuera del
-binario, asi que `dist.sh` deja la nota al lado en `kestrel64.build` (`soft` o `prdp`) y el
-lanzador la lee para saber si tiene sentido pasarle `KESTREL_PRDP`.
+guarda solo, sin boton de guardar. La segunda tampoco: instalado no hay un arbol de builds
+sino los `.exe` que se copiaron al lado del lanzador. Con que backend grafico se compilo cada
+uno no se ve desde fuera del binario, asi que `dist.sh` deja la nota al lado
+(`kestrel64.build`, `kestrel64-soft.build`; `soft` o `prdp`) y el lanzador la lee.
+
+## Dos rasterizadores en el paquete
+
+El plugin grafico se elige al **compilar** (`-DKESTREL_PRDP=ON`), no en tiempo de ejecucion,
+asi que un solo `.exe` no puede ofrecer los dos. El que se distribuye lleva parallel-RDP y
+cae a SoftRDP si Vulkan no arranca, pero esa caida es en caliente: no da a elegir, y una
+maquina con GPU vieja, driver roto o virtualizada paga el intento en cada arranque. Por eso
+el paquete lleva **dos** ejecutables, el mismo codigo con otra opcion de cmake:
+
+| fichero | build | plugin | para que |
+|---|---|---|---|
+| `kestrel64.exe` | `build-prdp-static` | parallel-RDP (Vulkan) | el recomendado; mas rapido y mas exacto en subpixel |
+| `kestrel64-soft.exe` | `build-static` | SoftRDP (CPU) | sin GPU ni Vulkan; es el rasterizador de referencia del proyecto |
+
+`scripts/pack.sh` compila los dos arboles (`SOFTBUILD=-` se salta el segundo) y `dist.sh`
+copia el segundo como `kestrel64-soft.exe` con su propia nota `kestrel64-soft.build`. El
+lanzador los detecta y la opcion "Rasterizador" (`soft`/`prdp`/`auto`) sigue funcionando
+igual desde una copia instalada que desde el arbol de fuentes.
 
 Dos detalles de `--windowed` (sin consola detras) que rompen si no se tratan: `sys.stdout`
 es `None` y cualquier `print` revienta -- se le da `os.devnull` al arrancar --, y una segunda

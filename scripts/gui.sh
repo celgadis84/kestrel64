@@ -27,7 +27,7 @@ rm -rf "$WORK"; mkdir -p "$WORK"
   --name kestrel64-gui \
   --distpath "$WORK/dist" --workpath "$WORK/work" --specpath "$WORK" \
   --paths "$(cygpath -w "$(pwd)/tools/launcher")" \
-  --hidden-import options --hidden-import tele \
+  --hidden-import options --hidden-import tele --hidden-import gamecard \
   --add-data "$(cygpath -w "$(pwd)/tools/launcher/web");web" \
   tools/launcher/kestrel_launcher.py
 

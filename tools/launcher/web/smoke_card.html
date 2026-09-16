@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>smoke ficha</title>
+<!-- Prueba de la ficha de juego. Necesita el servidor con una carpeta de ROMs en el perfil.
+     ?tab=info|manual|cheats|saves  elige pestana; ?theme=wonder cambia el tema.
+     El resultado va a <pre id="out"> (usar --dump-dom con --virtual-time-budget) y la
+     captura (--screenshot) ensena la ficha abierta a tamano real. -->
+<style>html,body{margin:0;height:100%;background:#000}iframe{border:0;width:100%;height:100%}
+#out{position:fixed;left:-9999px}</style>
+<iframe id="f" src="/"></iframe>
+<pre id="out">PENDIENTE</pre>
+<script>
+const Q = new URLSearchParams(location.search);
+const out = [];
+const ok = (c, m) => out.push((c ? "OK   " : "FALLO") + " " + m);
+setTimeout(async () => {
+  const w = document.getElementById("f").contentWindow, d = w.document;
+  try {
+    if (Q.get("theme")) w.applyTheme(Q.get("theme"));
+    ok(typeof w.openCard === "function" && typeof w.activate === "function", "card.js cargado");
+    ok(!!d.getElementById("dock-card") && !d.getElementById("dock-card").disabled, "boton Ficha en el muelle");
+    await w.openCard(Q.get("tab") || "info");
+    await new Promise(r => setTimeout(r, 500));
+    ok(d.getElementById("m-game").classList.contains("on"), "ficha abierta");
+    ok(d.getElementById("card-title").textContent.length > 0, "titulo: " + d.getElementById("card-title").textContent);
+    const tabs = [...d.querySelectorAll("#cardtabs button")].map(b => b.textContent.replace(/\s+/g, " ").trim());
+    ok(tabs.length === 4, "pestanas: " + tabs.join(" | "));
+    for (const t of ["info", "manual", "cheats", "saves"]) {
+      d.querySelector(`#cardtabs button[data-t="${t}"]`).click();
+      await new Promise(r => setTimeout(r, 150));
+      ok(d.getElementById("card-body").children.length > 0, "pestana " + t + " pinta");
+    }
+    d.querySelector(`#cardtabs button[data-t="${Q.get("tab") || "info"}"]`).click();
+    // Intro dentro de un campo NO juega; fuera, si (no se prueba el arranque: lanzaria el exe)
+    ok(typeof w.launch === "function", "launch accesible");
+  } catch (e) { ok(false, "excepcion: " + e); }
+  const bad = out.some(l => l.startsWith("FALLO"));
+  document.getElementById("out").textContent = out.join("\n") + "\n" + (bad ? "== HAY FALLOS ==" : "== TODO BIEN ==");
+}, 2500);
+</script>

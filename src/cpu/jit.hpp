@@ -219,6 +219,11 @@ public:
   auto cmp_r_r(Reg a, Reg b) -> void { rex(true,b,0,a); buf.emit(0x39); modrm(3,b,a); }
   // jne rel32 (ZF=0): placeholder; devuelve el offset del disp32.
   auto jne_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x85); usize at = buf.used; imm32(0); return at; }
+  // add qword [base+disp], imm32 (con signo):  REX.W 81 /0 id -- para contadores de 64 bits
+  // (stallTotal, mulDivOps) sin arrastre entre mitades.
+  auto add_m64_imm32(Reg base, s32 disp, u32 imm) -> void {
+    rex(true, 0, 0, base); buf.emit(0x81); memOperand(0, base, disp); imm32(imm);
+  }
   // add dword [base+disp], imm32:  81 /0 id  (32-bit, sin REX) — acumula ops en jitPending.
   auto add_m32_imm32(Reg base, s32 disp, u32 imm) -> void {
     buf.emit(0x81); memOperand(0, base, disp); imm32(imm);

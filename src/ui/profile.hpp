@@ -17,7 +17,10 @@ namespace kestrel::ui {
 
 struct Profile {
   std::map<std::string, std::string> v;                       // id -> valor en texto
-  std::map<std::string, std::pair<std::string, std::string>> pad;  // id -> (tecla, boton)
+  // Un mapeo por conector. El 0 se guarda con la clave "pad" para que el lanzador (que
+  // solo conoce un mando) siga leyendo y escribiendo el suyo; los otros tres van en
+  // "pad2".."pad4" y el lanzador los conserva sin tocarlos.
+  std::map<std::string, std::pair<std::string, std::string>> pad[4];  // id -> (tecla, boton)
 
   auto get(const char* id) const -> std::string;
   auto getBool(const char* id) const -> bool;
@@ -38,7 +41,17 @@ auto saveProfile(const Profile& p) -> bool;
 auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& env,
            std::vector<std::string>& argv) -> void;
 
-// Escribe el fichero de mapeo del mando y devuelve su ruta (vacio si no hay mapeo).
-auto writePadFile(const Profile& p) -> std::string;
+// Escribe el fichero de mapeo de un conector y devuelve su ruta (vacio si no hay mapeo).
+auto writePadFile(const Profile& p, int port) -> std::string;
+
+// Ajustes por conector. No estan en el catalogo de opciones (no son opciones de linea de
+// ordenes), asi que sus valores de fabrica viven aqui: solo el mando 1 viene enchufado, y
+// con Controller Pak, que es lo que hacia el emulador cuando solo habia un puerto.
+auto padOn(const Profile& p, int port) -> bool;
+auto padAcc(const Profile& p, int port) -> int;          // 0 nada, 1 Controller Pak, 2 Rumble
+auto padDevice(const Profile& p, int port) -> std::string;  // "auto", "kb" o nombre del mando
+auto setPadOn(Profile& p, int port, bool on) -> void;
+auto setPadAcc(Profile& p, int port, int acc) -> void;
+auto setPadDevice(Profile& p, int port, const std::string& dev) -> void;
 
 }  // namespace kestrel::ui

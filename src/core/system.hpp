@@ -6,6 +6,8 @@
 #include "types.hpp"
 #include "memory.hpp"
 #include "rom.hpp"
+#include "cheats.hpp"
+#include "rewind.hpp"
 #include "../cpu/cpu.hpp"
 #include "../video/present.hpp"
 #include <atomic>
@@ -23,6 +25,10 @@ struct System {
   Rom    rom;
   Memory memory;
   CPU    cpu;
+  // Motor de trucos (GameShark). Vacio y sin coste cuando no hay fichero de codigos.
+  Cheats cheats;
+  // Rebobinado. Apagado de fabrica: cuesta una foto del estado cada pocos campos.
+  rewind::Engine rewinder;
 
   // The CPU runs on the run() thread; telemetry handlers touch CPU/memory from
   // the telemetry thread. coreMutex serializes the two. Lock it for any access
@@ -31,6 +37,13 @@ struct System {
 
   std::atomic<bool> paused{true};    // start paused so single-stepping is deterministic
   std::atomic<bool> shutdown{false};
+  // Avance por fotogramas (TAS). Campos de video que el bucle debe correr AUNQUE este en
+  // pausa; al cerrar cada campo se descuenta uno y al llegar a cero la pausa vuelve a
+  // mandar. El cuanto es el CAMPO de video, no la instruccion ni el volteo de buffer: es
+  // la unidad en la que el juego lee el mando (una lectura de joybus por campo en casi
+  // todos), asi que un campo = una entrada de la pelicula, que es lo que hace falta para
+  // colocar una pulsacion en el sitio exacto.
+  std::atomic<u32> stepFields{0};
   // Corrida por lotes (--run sin vídeo): un halt de la CPU (cap de maxinsn, fatal) es el fin
   // de la sesión, así que se sale en vez de quedarse girando. En modo MCP NO: ahí el halt es
   // un punto de inspección y el proceso tiene que seguir vivo para el cliente.
@@ -57,7 +70,10 @@ struct System {
     // vuelva a haber dos relojes distintos en el mismo emulador (los habia: el tick del VI
     // contaba 750k instrucciones por campo y la lectura de VI_V_CURRENT contaba 1.56M,
     // asi que un juego que mezclara interrupcion y sondeo veia dos campos por cada uno).
+    // Lo fija System a partir de CPU::cpi256 (KESTREL_CPI); de fabrica 1,4. El 2.0 de
+    // aqui es el valor HISTORICO, el que ata un tick de Count a cada instruccion.
     double cyclesPerInsn = 2.0;
+    auto cpiIsHistoric() const -> bool { return cyclesPerInsn == 2.0; }   // = el modelo viejo
     auto cpuTarget()   const -> double { return cpuHz   * cpuOc; }
     auto rspTarget()   const -> double { return rspHz   * rspOc; }
     auto rdramTarget() const -> double { return rdramHz * rdramOc; }
@@ -156,12 +172,26 @@ struct System {
   // recargar en el otro modo de RCP. -1 = nada pendiente, si no = numero de ranura.
   std::atomic<int> stateSaveReq{-1}, stateLoadReq{-1};
   std::atomic<int> stateSlot{0};        // ranura activa (la que mueven las teclas)
+  // Pasos de rebobinado pedidos y aun no dados. Es un CONTADOR y no una bandera porque la
+  // tecla se mantiene apretada: cada vuelta de la ventana suma uno y el bucle los gasta en
+  // orden, de modo que el rebobinado va al ritmo del que puede el nucleo y no al de los
+  // eventos del sistema de ventanas.
+  std::atomic<u32> rewindReq{0};
   std::string      stateMsg;            // ultimo resultado, para telemetria/registro
   std::mutex       stateMsgMutex;
+  // Cuenta de partes publicados. El buzon se vacia al EMPEZAR a atender la peticion (hay
+  // que leerlo bajo coreMutex y de una vez), asi que ver el buzon vacio no significa que el
+  // trabajo este hecho: el cliente que mirara solo eso se llevaria el parte ANTERIOR. Este
+  // contador sube una vez, al final, con el mensaje ya escrito; quien espera se apunta el
+  // valor antes de pedir y espera a que cambie.
+  std::atomic<u64> stateSeq{0};
 
   // Atiende una peticion de estado pendiente. La llama el bucle de ejecucion al principio
   // de cada vuelta -- tambien estando en pausa, que es cuando mas se guarda.
   auto serviceStateReq() -> void;
+  // Deja el RCP quieto de verdad (RDP drenado, tarea de RSP terminada). Es la condicion
+  // para fotografiar la maquina; la comparten el estado guardado y el rebobinado.
+  auto quiesceRcp() -> void;
 
   auto requestShutdown() -> void { shutdown.store(true); }
 

@@ -1,0 +1,65 @@
+<!doctype html><meta charset="utf-8"><title>tema</title>
+<style>html,body{margin:0;background:#000}iframe{width:1400px;height:900px;border:0}
+#log{position:fixed;left:0;bottom:0;color:#8f8;font:12px monospace;background:#000a;white-space:pre-wrap}</style>
+<iframe id="f" src="/"></iframe><pre id="log"></pre>
+<script>
+/* Comprueba que el tema es SOLO tokens: cambiarlo no repinta nada a mano, se reevalua
+   :root. Por eso la prueba no mira pixeles sino lo que resuelve getComputedStyle antes
+   y despues, mas la persistencia en CFG y la caida a fabrica con un nombre inventado. */
+const L = [];
+const say = m => { L.push(m); document.getElementById("log").textContent = L.join("\n"); };
+const ok = (c, m) => say((c ? "BIEN " : "MAL  ") + m);
+window.onerror = m => say("ERR " + m);
+const f = document.getElementById("f");
+f.onload = () => {
+  const w = f.contentWindow, d = f.contentDocument;
+  w.onerror = m => say("APP-ERR " + m);
+  setTimeout(() => {
+    try {
+      const root = d.documentElement;
+      const tok = n => w.getComputedStyle(root).getPropertyValue(n).trim();
+      const sel = d.querySelector("#theme");
+      ok(!!sel, "hay selector de tema");
+      ok(sel && sel.options.length === 2, "opciones: " + (sel ? sel.options.length : -1));
+
+      // de fabrica
+      w.applyTheme("kestrel");
+      const k = { selr: tok("--selr"), bg: tok("--bg"), acc: tok("--acc"), disp: tok("--font-display") };
+      ok(root.dataset.theme === "kestrel", "atributo kestrel: " + root.dataset.theme);
+      ok(k.selr === "0px", "kestrel --selr=" + k.selr);
+
+      // wonder
+      w.applyTheme("wonder");
+      const n = { selr: tok("--selr"), bg: tok("--bg"), acc: tok("--acc"), disp: tok("--font-display") };
+      ok(root.dataset.theme === "wonder", "atributo wonder: " + root.dataset.theme);
+      ok(n.selr === "17px", "wonder --selr=" + n.selr);
+      ok(n.bg !== k.bg, "--bg cambia: " + k.bg + " -> " + n.bg);
+      ok(n.acc !== k.acc, "--acc cambia: " + k.acc + " -> " + n.acc);
+      ok(/Unbounded/.test(n.disp), "--font-display wonder: " + n.disp);
+      ok(sel.value === "wonder", "el selector se sincroniza: " + sel.value);
+
+      // nombre inventado -> fabrica
+      const back = w.applyTheme("no-existe");
+      ok(back === "kestrel" && root.dataset.theme === "kestrel", "tema desconocido cae a kestrel: " + back);
+
+      // el cuerpo pinta fondo propio (no hereda del anfitrion)
+      w.applyTheme("wonder");
+      const bodyBg = w.getComputedStyle(d.body).backgroundColor;
+      ok(bodyBg && bodyBg !== "rgba(0, 0, 0, 0)", "body con fondo propio: " + bodyBg);
+
+      // Persistencia: `CFG` es `let` de guion clasico, o sea que NO cuelga de window.
+      // Se comprueba donde importa de verdad: el POST a /api/config. El guardado va con
+      // 350 ms de rebote, asi que se espera y luego lo verifica el guion de fuera leyendo
+      // profile.json (que se salva y se restaura alrededor de la prueba).
+      sel.value = "wonder"; sel.dispatchEvent(new w.Event("change"));
+      ok(root.dataset.theme === "wonder", "el evento change aplica el tema: " + root.dataset.theme);
+      setTimeout(() => {
+        say(L.some(x => x.startsWith("MAL")) ? "== HAY FALLOS ==" : "== TODO BIEN ==");
+        // Lo que queda por comprobar (que `touch()` guarda `theme` de verdad) no se ve desde
+        // aqui: `CFG` es `let` de guion clasico y no cuelga de window. Lo mira el guion de
+        // fuera leyendo profile.json, que salva y restaura alrededor de la prueba.
+      }, 900);
+    } catch (e) { say("EXC " + e.message + "\n" + e.stack); }
+  }, 1500);
+};
+</script>

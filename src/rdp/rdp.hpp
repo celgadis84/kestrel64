@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <vector>
 // kestrel64 — software RDP (M3.2). Consumes the RDP command FIFO
 // (DPC_START..DPC_END, 64-bit commands living in RDRAM) and rasterizes into the
 // RDRAM color/z images the game set up. This is the "first light" renderer: no
@@ -44,6 +45,21 @@ struct SoftRdp {
   // RDRAM viva). Normalmente es la instantanea que el productor dejo al encolar el tramo:
   // ver Memory::rdpSnapshot. Nulo = leer la RDRAM directamente (lockstep, pruebas).
   const u8* cmdSrc = nullptr;
+  // Modo SOLO-COSTE: decodifica el FIFO y cobra los contadores del RDP (DPC_CLOCK y el
+  // reloj de coste que frena a la CPU) SIN escribir un solo pixel. Existe porque con
+  // parallel-RDP quien rasteriza es la GPU, y la GPU no puede decirle al invitado lo que
+  // costo: sin esto el RDP le sale GRATIS al juego -- DPC_CLOCK clavado a cero y ninguna
+  // espera -- y el emulador corre mas suelto de lo que jamas corrio la consola. En este
+  // modo el bucle por pixel no se ejecuta: cada tramo aporta su ANCHURA de una vez, que es
+  // la misma cuenta de pixeles que entrarian al pipeline, asi que el coste es O(altura)
+  // por primitiva en vez de O(area). Los pixeles se cobran como escritos: sin z-buffer
+  // fiable en RDRAM (lo tiene la GPU) no se puede saber cuales moriria en el test, y el
+  // hardware paga casi lo mismo por uno muerto que por uno escrito.
+  bool costOnly = false;
+  // Cobrar o no los contadores del RDP (DPC_CLOCK/PIPEBUSY/BUFBUSY/TMEM y el reloj de coste
+  // rdpGclk). El coste de un tramo se paga UNA vez: si delante ha ido un paseo solo-coste,
+  // el paseo que pinta ya no cobra. Ver Memory::rdpRunJob.
+  bool charge = true;
   // Direccion donde se paro el consumo. Igual a `end` salvo cuando el ultimo comando del
   // span esta partido: el command processor no ejecuta comandos a medias, se para delante
   // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.
@@ -156,13 +172,17 @@ private:
   // is set; opaque modes with no framebuffer read write straight through. out = P*a + M*b
   // with P/M/a/b picked by the blend mux (m1a,m1b,m2a,m2b) of the final blender cycle.
   auto readFb(Memory& mem, int x, int y) -> u32;             // framebuffer colour → RGBA32
-  auto blendColor(u32 src, u32 memc, bool blendEn) -> u32;   // pure blend-mux math
-  // aaEdge = this pixel is only partially covered, which is what ANTIALIAS_EN turns the
-  // blender on for. Fully covered pixels (the default) blend only under FORCE_BLEND.
-  auto blendPixel(Memory& mem, int x, int y, u32 src, bool aaEdge = false) -> void;
+  auto blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32;   // pure blend-mux math
+  // `cvg` = subpixeles cubiertos por el primitivo, 0..8 (8 = pixel entero). Es el valor que
+  // recorre TODA la etapa de escritura del RDP: modula el alfa (CVG_TIMES_ALPHA /
+  // ALPHA_CVG_SELECT), decide si el blender se enciende (AA_EN sin desbordar coverage),
+  // mata el pixel si se queda en cero, y acaba guardado en el framebuffer segun CVG_DEST.
+  auto blendPixel(Memory& mem, int x, int y, u32 src, int cvg = 8) -> void;
   auto ditherRgb(int x, int y, u32 c) const -> u32;   // RGB_DITHER_SEL, framebuffer write path
-  // Coverage-based edge AA: cvg<1 folds `src` (after blend) against the framebuffer.
-  auto coverPixel(Memory& mem, int x, int y, u32 src, double cvg) -> void;
+  // Bits ocultos de RDRAM: los 2 bits bajos de la cobertura de cada pixel de 16bpp. El bit
+  // alto vive en el bit 0 del propio pixel RGBA5551 (lo que el GBI llama "alfa"); los otros
+  // dos estan en la RAM oculta de 9 bits de los chips RDRAM, invisible para la CPU.
+  auto hiddenBits(Memory& mem) -> u8*;
   auto fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void;
   auto drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void;
   auto texRect(Memory& mem, const u64* w, bool flip) -> void;
@@ -242,6 +262,14 @@ private:
     bool force = false;   // FORCE_BLEND
     bool aaEn = false;    // ANTIALIAS_EN
     bool passthru = true; // FILL/COPY: sin blender ni dither
+    // Etapa de coverage de SET_OTHER_MODES. El RDP no guarda un alfa en el framebuffer:
+    // guarda la COBERTURA del pixel (3 bits) en el sitio del alfa, y esos bits son los que
+    // luego alimentan el filtro AA del VI y la propia mezcla del siguiente primitivo.
+    u8   cvgDst = 0;          // CVG_DEST (bits 9:8): 0 clamp, 1 wrap, 2 zap, 3 save
+    bool colorOnCvg = false;  // COLOR_ON_CVG (bit 7)
+    bool cvgXAlpha  = false;  // CVG_TIMES_ALPHA (bit 12)
+    bool alphaCvgSel= false;  // ALPHA_CVG_SELECT (bit 13)
+    bool needMem = false;     // el pixel necesita leer el framebuffer (color y/o coverage)
   } blendPlan;
   auto buildBlendPlan() -> void;
   auto buildCombPlan() -> void;

@@ -152,6 +152,28 @@ def run_control(action: str) -> dict:
     return data
 
 
+def frame_advance(fields: int = 1, timeout_ms: int = 5000) -> dict:
+    """Advance exactly `fields` N64 video fields and stop again (frame advance).
+
+    The twin of cpu_step for TAS work: the quantum is the video field, which is where
+    the game reads the controller, so one advance = one movie sample and a button press
+    lands on the exact frame. Blocks until done. Returns
+    {fields, timedOut, paused, halted, viFields, viFlips, pc}."""
+    data, _ = query("frame.advance", fields=int(fields), timeout_ms=int(timeout_ms))
+    return data
+
+
+def rewind_step(steps: int = 1) -> dict:
+    """Rewind `steps` snapshots (each one KESTREL_REWIND_FIELDS video fields back).
+
+    Needs the core started with KESTREL_REWIND=1 — off, this returns an error instead of
+    silently doing nothing. Each step puts the previous whole-machine snapshot back, so
+    rewinding 5 goes back five snapshots, it does not jump to the fifth. Returns
+    {msg, steps, bytes, interval, viFields, pc} where `steps` is how much tape is left."""
+    data, _ = query("rewind.step", steps=int(steps))
+    return data
+
+
 def rcp_registers() -> dict:
     """Full RCP MMIO register file: MI (mode/mask/intr/intrPending), SP, DPC, VI,
     AI, PI, SI. This is the state the boot code and scheduler poll — MI mask/intr
@@ -363,6 +385,8 @@ def _serve_mcp():
     mcp.tool()(cpu_step)
     mcp.tool()(cpu_disasm)
     mcp.tool()(run_control)
+    mcp.tool()(frame_advance)
+    mcp.tool()(rewind_step)
     mcp.tool()(rcp_registers)
     mcp.tool()(rsp_registers)
     mcp.tool()(controller_set)

@@ -42,9 +42,12 @@ constexpr int  kBufSamples = kBufFrames * kChannels;
 // Cap the software ring so a fast (faster-than-realtime) emulator can't grow it
 // without bound; when it fills we drop the oldest, keeping latency in check.
 constexpr u32  kRingFrames = 44100 / 4;           // ~250 ms of slack
-// Colchon minimo antes de empezar (o de volver) a tocar: dos bufers de dispositivo. Menos
-// que eso y cualquier campo que tarde un poco mas de la cuenta ya se oye.
-constexpr u32  kPrimeSamples = kBufSamples * 2;
+// Colchon minimo antes de empezar (o de volver) a tocar. Tiene que ser lo que el alimentador
+// va a encolar DE GOLPE en cuanto se ceba, que son los kNumBufs bufers del dispositivo: con
+// dos, la primera vuelta encolaba cuatro y los dos ultimos salian medio vacios -- ringPull
+// rellena de ceros lo que no hay. Medido en DK64: ~9600 muestras de silencio por arranque,
+// siempre las mismas corriera lo que corriera, o sea un hipo fijo al empezar a sonar.
+constexpr u32  kPrimeSamples = (u32)(kBufSamples * kNumBufs);
 
 struct Backend {
   std::mutex          mtx;                          // guards the ring
@@ -127,12 +130,16 @@ auto feederLoop() -> void {
     bool anyIdle = false;
     for(int i = 0; i < kNumBufs; i++) {
       if(g.hdr[i].dwFlags & WHDR_INQUEUE) continue;  // still playing
+      // Un bufer a medias es un hueco audible: ringPull rellena de ceros lo que falta. Antes
+      // de sacar nada se comprueba que hay bufer ENTERO; si no lo hay se descebra y se vuelve
+      // a esperar colchon, que es lo que ya hacia el codigo pero DESPUES de haber servido el
+      // hueco. Lo que ya esta encolado sigue sonando mientras tanto.
+      { std::lock_guard<std::mutex> lk(g.mtx); if(g.count < (u32)kBufSamples) g.primed = false; }
+      if(!g.primed) break;
       anyIdle = true;
       if(g.hdr[i].dwFlags & WHDR_PREPARED)
         waveOutUnprepareHeader(g.dev, &g.hdr[i], sizeof(WAVEHDR));
       ringPull(g.buf[i].data(), kBufSamples);
-      // Se acabo el colchon: en vez de encadenar huecos, se para y se vuelve a cebar.
-      { std::lock_guard<std::mutex> lk(g.mtx); if(g.count == 0) g.primed = false; }
       g.hdr[i] = WAVEHDR{};
       g.hdr[i].lpData = reinterpret_cast<LPSTR>(g.buf[i].data());
       g.hdr[i].dwBufferLength = kBufSamples * sizeof(s16);

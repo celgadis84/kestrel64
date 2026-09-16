@@ -1,3 +1,4 @@
+#include <cctype>
 #include "system.hpp"
 #include "savestate.hpp"
 #ifdef _WIN32
@@ -5,7 +6,9 @@
 #endif
 #include "../telemetry/server.hpp"
 #include "../telemetry/hostprof.hpp"
+#include "movie.hpp"
 #include "../audio/audio.hpp"
+#include "../vrdp/vrdp.hpp"   // vrdp::built: si ESTE .exe lleva el backend de GPU
 #include "runtime.hpp"
 #include <chrono>
 #include <cstdio>
@@ -28,17 +31,56 @@ auto System::stopTelemetry() -> void {
 }
 
 auto System::init(const std::string& romPath, std::string& error) -> bool {
-  memory.reset(/*expansionPak=*/true);
+  // Memoria de la consola. Por defecto los 8 MB del Expansion Pak, que es lo que quiere
+  // cualquiera que juegue hoy (y lo que EXIGEN Donkey Kong 64 y Perfect Dark en un jugador),
+  // pero la N64 de serie trae 4 MB y hay juegos que se comportan distinto segun lo que
+  // encuentren: reservan menos buferes, bajan la resolucion o directamente se niegan. El
+  // tamano no se puede cambiar en caliente (la RDRAM se dimensiona una vez y los estados
+  // guardados llevan el suyo dentro), asi que se decide aqui y se queda.
+  bool expansionPak = true;
+  if(const char* e = std::getenv("KESTREL_RDRAM")) {
+    std::string v(e);
+    for(auto& c : v) c = (char)std::tolower((unsigned char)c);
+    if(v == "4" || v == "4mb" || v == "0") expansionPak = false;
+  }
+  memory.reset(expansionPak);
+  // El tamano no se anuncia solo: el invitado lo lee en RDRAM 0x318 (osMemSize) y 0x3F0,
+  // que el arranque rapido rellena desde rdram.size(), y el camino rapido del dynarec lo
+  // acota con jitRdramSz, que sale del mismo sitio al compilar cada bloque.
+  std::printf("[system] RDRAM %u MB%s\n", (unsigned)(memory.rdram.size() >> 20),
+              expansionPak ? " (Expansion Pak)" : " (consola de serie)");
   if(!rom.loadFile(romPath, error)) return false;
   memory.loadRom(rom.data);  // exposes CART_ROM region for telemetry
   memory.attachSaveFile(romPath);  // load existing .eep/.sra/.fla, if any, next to the ROM
   this->romPath = romPath;         // base de los nombres de ranura de estado (rom.stN)
+  cheats.loadForRom(romPath);      // KESTREL_CHEATS, o el .cht que haya al lado de la ROM
   std::printf("[system] loaded \"%s\" (%s, %.2f MB, entry 0x%08x)\n",
               rom.header.name.c_str(),
               rom.originalOrder == Rom::Order::Z64 ? "z64" :
               rom.originalOrder == Rom::Order::N64 ? "n64" :
               rom.originalOrder == Rom::Order::V64 ? "v64" : "?",
               rom.data.size() / (1024.0 * 1024.0), rom.header.entryPoint);
+  // Norma de television: la del cartucho. En la consola de verdad la region del cartucho y
+  // la de la maquina coinciden, y libultra publica la de la maquina en osTvType; los juegos
+  // la leen y algunos se niegan a funcionar con la equivocada (Perfect Dark PAL entra en un
+  // `while(1)` dentro de mainInit si lee NTSC, y deja la pantalla en negro para siempre).
+  // De la norma cuelga tambien el ritmo de campo, que es el reloj de todo el emulador.
+  {
+    TvType tv = tvTypeForCountry(rom.header.countryCode);
+    if(const char* o = std::getenv("KESTREL_TVTYPE")) {   // por si una ROM trae mal la region
+      std::string v(o);
+      for(auto& c : v) c = (char)std::tolower((unsigned char)c);
+      if(v == "pal" || v == "0") tv = TvType::Pal;
+      else if(v == "ntsc" || v == "1") tv = TvType::Ntsc;
+      else if(v == "mpal" || v == "2") tv = TvType::Mpal;
+    }
+    cpu.bootTvType = (u32)tv;
+    clocks.viFieldHz = tvFieldHz(tv);
+    memory.aiVidClock = tvVidClock(tv);
+    std::printf("[system] region '%c' -> %s (%.2f campos/s)\n",
+                rom.header.countryCode >= 0x20 ? rom.header.countryCode : '?',
+                tvName(tv), clocks.viFieldHz);
+  }
   if(const char* w = std::getenv("KESTREL_WATCH")) {
     memory.watchAddr = (u32)std::strtoul(w, nullptr, 0) & 0x1fff'ffff;
     if(const char* l = std::getenv("KESTREL_WATCHLEN")) memory.watchLen = (u32)std::strtoul(l, nullptr, 0);
@@ -52,15 +94,23 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   // campo de video. Subir el de CPU cambia cuanto trabajo hace el juego entre campos --
   // que es justo lo que quita la ralentizacion, y tambien lo que puede romper un juego
   // que ate su logica al reloj. RDRAM solo mueve el modelo de ancho de banda.
+  //
+  // El modo fiel a consola (KESTREL_SPEEDMODE=hw, ver rt::speedModeHw) desarma todo esto: si
+  // lo que se pide es la velocidad de la maquina real, un multiplicador heredado del entorno
+  // o de un perfil viejo la falsearia sin que se note. Por eso no se "avisa" del conflicto:
+  // se ignora la variable, que es lo unico que deja el modo fiel siendo fiel.
+  const bool hwSpeed = rt::speedModeHw();
   {
-    auto mul = [](const char* n, double& dst) {
+    auto mul = [hwSpeed](const char* n, double& dst) {
+      if(hwSpeed) return;
       if(const char* v = std::getenv(n)) {
         double d = std::strtod(v, nullptr);
         if(d > 0.0) dst = d;           // 0 o basura = no tocar
       }
     };
     double all = 0.0;
-    if(const char* g = std::getenv("KESTREL_OC")) { double d = std::strtod(g, nullptr); if(d > 0.0) all = d; }
+    if(!hwSpeed)
+      if(const char* g = std::getenv("KESTREL_OC")) { double d = std::strtod(g, nullptr); if(d > 0.0) all = d; }
     if(all > 0.0) { clocks.cpuOc = clocks.rspOc = clocks.rdramOc = all; }
     mul("KESTREL_OC_CPU",   clocks.cpuOc);
     mul("KESTREL_OC_RSP",   clocks.rspOc);
@@ -74,6 +124,24 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
     u32 n = (u32)std::strtoul(t, nullptr, 0);
     if(n) clocks.viTicksPerField = n;
   }
+  // El CPI sale de un solo sitio (CPU::cpiFromEnv, en 1/128 de ciclo) y de ahi cuelgan LAS DOS
+  // cosas que dependen de el: el ritmo del reloj Count dentro de la CPU y el presupuesto de
+  // instrucciones por campo de este bucle. Derivarlo aqui en vez de volver a leer la variable
+  // de entorno es lo que impide que los dos relojes discrepen.
+  // Fiel a consola: tambien el CPI vuelve al calibrado de fabrica. Es la otra mitad del
+  // presupuesto de tiempo del invitado -- de nada sirve el reloj nativo si el numero de
+  // instrucciones que caben en un campo viene de un KESTREL_CPI puesto a mano.
+  if(hwSpeed) cpu.cpi256 = CPU::kCpiDefault256;
+  clocks.cyclesPerInsn = (double)cpu.cpi256 / 128.0;
+  if(hwSpeed)
+    std::printf("[system] modo FIEL A CONSOLA: CPU %.2f MHz, RSP %.2f MHz, RDRAM x1.00, "
+                "CPI %.4f, %.2f campos/s clavados\n",
+                clocks.cpuTarget() / 1e6, clocks.rspTarget() / 1e6,
+                (double)cpu.cpi256 / 128.0, clocks.viFieldHz);
+  if(clocks.cpiIsHistoric() == false)
+    std::printf("[system] CPI=%.4f -> %llu instrucciones por campo (modelo historico: 2 -> %llu)\n",
+                clocks.cyclesPerInsn, (unsigned long long)clocks.fieldInsns(),
+                (unsigned long long)(u64)(clocks.cpuTarget() / 2.0 / clocks.viFieldHz + 0.5));
   // Un solo reloj de video para todo el emulador: el mismo numero de instrucciones
   // por campo que usa el bucle de System (stepCpu) lo usa la lectura de VI_V_CURRENT.
   memory.viFieldInsns = clocks.fieldInsns();
@@ -84,9 +152,19 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   // (aqui) y para el regulador de Threaded (Memory::rcpPace).
   rspStepNum = (u64)(clocks.rspInsnsPerCpuInsn() * 65536.0 + 0.5);
   rspStepDen = 65536;
-  memory.paceCpuNum = rspStepDen; memory.paceCpuDen = rspStepNum;   // inverso: CPU por RSP
+  memory.setPaceRatio(rspStepDen, rspStepNum);   // inverso: CPU por RSP
+  // Peliculas de entrada (TAS). Se arma con el cartucho ya cargado y la RDRAM ya
+  // dimensionada porque la cabecera guarda los dos CRC del cartucho, la norma de TV y el
+  // tamano de memoria: reproducir una partida en una maquina distinta de la que la grabo no
+  // es reproducirla.
+  { u8 ports = 0;
+    for(int i = 0; i < 4; i++) if(memory.padPort[i].connected) ports |= (u8)(1u << i);
+  rewinder.init();
+    movie::init(rom.header.crc1, rom.header.crc2, rom.header.name, (u8)cpu.bootTvType,
+                (u8)(memory.rdram.size() >> 20), ports); }
   cpu.fastBoot(rom.header.entryPoint);  // HLE IPL3: boot segment in RDRAM, PC at entry
-  std::printf("[cpu] HLE boot, pc=0x%08x\n", (u32)cpu.pc);
+  std::printf("[cpu] %s boot, pc=0x%08x\n",
+              (u32)cpu.pc == 0xa4000040u ? "LLE IPL3" : "HLE", (u32)cpu.pc);
   if(envFlag("KESTREL_THREADS", true)) {
     memory.rcpMode = Memory::RcpMode::Threaded;
     memory.startRcpThreads();
@@ -141,6 +219,14 @@ auto System::stepCpu(u64 n) -> u64 {
                              ? (u32)std::strtoul(std::getenv("KESTREL_QCHKAFTER"), nullptr, 0) : 30u;
   static u32 qchkTick = 0;
   const bool paced = memory.rcpMode == Memory::RcpMode::Threaded;
+  // Reloj de invitado del interleave CPU:RSP. El ratio de Clocks es RSP por
+  // instruccion-equivalente de CPU, y una instruccion que se para en la cache NO vale
+  // lo mismo que una que retira limpia: el RSP corre igual durante esos ~60 ciclos de
+  // latencia de RDRAM. guestOps() = retiradas + paradas ya convertidas a equivalentes,
+  // que es exactamente el reloj en que nacen y vencen el campo de video, el plazo del SI
+  // y el latch del PI. Con KESTREL_CACHECOST apagado avanza 1 por instruccion y esto
+  // queda byte a byte igual que el "rspPhase += rspStepNum" de siempre.
+  u64 lastGuestOps = cpu.guestOps();
   u64 i = 0;
   while(i < n && !cpu.halted) {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
@@ -151,13 +237,30 @@ auto System::stepCpu(u64 n) -> u64 {
       // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
       cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
       u32 k = cpu.jitTryBlock();
-      if(k) { i += k; if(paced) memory.rcpPace(cpu.retired); continue; }
+      if(k) { i += k; lastGuestOps = cpu.guestOps();
+              if(paced) memory.rcpPace(cpu.guestOps()); continue; }
     }
     cpu.step();
     i++;
+    // Vencimiento del plazo del SI (transaccion de la PIF/joybus en vuelo). Se mira por
+    // instruccion, no por tramo, porque el instante en que llega MI_SI tiene que ser el
+    // MISMO en los siete modos: aqui se remata en la instruccion exacta y el JIT tiene
+    // prohibido meter el plazo dentro de un bloque (guarda en jitTryBlock).
+    // El plazo se ARMA en cartNow() (retiradas + pendientes del JIT + paradas de cache) y
+    // por tanto se tiene que VENCER en el mismo reloj. Compararlo contra cpu.retired a secas
+    // mezclaba dos relojes: con el coste de cache encendido, siDoneAt nace desplazado por
+    // TODAS las paradas acumuladas hasta ese momento, no por lo que dura la transaccion, asi
+    // que el plazo se alejaba mas cuanto mas llevaba corriendo el juego. SM64 con
+    // KESTREL_CACHECOST=60 se quedaba sin lecturas de mando y sin dibujar nada.
+    if(memory.siBusy && memory.cartNow() >= memory.siDoneAt) memory.siFinish();
+    // Y el fin de tarea del RCP en Threaded, por lo mismo: lo arma un worker con el coste ya
+    // modelado y se hace visible cuando el reloj de invitado llega, no cuando el anfitrion
+    // termina de calcular. Con Lockstep o con KESTREL_RCPDEADLINE=0 nunca hay nada armado y
+    // esto es una lectura atomica relajada que sale en cero.
+    if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire();
     // Regulador Threaded: el equivalente al interleave 2:3 de abajo. Cada 64 ops basta —
     // es una lectura atomica relajada y el margen del regulador es de miles de ops.
-    if(paced && (i & 0x3F) == 0) memory.rcpPace(cpu.retired);
+    if(paced && (i & 0x3F) == 0) memory.rcpPace(cpu.guestOps());
     // Solo se mira con interrupciones habilitadas y fuera de excepcion: dentro de
     // __osDisableInt el kernel esta a medio enlazar y el invariante no aplica.
     // El arranque no cuenta: bzero de las estructuras del kernel viola el invariante
@@ -189,8 +292,11 @@ auto System::stepCpu(u64 n) -> u64 {
     // Lockstep: interleave the RSP at Clocks::rspInsnsPerCpuInsn() (4/3 stock).
     // Threaded: the RSP runs to completion on its own worker (see rspWorkerLoop),
     // so the CPU thread must NOT also step it — that would double-execute the core.
-    if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running) {
-      rspPhase += rspStepNum;
+    u64 nowGuestOps = cpu.guestOps();
+    u64 dGuestOps   = nowGuestOps - lastGuestOps;
+    lastGuestOps    = nowGuestOps;
+    if(memory.rcpMode == Memory::RcpMode::Lockstep && memory.rsp.running && dGuestOps) {
+      rspPhase += rspStepNum * dGuestOps;
       while(rspPhase >= rspStepDen) {
         rspPhase -= rspStepDen; memory.rsp.step(1); if(!memory.rsp.running) break;
       }
@@ -211,13 +317,17 @@ auto System::startVideo(bool batch) -> void {
   // ROM cambia lo que se mide y encima requiere escritorio. KESTREL_VIDEO fuerza el si
   // (util para ver un caso de gate), KESTREL_NOVIDEO fuerza el no.
   bool want = !batch;
-  if(std::getenv("KESTREL_VIDEO"))   want = true;
-  if(std::getenv("KESTREL_NOVIDEO")) want = false;
+  // Por VALOR y no por presencia: "KESTREL_VIDEO=0" tiene que apagar la ventana, no
+  // encenderla, que es lo que hacia mientras solo se miraba si la variable existia.
+  if(const char* v = std::getenv("KESTREL_VIDEO"))   want = (v[0] != '0');
+  if(const char* v = std::getenv("KESTREL_NOVIDEO")) want = (v[0] == '0');
   if(!want) return;
   videoOn = presenter.start(&memory, &shutdown, &n64SpeedPct, &rspSpeedPct, &rdramSpeedPct,
                             rom.valid() ? rom.header.name.c_str() : nullptr);
   presenter.bindState(&stateSaveReq, &stateLoadReq, &stateSlot);
   presenter.bindMenu(&paused, romPath);
+  presenter.bindFrameAdvance(&stepFields);
+  presenter.bindRewind(&rewindReq);
   if(videoOn) std::printf("[video] VI presentation armed (window opens on main thread)\n");
 }
 
@@ -257,9 +367,16 @@ auto System::runLoop() -> void {
   // y ese tiene que seguir siendo el del RDP. Asi que se arranca la CPU primero (con ella los
   // hilos del RCP) y aqui solo se espera a que el hilo del RDP lo tenga listo.
   std::thread cpuThread([this] { run(); });
+  // "Querer" parallel-RDP solo tiene sentido si este .exe lo lleva compilado. El paquete
+  // trae DOS ejecutables (kestrel64.exe con GPU, kestrel64-soft.exe sin ella): en el de
+  // SoftRDP, dar por bueno el default "GPU si" hacia esperar quince segundos a un backend
+  // que no existe y despues NO abrir la ventana -- el emulador inutil por doble clic.
+  // Sin backend se va derecho a abrir la ventana, que es lo unico que se puede hacer.
   const char* pe = std::getenv("KESTREL_PRDP");
-  bool prdpWanted = !pe || pe[0] != '0';
+  bool prdpWanted = vrdp::built && (!pe || pe[0] != '0');
   bool prdpReady  = memory.vrdpWaitReady(15000);
+  if(pe && pe[0] != '0' && !vrdp::built)
+    std::printf("[video] este ejecutable no lleva parallel-RDP; se rasteriza con SoftRDP\n");
   if(prdpWanted && !prdpReady)
     std::printf("[video] parallel-rdp no arranco a tiempo; sin ventana\n");
   else if(!presenter.open())
@@ -303,18 +420,25 @@ static auto framebufferHash(Memory& mem) -> u64 {
 //
 // El coreMutex se coge aqui, no dentro de saveState/loadState: la telemetria puede estar
 // leyendo registros en el mismo instante.
-auto System::serviceStateReq() -> void {
-  int save = stateSaveReq.exchange(-1, std::memory_order_acq_rel);
-  int load = stateLoadReq.exchange(-1, std::memory_order_acq_rel);
-  if(save < 0 && load < 0) return;
-
-  std::lock_guard<std::mutex> lk(coreMutex);
+auto System::quiesceRcp() -> void {
+  // Un RSP aparcado espera un tramo que ya no va a llegar: aqui la CPU se para en seco.
+  memory.rspParkNudge();
   memory.rdpDrain();
   memory.rspAwaitIdle();
   // Lockstep: la tarea la lleva ESTE hilo intercalada con la CPU, asi que aqui puede
   // quedar a medias. Se la deja acabar. El tope es el mismo presupuesto de seguridad que
   // usa el propio nucleo: si no para, ya estaba colgada antes de pedir el estado.
   for(int i = 0; i < 64 && memory.rsp.running; i++) memory.rsp.step(1u << 20);
+}
+
+auto System::serviceStateReq() -> void {
+  int save = stateSaveReq.exchange(-1, std::memory_order_acq_rel);
+  int load = stateLoadReq.exchange(-1, std::memory_order_acq_rel);
+  u32 rew  = rewindReq.exchange(0, std::memory_order_acq_rel);
+  if(save < 0 && load < 0 && !rew) return;
+
+  std::lock_guard<std::mutex> lk(coreMutex);
+  quiesceRcp();
 
   std::string err, msg;
   if(save >= 0) {
@@ -324,12 +448,28 @@ auto System::serviceStateReq() -> void {
   }
   if(load >= 0) {
     std::string path = stateSlotPath(*this, load);
-    if(loadState(*this, path, err)) msg = "estado cargado de ranura " + std::to_string(load);
-    else                            msg = "fallo al cargar ranura " + std::to_string(load) + ": " + err;
+    if(loadState(*this, path, err)) {
+      msg = "estado cargado de ranura " + std::to_string(load);
+      // La cinta de rebobinado describe la partida que acaba de dejar de existir: volver
+      // atras por ella llevaria a un pasado que ya no es el de esta maquina.
+      rewinder.clear();
+    } else {
+      msg = "fallo al cargar ranura " + std::to_string(load) + ": " + err;
+    }
+  }
+  // Rebobinado. Los pasos pedidos se gastan de uno en uno: cada uno mete en la maquina la
+  // foto anterior, asi que pedir cinco es retroceder cinco fotos, no saltar a la quinta.
+  if(rew) {
+    u32 done = 0;
+    for(; done < rew && rewinder.stepBack(*this, err); done++) {}
+    if(done == rew) msg = "rebobinado " + std::to_string(done) + " (quedan "
+                        + std::to_string(rewinder.steps()) + ")";
+    else            msg = "rebobinado " + std::to_string(done) + ": " + err;
   }
   std::printf("[state] %s\n", msg.c_str());
   std::fflush(stdout);
   { std::lock_guard<std::mutex> ml(stateMsgMutex); stateMsg = msg; }
+  stateSeq.fetch_add(1, std::memory_order_release);
 }
 
 auto System::run() -> void {
@@ -568,6 +708,7 @@ auto System::run() -> void {
   auto  winT0 = clock::now();       // sliding speed window (recomputed ~4x/sec)
   u64   winInsn = 0, winRsp = rspNow();
   u64   winRdpNs = 0, winRspNs = 0, winWaitNs = 0, winFlips = 0;   // bases de la ventana
+  u64   winRamCpu = 0, winRamRcp = 0;                              // bases de bytes de RDRAM
   auto  hbT0 = winT0, hbLast = winT0;   // heartbeat lifetime baseline
   bool  hbOn = std::getenv("KESTREL_HEARTBEAT") != nullptr;
 
@@ -601,7 +742,7 @@ auto System::run() -> void {
   // end of a display list, so N syncs is N completed frames. CPU-side decoders never
   // touch the RDP, so it does not bound them either.
   u64  stableEvery = 0, stableNeed = 3, stableNext = 0, stableHash = 0;
-  u32  stableRun = 0, maxFlips = 0, maxSyncs = 0;
+  u32  stableRun = 0, maxFlips = 0, maxSyncs = 0, maxFields = 0;
   bool stableSawChange = false;
   // KESTREL_HANGDOG=<segundos>: perro guardian de cuelgues.
   //
@@ -625,6 +766,12 @@ auto System::run() -> void {
 
   if(const char* f = std::getenv("KESTREL_MAXFLIPS")) maxFlips = (u32)std::strtoul(f, nullptr, 0);
   if(const char* f = std::getenv("KESTREL_MAXSYNCS")) maxSyncs = (u32)std::strtoul(f, nullptr, 0);
+  // Tope por CAMPOS de video. Los otros dos topes cuentan trabajo del RCP (intercambios de
+  // buffer, syncs del RDP) y no sirven justo cuando mas falta hacen: un juego que arranca y
+  // NO llega a dibujar nunca se para solo, asi que la telemetria de cierre ([frames], [cache],
+  // [cpi], [muldiv], [fpu]) no llega a imprimirse y hay que matarlo por timeout a ciegas. El
+  // campo de video corre pase lo que pase, asi que este tope siempre llega.
+  if(const char* f = std::getenv("KESTREL_MAXFIELDS")) maxFields = (u32)std::strtoul(f, nullptr, 0);
   if(const char* s = std::getenv("KESTREL_STABLE")) {
     char* end = nullptr;
     stableEvery = std::strtoull(s, &end, 0);
@@ -635,13 +782,17 @@ auto System::run() -> void {
   while(!shutdown.load()) {
     serviceStateReq();
     if(cpu.halted && exitOnHalt) { shutdown.store(true); break; }
-    if(paused.load() || cpu.halted) {
+    // Avance por fotogramas: con campos pendientes el bucle corre aunque la pausa este
+    // puesta. Se lee aqui y se descuenta abajo, al cerrar el campo.
+    const u32 fadv = stepFields.load(std::memory_order_relaxed);
+    if((paused.load() && !fadv) || cpu.halted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       winT0 = clock::now(); winInsn = 0; winRsp = rspNow();  // don't fold idle time into speed
       winRdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
       winRspNs = memory.rspBusyNs.load(std::memory_order_relaxed);
       winWaitNs = memory.cpuWaitNs.load(std::memory_order_relaxed);
       winFlips = memory.rcp.viFlips;
+      winRamCpu = cpu.ramCpuBytes; winRamRcp = memory.ramBytesRcp();
       continue;
     }
     u64 did;
@@ -653,7 +804,17 @@ auto System::run() -> void {
       // constante suelta: el mismo campo lo usa la lectura de VI_V_CURRENT en Memory, para
       // que la interrupcion y el sondeo del contador de medias-lineas midan el MISMO tiempo.
       did = stepCpu(clocks.tickInsns());
-      fieldClosed = memory.viTick(cpu.retired);
+      // Con el reloj de invitado, no con las ops retiradas a secas: si un campo trae muchos
+      // fallos de cache, en HW ese campo hace MENOS trabajo de CPU, no el mismo en mas tiempo.
+      fieldClosed = memory.viTick(cpu.guestOps());
+      // Trucos: el motor del GameShark colgaba de la interrupcion del VI, asi que el ritmo
+      // es el campo de video y no el fotograma del juego. Va aqui dentro, con el nucleo
+      // parado bajo coreMutex, para que las escrituras no crucen con la CPU ni con el RCP.
+      if(fieldClosed && cheats.enabled()) cheats.applyField(cpu);
+      // Un campo cerrado gasta un paso del avance por fotogramas. El fetch_sub no puede
+      // bajar de cero porque solo se resta lo que se vio distinto de cero en esta vuelta y
+      // nadie mas resta: quien pide avance solo suma.
+      if(fieldClosed && fadv) stepFields.fetch_sub(1, std::memory_order_relaxed);
       // Diagnostico de divergencia entre modos, opt-in. El md5 final solo dice "difieren";
       // estos dicen DONDE: KESTREL_FIELDHASH=1 imprime un FNV del estado CPU al cierre de
       // cada campo (primer campo distinto = ventana a bisecar) y KESTREL_FIELDDUMP=<n>
@@ -681,6 +842,15 @@ auto System::run() -> void {
         std::fflush(stderr);
       }
     }
+    // Foto de rebobinado. Va FUERA del subtramo de arriba y con el RCP parado a proposito:
+    // una foto con el RDP a medias de una lista no se puede volver a meter en la maquina.
+    // Apagado, esto es una comparacion contra cero.
+    if(fieldClosed && rewinder.enabled) {
+      std::lock_guard<std::mutex> lk(coreMutex);
+      quiesceRcp();
+      rewinder.onField(*this);
+    }
+
     // Limitador de velocidad. Sin el, el emulador corre a lo que de el host: a 157% de
     // consola el audio sale acelerado y el juego responde a destiempo, o sea sirve para medir
     // pero no para jugar. El reloj es el campo de video (Clocks::viFieldHz), el mismo que ancla
@@ -704,16 +874,133 @@ auto System::run() -> void {
     retiredInsns.fetch_add(did, std::memory_order_relaxed);
     winInsn += did;
 
+    // Nivel 1 (por defecto): SOLO columnas que el invitado puede ver. Es el rastro que se
+    // compara por md5 entre corridas, asi que no puede llevar nada medido en tiempo de
+    // anfitrion. Nivel 2 anade `rsp=` (ciclos del RSP) y `gclk=` (reloj del RDP), que son el
+    // avance REAL de los dos workers: muestreados en el limite de campo valen lo que valgan
+    // segun donde estuviera cada hilo en ese instante, y difieren entre corridas sin que el
+    // invitado vea nada distinto. Utiles para mirar a ojo, veneno para un diff.
+    static const int fieldTrace = [] {
+      const char* e = std::getenv("KESTREL_FIELDTRACE");
+      if(!e || !*e || !std::strcmp(e, "0")) return 0;
+      return std::atoi(e) >= 2 ? 2 : 1;
+    }();
+    if(fieldTrace && fieldClosed) {
+      // Una sola escritura. Con fprintf directo la linea sale a trozos y otro hilo que
+      // imprima a la vez la parte por la mitad: el rastro se compara por md5 entre corridas
+      // y una linea partida se lee como una divergencia que no existe.
+      char ln[192];
+      char host[64] = "";
+      if(fieldTrace >= 2)
+        std::snprintf(host, sizeof(host), "rsp=%llu gclk=%llu ",
+                      (unsigned long long)memory.rsp.cyclesRun.load(std::memory_order_relaxed),
+                      (unsigned long long)memory.rcp.rdpGclk.load(std::memory_order_relaxed));
+      int n = std::snprintf(ln, sizeof(ln),
+                   "[ft] f=%u ret=%llu ops=%llu %s"
+                   "sp=%u dp=%u flips=%u syncs=%u org=%06x mi=%02x\n",
+                   memory.rcp.viFields, (unsigned long long)cpu.retired,
+                   (unsigned long long)cpu.guestOps(), host,
+                   memory.spRets.load(), memory.dpRets.load(),
+                   memory.rcp.viFlips, memory.rcp.dpSyncs, memory.rcp.vi_origin,
+                   (unsigned)(memory.rcp.mi_intr.load(std::memory_order_relaxed) & 0xff));
+      if(n > 0) std::fwrite(ln, 1, (usize)n < sizeof(ln) ? (usize)n : sizeof(ln) - 1, stderr);
+    }
+
     if((maxFlips && memory.rcp.viFlips >= maxFlips) ||
-       (maxSyncs && memory.rcp.dpSyncs >= maxSyncs)) {
+       (maxSyncs && memory.rcp.dpSyncs >= maxSyncs) ||
+       (maxFields && memory.rcp.viFields >= maxFields)) {
       // viFields = campos de video emitidos = tiempo del guest (a viFieldHz). viFlips solo
       // cuenta intercambios de buffer, y un juego que no llega a 60 fps intercambia menos
       // veces que campos hay: medir "tiempo real" con los swaps mide de menos.
-      std::fprintf(stderr, "[frames] %u buffer swaps, %u VI fields, %u RDP syncs after %lluM insns, "
-                   "origin=%06x, stopping\n",
+      // padPolls = comandos 0x01 del joybus en el conector 1: las veces que el JUEGO ha
+      // leido el mando. Va aqui porque es la unica cuenta de "tiempo del mando" que el invitado
+      // percibe, y sin ella no se puede comparar su cadencia contra los campos de video.
+      std::fprintf(stderr, "[frames] %u buffer swaps, %u VI fields, %u RDP syncs, %u lecturas de mando "
+                   "after %lluM insns, origin=%06x, stopping\n",
                    memory.rcp.viFlips, memory.rcp.viFields, memory.rcp.dpSyncs,
+                   (unsigned)memory.padPolls.load(std::memory_order_relaxed),
                    (unsigned long long)(cpu.retired / 1'000'000),
                    memory.rcp.vi_origin);
+      // Fallos de cache primaria del tramo. Es la materia prima del CPI real: el VR4300 no
+      // gasta un numero fijo de ciclos por instruccion, gasta uno mas la penalizacion de
+      // RDRAM de cada fallo. Sin esta cuenta el CPI solo se puede suponer.
+      std::fprintf(stderr, "[cache] %llu fallos D$ (%.3f%%), %llu fallos I$ (%.3f%%)\n",
+                   (unsigned long long)cpu.dcMisses,
+                   cpu.retired ? 100.0 * (double)cpu.dcMisses / (double)cpu.retired : 0.0,
+                   (unsigned long long)cpu.icMisses,
+                   cpu.retired ? 100.0 * (double)cpu.icMisses / (double)cpu.retired : 0.0);
+      // Y el CPI que sale de ahi. cpiBase = el factor plano configurado (KESTREL_CPI);
+      // cpiReal = cpiBase + ciclos de parada por instruccion. Con KESTREL_CACHECOST=0 los dos
+      // coinciden y la linea dice justo eso: el modelo es plano. Con el coste encendido, la
+      // diferencia es lo que la cache le cuesta AL JUEGO, medido, no supuesto.
+      {
+        double cpiBase = (double)cpu.cpi256 / 128.0;
+        double cpiReal = cpiBase + (cpu.retired ? (double)cpu.stallTotal / (double)cpu.retired : 0.0);
+        std::fprintf(stderr, "[cpi] base %.3f  real %.3f  (fallo %u ciclos, no-cacheado %u ciclos"
+                     " x %llu lecturas = %.3f%%; %llu ciclos parados = %llu ops equivalentes)\n",
+                     cpiBase, cpiReal, cpu.missCycles, cpu.uncachedCycles,
+                     (unsigned long long)cpu.uncachedReads,
+                     cpu.retired ? 100.0 * (double)cpu.uncachedReads / (double)cpu.retired : 0.0,
+                     (unsigned long long)cpu.stallTotal, (unsigned long long)cpu.stallOps);
+        // Reparto del bus de RDRAM. La consola tiene UN bus de 562,5 MB/s que arbitra el RCP
+        // entre los siete maestros, y en muchos juegos el palo largo es el bus y no ningun
+        // chip. Los MB/s van por segundo de tiempo de INVITADO (retiradas / ritmo a tiempo
+        // real), asi que el numero es del juego y no del anfitrion. Lo que NO se cuenta esta
+        // en Memory::kRdramPeakBps: es un suelo, no una cota.
+        {
+          double gs = clocks.insnTarget() > 0.0 ? cpu.retired / clocks.insnTarget() : 0.0;
+          if(gs > 1e-6) {
+            auto mb = [&](u64 b) { return (double)b / 1e6 / gs; };
+            double tot = mb(cpu.ramCpuBytes + memory.ramBytesRcp());
+            std::fprintf(stderr, "[rdram] %.1f%% del bus (%.1f MB/s de invitado en %.2f s):"
+                         " cpu %.1f rdp %.1f vi %.1f rsp %.1f pi %.1f ai %.1f si %.1f%s",
+                         tot * 1e6 / Memory::kRdramPeakBps * 100.0, tot, gs,
+                         mb(cpu.ramCpuBytes),
+                         mb(memory.ramBytesRdp.load(std::memory_order_relaxed)),
+                         mb(memory.ramBytesVi .load(std::memory_order_relaxed)),
+                         mb(memory.ramBytesRsp.load(std::memory_order_relaxed)),
+                         mb(memory.ramBytesPi .load(std::memory_order_relaxed)),
+                         mb(memory.ramBytesAi .load(std::memory_order_relaxed)),
+                         mb(memory.ramBytesSi .load(std::memory_order_relaxed)), "\n");
+          }
+        }
+        // Reparto del TIEMPO DE PARED del hilo de CPU y de los workers. Es la vista que dice
+        // si el emulador va lento porque emular cuesta o porque alguien esta dormido esperando
+        // a otro: sin ella "CPU 14%" no distingue las dos cosas. El aparcamiento del RSP se
+        // saca aparte porque NO es ocupacion (ver rspParkNs).
+        {
+          double ws = std::chrono::duration<double>(std::chrono::steady_clock::now() - hbT0).count();
+          auto pc = [&](u64 ns) { return ws > 0.0 ? ns / 1e9 / ws * 100.0 : 0.0; };
+          memory.sampleWorkerCpu();
+          std::fprintf(stderr, "[block] pared %.2f s | cpuWait %.1f%% (freno %.1f%% barSP %.1f%%"
+                       " barDP %.1f%%) | rsp ocupado %.1f%% aparcado %.1f%% | rdp ocupado %.1f%%"
+                       " | CPU real: cpu %.1f%% rsp %.1f%% rdp %.1f%%\n",
+                       ws, pc(memory.cpuWaitNs.load(std::memory_order_relaxed)),
+                       pc(memory.paceBlockNs.load(std::memory_order_relaxed)),
+                       pc(memory.spBarBlockNs.load(std::memory_order_relaxed)),
+                       pc(memory.dpBarBlockNs.load(std::memory_order_relaxed)),
+                       pc(memory.rspBusyNs.load(std::memory_order_relaxed)),
+                       pc(memory.rspParkNs.load(std::memory_order_relaxed)),
+                       pc(memory.rdpBusyNs.load(std::memory_order_relaxed)),
+                       pc(memory.cpuCpuNs.load(std::memory_order_relaxed)),
+                       pc(memory.rspCpuNs.load(std::memory_order_relaxed)),
+                       pc(memory.rdpCpuNs.load(std::memory_order_relaxed)));
+        }
+        if(cpu.mulDivMode)
+          std::fprintf(stderr, "[muldiv] %llu mult/div enteras (%.3f%% de las retiradas),"
+                       " %llu ciclos parados = %.3f de CPI\n",
+                       (unsigned long long)cpu.mulDivOps,
+                       cpu.retired ? 100.0 * (double)cpu.mulDivOps / (double)cpu.retired : 0.0,
+                       (unsigned long long)cpu.mulDivStall,
+                       cpu.retired ? (double)cpu.mulDivStall / (double)cpu.retired : 0.0);
+        if(cpu.fpuMode)
+          std::fprintf(stderr, "[fpu] %llu ops de coma flotante (%.3f%% de las retiradas),"
+                       " %llu ciclos parados = %.3f de CPI\n",
+                       (unsigned long long)cpu.fpuOps,
+                       cpu.retired ? 100.0 * (double)cpu.fpuOps / (double)cpu.retired : 0.0,
+                       (unsigned long long)cpu.fpuStall,
+                       cpu.retired ? (double)cpu.fpuStall / (double)cpu.retired : 0.0);
+      }
       std::lock_guard<std::mutex> lk(coreMutex);
       cpu.maxInsn = cpu.retired + 1;
       // El tope de instrucciones se comprueba en la guarda de depuracion del interprete, y
@@ -722,7 +1009,7 @@ auto System::run() -> void {
       // campo tras campo. Solo no se notaba porque el gate pasa ademas KESTREL_MAXINSN,
       // que ya la arma.
       cpu.refreshDebugArmed();
-      maxFlips = maxSyncs = 0;    // ya disparado: no repetir el aviso cada campo
+      maxFlips = maxSyncs = maxFields = 0;    // ya disparado: no repetir el aviso cada campo
     }
 
     if(hangSecs > 0.0) {
@@ -772,7 +1059,18 @@ auto System::run() -> void {
       // daba la mitad del numero real bajo el modelo de Count de este interprete.
       n64SpeedPct.store(cpuCps / clocks.insnTarget() * 100.0, std::memory_order_relaxed);
       rspSpeedPct.store(rspCps / clocks.rspTarget() * 100.0, std::memory_order_relaxed);
-      // RDRAM has no per-transaction cycle model yet → leave at 0 (unmodeled).
+      // Ocupacion del bus de RDRAM. El divisor NO es el tiempo de pared sino el tiempo de
+      // INVITADO transcurrido en la ventana (instrucciones retiradas / ritmo de retirada a
+      // tiempo real): el bus de la consola es de 562,5 MB/s pase lo que pase, asi que el
+      // porcentaje tiene que salir igual corra el emulador al 20% o al 300%. Con la ventana
+      // parada (juego en pausa, cero instrucciones) se deja el valor anterior en vez de
+      // dividir por cero. Que maestros entran y cuales no: Memory::kRdramPeakBps.
+      u64 ramCpu = cpu.ramCpuBytes, ramRcp = memory.ramBytesRcp();
+      double guestS = clocks.insnTarget() > 0.0 ? winInsn / clocks.insnTarget() : 0.0;
+      if(guestS > 1e-6)
+        rdramSpeedPct.store((double)((ramCpu - winRamCpu) + (ramRcp - winRamRcp))
+                            / guestS / Memory::kRdramPeakBps * 100.0, std::memory_order_relaxed);
+      winRamCpu = ramCpu; winRamRcp = ramRcp;
       // Ocupacion en la misma ventana: nanosegundos de pared que cada worker paso DENTRO
       // de un trabajo, y cuantos intercambios de buffer hubo (= fps de verdad del juego).
       u64 rdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
@@ -828,6 +1126,28 @@ auto System::run() -> void {
       std::fprintf(stderr, "[hb] jobs/s: rsp=%.0f rdp=%.0f\n",
                    memory.rspJobsRun.load(std::memory_order_relaxed) / s,
                    memory.rdpJobsRun.load(std::memory_order_relaxed) / s);
+      // Reparto del bus de RDRAM entre los siete maestros, en MB por segundo de INVITADO y
+      // como porcentaje del pico de la consola. Es la unica vista que dice si el palo largo
+      // de un juego es un chip o el bus: el RDP pinta a 562,5 MB/s como mucho, y con el VI
+      // releyendo el framebuffer entero cada campo el techo real baja. Ver kRdramPeakBps
+      // para lo que NO se cuenta (refresco, noveno bit, camino rapido del dynarec).
+      {
+        double gs = clocks.insnTarget() > 0.0 ? ri / clocks.insnTarget() : 0.0;
+        if(gs > 1e-6) {
+          auto mb = [&](u64 b) { return (double)b / 1e6 / gs; };
+          double tot = mb(cpu.ramCpuBytes + memory.ramBytesRcp());
+          std::fprintf(stderr, "[hb] rdram %.0f%% (%.1f MB/s invitado): cpu %.1f rdp %.1f vi %.1f"
+                               " rsp %.1f pi %.1f ai %.1f si %.1f\n",
+                       tot * 1e6 / Memory::kRdramPeakBps * 100.0, tot,
+                       mb(cpu.ramCpuBytes),
+                       mb(memory.ramBytesRdp.load(std::memory_order_relaxed)),
+                       mb(memory.ramBytesVi .load(std::memory_order_relaxed)),
+                       mb(memory.ramBytesRsp.load(std::memory_order_relaxed)),
+                       mb(memory.ramBytesPi .load(std::memory_order_relaxed)),
+                       mb(memory.ramBytesAi .load(std::memory_order_relaxed)),
+                       mb(memory.ramBytesSi .load(std::memory_order_relaxed)));
+        }
+      }
       // Hambre del sumidero de audio EN VIVO. `KESTREL_AUDIOSTAT` solo habla al cerrar, y
       // con ventana el emulador no cierra solo: sin esta linea un "se oye entrecortado" no
       // se puede localizar mientras pasa. `min` es el colchon minimo DE ESTA VENTANA de 5 s,
@@ -845,6 +1165,7 @@ auto System::run() -> void {
     }
   }
   hostprof::stop();
+  movie::finish();
   shutdown.store(true);
   if(wdog.joinable()) { shutdown.store(true); wdog.join(); }
   if(occTh.joinable()) occTh.join();

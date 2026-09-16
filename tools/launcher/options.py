@@ -53,6 +53,11 @@ CATEGORIES = [
     O("jit_nobranch", "KESTREL_JIT_NOBRANCH", "Sin absorcion de saltos", "bool", False, adv=True),
     O("jit_nojmp", "KESTREL_JIT_NOJMP", "Sin absorcion de J/JAL/JR", "bool", False, adv=True),
     O("jit_nofast", "KESTREL_JIT_NOFAST", "Sin prologo rapido", "bool", False, adv=True),
+    O("cpuidle", "KESTREL_CPUIDLE", "Salto del bucle ocioso de la CPU", "bool", True,
+      "El hilo ocioso de libultra es un salto a si mismo con NOP en la ranura de retardo: "
+      "no observa nada mas que Count, asi que se cobra de golpe hasta el mismo instante en "
+      "que la cadena del JIT habria vuelto a mirar los eventos. Apagarlo tiene que dar el "
+      "mismo resultado, solo mas lento.", tri=True),
     O("lle_ipl3", "KESTREL_LLE_IPL3", "IPL3 real (LLE)", "bool", False, adv=True,
       help="Arranca ejecutando el IPL3 del cartucho en vez del arranque HLE."),
   ]),
@@ -69,6 +74,28 @@ CATEGORIES = [
     O("rspsse", "KESTREL_NORSPSSE", "VU por SSE", "bool", True, invert=True,
       help="Unidad vectorial del RSP con instrucciones SSE del anfitrion en vez de escalar."),
     O("vecfast", "KESTREL_NOVECFAST", "Cargas vectoriales rapidas", "bool", True, invert=True),
+    O("rspidle", "KESTREL_RSPIDLE", "Aparcar el RSP en la espera del FIFO", "bool", True,
+      "Con el motor del RDP drenado, el sondeo del microcodigo sobre DPC_CURRENT no puede "
+      "cambiar de respuesta: se aparca el RSP hasta que la CPU archiva el siguiente tramo. "
+      "Apagarlo tiene que dar el mismo resultado.", tri=True),
+    O("spinpause", "KESTREL_SPINPAUSE", "Pista PAUSE en las esperas activas", "bool", True,
+      "La CPU y el RSP se vigilan girando sobre contadores que escribe el otro. PAUSE le dice "
+      "al nucleo que eso es una espera, para que no le robe la linea de cache ni las ranuras "
+      "de emision al hermano. Es solo una pista de anfitrion: el resultado sale identico.",
+      tri=True, adv=True),
+    O("barspin", "KESTREL_BARSPIN", "Vueltas de la barrera del SP", "int", 0, adv=True,
+      min=0, max=1000000,
+      help="0 = por defecto (2048). Cuanto gira la CPU en la barrera del RSP antes de dormir."),
+    O("rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", "int", 32768, adv=True,
+      min=0, max=10000000,
+      help="Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. "
+      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo con Parallel-RDP."),
+    O("rspspin", "KESTREL_RSPSPIN", "Vueltas del RSP ocioso", "int", 0, adv=True,
+      min=0, max=10000000,
+      help="Cuanto gira el hilo del RSP entre tareas antes de dormir. Medido neutro; 0 = dormir enseguida."),
+    O("dpspin", "KESTREL_DPSPIN", "Vueltas esperando al RDP", "int", 262144, adv=True,
+      min=0, max=10000000,
+      help="Cuanto gira la CPU (y el RSP) esperando a que el RDP cierre un tramo antes de dormir. 0 = dormir enseguida."),
     O("rspinline", "KESTREL_RSPINLINE", "RSP en linea", "bool", False, adv=True,
       help="Ejecuta la tarea del RSP dentro del hilo de CPU en vez de cederla al hilo del RCP."),
     O("rdpinline", "KESTREL_RDPINLINE", "RDP en linea", "bool", False, adv=True),
@@ -87,6 +114,14 @@ CATEGORIES = [
             "quita ralentizacion, pero cambia cuanto trabajo hace el juego entre campos de "
             "video: hay juegos que atan su logica al reloj y se rompen.",
        options=[
+    O("speedmode", "KESTREL_SPEEDMODE", "Modo de velocidad", "choice", "libre",
+      values=[["libre", "Libre - manda lo que se elija aqui debajo"],
+              ["hw", "Fiel a consola - relojes N64 exactos y 59.94 campos/s"]],
+      help="Fiel a consola ignora los multiplicadores y el CPI puesto a mano, y con ventana "
+           "clava el campo de video a 59.94 Hz: el juego ve el mismo tiempo que veria en la "
+           "maquina real. Sin ventana no limita el ritmo de pared, porque no hay pantalla que "
+           "respetar y el resultado no cambia. Es lo que hay que poner para las demos que "
+           "cuentan campos (la liana de Donkey Kong 64) y para comparar contra hardware."),
     O("oc_link", None, "Ligar los tres dominios", "bool", True,
       "Un solo mando para CPU, RSP y RDRAM."),
     O("oc_all", "KESTREL_OC", "Multiplicador global", "float", 1.0,
@@ -129,6 +164,22 @@ CATEGORIES = [
       help="Vacio = usar la escala. Ejemplo: 1600x900. Manda sobre la escala."),
     O("fullscreen", "KESTREL_FULLSCREEN", "Pantalla completa", "bool", False,
       "Usa el modo actual del monitor primario; no cambia la resolucion del escritorio.", tri=True),
+    O("aspect", "KESTREL_ASPECT", "Relacion de aspecto", "choice", "4:3",
+      values=[["4:3", "4:3 - la senal que saca el VI (fiel)"],
+              ["16:9", "16:9 - estirar la imagen anamorfica"],
+              ["estirar", "Llenar la ventana (deforma)"]],
+      help="El N64 saca SIEMPRE 4:3. 16:9 no ensancha el campo de vision -- eso solo lo "
+           "puede hacer el juego -- sino que estira la imagen que ya generan aplastada los "
+           "juegos con modo panoramico propio (Perfect Dark, GoldenEye, Turok, Rush 2)."),
+    O("upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", "choice", "1",
+      values=[["1", "1x - resolucion nativa"], ["2", "2x"], ["4", "4x"], ["8", "8x"]],
+      help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con "
+           "paraLLEl-RDP; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio "
+           "framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen."),
+    O("ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", "bool", False, adv=True,
+      help="Con escalado interno, al devolver la imagen ampliada al framebuffer del juego "
+           "promedia las NxN muestras en vez de coger una. Antialiasing gratis en los "
+           "efectos que releen el framebuffer, a cambio de una pasada mas."),
     O("hud", "KESTREL_HUD_OFF", "HUD de telemetria sobre la imagen", "bool", True, invert=True),
     O("noaa", "KESTREL_NOAA", "Antialiasing del RDP", "bool", True, invert=True,
       help="SoftRDP. Apagarlo sube el relleno y cambia el borde de los poligonos."),
@@ -161,6 +212,58 @@ CATEGORIES = [
               ["sram256k", "SRAM 256 kbit"], ["sram768k", "SRAM 768 kbit"],
               ["flash1m", "FlashRAM 1 Mbit"]],
       help="Se resuelve por ID de cartucho; esto lo fuerza cuando la ROM no esta en la tabla."),
+    O("tvtype", "KESTREL_TVTYPE", "Norma de television", "choice", "auto",
+      values=[["auto", "Automatico - por region del cartucho"],
+              ["ntsc", "NTSC (60 Hz)"], ["pal", "PAL (50 Hz)"], ["mpal", "PAL-M (60 Hz)"]],
+      help="Lo que el juego lee en osTvType, y de donde sale el ritmo de campo. En la consola "
+           "de verdad lo fija la maquina, y la region del cartucho coincide con ella; algunos "
+           "juegos se niegan a funcionar con la norma equivocada."),
+    O("rdram", "KESTREL_RDRAM", "Memoria RDRAM", "choice", "8",
+      values=[["8", "8 MB - con Expansion Pak"], ["4", "4 MB - consola de serie"]],
+      help="La N64 trae 4 MB y el Expansion Pak la sube a 8. Los juegos lo leen en "
+           "osMemSize y algunos cambian de comportamiento: reservan menos buferes o "
+           "bajan la resolucion con 4 MB, y Donkey Kong 64 y el modo de un jugador de "
+           "Perfect Dark EXIGEN los 8. La RDRAM se dimensiona una sola vez, asi que "
+           "cambiarlo pide relanzar, y un estado guardado con un tamano no se puede "
+           "cargar con el otro."),
+    O("cheats", "KESTREL_CHEATS", "Fichero de trucos (.cht)", "path", "",
+      help="Codigos tipo GameShark, aplicados en cada campo de video igual que el cartucho "
+           "de verdad. Sin fichero se usa el .cht que haya al lado de la ROM con su mismo "
+           "nombre. Formato: [Nombre] abre un truco ([-Nombre] lo deja apagado) y debajo van "
+           "las lineas AAAAAAAA VVVV tal como se publican."),
+  ]),
+
+  # ============================================================ peliculas (TAS)
+  dict(id="movie", label="Peliculas", icon="cart",
+       desc="Grabacion y reproduccion de entradas (.k64m). Lo que se graba no es lo que "
+            "aprieta el jugador sino lo que el JUEGO LEE en cada lectura del joybus, que es "
+            "la unica frontera que el invitado percibe.", options=[
+    O("movie_rec", "KESTREL_MOVIE_REC", "Grabar entradas en", "path", "",
+      help="Fichero .k64m donde apuntar cada lectura de botones. Se graba desde el arranque "
+           "en frio: una repeticion vale desde el encendido, no desde media partida."),
+    O("movie_play", "KESTREL_MOVIE_PLAY", "Reproducir entradas de", "path", "",
+      help="Sustituye el mando por el de la pelicula. Se comprueban los CRC del cartucho y "
+           "no se reproduce una pelicula de otro juego. Al acabar la cinta vuelve a mandar "
+           "el mando del anfitrion. Con las dos casillas puestas manda esta."),
+  ]),
+
+  # ============================================================ rebobinado
+  dict(id="rewind", label="Rebobinado", icon="cart",
+       desc="Deshacer lo que acaba de pasar. Cuesta CPU y memoria: cada foto obliga a parar "
+            "el RCP y a recorrer el estado entero, asi que viene apagado y solo se paga si "
+            "se enciende.", options=[
+    O("rewind", "KESTREL_REWIND", "Activar rebobinado", "bool", False,
+      "Con la tecla de retroceso el juego va hacia atras mientras se mantenga apretada. "
+      "Apagado no cuesta nada; encendido, el emulador fotografia la maquina cada pocos "
+      "campos (parando el RDP y el RSP en cada foto) y guarda solo las diferencias."),
+    O("rewind_fields", "KESTREL_REWIND_FIELDS", "Campos entre fotos", "int", 2, min=1, max=60,
+      help="Cada cuantos campos de video se toma una foto. Menos = rebobinado mas fino y "
+           "mas caro; mas = mas barato y a saltos mas gordos. 2 son unas 30 fotos por "
+           "segundo, que es el paso con el que se juega."),
+    O("rewind_mb", "KESTREL_REWIND_MB", "Memoria para la cinta (MB)", "int", 256, min=8, max=4096,
+      help="Tope de memoria de las diferencias. Al llenarse se tira el pasado LEJANO, que "
+           "es lo que no se va a pedir. Cuanto dura depende del juego: lo que ocupa una "
+           "foto es lo que el juego cambia entre foto y foto."),
   ]),
 
   # ============================================================ telemetria / MCP
@@ -359,6 +462,14 @@ def to_env(profile):
     # "auto" en el limitador significa "no digas nada y deja decidir al emulador".
     if str(p.get("throttle", "auto")) == "auto":
         env.pop("KESTREL_THROTTLE", None)
+
+    # Fiel a consola: ni multiplicadores ni CPI a mano viajan en el entorno. El emulador ya
+    # los ignora en este modo, pero dejarlos puestos haria creer que siguen valiendo.
+    if str(p.get("speedmode", "libre")) == "hw":
+        for k in ("KESTREL_OC", "KESTREL_OC_CPU", "KESTREL_OC_RSP", "KESTREL_OC_RDRAM",
+                  "KESTREL_CPI"):
+            env.pop(k, None)
+        env["KESTREL_THROTTLE"] = "1"
 
     # El plugin grafico decide EJECUTABLE (compilacion), no solo variable. "auto" no dice
     # nada y deja el defecto del binario, que es la GPU cuando el backend esta compilado;

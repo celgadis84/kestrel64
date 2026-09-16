@@ -20,6 +20,11 @@ la carga entera en vez de repartir bytes desplazados por toda la maquina. La cab
 magia, version, CRC1/CRC2 de la ROM y el tamano de RDRAM: un estado de OTRO juego se rechaza
 antes de tocar nada.
 
+La version va por **5**. La 5 anadio la seccion `MOVI`: el sondeo por el que va la pelicula
+de entradas, para que cargar un estado rebobine la cinta con el juego (ver `docs/TAS.md`).
+El campo va aunque no haya pelicula -- el formato no puede depender de una variable de
+entorno. Los estados de la 4 no se cargan.
+
 ## Por que se guardan las caches
 
 La VR4300 **no tiene coherencia de cache**. Una linea sucia de D-cache es un dato que solo

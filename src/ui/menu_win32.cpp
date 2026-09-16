@@ -1,11 +1,15 @@
 #include "menu.hpp"
 #include "optdefs.hpp"
 #include "profile.hpp"
+#include "library.hpp"
 #include "../core/runtime.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
+#include <commctrl.h>
+#include <windowsx.h>   // GET_X_LPARAM: el clic sobre el dibujo del mando
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -36,12 +40,12 @@ bool     g_menuHidden = false;  // barra retirada (pantalla completa)
 constexpr UINT kMsgSync = WM_APP + 17;
 
 enum : UINT {
-  kOpenRom = 0x8100, kRelaunch, kQuit,
+  kOpenRom = 0x8100, kOpenFile, kRelaunch, kQuit,
   kPause, kReset, kSaveState, kLoadState, kNextSlot,
   kFull, kHud,
   kAudioOn, kPadCfg, kAllOpts, kAbout,
   kScale1  = 0x8140,              // +0..+6 (escala 1x..7x)
-  kThrAuto = 0x8160, kThrOn, kThrOff,
+  kThrHw = 0x8160, kThrAuto, kThrOn, kThrOff,
   kSlot0   = 0x8170,              // +0..+9
   // El volumen gasta 101 identificadores seguidos (el valor ES el desplazamiento), asi que
   // va el ULTIMO y con sitio de sobra: CheckMenuRadioItem desmarca todo el rango que se le
@@ -73,6 +77,18 @@ auto profileWindowSize(const Profile& p, int& w, int& h) -> void {
   }
 }
 
+// El perfil trae overclock guardado? El modo fiel a consola lo anula, pero eso solo se puede
+// hacer al montar los relojes, o sea relanzando; con todo a 1.00x no hay nada que anular y el
+// cambio es instantaneo.
+auto ocNotStock(const Profile& p) -> bool {
+  static const char* kIds[4] = {"oc_all", "oc_cpu", "oc_rsp", "oc_rdram"};
+  for(const char* id : kIds) {
+    double v = std::atof(p.get(id).c_str());
+    if(v > 0.0 && std::fabs(v - 1.0) > 1e-9) return true;
+  }
+  return false;
+}
+
 // Aplica al vuelo lo que se puede aplicar al vuelo. El resto del perfil ya esta guardado y
 // solo se hace efectivo relanzando.
 auto applyLive(const Profile& p, bool windowToo) -> void {
@@ -82,6 +98,15 @@ auto applyLive(const Profile& p, bool windowToo) -> void {
   rt::volume.store(vol < 0 ? 0 : vol > 100 ? 100 : vol);
   std::string th = p.get("throttle");
   rt::throttle.store(th == "1" ? 1 : th == "0" ? 0 : -1);
+  // Relacion de aspecto: "4:3", "16:9" o cualquier "W:H"/"WxH"; lo que no se parsee (o sea
+  // "estirar") va a 0:0, que el presentador entiende como llenar la ventana entera.
+  {
+    int aw = 0, ah = 0;
+    if(std::sscanf(p.get("aspect").c_str(), "%d%*[:xX]%d", &aw, &ah) != 2 || aw <= 0 || ah <= 0)
+      { aw = 0; ah = 0; }
+    rt::aspectW.store(aw);
+    rt::aspectH.store(ah);
+  }
   if(windowToo) {
     int w = 0, h = 0;
     profileWindowSize(p, w, h);
@@ -128,7 +153,8 @@ auto buildMenu() -> void {
   g_menu = CreateMenu();
 
   HMENU file = CreatePopupMenu();
-  addItem(file, kOpenRom, "&Abrir ROM...\tCtrl+O");
+  addItem(file, kOpenRom, "&Biblioteca de ROMs...\tCtrl+O");
+  addItem(file, kOpenFile, "Abrir un &fichero...");
   addItem(file, kRelaunch, "&Reiniciar emulador");
   addSep(file);
   addItem(file, kQuit, "&Salir");
@@ -149,6 +175,8 @@ auto buildMenu() -> void {
   addSub(emu, slot, "&Ranura");
   addSep(emu);
   HMENU thr = CreatePopupMenu();
+  addItem(thr, kThrHw, "Fiel a consola (velocidad del N64 real)", false, true);
+  addSep(thr);
   addItem(thr, kThrAuto, "Automatico (limita si hay ventana)", true, true);
   addItem(thr, kThrOn, "Siempre a 59.94 campos/s", false, true);
   addItem(thr, kThrOff, "Sin limite (a tope)", false, true);
@@ -226,8 +254,9 @@ auto syncMenu() -> void {
     CheckMenuRadioItem(g_menu, kSlot0, kSlot0 + 9, kSlot0 + (UINT)sl, MF_BYCOMMAND);
   }
   int th = rt::throttle.load();
-  CheckMenuRadioItem(g_menu, kThrAuto, kThrOff,
-                     th < 0 ? kThrAuto : th ? kThrOn : kThrOff, MF_BYCOMMAND);
+  const bool hw = g_prof.get("speedmode") == "hw";
+  CheckMenuRadioItem(g_menu, kThrHw, kThrOff,
+                     hw ? kThrHw : th < 0 ? kThrAuto : th ? kThrOn : kThrOff, MF_BYCOMMAND);
   DrawMenuBar(g_game);
 }
 
@@ -313,6 +342,7 @@ struct Row {
   HWND ctl = nullptr;
   HWND label = nullptr;
   HWND extra = nullptr;   // boton "..." de las rutas
+  HWND slider = nullptr;  // barra deslizante de los numericos acotados (ver sliderTicks)
 };
 
 struct OptDlg {
@@ -327,6 +357,85 @@ OptDlg g_dlg;
 
 constexpr int kIdList = 700, kIdAdv = 701, kIdApply = 702, kIdSave = 703, kIdClose = 704;
 constexpr int kIdPanel = 705, kIdCtl0 = 1000;
+
+// ------------------------------------------------------------------ numericos con barra
+//
+// Un multiplicador de overclock (0.25x .. 8x en pasos de 0.05) se ajusta a tientas en una
+// caja de texto: hay que saber de memoria el rango y teclear el numero. Con barra el rango
+// se ve, el paso lo impone el control y no hace falta validar nada. La caja se queda al
+// lado, editable, para teclear un valor exacto; barra y caja se espejan.
+//
+// Solo llevan barra los numericos ACOTADOS y de recorrido corto. Un tope como el perro
+// guardian (0..100000 s) o el muestreo de solape no cabe en una barra util: esos siguen
+// siendo caja de texto.
+auto sliderStep(const Option& o) -> double {
+  if(o.step > 0) return o.step;
+  return o.type == OType::Int ? 1.0 : 0.0;
+}
+
+// Numero de posiciones de la barra, o 0 si esta opcion no debe llevarla.
+auto sliderTicks(const Option& o) -> int {
+  if(o.type != OType::Int && o.type != OType::Float) return 0;
+  if(!(o.max > o.min)) return 0;
+  double st = sliderStep(o);
+  if(st <= 0) return 0;
+  double n = (o.max - o.min) / st;
+  if(n < 1 || n > 1000) return 0;   // recorrido inutilizable en una barra
+  return (int)(n + 0.5);
+}
+
+// Texto canonico de un numero, con las mismas reglas que sanitize (los float sin ceros
+// de cola, para que "1" no se guarde como "1.0000" y el perfil no cambie solo).
+auto fmtNum(const Option& o, double x) -> std::string {
+  char out[64];
+  if(o.type == OType::Int) {
+    std::snprintf(out, sizeof out, "%lld", (long long)(x < 0 ? x - 0.5 : x + 0.5));
+    return out;
+  }
+  std::snprintf(out, sizeof out, "%.4f", x);
+  std::string t(out);
+  while(t.size() > 1 && t.back() == '0') t.pop_back();
+  if(!t.empty() && t.back() == '.') t.pop_back();
+  return t;
+}
+
+auto valToPos(const Option& o, double x) -> int {
+  double st = sliderStep(o);
+  if(st <= 0) return 0;
+  if(x < o.min) x = o.min;
+  if(x > o.max) x = o.max;
+  int pos = (int)((x - o.min) / st + 0.5);
+  int n = sliderTicks(o);
+  if(pos < 0) pos = 0;
+  if(pos > n) pos = n;
+  return pos;
+}
+
+auto posToVal(const Option& o, int pos) -> double { return o.min + pos * sliderStep(o); }
+
+// La barra manda: mueve la caja. Bandera para que el EN_CHANGE que dispara esto no
+// rebote y vuelva a mover la barra bajo el dedo del usuario.
+bool g_syncing = false;
+
+auto sliderToEdit(const Row& r) -> void {
+  if(!r.slider || !r.ctl) return;
+  int pos = (int)SendMessageA(r.slider, TBM_GETPOS, 0, 0);
+  g_syncing = true;
+  SetWindowTextA(r.ctl, fmtNum(*r.opt, posToVal(*r.opt, pos)).c_str());
+  g_syncing = false;
+}
+
+// La caja manda: mueve la barra. Texto a medio teclear (vacio, "0.") se ignora en vez de
+// saltar la barra al minimo mientras se escribe.
+auto editToSlider(const Row& r) -> void {
+  if(!r.slider || !r.ctl || g_syncing) return;
+  char buf[64] = {0};
+  GetWindowTextA(r.ctl, buf, sizeof buf - 1);
+  char* end = nullptr;
+  double x = std::strtod(buf, &end);
+  if(end == buf) return;
+  SendMessageA(r.slider, TBM_SETPOS, TRUE, (LPARAM)valToPos(*r.opt, x));
+}
 
 auto rowValue(const Row& r) -> std::string {
   char buf[512] = {0};
@@ -363,16 +472,7 @@ auto sanitize(const Row& r, const std::string& raw, const std::string& prev) -> 
     if(x < o.min) x = o.min;
     if(x > o.max) x = o.max;
   }
-  char out[64];
-  if(o.type == OType::Int) std::snprintf(out, sizeof out, "%lld", (long long)(x < 0 ? x - 0.5 : x + 0.5));
-  else {
-    std::snprintf(out, sizeof out, "%.4f", x);
-    std::string t(out);
-    while(t.size() > 1 && t.back() == '0') t.pop_back();
-    if(!t.empty() && t.back() == '.') t.pop_back();
-    return t;
-  }
-  return out;
+  return fmtNum(o, x);
 }
 
 auto commitPanel(Profile& p) -> void {
@@ -400,6 +500,7 @@ auto clearPanel() -> void {
     if(r.ctl) DestroyWindow(r.ctl);
     if(r.label) DestroyWindow(r.label);
     if(r.extra) DestroyWindow(r.extra);
+    if(r.slider) DestroyWindow(r.slider);
   }
   g_dlg.rows.clear();
 }
@@ -444,14 +545,30 @@ auto buildPanel() -> void {
         }
         SendMessageA(r.ctl, CB_SETCURSEL, sel, 0);
       } else {
+        int ticks = sliderTicks(o);
+        // Con barra la caja se encoge y se va a la derecha; sin barra ocupa todo el ancho
+        // como siempre.
+        int editX = ticks ? 556 : 316, editW = ticks ? 64 : (o.type == OType::Path ? 260 : 300);
+        if(ticks) {
+          r.slider = CreateWindowExA(0, TRACKBAR_CLASSA, "",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+                                     316, y, 232, 24, g_dlg.panel,
+                                     (HMENU)(INT_PTR)(kIdCtl0 + (int)g_dlg.rows.size()),
+                                     nullptr, nullptr);
+          SendMessageA(r.slider, TBM_SETRANGE, TRUE, MAKELPARAM(0, ticks));
+          SendMessageA(r.slider, TBM_SETPAGESIZE, 0, (LPARAM)(ticks / 10 + 1));
+        }
         r.ctl = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", g_prof.get(o.id).c_str(),
                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                                316, y, o.type == OType::Path ? 260 : 300, 22, g_dlg.panel,
-                                (HMENU)(INT_PTR)(kIdCtl0 + (int)g_dlg.rows.size()),
+                                editX, y, editW, 22, g_dlg.panel,
+                                (HMENU)(INT_PTR)(kIdCtl0 + (int)g_dlg.rows.size() + 500),
                                 nullptr, nullptr);
+        // La barra arranca donde diga el perfil, no en el minimo.
+        if(ticks) editToSlider(r);
       }
     }
     if(r.ctl) SendMessageA(r.ctl, WM_SETFONT, (WPARAM)f, TRUE);
+    if(r.slider) SendMessageA(r.slider, WM_SETFONT, (WPARAM)f, TRUE);
     if(r.label) SendMessageA(r.label, WM_SETFONT, (WPARAM)f, TRUE);
     y += 26;
     if(o.help && *o.help) {
@@ -505,6 +622,20 @@ auto scrollPanel(int newPos) -> void {
 
 LRESULT CALLBACK panelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch(m) {
+    // Las barras son hijas del panel: sus avisos de movimiento llegan aqui. WM_HSCROLL no
+    // choca con el WM_VSCROLL del propio panel (la barra es horizontal).
+    case WM_HSCROLL: {
+      if(!l) break;
+      for(const Row& r : g_dlg.rows)
+        if(r.slider == (HWND)l) { sliderToEdit(r); return 0; }
+      break;
+    }
+    case WM_COMMAND: {
+      if(HIWORD(w) != EN_CHANGE) break;
+      for(const Row& r : g_dlg.rows)
+        if(r.ctl == (HWND)l && r.slider) { editToSlider(r); return 0; }
+      break;
+    }
     case WM_VSCROLL: {
       SCROLLINFO si = {};
       si.cbSize = sizeof si;
@@ -597,6 +728,9 @@ LRESULT CALLBACK optProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 auto optionsDialogThread() -> void {
   static bool cls = false;
   if(!cls) {
+    // Sin esto la clase de la barra deslizante no existe y CreateWindowEx devuelve nullptr.
+    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_BAR_CLASSES};
+    InitCommonControlsEx(&icc);
     WNDCLASSA wc = {};
     wc.lpfnWndProc = optProc;
     wc.hInstance = GetModuleHandleA(nullptr);
@@ -680,15 +814,22 @@ auto optionsDialogThread() -> void {
 
 struct PadDlg {
   HWND win = nullptr;
+  int  port = 0;              // conector que se esta editando (0..3)
+  HWND cbPort = nullptr, ckOn = nullptr, cbDev = nullptr, cbAcc = nullptr;
+  HWND stHint = nullptr;      // que columna se puede tocar y por que
   std::vector<HWND> keyBtn;
   std::vector<HWND> gpCombo;
-  int capture = -1;   // fila esperando una tecla
+  std::vector<int>  devVal;   // fila del combo de aparato -> valor de rt::padDev
+  int capture = -1;           // fila esperando una tecla
+  int sel = 0;                // control resaltado en el dibujo del mando
+  u32 joySeen = 0xffffffffu;  // generacion de la lista de mandos ya volcada al combo
 };
 
 PadDlg g_pad;
 
 constexpr int kIdPadKey0 = 2000, kIdPadGp0 = 2100;
 constexpr int kIdPadOk = 2300, kIdPadCancel = 2301, kIdPadDefaults = 2302;
+constexpr int kIdPadPort = 2303, kIdPadConn = 2304, kIdPadDev = 2305, kIdPadAcc = 2306;
 
 // Nombres GLFW de los botones de mando, en el mismo orden que la tabla de present.cpp.
 const char* const kGpNames[] = {
@@ -697,6 +838,162 @@ const char* const kGpNames[] = {
   "LEFT_TRIGGER", "RIGHT_TRIGGER",
 };
 constexpr int kGpCount = (int)(sizeof kGpNames / sizeof kGpNames[0]);
+
+// ------------------------------------------------------- dibujo del mando de Nintendo 64
+// El dibujo no es adorno: es la forma de decir QUE se esta asignando sin un parrafo de
+// texto. Se pincha el boton en el mando y el dialogo captura la tecla de esa fila.
+// Coordenadas en un lienzo fijo de 320x300 pegado en la esquina kArtX/kArtY.
+
+constexpr int kArtX = 12, kArtY = 78;
+
+struct PadSpot {
+  const char* id;             // id del control en la tabla de padControls()
+  int x, y, w, h;             // rectangulo del lienzo (elipse inscrita si round)
+  bool round;
+  COLORREF fill;
+  COLORREF ink;               // color del rotulo
+  const wchar_t* cap;         // rotulo dentro de la figura (Unicode: lleva flechas)
+};
+
+// Proporciones sacadas del mando gris de Nintendo 64 visto de frente: cuerpo ancho con
+// tres mangos, cruceta arriba a la izquierda, START rojo en el centro, stick analogico
+// debajo, B verde y A azul a la derecha y el rombo de cuatro C amarillos a su derecha.
+const PadSpot kSpots[] = {
+  // Gatillos de arriba, sobresaliendo del borde superior del cuerpo.
+  {"L",     34,  16,  86, 24, false, RGB(196, 196, 196), RGB(30, 30, 30),  L"L"},
+  {"R",    200,  16,  86, 24, false, RGB(196, 196, 196), RGB(30, 30, 30),  L"R"},
+  // Cruceta: cuatro brazos sobre el cubo central.
+  {"DU",    50,  58,  24, 32, false, RGB(78, 78, 84),    RGB(235, 235, 235), L"▲"},
+  {"DD",    50, 110,  24, 32, false, RGB(78, 78, 84),    RGB(235, 235, 235), L"▼"},
+  {"DL",    20,  88,  32, 24, false, RGB(78, 78, 84),    RGB(235, 235, 235), L"◀"},
+  {"DR",    72,  88,  32, 24, false, RGB(78, 78, 84),    RGB(235, 235, 235), L"▶"},
+  // START, en el centro del cuerpo.
+  {"START",143,  55,  34, 34, true,  RGB(196, 36, 36),   RGB(255, 255, 255), L""},
+  // Botones de accion.
+  {"B",    188,  68,  32, 32, true,  RGB(36, 150, 66),   RGB(255, 255, 255), L"B"},
+  {"A",    213,  97,  38, 38, true,  RGB(46, 84, 190),   RGB(255, 255, 255), L"A"},
+  // Rombo de botones C.
+  {"CU",   265,  40,  22, 22, true,  RGB(242, 186, 32),  RGB(60, 40, 0),   L"▲"},
+  {"CD",   265,  92,  22, 22, true,  RGB(242, 186, 32),  RGB(60, 40, 0),   L"▼"},
+  {"CL",   241,  66,  22, 22, true,  RGB(242, 186, 32),  RGB(60, 40, 0),   L"◀"},
+  {"CR",   289,  66,  22, 22, true,  RGB(242, 186, 32),  RGB(60, 40, 0),   L"▶"},
+  // Z, en la cara de atras del mango central.
+  {"Z",    140, 232,  40, 42, false, RGB(112, 112, 118), RGB(245, 245, 245), L"Z"},
+  // Las cuatro direcciones del stick, entre la cabeza y el anillo.
+  {"SY+",  150, 115,  20, 20, true,  RGB(226, 226, 226), RGB(50, 50, 50),  L"▲"},
+  {"SY-",  150, 165,  20, 20, true,  RGB(226, 226, 226), RGB(50, 50, 50),  L"▼"},
+  {"SX-",  125, 140,  20, 20, true,  RGB(226, 226, 226), RGB(50, 50, 50),  L"◀"},
+  {"SX+",  175, 140,  20, 20, true,  RGB(226, 226, 226), RGB(50, 50, 50),  L"▶"},
+};
+constexpr int kSpotCount = (int)(sizeof kSpots / sizeof kSpots[0]);
+
+auto spotRow(const char* id) -> int {
+  for(int i = 0; i < padControlCount(); i++) if(!std::strcmp(padControls()[i].id, id)) return i;
+  return -1;
+}
+
+// Rotulo serigrafiado (los que van impresos en el plastico, no dentro del boton).
+auto padSilk(HDC dc, const wchar_t* s, int x0, int y0, int x1, int y1) -> void {
+  RECT r = {kArtX + x0, kArtY + y0, kArtX + x1, kArtY + y1};
+  DrawTextW(dc, s, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+auto drawPad(HDC dc) -> void {
+  auto X = [](int v) { return kArtX + v; };
+  auto Y = [](int v) { return kArtY + v; };
+
+  HPEN edge = CreatePen(PS_SOLID, 1, RGB(108, 108, 112));
+  HBRUSH body = CreateSolidBrush(RGB(208, 208, 206));
+  HBRUSH grip = CreateSolidBrush(RGB(190, 190, 188));
+  HBRUSH ring = CreateSolidBrush(RGB(118, 118, 122));
+  HBRUSH knob = CreateSolidBrush(RGB(232, 232, 230));
+  HGDIOBJ oldPen = SelectObject(dc, edge);
+  HGDIOBJ oldBr = SelectObject(dc, grip);
+
+  // Los tres mangos primero: el cuerpo se pinta encima y les tapa el arranque.
+  POINT gl[] = {{X(30), Y(150)}, {X(96), Y(150)}, {X(88), Y(286)}, {X(36), Y(258)}};
+  POINT gc[] = {{X(128), Y(150)}, {X(192), Y(150)}, {X(184), Y(296)}, {X(136), Y(296)}};
+  POINT gr[] = {{X(224), Y(150)}, {X(290), Y(150)}, {X(284), Y(258)}, {X(232), Y(286)}};
+  Polygon(dc, gl, 4);
+  Polygon(dc, gc, 4);
+  Polygon(dc, gr, 4);
+
+  SelectObject(dc, body);
+  RoundRect(dc, X(6), Y(40), X(314), Y(172), 56, 56);
+
+  // Cubo de la cruceta, debajo de los cuatro brazos.
+  SelectObject(dc, ring);
+  RoundRect(dc, X(46), Y(84), X(78), Y(116), 6, 6);
+
+  // Anillo y cabeza del stick analogico.
+  Ellipse(dc, X(126), Y(116), X(194), Y(184));
+  SelectObject(dc, knob);
+  Ellipse(dc, X(143), Y(133), X(177), Y(167));
+
+  SetBkMode(dc, TRANSPARENT);
+  HGDIOBJ oldFont = SelectObject(dc, panelFont());
+
+  for(int i = 0; i < kSpotCount; i++) {
+    const PadSpot& sp = kSpots[i];
+    HBRUSH br = CreateSolidBrush(sp.fill);
+    SelectObject(dc, br);
+    int x0 = X(sp.x), y0 = Y(sp.y), x1 = X(sp.x + sp.w), y1 = Y(sp.y + sp.h);
+    if(sp.round) Ellipse(dc, x0, y0, x1, y1);
+    else RoundRect(dc, x0, y0, x1, y1, 8, 8);
+    if(*sp.cap) {
+      RECT r = {x0, y0, x1, y1};
+      SetTextColor(dc, sp.ink);
+      DrawTextW(dc, sp.cap, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    SelectObject(dc, body);
+    DeleteObject(br);
+
+    // El control elegido en la lista se marca con un aro: asi se sabe siempre a que boton
+    // del mando de verdad corresponde la fila que se esta editando.
+    if(spotRow(sp.id) == g_pad.sel) {
+      HPEN hi = CreatePen(PS_SOLID, 3, RGB(230, 120, 20));
+      HGDIOBJ pb = SelectObject(dc, GetStockObject(NULL_BRUSH));
+      SelectObject(dc, hi);
+      if(sp.round) Ellipse(dc, x0 - 3, y0 - 3, x1 + 3, y1 + 3);
+      else RoundRect(dc, x0 - 3, y0 - 3, x1 + 3, y1 + 3, 10, 10);
+      SelectObject(dc, pb);
+      SelectObject(dc, edge);
+      DeleteObject(hi);
+    }
+  }
+
+  // Serigrafia del plastico, como en el mando de verdad.
+  SetTextColor(dc, RGB(70, 70, 70));
+  padSilk(dc, L"START", 130, 90, 190, 106);
+  padSilk(dc, L"C", 264, 66, 288, 88);
+  SetTextColor(dc, RGB(90, 90, 90));
+  padSilk(dc, L"Stick analogico", 116, 186, 204, 202);
+
+  SelectObject(dc, oldFont);
+  SelectObject(dc, oldBr);
+  SelectObject(dc, oldPen);
+  DeleteObject(edge);
+  DeleteObject(body);
+  DeleteObject(grip);
+  DeleteObject(ring);
+  DeleteObject(knob);
+}
+
+// Que control del mando hay bajo el punto (coordenadas de cliente). -1 si ninguno.
+auto padHit(int px, int py) -> int {
+  for(int i = kSpotCount - 1; i >= 0; i--) {
+    const PadSpot& sp = kSpots[i];
+    int x0 = kArtX + sp.x, y0 = kArtY + sp.y;
+    if(px < x0 || py < y0 || px >= x0 + sp.w || py >= y0 + sp.h) continue;
+    if(sp.round) {
+      double cx = x0 + sp.w / 2.0, cy = y0 + sp.h / 2.0;
+      double dx = (px - cx) / (sp.w / 2.0), dy = (py - cy) / (sp.h / 2.0);
+      if(dx * dx + dy * dy > 1.0) continue;
+    }
+    return spotRow(sp.id);
+  }
+  return -1;
+}
 
 // Codigo virtual de Windows -> nombre de tecla GLFW (el que entiende el fichero de mapeo).
 auto vkToGlfwName(WPARAM vk, LPARAM lp) -> std::string {
@@ -750,20 +1047,139 @@ auto vkToGlfwName(WPARAM vk, LPARAM lp) -> std::string {
   return {};
 }
 
+// ------------------------------------------------------------------ aparato del conector
+// La lista de mandos enchufados la publica el hilo de video (GLFW solo se puede consultar
+// desde ahi). Aqui solo se lee y se vuelca al combo.
+
+auto fillDevCombo() -> void {
+  u32 gen = rt::joyGen.load(std::memory_order_acquire);
+  std::string cur = padDevice(g_prof, g_pad.port);
+  // Un conector recien estrenado no trae aparato elegido. El combo tiene que ensenar algo,
+  // asi que se fija el teclado en el perfil en vez de dejar la lista diciendo "Teclado"
+  // mientras el nucleo no lee nada de ese puerto.
+  if(cur.empty()) { cur = "kb"; setPadDevice(g_prof, g_pad.port, cur); }
+  SendMessageA(g_pad.cbDev, CB_RESETCONTENT, 0, 0);
+  g_pad.devVal.clear();
+  auto add = [&](const char* text, int val) {
+    SendMessageA(g_pad.cbDev, CB_ADDSTRING, 0, (LPARAM)text);
+    g_pad.devVal.push_back(val);
+  };
+  add("Teclado", -1);
+  // El modo automatico (teclado y el primer mando a la vez) es el de siempre, pero solo
+  // tiene sentido en el jugador 1: en los demas el teclado moveria a dos a la vez.
+  if(g_pad.port == 0) add("Teclado + primer mando (automatico)", -2);
+
+  int sel = -1;
+  {
+    std::lock_guard<std::mutex> lk(rt::joyMx);
+    for(int j = 0; j < rt::kMaxJoy; j++) {
+      if(rt::joyName[j].empty()) continue;
+      add(rt::joyName[j].c_str(), j);
+      if(cur == rt::joyName[j]) sel = (int)g_pad.devVal.size() - 1;
+    }
+  }
+  if(cur == "kb") sel = 0;
+  else if(cur == "auto" && g_pad.port == 0) sel = 1;
+  else if(sel < 0 && !cur.empty()) {
+    // El mando guardado no esta enchufado ahora mismo: se deja en la lista para no perder
+    // la eleccion, y volvera a valer en cuanto aparezca.
+    add((cur + "  (no conectado)").c_str(), -3);
+    sel = (int)g_pad.devVal.size() - 1;
+  }
+  SendMessageA(g_pad.cbDev, CB_SETCURSEL, sel < 0 ? 0 : sel, 0);
+  g_pad.joySeen = gen;
+}
+
 auto padRefresh() -> void {
+  const int port = g_pad.port;
+  auto& map = g_prof.pad[port];
+  bool on = padOn(g_prof, port);
+  std::string dev = padDevice(g_prof, port);
+  bool kb = on && (dev == "kb" || dev == "auto" || dev.empty());
+  bool gp = on && dev != "kb";
+
   for(int i = 0; i < padControlCount(); i++) {
-    auto it = g_prof.pad.find(padControls()[i].id);
-    std::string k = it == g_prof.pad.end() ? "" : it->second.first;
+    auto it = map.find(padControls()[i].id);
+    std::string k = it == map.end() ? "" : it->second.first;
     SetWindowTextA(g_pad.keyBtn[i], k.empty() ? "(sin asignar)" : k.c_str());
-    std::string g = it == g_prof.pad.end() ? "" : it->second.second;
+    std::string g = it == map.end() ? "" : it->second.second;
     int sel = 0;
     for(int n = 0; n < kGpCount; n++) if(g == kGpNames[n]) { sel = n; break; }
     SendMessageA(g_pad.gpCombo[i], CB_SETCURSEL, sel, 0);
+    // Solo se deja tocar la columna del aparato con el que juega ese conector: un mapeo de
+    // teclado en un puerto que lee un mando no hace nada y confunde.
+    EnableWindow(g_pad.keyBtn[i], kb);
+    EnableWindow(g_pad.gpCombo[i], gp);
   }
+  // Una columna en gris sin explicacion parece un dialogo roto: se dice cual manda.
+  const char* hint = !on ? "Puerto desconectado."
+               : dev == "kb" ? "Teclado: edita la columna TECLA."
+               : (dev == "auto" || dev.empty())
+                   ? "Automatico: teclado y primer mando, las dos columnas."
+                   : "Mando: edita la columna BOTON DEL MANDO.";
+  SetWindowTextA(g_pad.stHint, hint);
+  SendMessageA(g_pad.ckOn, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+  SendMessageA(g_pad.cbAcc, CB_SETCURSEL, padAcc(g_prof, port), 0);
+  EnableWindow(g_pad.cbDev, on);
+  EnableWindow(g_pad.cbAcc, on);
+  InvalidateRect(g_pad.win, nullptr, TRUE);
+}
+
+// Vuelca el perfil al emulador que ya esta corriendo: puertos, accesorios, aparatos y los
+// cuatro ficheros de mapeo. El nucleo lo ve en el siguiente fotograma, sin reiniciar.
+auto padApply() -> void {
+  saveProfile(g_prof);
+  for(int q = 0; q < 4; q++) {
+    std::string f = writePadFile(g_prof, q);
+    char var[20];
+    std::snprintf(var, sizeof var, "KESTREL_PAD%d", q + 1);
+    // present.cpp lee la ruta del entorno: si el emulador se lanzo sin el lanzador, la
+    // variable aun no existe y sin esto el mapeo recien escrito no se cargaria nunca.
+    if(!f.empty()) _putenv_s(var, f.c_str());
+
+    rt::padOn[q].store(padOn(g_prof, q), std::memory_order_relaxed);
+    rt::padAcc[q].store(padAcc(g_prof, q), std::memory_order_relaxed);
+
+    std::string dev = padDevice(g_prof, q);
+    int val = -3;
+    if(dev == "kb") val = -1;
+    else if(dev == "auto") val = -2;
+    else if(!dev.empty()) {
+      std::lock_guard<std::mutex> lk(rt::joyMx);
+      for(int j = 0; j < rt::kMaxJoy; j++) if(rt::joyName[j] == dev) { val = j; break; }
+    }
+    rt::padDev[q].store(val, std::memory_order_relaxed);
+  }
+  rt::padGen.fetch_add(1, std::memory_order_release);
 }
 
 LRESULT CALLBACK padProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch(m) {
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(h, &ps);
+      drawPad(dc);
+      EndPaint(h, &ps);
+      return 0;
+    }
+    case WM_LBUTTONDOWN: {
+      int row = padHit(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+      if(row < 0) break;
+      std::lock_guard<std::mutex> lk(g_mu);
+      g_pad.sel = row;
+      // Pinchar el mando dibujado es elegir ese control: si el conector va por teclado se
+      // queda esperando la tecla; si va por mando, se abre su lista de botones.
+      if(IsWindowEnabled(g_pad.keyBtn[row])) {
+        g_pad.capture = row;
+        SetWindowTextA(g_pad.keyBtn[row], "pulsa una tecla (Esc = ninguna)");
+        SetFocus(h);
+      } else if(IsWindowEnabled(g_pad.gpCombo[row])) {
+        SetFocus(g_pad.gpCombo[row]);
+        SendMessageA(g_pad.gpCombo[row], CB_SHOWDROPDOWN, TRUE, 0);
+      }
+      InvalidateRect(h, nullptr, TRUE);
+      return 0;
+    }
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
       if(g_pad.capture < 0) break;
@@ -772,7 +1188,7 @@ LRESULT CALLBACK padProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       g_pad.capture = -1;
       std::string name = w == VK_ESCAPE ? std::string() : vkToGlfwName(w, l);
       const char* id = padControls()[row].id;
-      auto& e = g_prof.pad[id];
+      auto& e = g_prof.pad[g_pad.port][id];
       // Escape = desasignar a proposito; una tecla que no esta en la tabla de GLFW se
       // rechaza en vez de guardarse como basura que luego no responderia.
       if(w == VK_ESCAPE) e.first.clear();
@@ -786,38 +1202,89 @@ LRESULT CALLBACK padProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       int id = LOWORD(w);
       if(id >= kIdPadKey0 && id < kIdPadKey0 + padControlCount()) {
         g_pad.capture = id - kIdPadKey0;
+        g_pad.sel = g_pad.capture;
         SetWindowTextA(g_pad.keyBtn[g_pad.capture], "pulsa una tecla (Esc = ninguna)");
         SetFocus(h);
+        InvalidateRect(h, nullptr, TRUE);
         return 0;
       }
       if(id >= kIdPadGp0 && id < kIdPadGp0 + padControlCount() && HIWORD(w) == CBN_SELCHANGE) {
         int row = id - kIdPadGp0;
         LRESULT sel = SendMessageA(g_pad.gpCombo[row], CB_GETCURSEL, 0, 0);
-        if(sel >= 0 && sel < kGpCount) g_prof.pad[padControls()[row].id].second = kGpNames[sel];
+        if(sel >= 0 && sel < kGpCount)
+          g_prof.pad[g_pad.port][padControls()[row].id].second = kGpNames[sel];
+        g_pad.sel = row;
+        InvalidateRect(h, nullptr, TRUE);
+        return 0;
+      }
+      if(id == kIdPadPort && HIWORD(w) == CBN_SELCHANGE) {
+        LRESULT sel = SendMessageA(g_pad.cbPort, CB_GETCURSEL, 0, 0);
+        if(sel >= 0 && sel < 4) {
+          g_pad.port = (int)sel;
+          g_pad.capture = -1;
+          fillDevCombo();
+          padRefresh();
+        }
+        return 0;
+      }
+      if(id == kIdPadConn) {
+        bool on = SendMessageA(g_pad.ckOn, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        setPadOn(g_prof, g_pad.port, on);
+        padRefresh();
+        return 0;
+      }
+      if(id == kIdPadDev && HIWORD(w) == CBN_SELCHANGE) {
+        LRESULT sel = SendMessageA(g_pad.cbDev, CB_GETCURSEL, 0, 0);
+        if(sel >= 0 && sel < (LRESULT)g_pad.devVal.size()) {
+          int val = g_pad.devVal[(size_t)sel];
+          // Se guarda el NOMBRE del mando, no su numero: Windows renumera al enchufar y
+          // desenchufar, y un numero acabaria apuntando al mando de otro jugador.
+          std::string dev = val == -1 ? "kb" : val == -2 ? "auto" : std::string();
+          if(val >= 0) {
+            std::lock_guard<std::mutex> lk(rt::joyMx);
+            dev = rt::joyName[val];
+          } else if(val == -3) {
+            dev = padDevice(g_prof, g_pad.port);   // el guardado, que sigue sin aparecer
+          }
+          setPadDevice(g_prof, g_pad.port, dev);
+          padRefresh();
+        }
+        return 0;
+      }
+      if(id == kIdPadAcc && HIWORD(w) == CBN_SELCHANGE) {
+        LRESULT sel = SendMessageA(g_pad.cbAcc, CB_GETCURSEL, 0, 0);
+        if(sel >= 0 && sel <= 2) setPadAcc(g_prof, g_pad.port, (int)sel);
         return 0;
       }
       if(id == kIdPadDefaults) {
         Profile d = defaultProfile();
-        g_prof.pad = d.pad;
+        g_prof.pad[g_pad.port] = d.pad[g_pad.port];
         padRefresh();
         return 0;
       }
       if(id == kIdPadOk) {
-        saveProfile(g_prof);
-        writePadFile(g_prof);
-        // El emulador relee el fichero cuando sube la generacion: el mando queda reasignado
-        // sin salir de la partida.
-        rt::padGen.fetch_add(1, std::memory_order_release);
+        // El emulador relee los mapeos cuando sube la generacion: los mandos quedan
+        // reasignados sin salir de la partida.
+        padApply();
         DestroyWindow(h);
         return 0;
       }
       if(id == kIdPadCancel) { DestroyWindow(h); return 0; }
       return 0;
     }
+    case WM_TIMER:
+      // Enchufar o quitar un mando con el dialogo abierto tiene que verse en la lista de
+      // aparatos sin cerrarlo.
+      if(rt::joyGen.load(std::memory_order_acquire) != g_pad.joySeen) {
+        std::lock_guard<std::mutex> lk(g_mu);
+        fillDevCombo();
+      }
+      return 0;
     case WM_CLOSE:
       DestroyWindow(h);
       return 0;
     case WM_DESTROY:
+      KillTimer(h, 1);
       g_pad = PadDlg();
       g_padWin = nullptr;
       PostQuitMessage(0);
@@ -840,53 +1307,71 @@ auto padDialogThread() -> void {
   }
   g_pad = PadDlg();
   const int n = padControlCount();
-  HWND h = CreateWindowExA(0, "kestrel64_pad", "kestrel64 - mando 1",
-                           WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
-                           CW_USEDEFAULT, CW_USEDEFAULT, 560, 70 + n * 28 + 70,
+  const int listX = 350, rowY0 = 92, rowH = 26;
+  const int cliW = 760, cliH = rowY0 + n * rowH + 56;
+  RECT want = {0, 0, cliW, cliH};
+  const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME;
+  AdjustWindowRect(&want, style, FALSE);
+  HWND h = CreateWindowExA(0, "kestrel64_pad", "kestrel64 - mandos", style,
+                           CW_USEDEFAULT, CW_USEDEFAULT,
+                           want.right - want.left, want.bottom - want.top,
                            nullptr, nullptr, GetModuleHandleA(nullptr), nullptr);
   if(!h) return;
   g_padWin = h;
   g_pad.win = h;
   HFONT f = panelFont();
+  auto mk = [&](const char* cl, const char* txt, DWORD st, int x, int y, int w2, int h2,
+                int id) {
+    HWND c = CreateWindowExA(0, cl, txt, WS_CHILD | WS_VISIBLE | st, x, y, w2, h2, h,
+                             (HMENU)(INT_PTR)id, nullptr, nullptr);
+    SendMessageA(c, WM_SETFONT, (WPARAM)f, TRUE);
+    return c;
+  };
 
-  HWND hdr = CreateWindowExA(0, "STATIC",
-                             "Pulsa el boton de la columna TECLA y luego la tecla que quieras."
-                             " Esc la deja sin asignar.",
-                             WS_CHILD | WS_VISIBLE, 12, 8, 520, 20, h, nullptr, nullptr,
-                             nullptr);
-  SendMessageA(hdr, WM_SETFONT, (WPARAM)f, TRUE);
+  // Cabecera: que conector, si esta enchufado, con que se juega y que lleva en la ranura.
+  mk("STATIC", "Mando:", 0, 12, 14, 46, 18, 0);
+  g_pad.cbPort = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST, 62, 10, 90, 200, kIdPadPort);
+  for(int q = 1; q <= 4; q++) {
+    char t[16];
+    std::snprintf(t, sizeof t, "Mando %d", q);
+    SendMessageA(g_pad.cbPort, CB_ADDSTRING, 0, (LPARAM)t);
+  }
+  SendMessageA(g_pad.cbPort, CB_SETCURSEL, 0, 0);
+  g_pad.ckOn = mk("BUTTON", "Conectado", WS_TABSTOP | BS_AUTOCHECKBOX, 166, 12, 96, 20,
+                  kIdPadConn);
+  mk("STATIC", "Accesorio:", 0, 276, 14, 66, 18, 0);
+  g_pad.cbAcc = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST, 346, 10, 190, 200, kIdPadAcc);
+  for(const char* a : {"Ninguno", "Controller Pak", "Rumble Pak"})
+    SendMessageA(g_pad.cbAcc, CB_ADDSTRING, 0, (LPARAM)a);
+  mk("STATIC", "Aparato:", 0, 12, 46, 46, 18, 0);
+  g_pad.cbDev = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 62, 42, 474,
+                   300, kIdPadDev);
+
+  // Cabecera de las dos columnas: sin esto no se ve que la de la derecha es editable.
+  mk("STATIC", "Control", 0, listX, rowY0 - 20, 110, 18, 0);
+  mk("STATIC", "TECLA", 0, listX + 116, rowY0 - 20, 140, 18, 0);
+  mk("STATIC", "BOTON DEL MANDO", 0, listX + 262, rowY0 - 20, 134, 18, 0);
 
   for(int i = 0; i < n; i++) {
-    int y = 36 + i * 28;
-    HWND lb = CreateWindowExA(0, "STATIC", padControls()[i].label, WS_CHILD | WS_VISIBLE,
-                              12, y + 4, 150, 18, h, nullptr, nullptr, nullptr);
-    SendMessageA(lb, WM_SETFONT, (WPARAM)f, TRUE);
-    HWND kb = CreateWindowExA(0, "BUTTON", "", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                              168, y, 180, 24, h, (HMENU)(INT_PTR)(kIdPadKey0 + i),
-                              nullptr, nullptr);
-    SendMessageA(kb, WM_SETFONT, (WPARAM)f, TRUE);
-    HWND cb = CreateWindowExA(0, "COMBOBOX", "",
-                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-                              356, y, 170, 300, h, (HMENU)(INT_PTR)(kIdPadGp0 + i),
-                              nullptr, nullptr);
-    SendMessageA(cb, WM_SETFONT, (WPARAM)f, TRUE);
+    int y = rowY0 + i * rowH;
+    mk("STATIC", padControls()[i].label, 0, listX, y + 4, 110, 18, 0);
+    g_pad.keyBtn.push_back(mk("BUTTON", "", WS_TABSTOP, listX + 116, y, 140, 22,
+                              kIdPadKey0 + i));
+    HWND cb = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, listX + 262, y,
+                 134, 300, kIdPadGp0 + i);
     for(int k = 0; k < kGpCount; k++)
       SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)(*kGpNames[k] ? kGpNames[k] : "(ninguno)"));
-    g_pad.keyBtn.push_back(kb);
     g_pad.gpCombo.push_back(cb);
   }
-  int by = 44 + n * 28;
-  struct { int id; const char* t; int x; int w; } btn[] = {
-    {kIdPadDefaults, "Valores de fabrica", 12, 150},
-    {kIdPadOk, "Aplicar y cerrar", 300, 130},
-    {kIdPadCancel, "Cancelar", 440, 90},
-  };
-  for(auto& b : btn) {
-    HWND bh = CreateWindowExA(0, "BUTTON", b.t, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                              b.x, by, b.w, 28, h, (HMENU)(INT_PTR)b.id, nullptr, nullptr);
-    SendMessageA(bh, WM_SETFONT, (WPARAM)f, TRUE);
-  }
+  int by = rowY0 + n * rowH + 12;
+  mk("BUTTON", "Valores de fabrica", WS_TABSTOP, 12, by, 150, 28, kIdPadDefaults);
+  g_pad.stHint = mk("STATIC", "", 0, 172, by + 5, 290, 18, 0);
+  mk("BUTTON", "Aplicar y cerrar", WS_TABSTOP, 470, by, 140, 28, kIdPadOk);
+  mk("BUTTON", "Cancelar", WS_TABSTOP, 620, by, 100, 28, kIdPadCancel);
+
+  fillDevCombo();
   padRefresh();
+  SetTimer(h, 1, 500, nullptr);
   ShowWindow(h, SW_SHOW);
   SetForegroundWindow(h);
 
@@ -909,7 +1394,7 @@ auto pickRom(HWND owner) -> std::string {
   ofn.lStructSize = sizeof ofn;
   ofn.hwndOwner = owner;
   static const char kFilter[] =
-      "ROM de Nintendo 64\0*.z64;*.n64;*.v64\0Todos los archivos\0*.*\0";
+      "ROM de Nintendo 64\0*.z64;*.n64;*.v64;*.zip;*.gz\0Todos los archivos\0*.*\0";
   ofn.lpstrFilter = kFilter;
   ofn.lpstrTitle = "Elige una ROM de Nintendo 64";
   ofn.lpstrFile = file;
@@ -922,6 +1407,24 @@ auto onCommand(UINT id) -> void {
   std::lock_guard<std::mutex> lk(g_mu);
   switch(id) {
     case kOpenRom: {
+      // La biblioteca monta su ventana y su propio bucle de mensajes, asi que va en un hilo
+      // aparte: este es el hilo de la ventana del juego, que esta presentando cuadros y no
+      // puede meterse en un bucle modal sin congelar la imagen. El hilo se queda con el
+      // resto del trabajo y vuelve a coger el candado cuando el usuario ya ha elegido.
+      if(libraryOpen()) return;
+      std::thread([] {
+        std::string rom = pickRomLibrary(g_game);
+        if(rom.empty()) return;
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_prof.set("rom", rom);
+        saveProfile(g_prof);
+        g_h.rom = rom;
+        askRelaunch(g_game, ("ROM elegida:\n" + rom).c_str());
+      }).detach();
+      return;
+    }
+    // El dialogo de fichero de siempre, para una ROM que este fuera de la biblioteca.
+    case kOpenFile: {
       std::string rom = pickRom(g_game);
       if(rom.empty()) return;
       g_prof.set("rom", rom);
@@ -1016,12 +1519,33 @@ auto onCommand(UINT id) -> void {
     syncMenu();
     return;
   }
+  if(id == kThrHw) {
+    // Fiel a consola. El limitador se puede poner en caliente, pero los relojes y el CPI se
+    // montan al arrancar: si el perfil traia overclock hay que relanzar para que el modo
+    // signifique de verdad "velocidad del N64 real" y no "59.94 Hz con la CPU dopada".
+    const bool oc = ocNotStock(g_prof);
+    g_prof.set("speedmode", "hw");
+    g_prof.set("throttle", "auto");
+    rt::throttle.store(-1);      // automatico = limitar solo si hay ventana, y aqui la hay
+    saveProfile(g_prof);
+    syncMenu();
+    if(oc) askRelaunch(g_game, "Modo fiel a consola: los multiplicadores de reloj quedan "
+                               "anulados (1.00x).");
+    return;
+  }
   if(id >= kThrAuto && id <= kThrOff) {
     const char* val = id == kThrAuto ? "auto" : id == kThrOn ? "1" : "0";
+    const bool wasHw = g_prof.get("speedmode") == "hw";
+    g_prof.set("speedmode", "libre");
     g_prof.set("throttle", val);
     rt::throttle.store(id == kThrAuto ? -1 : id == kThrOn ? 1 : 0);
     saveProfile(g_prof);
     syncMenu();
+    // Salir del modo fiel devuelve los multiplicadores guardados, y eso solo se lee al
+    // arrancar. Sin overclock guardado no hay nada que devolver: no se molesta al usuario.
+    if(wasHw && ocNotStock(g_prof))
+      askRelaunch(g_game, "Se sale del modo fiel a consola: vuelven los multiplicadores de "
+                          "reloj guardados en el perfil.");
     return;
   }
 }

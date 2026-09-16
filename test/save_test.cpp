@@ -140,13 +140,15 @@ int main() {
     auto pp = std::make_unique<Memory>();
     Memory& m = *pp;
     m.reset(true);
-    chk("pak presente", m.mempakPresent ? 1 : 0, 1);
-    chk("tamano del pak", (u32)m.mempak.size(), 32 * 1024);
+    // El Controller Pak es del MANDO: desde que hay cuatro puertos vive en padPort[i],
+    // y `reset` lo formatea para todo puerto cuyo accesorio sea 1 (el valor por defecto).
+    chk("pak presente", m.padPort[0].accessory == 1 ? 1 : 0, 1);
+    chk("tamano del pak", (u32)m.padPort[0].mempak.size(), 32 * 1024);
 
     // El pak sale formateado: bloque de ID (1/3/4/6) con las dos sumas buenas y deviceid
     // impar, que es lo que mira __osGetId antes de dar el pak por utilizable.
     for(int blk : {1, 3, 4, 6}) {
-      const u8* id = &m.mempak[blk * 32];
+      const u8* id = &m.padPort[0].mempak[blk * 32];
       u16 sum = 0, isum = 0;
       for(int j = 0; j < 28; j += 2) {
         u16 d = (u16)((id[j] << 8) | id[j + 1]);
@@ -161,12 +163,12 @@ int main() {
       chk(name, (u32)(((id[0x18] << 8) | id[0x19]) & 1), 1);
     }
     {                                                 // suma de la tabla de inodos
-      const u8* n = &m.mempak[8 * 32];
+      const u8* n = &m.padPort[0].mempak[8 * 32];
       u32 s = 0;
       for(int j = 10; j < 256; j++) s = (s + n[j]) & 0xffff;
       chk("inodos: suma", (u32)((n[0] << 8) | n[1]), s);
       chk("inodos: pagina 5 libre", (u32)((n[10] << 8) | n[11]), 3);
-      chk("inodos: copia igual", (u32)std::memcmp(&m.mempak[8 * 32], &m.mempak[16 * 32], 256), 0);
+      chk("inodos: copia igual", (u32)std::memcmp(&m.padPort[0].mempak[8 * 32], &m.padPort[0].mempak[16 * 32], 256), 0);
     }
 
     // Ejecuta un bloque de ordenes joybus y devuelve la RDRAM ya releida.
@@ -176,6 +178,10 @@ int main() {
       m.write32(0xA480'0000, CMDBUF);                 // SI_DRAM_ADDR
       m.write32(0xA480'0010, 0);                      // RDRAM -> PIF (ejecuta)
       m.write32(0xA480'0004, 0);                      // PIF -> RDRAM (respuesta)
+      // La transaccion del SI ya no termina en la instruccion que la arranca (el joybus va
+      // a 4 us por bit): en el emulador la remata el bucle de CPU al vencer el plazo, y
+      // aqui no hay CPU, asi que el arnes hace pasar el tiempo a mano.
+      m.siFinish();
     };
 
     {                                                 // estado: tipo 0x0005 y pak dentro
@@ -199,8 +205,8 @@ int main() {
       run(blk, 39);
       chk("escritura: CRC de datos", m.rdram[CMDBUF + 37], dataCrc(payload));
       chk("escritura: sin bit de ausente", (u32)(m.rdram[CMDBUF + 1] & 0xc0), 0);
-      chk("escritura: llega al pak", (u32)std::memcmp(&m.mempak[block * 32], payload, 32), 0);
-      chk("escritura: marca sucio", m.mempakDirty ? 1 : 0, 1);
+      chk("escritura: llega al pak", (u32)std::memcmp(&m.padPort[0].mempak[block * 32], payload, 32), 0);
+      chk("escritura: marca sucio", m.padPort[0].mempakDirty ? 1 : 0, 1);
     }
     {                                                 // lectura: 32 bytes + CRC
       u8 blk[64] = {0};
@@ -231,9 +237,10 @@ int main() {
     {
       auto np = std::make_unique<Memory>();
       Memory& n = *np;
-      n.mempakPresent = false;
       n.reset(true);
-      chk("sin pak: memoria vacia", (u32)n.mempak.size(), 0);
+      n.padPort[0].accessory = 0;          // ranura vacia
+      n.padPort[0].mempak.clear();
+      chk("sin pak: memoria vacia", (u32)n.padPort[0].mempak.size(), 0);
       u8 blk[64] = {0};
       u16 wire = (u16)((block << 5) | addrCrc(block));
       blk[0] = 3; blk[1] = 33; blk[2] = 0x02;
@@ -243,6 +250,7 @@ int main() {
       n.write32(0xA480'0000, CMDBUF);
       n.write32(0xA480'0010, 0);
       n.write32(0xA480'0004, 0);
+      n.siFinish();   // hacer pasar el tiempo del joybus (no hay CPU en el arnes)
       u8 zeros[32] = {0};
       chk("sin pak: CRC invertido", n.rdram[CMDBUF + 37], (u8)~dataCrc(zeros));
       u8 st[8] = { 1, 3, 0x00, 0xff, 0xff, 0xff, 0xfe, 0 };
@@ -250,6 +258,7 @@ int main() {
       n.write32(0xA480'0000, CMDBUF);
       n.write32(0xA480'0010, 0);
       n.write32(0xA480'0004, 0);
+      n.siFinish();   // hacer pasar el tiempo del joybus (no hay CPU en el arnes)
       chk("sin pak: CONT_CARD_ON a cero", n.rdram[CMDBUF + 5], 0x00);
     }
 
@@ -258,15 +267,15 @@ int main() {
       const char* romp = "save_test_tmp.z64";
       std::remove("save_test_tmp.mpk");
       m.attachSaveFile(romp);      // sin fichero: el pak formateado se queda como esta
-      chk("escritura: sigue en el pak", (u32)std::memcmp(&m.mempak[block * 32], payload, 32), 0);
-      m.mempakDirty = true;
+      chk("escritura: sigue en el pak", (u32)std::memcmp(&m.padPort[0].mempak[block * 32], payload, 32), 0);
+      m.padPort[0].mempakDirty = true;
       m.flushSaveFile();
 
       auto qp = std::make_unique<Memory>();
       Memory& q = *qp;
       q.reset(true);
       q.attachSaveFile(romp);
-      chk("recargado del .mpk", (u32)std::memcmp(&q.mempak[block * 32], payload, 32), 0);
+      chk("recargado del .mpk", (u32)std::memcmp(&q.padPort[0].mempak[block * 32], payload, 32), 0);
       std::remove("save_test_tmp.mpk");
       std::remove("save_test_tmp.sra");
     }
