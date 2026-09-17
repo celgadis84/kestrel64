@@ -169,6 +169,17 @@ docs/         status, design notes, baselines
 test/         unit and subsystem tests
 ```
 
+## License
+
+MIT, see [LICENSE](LICENSE). Bundled third-party code keeps its own license:
+`third_party/parallel-rdp/` is MIT, Copyright (c) 2020 Themaister.
+
+This repository contains no ROM images, BIOS images or other copyrighted game data, and
+none are needed to build it. Running a game requires a ROM image you own.
+
+Patches are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has the build steps, the accuracy
+and determinism rules, and the gates a change has to pass.
+
 ## Credits
 
 - **parallel-rdp** — Hans-Kristian Arntzen (Themaister), the Vulkan RDP.

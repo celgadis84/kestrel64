@@ -1,0 +1,58 @@
+name: Accuracy report
+description: Output differs from real hardware or from a known-good reference
+labels: ["accuracy"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for "the pixels/timing are wrong", as opposed to a crash or a hang.
+        Screenshots of kestrel64 next to the reference are the most useful thing you can
+        attach. Please do not attach ROM images.
+  - type: textarea
+    id: what
+    attributes:
+      label: What differs
+      description: Which part of the output, and how.
+    validations:
+      required: true
+  - type: dropdown
+    id: reference
+    attributes:
+      label: What are you comparing against
+      options:
+        - Real N64 hardware
+        - A test ROM with a reference image (krom, n64-systemtest, ...)
+        - Another emulator
+        - Documentation (n64brew, n64.dev, MiSTer RTL, ...)
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Screenshots, the test ROM name and its reference image, the doc section, or the RTL
+        file and line. A fix has to be justifiable as genuine hardware behaviour, so the
+        stronger the oracle, the faster this moves.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Game or test ROM, the point where it shows, and the command line.
+  - type: dropdown
+    id: backend
+    attributes:
+      label: RDP backend
+      options:
+        - parallel-rdp (KESTREL_PRDP=1)
+        - software RDP
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: Release tag, or `git rev-parse --short HEAD`.

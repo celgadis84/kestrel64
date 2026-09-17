@@ -1,0 +1,80 @@
+name: Bug report
+description: Something renders wrong, crashes, hangs, desyncs or runs slower than it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not attach ROM images or link to them. This project ships no game data
+        and does not want any.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Game, where in the game, and the exact command line you ran.
+      placeholder: |
+        KESTREL_PRDP=1 ./kestrel64.exe "game.z64" --run
+    validations:
+      required: true
+  - type: input
+    id: knobs
+    attributes:
+      label: KESTREL_* environment variables
+      description: Paste the whole set you had exported. Most behaviour here is knob-dependent.
+      placeholder: KESTREL_THREADS=1 KESTREL_JIT=1 KESTREL_PRDP=1
+  - type: dropdown
+    id: lockstep
+    attributes:
+      label: Does it also happen with KESTREL_THREADS=0 (lockstep)?
+      description: >
+        Lockstep is the oracle. A bug that appears only threaded is a determinism bug and
+        gets triaged first.
+      options:
+        - "Yes, lockstep too"
+        - "No, threaded only"
+        - "Not tested"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: RDP backend
+      options:
+        - parallel-rdp (KESTREL_PRDP=1)
+        - software RDP
+        - Not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: cpu
+    attributes:
+      label: CPU core
+      options:
+        - Interpreter
+        - Dynarec (KESTREL_JIT=1)
+        - Both
+        - Not sure
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: Release tag, or `git rev-parse --short HEAD` if you built it yourself.
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS, CPU, GPU.
+      placeholder: Windows 11, i7-870, RX570
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log or stack trace
+      description: Paste it here; it will be formatted as code automatically.
+      render: text

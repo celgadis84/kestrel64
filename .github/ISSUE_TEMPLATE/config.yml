@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions, ideas and general discussion
+    url: https://github.com/celgadis84/kestrel64/discussions
+    about: For anything that is not a concrete bug or accuracy report.
+  - name: How this project works
+    url: https://github.com/celgadis84/kestrel64/blob/main/CONTRIBUTING.md
+    about: Build instructions, the accuracy and determinism rules, and the gates a patch must pass.
