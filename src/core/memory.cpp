@@ -2811,6 +2811,35 @@ static auto dpSpinLen() -> u32 {
   return v;
 }
 
+// Vueltas de sondeo apretado antes de espaciar la lectura del reloj de la CPU. Mirar
+// `cartNow()` en cada vuelta no cuesta aqui, cuesta ALLI: `cartClock` es el contador de
+// instrucciones retiradas y el hilo de CPU lo escribe sin parar, asi que cada lectura nuestra
+// le pasa la linea a compartida y le obliga a volver a pedirla en exclusiva en su siguiente
+// op. Y el hilo de CPU es el palo largo: en junkrunner64 el RSP se pasa el 57 % de su pared
+// dentro de esta cita, o sea martilleando esa linea. Las esperas cortas se resuelven en las
+// primeras vueltas, asi que se mira a pelo al principio y una de cada 16 despues.
+// KESTREL_RDVTIGHT=<n> (0 = espaciado desde la primera vuelta, ~0 = comportamiento viejo).
+static auto rdvTightTurns() -> u32 {
+  static const u32 v = [] {
+    const char* e = std::getenv("KESTREL_RDVTIGHT");
+    if(e && *e) { char* end = nullptr; unsigned long n = std::strtoul(e, &end, 0);
+                  if(end && !*end && n <= 1'000'000ul) return (u32)n; }
+    return 0u;
+  }();
+  return v;
+}
+
+// Una de cada cuantas vueltas se mira el reloj de la CPU, pasadas las apretadas.
+static auto rdvPollMask() -> u32 {
+  static const u32 v = [] {
+    const char* e = std::getenv("KESTREL_RDVPOLL");
+    if(e && *e) { char* end = nullptr; unsigned long n = std::strtoul(e, &end, 0);
+                  if(end && !*end && n >= 1 && n <= 65536ul && (n & (n - 1)) == 0) return (u32)n - 1u; }
+    return 63u;
+  }();
+  return v;
+}
+
 auto Memory::dpSpinUntil(u64 bar, u64 comp) -> bool {
   for(u32 k = 0, lim = dpSpinLen(); k < lim; ++k) {
     if(!(rcpPend.load(std::memory_order_acquire) & 4u) || dpBarrierAt() != bar
@@ -3102,14 +3131,17 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
   rspLogWait.store(true, std::memory_order_release);
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
+  const u32 tight = rdvTightTurns(), pm = rdvPollMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
   for(u32 k = 0;; ++k) {
-    if(ready()) break;
+    // Espaciado como en spReadSync: `ready()` lee el reloj y el diario de la CPU.
+    if(k < tight || (k & pm) == pm) { if(ready()) break; }
     if(dpLogFlush.load(std::memory_order_acquire)) dpLogApply(~0ull);
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
     if((k & 15u) == 15u) spinPause();
     if((k & 255u) != 255u) continue;
     std::this_thread::yield();
+    if(ready()) break;
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
     if(!rdvWaiveDue(timing, t0, t1)) continue;
     {
@@ -3231,10 +3263,17 @@ auto Memory::rspParkWait(u64 now, u64 seq0, u64 until) -> u64 {
   // Giro previo a dormir. Con el motor ocupado el tope suele estar a unos pocos miles de
   // instrucciones de la CPU, y el que lo alcanza no avisa a nadie: la CPU se queda en la
   // barrera del SP y el RSP dormiria el plazo entero del condvar (~30 ms de pared en Windows).
-  for(u32 k = 0; k < 65536u; ++k) {
-    if(rspParkWake.load(std::memory_order_acquire) || cartNow() >= cap || missed()) break;
-    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
-    if((k & 15u) == 15u) spinPause();
+  {
+    const u32 tight = rdvTightTurns(), pm = rdvPollMask();
+    for(u32 k = 0; k < 65536u; ++k) {
+      // `rspParkWake` es nuestro aviso directo (la CPU lo escribe una vez), pero `cartNow()` y
+      // `missed()` son lineas que el hilo de CPU esta escribiendo sin parar: mirarlas en cada
+      // vuelta se lo cobra a el. Ver la nota de rdvTightTurns.
+      if(rspParkWake.load(std::memory_order_acquire)) break;
+      if(k < tight || (k & pm) == pm) { if(cartNow() >= cap || missed()) break; }
+      if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+      if((k & 15u) == 15u) spinPause();
+    }
   }
   u64 wake = 0, miss = 0;
   bool capped = false;
@@ -3408,9 +3447,10 @@ auto Memory::spReadSync(u64 now) -> void {
   RcpWaitMark sw_{rspSyncWait};   // antes de mirar rspWaiters: el regulador suelta a la CPU
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
+  const u32 tight = rdvTightTurns(), pm = rdvPollMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
   for(u32 k = 0;; ++k) {
-    if(cartNow() >= now) break;
+    if(k < tight || (k & pm) == pm) { if(cartNow() >= now) break; }
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
     if((k & 15u) == 15u) spinPause();
     if((k & 255u) != 255u) continue;

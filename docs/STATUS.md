@@ -6421,3 +6421,45 @@ libdragon manda ~1.600 tramos diminutos por cuadro). Tres intentos de quitarlo, 
 **Conclusion**: el coste de despertar al worker no se quita ni agrupando, ni girando, ni
 aplazando. Mientras el RDP viva en otro hilo y el juego mande tramos diminutos, esas dos llamadas
 al kernel por tramo son el precio del solape, y el solape vale mas que ellas.
+
+## 2026-09-17 — El RSP le robaba la linea de cache al hilo de CPU mirando su reloj
+
+Perfil del hilo del RSP (junkrunner64, 200 cuadros, Parallel-RDP, 1.733 muestras): **57 %** de su
+pared esta dentro de `Memory::spReadSync` (36 % en imagen + 21 % de salidas a ntdll desde el
+`yield` de su bucle). Son las 290.421 citas del sondeo de SP_STATUS: el microcodigo lee
+SP_STATUS, el RSP va por delante de la CPU en tiempo de invitado y tiene que esperar a que la
+CPU retire hasta ese instante para no perderse una escritura suya de SIG.
+
+Esa espera es semantica y no se puede quitar. Lo que SI se podia quitar es lo que la espera le
+cuesta **al otro hilo**: el bucle miraba `cartNow()` en cada vuelta, y `cartNow()` lee
+`cartClock`, el contador de instrucciones retiradas que el hilo de CPU esta escribiendo sin
+parar. Cada lectura del RSP le pasa esa linea a compartida y obliga a la CPU a volver a pedirla
+en exclusiva en su siguiente op. Con el RSP dentro de la cita el 57 % del tiempo, eso es
+martillear al hilo que ES el cuello de botella.
+
+Ahora los bucles de espera del hilo del RSP miran el reloj de la CPU **una de cada 64 vueltas**
+(`KESTREL_RDVPOLL`, potencia de dos; `KESTREL_RDVTIGHT=<n>` vuelve a mirarlo a pelo las primeras
+n vueltas, por si otro anfitrion prefiere latencia). Afecta a `spReadSync`, a `dpLogWait` y al
+giro previo a dormir de `rspParkWait`. La pausa `PAUSE` sigue a una de cada 16.
+
+**Medido** (Parallel-RDP, threaded+JIT, 200 flips jr / 600 PD / 300 SM64 / 1.500 M DK64):
+
+| | antes | ahora | |
+|---|---|---|---|
+| junkrunner64 | 9.239 ms | **8.059 ms** | -12,8 % |
+| Perfect Dark | 14.809 ms | **13.439 ms** | -9,2 % |
+| SM64 | 8.365 ms | **8.283 ms** | -1,0 % |
+| DK64 | 13.688 ms | **13.186 ms** | -3,7 % |
+
+Framebuffer md5 identico en los cuatro (jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`,
+DK64 `eca336ea`). Muestras del hilo del RSP en jr: 1.733 -> **1.454** (-16 % de tiempo de hilo),
+que es justo el nucleo que se le devuelve a la CPU y al worker del RDP.
+
+Barrido del espaciado (jr/PD/SM64/DK64, ms): cada vuelta 9.239/14.809/8.365/13.688 ·
+16 -> 8.620/14.335/8.260/13.527 · **64 -> 8.342/14.100/8.254/13.134** · 256 ->
+8.226/14.108/8.470/13.179. Desde 256 SM64 empeora: se queda 64.
+
+**Lo que NO vale**: el mismo espaciado en el lado de la CPU (`spBarrierWait`, `dpSpinUntil`)
+es una REGRESION clara -- jr 7.892 -> 9.936 ms, SM64 8.299 -> 8.727. Alli la latencia manda,
+porque quien espera es el palo largo y cada microsegundo que tarda en ver la barrera levantada
+lo paga la corrida entera. Revertido; el espaciado es solo del hilo del RSP.
