@@ -25,7 +25,8 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 11;  // 11: fines de tarea de SP/DP armados y aun sin vencer;
+constexpr u32 kVersion = 12;  // 12: pareja pendiente de la tuberia (enclavamientos);
+                              // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
                               // 9: registros DPS (puerto de test al buffer de spans);
                               // 8: plano oculto de RDRAM (cobertura del RDP para el AA del VI);
@@ -162,6 +163,7 @@ auto visitCpu(StateIO& io, CPU& c) -> void {
                          // motivo que countFrac -- es reloj de invitado a medio consumir
   io.pod(c.stallOps); io.pod(c.stallOpsRem);   // y su traduccion a ops, que es lo que ven el
                          // campo de video (viTick) y los plazos de PI/SI (cartNow)
+  io.pod(c.ilk); io.pod(c.dcbR);   // pareja pendiente de la tuberia
   io.pod(c.halted);
   io.pod(c.retired); io.pod(c.exceptions);
   io.pod(c.icSeq);

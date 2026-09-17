@@ -275,6 +275,10 @@ auto System::stepCpu(u64 n) -> u64 {
               rspInterleave();
               if(paced) memory.rcpPace(cpu.guestOps()); continue; }
     }
+    // Inicio de la instruccion en el reloj de invitado, para rcpRetire (ver dpEndArmAt). Solo
+    // lo usa el diario del RSP, que solo existe en Threaded; se toma siempre y no solo con
+    // rcpPend puesto porque una entrada puede llegar DURANTE el paso.
+    const u64 opStart = paced ? cpu.guestOps() : ~0ull;
     cpu.step();
     i++;
     // Vencimiento del plazo del SI (transaccion de la PIF/joybus en vuelo). Se mira por
@@ -292,7 +296,7 @@ auto System::stepCpu(u64 n) -> u64 {
     // modelado y se hace visible cuando el reloj de invitado llega, no cuando el anfitrion
     // termina de calcular. Con Lockstep o con KESTREL_RCPDEADLINE=0 nunca hay nada armado y
     // esto es una lectura atomica relajada que sale en cero.
-    if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire();
+    if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire(opStart);
     // Regulador Threaded: el equivalente al interleave 2:3 de abajo. Cada 64 ops basta —
     // es una lectura atomica relajada y el margen del regulador es de miles de ops.
     if(paced && (i & 0x3F) == 0) memory.rcpPace(cpu.guestOps());
@@ -891,6 +895,10 @@ auto System::run() -> void {
           for(int r = 0; r < 32; r++) std::fprintf(stderr, "[fd] cop0_%02d=%016llx\n", r, (unsigned long long)cpu.cop0[r]);
           std::fprintf(stderr, "[fd] pc=%016llx next=%016llx retired=%llu\n", (unsigned long long)cpu.pc,
                        (unsigned long long)cpu.nextPc, (unsigned long long)cpu.retired);
+          std::fprintf(stderr, "[fd] stallOps=%llu rem=%u stall=%u frac=%u ilk=%016llx dcbR=%u ilkHits=%llu dcbHits=%llu\n",
+                       (unsigned long long)cpu.stallOps, cpu.stallOpsRem, cpu.stallCycles, cpu.countFrac,
+                       (unsigned long long)cpu.ilk, (unsigned)cpu.dcbR,
+                       (unsigned long long)cpu.ilkHits, (unsigned long long)cpu.dcbHits);
         }
         if(fieldHash) {
           u64 h = 1469598103934665603ull;
@@ -899,6 +907,13 @@ auto System::run() -> void {
           mix(cpu.pc); mix(cpu.nextPc);
           mix((u64)cpu.cop0[9]); mix((u64)cpu.cop0[11]); mix((u64)cpu.cop0[12]); mix((u64)cpu.cop0[13]);
           mix(cpu.retired);
+          // Reloj de paradas y pareja pendiente: con costes fisicos la primera divergencia
+          // suele verse aqui antes que en los registros.
+          mix(cpu.stallOps); mix(cpu.stallOpsRem); mix(cpu.stallCycles); mix(cpu.countFrac);
+          // dcbR: solo bit0 (store en curso) y bit1 (store anterior sin primer acceso) tienen
+          // semantica; los bits altos son historia desplazada que nunca vuelve a bit1, y el JIT
+          // la limpia (=1) donde el interprete la conserva (|=1).
+          mix(cpu.ilk); mix(cpu.dcbR & 3u);
           std::fprintf(stderr, "[fh] %llu %016llx\n", (unsigned long long)nField, (unsigned long long)h);
         }
         std::fflush(stderr);
@@ -1010,9 +1025,9 @@ auto System::run() -> void {
       {
         double cpiBase = (double)cpu.cpi256 / 128.0;
         double cpiReal = cpiBase + (cpu.retired ? (double)cpu.stallTotal / (double)cpu.retired : 0.0);
-        std::fprintf(stderr, "[cpi] base %.3f  real %.3f  (fallo %u ciclos, no-cacheado %u ciclos"
+        std::fprintf(stderr, "[cpi] base %.3f  real %.3f  (fallo I %u / D %u ciclos, no-cacheado %u ciclos"
                      " x %llu lecturas = %.3f%%; %llu ciclos parados = %llu ops equivalentes)\n",
-                     cpiBase, cpiReal, cpu.missCycles, cpu.uncachedCycles,
+                     cpiBase, cpiReal, cpu.icMissCycles, cpu.dcMissCycles, cpu.uncachedCycles,
                      (unsigned long long)cpu.uncachedReads,
                      cpu.retired ? 100.0 * (double)cpu.uncachedReads / (double)cpu.retired : 0.0,
                      (unsigned long long)cpu.stallTotal, (unsigned long long)cpu.stallOps);
@@ -1067,6 +1082,15 @@ auto System::run() -> void {
                        cpu.retired ? 100.0 * (double)cpu.mulDivOps / (double)cpu.retired : 0.0,
                        (unsigned long long)cpu.mulDivStall,
                        cpu.retired ? (double)cpu.mulDivStall / (double)cpu.retired : 0.0);
+        if(cpu.ilkMode)
+          std::fprintf(stderr, "[ilk] %llu enclavamientos de pareja (%.3f%%), %llu DCB (%.3f%%),"
+                       " %llu ciclos parados = %.3f de CPI\n",
+                       (unsigned long long)cpu.ilkHits,
+                       cpu.retired ? 100.0 * (double)cpu.ilkHits / (double)cpu.retired : 0.0,
+                       (unsigned long long)cpu.dcbHits,
+                       cpu.retired ? 100.0 * (double)cpu.dcbHits / (double)cpu.retired : 0.0,
+                       (unsigned long long)cpu.ilkStall,
+                       cpu.retired ? (double)cpu.ilkStall / (double)cpu.retired : 0.0);
         if(cpu.fpuMode)
           std::fprintf(stderr, "[fpu] %llu ops de coma flotante (%.3f%% de las retiradas),"
                        " %llu ciclos parados = %.3f de CPI\n",

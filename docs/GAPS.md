@@ -673,6 +673,11 @@ por ser pequeña; se ordena por impacto, no se filtra.*
        defecto no se mueve sin captura de HW: `docs/STATUS.md`, seccion del 2026-09-17.
     4. **Recalibrar la base y rehacer el barrido** de "Que falta para mover el defecto" de mas
        arriba, entero (mas juegos, `KESTREL_AUDIOSTAT`, y el numero con un argumento).
+       **Modelo fisico completo 2026-09-17** (perillas por fuente: I$ 48, D$ 44, sin cache 38,
+       MULT/DIV tabla NEC, FPU `block`, enclavamientos LDI/DCB; ver `docs/STATUS.md`). Lockstep,
+       Threaded e interprete dan lo mismo con cada perilla. **El defecto sigue sin moverse**:
+       ninguna fuente (ares, libdragon, n64brew, cen64, NEC, SGI) da verdad de consola de campos
+       por intercambio; falta la captura de HW.
 
     Sesgo conocido y anotado del punto 1: `SWL`/`SWR`/`SDL`/`SDR` se emulan como
     lee-modifica-escribe, asi que un store parcial a memoria NO cacheada cobra una lectura que

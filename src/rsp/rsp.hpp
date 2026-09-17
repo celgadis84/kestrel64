@@ -173,7 +173,7 @@ struct Rsp {
     return c;
   }
   // --- salto del bucle de espera del FIFO (ver Rsp::idleSkip en rsp.cpp) ---------------
-  auto idleSkip(u64 now, u32 val) -> void;
+  auto idleSkip(u64 now, u32 val, bool cur) -> void;
   u32 idlePc = 0xffffffffu;   // firma de la ultima lectura de DPC_CURRENT
   u32 idleHash = 0;           // huella de r[1..31] en esa lectura
   u32 idleVal = 0;            // valor devuelto en esa lectura

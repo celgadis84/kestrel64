@@ -514,6 +514,12 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
         fastFail[nFail++] = e.je_rel32_placeholder();
       }
     }
+    // Enclavamientos: el primer acceso a D tras un store tiene que pasar por dcbTouch.
+    static const bool ilkOn = CPU::ilkFromEnv() != 0;
+    if(ilkOn) {
+      e.test_m8_imm(RBX, (s32)offsetof(CPU, dcbR), 2);
+      fastFail[nFail++] = e.jne_rel32_placeholder();
+    }
     e.mov_r_r(RAX, RDX);
     e.alu64_imm(5, RAX, 0x80000000u);                 // sub rax, sext(imm) == rax += 0x80000000
     e.cmp64_imm(RAX, 0x20000000u);
@@ -551,6 +557,8 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
     // desplazamiento intra-linea escribiria la bandera dentro de data[], que es corrupcion
     // silenciosa del dato recien escrito. Costo una tarde.
     if(st && !(g_noFastMem & 4)) e.mov_m8_imm(RCX, dcOff + lnDrt, 1);
+    // bit0 lo acaba de limpiar la frontera y bit1 esta comprobado a 0 arriba: dcbR = 1.
+    if(st && !(g_noFastMem & 4) && ilkOn) e.mov_m8_imm(RBX, (s32)offsetof(CPU, dcbR), 1);
     e.alu32_imm(4, RAX, 0xFu);                        // desplazamiento dentro de la linea
     e.alu64_rr(0x03, RCX, RAX);
     const s32 D = dcOff + lnDat;
@@ -1140,6 +1148,7 @@ static const int g_jitDiffAny = (std::getenv("KESTREL_JIT_DIFF") || std::getenv(
 // timer — más viajes al driver, más código emitido, peor I-cache del host.
 static const int g_jitTrace = (std::getenv("KESTREL_JIT_TRACE") && !g_jitDiffAny) ? 1 : 0;
 extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K);
+extern "C" u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base);
 
 extern const char* g_jitDump;   // KESTREL_JIT_DUMP (definido mas abajo)
 static auto compileBlock(CPU& c, u32 phys) -> Block {
@@ -1295,6 +1304,88 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   std::vector<u32>   interpIdx;   // ops retiradas INCLUYENDO esa op (ya tuvo efecto)
   std::vector<RcSnap> interpSnap; // ranuras sucias en cada salida de op interpretada
 
+  // Enclavamientos de la tuberia (KESTREL_INTERLOCK, ver CPU::ilkStep). El interprete cobra la
+  // PAREJA en la frontera de cada instruccion, antes de ejecutarla; aqui se emite la misma
+  // frontera delante de cada op. Dentro del bloque la op anterior se conoce al compilar, asi
+  // que el cobro es una constante; solo la primera frontera del bloque (o la de un salto lider)
+  // mira `ilk` en tiempo de ejecucion. Un bail re-ejecuta la op en el interprete, que vuelve a
+  // pasar por su frontera: el stub de bail DESHACE la(s) frontera(s) ya emitidas (IlkUndo).
+  // Una salida de op interpretada no se deshace: la op ya corrio, como en el interprete.
+  // Apagado (defecto) no se emite nada.
+  const bool ilkOn = c.ilkMode != 0, ilkCharge = c.ilkMode >= 2;
+  const s32 ilkOff   = (s32)offsetof(CPU, ilk),        dcbOff   = (s32)offsetof(CPU, dcbR);
+  const s32 ilkSvOff = (s32)offsetof(CPU, ilkSave),    ilkHsOff = (s32)offsetof(CPU, ilkHitSave);
+  const s32 ilkHtOff = (s32)offsetof(CPU, ilkHits),    ilkStOff = (s32)offsetof(CPU, ilkStall);
+  const s32 stlOff   = (s32)offsetof(CPU, stallCycles), stlTOff = (s32)offsetof(CPU, stallTotal);
+  struct IlkUndo { u8 shifts = 0; bool known = false; u64 prev = 0; u32 hits = 0; };
+  bool ilkKnown = false; u64 ilkPrev = 0;          // lo que deja la op anterior, si se sabe
+  IlkUndo ilkUndo;                                 // como deshacer las fronteras ya emitidas
+  std::vector<IlkUndo> bailUndo;
+
+  // I-cache exacta (ver CPU::jitIcExact): en la primera op del bloque y en cada op que abre
+  // linea se emite el mismo `valid && ptag == base` de icFetch. El fallo salta a un stub del
+  // final que llama a jitIcRefill y vuelve, o hace bail a `idx` si el codigo cambio. La
+  // comprobacion va DESPUES de la frontera de enclavamiento, asi que el bail la deshace como
+  // cualquier otro; el relleno no se deshace, y el interprete que re-ejecuta la op acierta.
+  const bool icExact = c.jitIcExact();
+  auto fetchW = [&](u32 a) -> u32 { return icExact ? c.jitPeekWord(a) : c.jitFetchWord(a); };
+  struct IcChk { usize at, j1, j2, cont; u32 base; u32 idx; RcSnap snap; IlkUndo undo; };
+  std::vector<IcChk> icChks;
+  auto icChk = [&](u32 a, u32 idx) {
+    if(!icExact || (a != phys && (a & 0x1f))) return;
+    u32 base = a & ~0x1fu;
+    const s32 lo = (s32)(offsetof(CPU, icache) + ((base >> 5) & 0x1ff) * sizeof(CPU::ICacheLine));
+    IcChk k; k.at = c.jitCache->buf.used; k.base = base; k.idx = idx;
+    e.mov_r32_m(RAX, RBX, lo + (s32)offsetof(CPU::ICacheLine, ptag));
+    e.alu32_imm(7, RAX, base);                     // cmp eax, base
+    k.j1 = e.jne_rel32_placeholder();
+    e.movzx8_r_m(RAX, RBX, lo + (s32)offsetof(CPU::ICacheLine, valid));
+    e.test_al_al();
+    k.j2 = e.je_rel32_placeholder();
+    k.cont = c.jitCache->buf.used;
+    k.snap = rc.snap(); k.undo = ilkUndo;
+    icChks.push_back(k);
+  };
+  auto icTrim = [&](usize at) { while(!icChks.empty() && icChks.back().at >= at) icChks.pop_back(); };
+  // chain = segunda frontera de la pareja salto+ranura: el bail de la ranura apunta al SALTO,
+  // asi que hay que deshacer las dos.
+  auto ilkPre = [&](u32 op, bool chain) {
+    if(!ilkOn) return;
+    u64 use; u64 prod = CPU::ilkMasks(op, use);
+    e.movzx8_r_m(RAX, RBX, dcbOff);                // dcbR <<= 1
+    e.alu32_rr(0x03, RAX, RAX);
+    e.mov_m8_r(RBX, dcbOff, RAX);
+    if(!chain) ilkUndo = IlkUndo{1, ilkKnown, ilkPrev, 0};
+    else       ilkUndo.shifts++;
+    if(ilkKnown) {
+      if(ilkPrev & use) {
+        ilkUndo.hits++;
+        e.add_m64_imm32(RBX, ilkHtOff, 1);
+        if(ilkCharge) { e.add_m32_imm32(RBX, stlOff, 1); e.add_m64_imm32(RBX, stlTOff, 1);
+                        e.add_m64_imm32(RBX, ilkStOff, 1); }
+      }
+    } else {
+      e.mov_r_m(RAX, RBX, ilkOff);
+      e.mov_m_r(RBX, ilkSvOff, RAX);               // para deshacer en un bail
+      e.mov_r_imm64(RDX, use);
+      e.alu64_rr(0x23, RAX, RDX);                  // and rax, rdx
+      e.setcc_x(0x95, RAX);                        // setne al
+      e.movzx_r8(RAX, RAX);
+      e.mov_m_r32(RBX, ilkHsOff, RAX);
+      e.add_r_m(RAX, RBX, ilkHtOff); e.mov_m_r(RBX, ilkHtOff, RAX);
+      if(ilkCharge) {
+        e.mov_r32_m(RAX, RBX, ilkHsOff);
+        e.mov_r32_m(RDX, RBX, stlOff); e.alu32_rr(0x03, RDX, RAX); e.mov_m_r32(RBX, stlOff, RDX);
+        e.add_r_m(RAX, RBX, stlTOff); e.mov_m_r(RBX, stlTOff, RAX);
+        e.mov_r32_m(RAX, RBX, ilkHsOff);
+        e.add_r_m(RAX, RBX, ilkStOff); e.mov_m_r(RBX, ilkStOff, RAX);
+      }
+    }
+    e.mov_r_imm64(RAX, prod);
+    e.mov_m_r(RBX, ilkOff, RAX);
+    ilkKnown = true; ilkPrev = prod;
+  };
+
   // Offsets de los campos de control del CPU (para branch-in-block: el bloque
   // escribe pc/nextPc/inDelay/justBranched directamente y devuelve flag de control).
   const s32 pcOff      = (s32)((char*)&c.pc           - (char*)&c);
@@ -1360,7 +1451,10 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   // salto (bailIdx=idx): al faultar, el intérprete re-ejecuta desde el salto. Devuelve false
   // si el delay slot no es compilable (→ se descarta la absorción del salto completo).
   auto compileDelay = [&](u32 dop, u32 idx) -> bool {
-    usize dBefore = c.jitCache->buf.used;
+    usize dBefore0 = c.jitCache->buf.used;
+    ilkPre(dop, true);
+    icChk(phys + 4 * (idx + 1), idx);             // la linea de la ranura: bail al SALTO
+    usize dBefore = c.jitCache->buf.used;         // los reintentos conservan la frontera
     if(emitSafeOp(e, rc, dop)) return true;
     c.jitCache->buf.used = dBefore;
     // ALU-con-trampa / MFC0 en la ranura: los dos emiten su bail ANTES de tocar el destino,
@@ -1372,26 +1466,26 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // fallidos medidos en SM64 (ADDI 23k + DADDI 7.8k en la ranura).
     usize tsite; RcSnap tsnap;
     if(emitTrapAlu(e, rc, dop, tsite, tsnap)) {
-      bailSites.push_back(tsite); bailIdx.push_back(idx); bailSnap.push_back(tsnap);
+      bailSites.push_back(tsite); bailIdx.push_back(idx); bailSnap.push_back(tsnap); bailUndo.push_back(ilkUndo);
       b.hasTrap = true;
       return true;
     }
     c.jitCache->buf.used = dBefore;
     usize asite; RcSnap asnap;
     if(emitAlu64(e, rc, dop, asite, asnap)) {
-      bailSites.push_back(asite); bailIdx.push_back(idx); bailSnap.push_back(asnap);
+      bailSites.push_back(asite); bailIdx.push_back(idx); bailSnap.push_back(asnap); bailUndo.push_back(ilkUndo);
       return true;
     }
     c.jitCache->buf.used = dBefore;
     usize csite; RcSnap csnap;
     if(emitCop0(e, rc, dop, csite, csnap, idx + 1, c.cpi256)) {   // la ranura va una op detras del salto
-      bailSites.push_back(csite); bailIdx.push_back(idx); bailSnap.push_back(csnap);
+      bailSites.push_back(csite); bailIdx.push_back(idx); bailSnap.push_back(csnap); bailUndo.push_back(ilkUndo);
       return true;
     }
     c.jitCache->buf.used = dBefore;
     usize dsite; bool dStore; RcSnap dsnap;
     if(emitMemOp(e, rc, dop, dsite, dStore, dsnap, idx + 1, pendOff)) {
-      bailSites.push_back(dsite); bailIdx.push_back(idx); bailSnap.push_back(dsnap);
+      bailSites.push_back(dsite); bailIdx.push_back(idx); bailSnap.push_back(dsnap); bailUndo.push_back(ilkUndo);
       b.hasMem = true; if(dStore) b.hasStore = true;
       return true;
     }
@@ -1409,7 +1503,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       b.hasMem = true; b.hasStore = true;
       return true;
     }
-    c.jitCache->buf.used = dBefore;
+    c.jitCache->buf.used = dBefore0;
     return false;
   };
   // JAL/JALR: link = sext32((u32)nextPc) = sext32(entryVA + 4*(idx+2)) → gpr[reg]. Se emite
@@ -1505,14 +1599,18 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // pagina dejaba su ranura de retardo fuera, la absorcion se caia y con el salto de
     // lider el bloque entero no compilaba -- 465k entradas al interprete medidas en SM64.
     if((a & ~0xFFFu) != (phys & ~0xFFFu)) { if(!ck0Entry || g_noXPage) break; b.crossPage = true; }
-    u32 op = c.jitFetchWord(a);
-    usize before = c.jitCache->buf.used;
-    if(g_jitDump) b.opOff.push_back((u32)(before - (usize)(entry - c.jitCache->buf.base)));
+    u32 op = fetchW(a);
+    usize before0 = c.jitCache->buf.used;
+    if(g_jitDump) b.opOff.push_back((u32)(before0 - (usize)(entry - c.jitCache->buf.base)));
+    const bool ilkKnown0 = ilkKnown; const u64 ilkPrev0 = ilkPrev;
+    ilkPre(op, false);
+    icChk(a, b.nOps);
+    usize before = c.jitCache->buf.used;          // los reintentos conservan la frontera
     if(emitSafeOp(e, rc, op)) { b.src.push_back(op); b.nOps++; continue; }
     c.jitCache->buf.used = before;
     usize tsite; RcSnap tsnap;
     if(emitTrapAlu(e, rc, op, tsite, tsnap)) {
-      bailSites.push_back(tsite); bailIdx.push_back(b.nOps); bailSnap.push_back(tsnap);
+      bailSites.push_back(tsite); bailIdx.push_back(b.nOps); bailSnap.push_back(tsnap); bailUndo.push_back(ilkUndo);
       b.hasTrap = true;
       b.src.push_back(op); b.nOps++;
       continue;
@@ -1520,19 +1618,19 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     c.jitCache->buf.used = before;
     usize asite; RcSnap asnap;
     if(emitAlu64(e, rc, op, asite, asnap)) {
-      bailSites.push_back(asite); bailIdx.push_back(b.nOps); bailSnap.push_back(asnap);
+      bailSites.push_back(asite); bailIdx.push_back(b.nOps); bailSnap.push_back(asnap); bailUndo.push_back(ilkUndo);
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
     usize csite; RcSnap csnap;
     if(emitCop0(e, rc, op, csite, csnap, i, c.cpi256)) {
-      bailSites.push_back(csite); bailIdx.push_back(b.nOps); bailSnap.push_back(csnap);
+      bailSites.push_back(csite); bailIdx.push_back(b.nOps); bailSnap.push_back(csnap); bailUndo.push_back(ilkUndo);
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
     usize site; bool isStore; RcSnap msnap;
     if(emitMemOp(e, rc, op, site, isStore, msnap, b.nOps, pendOff)) {
-      bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap);
+      bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap); bailUndo.push_back(ilkUndo);
       b.hasMem = true; if(isStore) b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
     }
@@ -1582,6 +1680,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // el bucle caliente de PD está dominado por BEQ + llamadas (JAL) + returns (JR $ra), y
     // cortar en cada uno dejaba bloques cortos. cpu == &gpr[0] == RBX (ver static_assert),
     // así el estado de control se direcciona vía RBX (R12 no fiable tras el CALL de mem-op).
+    // Ninguna forma recta compilo: fuera la frontera. Si es un salto absorbible la vuelve a
+    // emitir su maquinaria (dentro del rango de rollback); si no, el bloque acaba aqui.
+    c.jitCache->buf.used = before0;
+    icTrim(before0);
+    ilkKnown = ilkKnown0; ilkPrev = ilkPrev0;
     u32 LO = op >> 26;
     u32 FN = op & 63;
     u32 rtF = (op >> 16) & 31;
@@ -1645,7 +1748,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
                      (((ad & ~0xFFFu) == (phys & ~0xFFFu)) || (ck0Entry && !g_noXPage));
       if(delayOk && (ad & ~0xFFFu) != (phys & ~0xFFFu)) b.crossPage = true;
       if(delayOk) {
-        u32 dop = c.jitFetchWord(ad);
+        u32 dop = fetchW(ad);
         u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
         s32 simm = (s32)(s16)(op & 0xFFFF);
         u32 idx = b.nOps;                          // rectas antes del salto (= i)
@@ -1655,13 +1758,17 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
         // volcado queda FUERA del rango de rollback (antes de beforeBranch) a proposito.
         rc.disable();
         usize beforeBranch = c.jitCache->buf.used; // por si el delay no compila
+        ilkPre(op, false);                         // frontera del salto (la de la ranura, en compileDelay)
+        icChk(a, idx);
         // Un rollback deja el codigo descartado pero los sitios de bail ya registrados
         // seguirian apuntando dentro de esa zona, que otra op reescribira despues. Se recortan
         // con el buffer. Hoy solo BC1 registra uno en fase A; vale para el que venga.
         usize nBailBefore = bailSites.size();
         auto rollbackBranch = [&]() {
           c.jitCache->buf.used = beforeBranch;
+          icTrim(beforeBranch);
           bailSites.resize(nBailBefore); bailIdx.resize(nBailBefore); bailSnap.resize(nBailBefore);
+          bailUndo.resize(nBailBefore);
         };
         // Fase A (antes del delay slot): capturar la condición/target/enlace que el delay
         // slot podría pisar (el delay puede escribir gpr[rs]/gpr[rt] o hacer CALL).
@@ -1698,7 +1805,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
           const s32 stOff = (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status);
           e.test_m8_imm(RBX, stOff + 3, 0x20);              // Status bit29 vive en el byte 3
           bailSites.push_back(e.je_rel32_placeholder());
-          bailIdx.push_back(idx); bailSnap.push_back(rc.snap());
+          bailIdx.push_back(idx); bailSnap.push_back(rc.snap()); bailUndo.push_back(ilkUndo);
           // COND es el bit 23 de FCR31 -> byte 2, bit 7. ZF=1 significa COND=0, asi que
           // "tomar" es setne cuando TF=1 y sete cuando TF=0.
           e.test_m8_imm(RBX, (s32)offsetof(CPU, fcr31) + 2, 0x80);
@@ -1865,11 +1972,48 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     haveMain = true;
   }
 
+  // Stubs de I-cache exacta: rellenar y volver, o bail registrado como uno mas.
+  for(const IcChk& k : icChks) {
+    e.patchRel32(k.j1); e.patchRel32(k.j2);
+    e.mov_r_r(RCX, RBX);
+    e.mov_r_imm32(RDX, phys);
+    e.mov_r_imm32(R8, k.base);
+    e.mov_r_imm64(RAX, (u64)&kestrel_jitIcRefill);
+    e.call_reg(RAX);
+    e.test_al_al();
+    bailSites.push_back(e.je_rel32_placeholder());
+    bailIdx.push_back(k.idx); bailSnap.push_back(k.snap); bailUndo.push_back(k.undo);
+    usize back = e.jmp_rel32_placeholder();
+    e.patchRel32To(back, k.cont);
+  }
   // Stubs de bail: cada je de mem-op aterriza aquí → eax = índice (ops retiradas) y al epílogo.
   std::vector<usize> toDone;
   for(usize k = 0; k < bailSites.size(); k++) {
     e.patchRel32(bailSites[k]);
     rc.emitSnapSpill(bailSnap[k]);           // spill perezoso: lo sucio en el punto del bail
+    if(ilkOn) {
+      const IlkUndo& u = bailUndo[k];
+      e.movzx8_r_m(RAX, RBX, dcbOff);        // dcbR >>= fronteras deshechas
+      e.shift32_imm(5, RAX, u.shifts);
+      e.mov_m8_r(RBX, dcbOff, RAX);
+      if(u.hits) {
+        e.add_m64_imm32(RBX, ilkHtOff, (u32)-(s32)u.hits);
+        if(ilkCharge) { e.add_m32_imm32(RBX, stlOff, (u32)-(s32)u.hits);
+                        e.add_m64_imm32(RBX, stlTOff, (u32)-(s32)u.hits);
+                        e.add_m64_imm32(RBX, ilkStOff, (u32)-(s32)u.hits); }
+      }
+      if(u.known) { e.mov_r_imm64(RAX, u.prev); e.mov_m_r(RBX, ilkOff, RAX); }
+      else {
+        e.mov_r_m(RAX, RBX, ilkSvOff); e.mov_m_r(RBX, ilkOff, RAX);
+        e.mov_r32_m(RAX, RBX, ilkHsOff);
+        e.mov_r_m(RDX, RBX, ilkHtOff); e.alu64_rr(0x2B, RDX, RAX); e.mov_m_r(RBX, ilkHtOff, RDX);
+        if(ilkCharge) {
+          e.mov_r32_m(RDX, RBX, stlOff); e.alu32_rr(0x2B, RDX, RAX); e.mov_m_r32(RBX, stlOff, RDX);
+          e.mov_r_m(RDX, RBX, stlTOff);  e.alu64_rr(0x2B, RDX, RAX); e.mov_m_r(RBX, stlTOff, RDX);
+          e.mov_r_m(RDX, RBX, ilkStOff); e.alu64_rr(0x2B, RDX, RAX); e.mov_m_r(RBX, ilkStOff, RDX);
+        }
+      }
+    }
     e.mov_r_imm32(RAX, bailIdx[k]);
     toDone.push_back(e.jmp_rel32_placeholder());
   }
@@ -2121,7 +2265,8 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   // ops, asi que se compara contra la MISMA cota superior que el borde de timer: con el coste
   // de cache encendido un bloque de K ops adelanta el reloj mas de K y se tragaria el plazo.
   // countTicksMax(K) == K con todos los costes apagados, luego esto queda igual byte a byte.
-  if(siDue <= kTicks) return 0;                                // cruzaria el plazo del SI
+  const u64 kGuest = guestOpsMax(K);                           // == K con los costes apagados
+  if(siDue <= kGuest) return 0;                                // cruzaria el plazo del SI
   // Permiso para el camino rápido del prólogo: cuántas ops MÁS puede encadenar la cadena sin
   // volver a preguntar. Lo acota lo mismo que acaba de comprobarse aquí — el borde de timer
   // (determinista: Count avanza 1 por op) y lo que queda de ventana del bucle del sistema —
@@ -2134,7 +2279,7 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
     // de cache apagado, luego esta linea queda byte a byte como estaba).
     u32 slack = opsForTicks((u64)(u32)(cmp - cnt) - kTicks - 1ull);
     // El permiso de la cadena tambien lo acota el plazo del SI, por lo mismo.
-    if(siDue != ~0ull) { u32 sl = (u32)(siDue - kTicks - 1); if(sl < slack) slack = sl; }                 // > 0 garantizado por la línea de arriba
+    if(siDue != ~0ull) { u32 sl = opsForGuest(siDue - kGuest - 1); if(sl < slack) slack = sl; }                 // > 0 garantizado por la línea de arriba
     u32 budg  = (K >= jitOpsBudget) ? 0 : (jitOpsBudget - K);
     u32 g     = slack < budg ? slack : budg;
     // Regulador Threaded: duerme si la CPU emulada adelanta al RSP en vuelo y mete lo que
@@ -2165,6 +2310,40 @@ u64 g_trampWhy[5] = {0};   // 0=permiso agotado 1=MI 2=latch timer 3=rsp corrien
 // mitad de la respuesta a "por que solo se encadenan 12 bloques"; la otra mitad son las
 // salidas que no resuelven destino (ni enlace estatico ni acierto en la ITC).
 u64 g_trampBail = 0;
+auto CPU::jitPeekWord(u32 phys) -> u32 {
+  const ICacheLine& l = icache[(phys >> 5) & 0x1ff];
+  if(!l.valid || l.ptag != (phys & ~0x1fu)) {
+    if((usize)phys + 4 > mem->rdram.size()) return 0;
+    const u8* b = &mem->rdram[phys];
+    return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3];
+  }
+  u32 w; std::memcpy(&w, &l.data[phys & 0x1c], 4);
+  return __builtin_bswap32(w);
+}
+auto CPU::jitIcRefill(u32 entry, u32 base) -> u8 {
+  u32 idx = (base >> 5) & 0x1ff;
+  icFill(idx, base);
+  if(!jitCache) return 0;
+  s32 bi = jitCache->find(entry);
+  if(bi < 0) return 0;
+  jit::Block& b = jitCache->blocks[bi];
+  if(b.dead) return 0;
+  const ICacheLine& l = icache[idx];
+  u32 endPa = entry + 4 * b.nOps;
+  u32 lo = base > entry ? base : entry, hi = base + 32 < endPa ? base + 32 : endPa;
+  for(u32 pa = lo; pa < hi; pa += 4) {
+    u32 off = pa & 0x1c;
+    u32 w = ((u32)l.data[off] << 24) | ((u32)l.data[off + 1] << 16) | ((u32)l.data[off + 2] << 8) | l.data[off + 3];
+    if(w != b.src[(pa - entry) >> 2]) { b.dead = true; jitCache->unlinkTo(entry); return 0; }
+  }
+  u32 li = ((base - (entry & ~0x1fu)) >> 5);
+  if(li < sizeof(b.lineSeq) / sizeof(b.lineSeq[0])) b.lineSeq[li] = l.seq;
+  return 1;
+}
+extern "C" u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base) {
+  return reinterpret_cast<CPU*>(cpu)->jitIcRefill(entry, base);
+}
+
 extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
   CPU* c = reinterpret_cast<CPU*>(cpu);
   if(g_jitStats) {
@@ -2207,6 +2386,12 @@ static u64 g_idleSkips = 0, g_idleOps = 0;
 auto CPU::jitIdleSkip(u32 phys) -> u32 {
   if(jitPending) return 0;                       // el driver siempre entra con la cadena vacia
   if((usize)phys + 8 > mem->rdram.size()) return 0;
+  // I-cache exacta: el salto no pasa por el fetch, asi que solo vale con las dos lineas ya
+  // cargadas (todas las vueltas aciertan); si no, la primera vuelta la da el camino normal.
+  if(jitIcExact()) {
+    for(u32 pa : {phys, phys + 4}) { const ICacheLine& l = icache[(pa >> 5) & 0x1ff];
+      if(!l.valid || l.ptag != (pa & ~0x1fu)) return 0; }
+  }
   u32 w0 = jitFetchWord(phys), op = w0 >> 26;
   bool self = false;
   if(op == 0x04)                                 // BEQ rX,rX,-1
@@ -2230,7 +2415,7 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
   u64 now = mem->cartNow();
   u64 due = mem->siDueIn(now);
   { u64 r = mem->rcpDueIn(now); if(r < due) due = r; }
-  if(due != ~0ull) { u64 d = opsForTicks(due); if(d < lim) lim = d; }
+  if(due != ~0ull) { u64 d = opsForGuest(due); if(d < lim) lim = d; }
   if((u64)jitOpsBudget < lim) lim = jitOpsBudget;
   if(mem->rcpMode == Memory::RcpMode::Threaded) {
     u32 pa = mem->rcpPace(guestOps());
@@ -2454,7 +2639,7 @@ auto CPU::jitTryBlock() -> u32 {
   // frente a una compilación entera.
   jit::CodeCache::NoComp& nc = cc->noComp[(phys >> 2) & (jit::CodeCache::kNoCompSlots - 1)];
   if(nc.phys == phys && nc.ck0 == (u8)ck0Route) {
-    if(jitFetchWord(phys) == nc.word) {
+    if((jitIcExact() ? jitPeekWord(phys) : jitFetchWord(phys)) == nc.word) {
       if(jit::g_compFailOn) { u32 LO = nc.word >> 26; jit::g_compFailOp[LO]++;
         if(LO == 0) jit::g_compFailSpecial[nc.word & 63]++;
         else if(LO == 1) jit::g_compFailRegimm[(nc.word >> 16) & 31]++;
@@ -2490,14 +2675,14 @@ auto CPU::jitTryBlock() -> u32 {
       const u64 kFit = countTicksMax(65);
       u64 due = mem->siDueIn(mem->cartNow());
       { u64 r = mem->rcpDueIn(mem->cartNow()); if(r < due) due = r; }
-      if((u64)(u32)(cmp - cnt) <= kFit || due <= kFit)
+      if((u64)(u32)(cmp - cnt) <= kFit || due <= guestOpsMax(65))
         { JDECL(DR_TIMER); return 0; }
     }
     // Reclamo de buffer: si el buf ejecutable desbordó (fugas por dead-mark en SMC pesado),
     // clear global recupera memoria antes de recompilar. Sin esto el JIT quedaría muerto.
     if(cc->buf.overflowed()) cc->clear();
     jit::Block b = jit::compileBlock(*this, phys);
-    if(b.nOps == 0) { nc.phys = phys; nc.word = jitFetchWord(phys); nc.ck0 = (u8)ck0Route; JDECL(DR_COMPILE); return 0; }
+    if(b.nOps == 0) { nc.phys = phys; nc.word = jitIcExact() ? jitPeekWord(phys) : jitFetchWord(phys); nc.ck0 = (u8)ck0Route; JDECL(DR_COMPILE); return 0; }
     bi = cc->insert(phys, std::move(b));
     if(bi < 0) { cc->clear(); jit::Block b2 = jit::compileBlock(*this, phys); if(b2.nOps==0) return 0; bi = cc->insert(phys, std::move(b2)); if(bi < 0) return 0; }
     // Block-linking Step 3: registra los sitios de enlace que este bloque emitió (se resuelven
@@ -2553,11 +2738,12 @@ auto CPU::jitTryBlock() -> u32 {
   // siempre trae los MISMOS bytes) se comparan las palabras del bloque en esa linea. Un bloque
   // de 16 ops pasa de 16 extracciones big-endian a 3 comparaciones de u32.
   u32 endPa = phys + 4 * K;
+  const bool icExact = jitIcExact();
   if(!noSmc)
   for(u32 base = phys & ~0x1fu, li = 0; base < endPa; base += 32, li++) {
     u32 idx = (base >> 5) & 0x1ff;
     ICacheLine& l = icache[idx];
-    if(!l.valid || l.ptag != base) icFill(idx, base);
+    if(!l.valid || l.ptag != base) { if(icExact) continue; icFill(idx, base); }   // exacta: la rellena el bloque
     if(l.seq == blk.lineSeq[li]) continue;                 // linea intacta desde la ultima mirada
     u32 lo = (base > phys) ? base : phys;                  // primer byte del bloque en esta linea
     u32 hi = (base + 32 < endPa) ? base + 32 : endPa;
@@ -2609,7 +2795,9 @@ auto CPU::jitTryBlock() -> u32 {
     bool sIn = inDelay, sJb = justBranched;
     u32 sCnt = (u32)cop0[C0_Count], sRnd = (u32)cop0[C0_Random], sFrc = countFrac, sStl = stallCycles;
     u64 sUnc = uncachedReads, sMdo = mulDivOps, sMds = mulDivStall, sFpo = fpuOps, sFps = fpuStall;
+    u64 sIlk = ilk, sIlkH = ilkHits, sDcbH = dcbHits, sIlkS = ilkStall; u8 sDcb = dcbR; u64 sStlT = stallTotal;
     u32 Rd = blk.fn(gpr, this) & 0x7FFF'FFFFu; gpr[0] = 0;
+    ilk = sIlk; dcbR = sDcb; ilkHits = sIlkH; dcbHits = sDcbH; ilkStall = sIlkS; stallTotal = sStlT;
     u64 tmp[32]; for(int r = 0; r < 32; r++) tmp[r] = gpr[r];
     // restaurar: a partir de aqui el estado del invitado es como si el bloque no hubiera corrido
     for(int r = 0; r < 32; r++) gpr[r] = pre[r];
@@ -2658,6 +2846,7 @@ auto CPU::jitTryBlock() -> u32 {
     // escribir mal (dato o direccion), que es justo lo que hace un prologo de handler.
     static std::vector<u8> memPre, memPost;   // copias planas: GuestBytes usa otro allocador
     const bool memCmp = brdiffPhys && phys == brdiffPhys;
+    u64 sIlk = ilk, sIlkH = ilkHits, sDcbH = dcbHits, sIlkS = ilkStall; u8 sDcb = dcbR; u64 sStlT = stallTotal;
     static DCacheLine dcPre[512], dcPost[512];
     if(memCmp) { memPre.assign(mem->rdram.begin(), mem->rdram.end());
                  std::memcpy(dcPre, dcache, sizeof(dcache)); }
@@ -2672,7 +2861,9 @@ auto CPU::jitTryBlock() -> u32 {
     bool iIn = inDelay, iJb = justBranched;
     u32 iCnt = (u32)cop0[C0_Count], iRnd = (u32)cop0[C0_Random], iFrc = countFrac, iStl = stallCycles;
     u64 iUnc = uncachedReads, iMdo = mulDivOps, iMds = mulDivStall, iFpo = fpuOps, iFps = fpuStall;
+    u64 iIlk = ilk, iIlkH = ilkHits, iDcbH = dcbHits, iIlkS = ilkStall; u8 iDcb = dcbR; u64 iStlT = stallTotal;
     // restaura y corre el bloque
+    ilk = sIlk; dcbR = sDcb; ilkHits = sIlkH; dcbHits = sDcbH; ilkStall = sIlkS; stallTotal = sStlT;
     for(int r = 0; r < 32; r++) gpr[r] = sg[r];
     pc = sPc; nextPc = sNext; inDelay = sIn; justBranched = sJb;
     cop0[C0_Count] = sCnt; cop0[C0_Random] = sRnd; countFrac = sFrc; stallCycles = sStl; uncachedReads = sUnc; mulDivOps = sMdo; mulDivStall = sMds; fpuOps = sFpo; fpuStall = sFps;
@@ -2684,9 +2875,10 @@ auto CPU::jitTryBlock() -> u32 {
       for(int r = 0; r < 32; r++) gpr[r] = iG[r];
       pc = iPc; nextPc = iNext; inDelay = iIn; justBranched = iJb;
       cop0[C0_Count] = iCnt; cop0[C0_Random] = iRnd; countFrac = iFrc; stallCycles = iStl; uncachedReads = iUnc; mulDivOps = iMdo; mulDivStall = iMds; fpuOps = iFpo; fpuStall = iFps;
+      ilk = iIlk; dcbR = iDcb; ilkHits = iIlkH; dcbHits = iDcbH; ilkStall = iIlkS; stallTotal = iStlT;
       return K;                                  // manda el interprete, ya avanzado arriba
     }
-    bool bad = (pc != iPc) || (nextPc != iNext);
+    bool bad = (pc != iPc) || (nextPc != iNext) || ilk != iIlk || dcbR != iDcb;
     for(int r = 1; r < 32; r++) if(gpr[r] != iG[r]) bad = true;
     if(memCmp && (std::memcmp(mem->rdram.data(), memPost.data(), memPost.size()) != 0 ||
                   std::memcmp(dcache, dcPost, sizeof(dcache)) != 0)) {

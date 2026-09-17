@@ -194,11 +194,17 @@ struct CPU {
   // tags, sucio, write-back, la instruccion CACHE, integradas en el JIT y en el savestate);
   // lo unico que faltaba era cobrarlas.
   //
-  // missCycles = ciclos de CPU que cuesta UN fallo (relleno de linea desde RDRAM). n64brew da
+  // icMissCycles/dcMissCycles = ciclos de CPU que cuesta UN fallo (relleno de linea desde RDRAM). n64brew da
   // ~640 ns de latencia aleatoria de RDRAM, que a 93,75 MHz son ~60 ciclos. Es CONFIGURACION,
   // no estado: 0 = apagado = el modelo plano de siempre, byte a byte.
-  static auto missFromEnv() -> u32;      // KESTREL_CACHECOST -> ciclos por fallo (0 = off)
-  u32  missCycles = missFromEnv();
+  //
+  // I y D van por separado porque el relleno no mueve lo mismo: la linea de I son 8 palabras y
+  // la de D 4. cen64 (vr4300/fault.h) cobra ICACHE_ACCESS_DELAY = 48 y DCACHE_ACCESS_DELAY = 44
+  // ciclos de parada; ares (dcache.cpp 40, cpu.hpp 48) viene de ahi. KESTREL_CACHECOST fija los
+  // dos; KESTREL_ICACHECOST / KESTREL_DCACHECOST los pisan uno a uno.
+  static auto missFromEnv(const char* own) -> u32;   // -> ciclos por fallo (0 = off)
+  u32  icMissCycles = missFromEnv("KESTREL_ICACHECOST");
+  u32  dcMissCycles = missFromEnv("KESTREL_DCACHECOST");
   // Ciclos de parada acumulados y aun no volcados a Count. Estado de invitado (savestate):
   // en el interprete se drena en cada op, en el JIT al cerrar el bloque.
   u32  stallCycles = 0;
@@ -211,7 +217,8 @@ struct CPU {
   // se traducen a ops equivalentes: 1 op = cpi256/128 ciclos de CPU.
   u64  stallOps    = 0;                  // ops equivalentes a las paradas ya cobradas
   u32  stallOpsRem = 0;                  // resto de esa division (estado de invitado)
-  auto chargeMiss() -> void { stallCycles += missCycles; stallTotal += missCycles; }
+  auto chargeIcMiss() -> void { stallCycles += icMissCycles; stallTotal += icMissCycles; }
+  auto chargeDcMiss() -> void { stallCycles += dcMissCycles; stallTotal += dcMissCycles; }
 
   // --- coste de los accesos NO cacheados -------------------------------------
   // Un load a KSEG1 (o a cualquier region no cacheada) no mira la cache: va al bus y paga la
@@ -236,6 +243,19 @@ struct CPU {
   // Fuera de linea: aqui Memory es todavia un tipo incompleto, y de todas formas este
   // camino ya es el lento (MMIO/cartucho), donde una llamada no se nota.
   auto ramUncached(u32 pe, u32 size) -> void;
+  // Lectura no cacheada: primero el acceso, DESPUES la parada. El registro o la RDRAM se
+  // muestrean en el instante en que la instruccion llega a MEM, y los ciclos de latencia son lo
+  // que tarda el dato en volver; no hay nada del RCP que la CPU pueda ver "al final" de esa
+  // espera, porque la tuberia esta parada con el valor ya pedido. Ademas es lo unico que
+  // cuadra con Lockstep, donde el RSP en linea corre tras la instruccion: una lectura de DPC
+  // que viese el reloj con la parada ya dentro aplicaba en Threaded el diario del RSP hasta un
+  // instante al que el RSP de Lockstep todavia no habia llegado (junkrunner64 con
+  // KESTREL_UNCACHEDCOST, MI_DP una op antes y segun el anfitrion).
+  template<typename F> auto uncachedRead(u32 pe, u32 size, F&& rd) -> decltype(rd()) {
+    auto v = rd();
+    chargeUncached(); ramUncached(pe, size);
+    return v;
+  }
   // --- coste de multiplicar y dividir enteros ---------------------------------
   // Manual NEC VR4300, tabla 3-12: "When an integer multiply or divide instruction is executed,
   // the VR4300 stalls the ENTIRE pipeline. The number of processor cycles (PCycles) stalled at
@@ -262,11 +282,8 @@ struct CPU {
     stallCycles += total - 1; stallTotal += total - 1; mulDivStall += total - 1;
   }
   // --- latencia de la FPU ------------------------------------------------------
-  // Manual NEC VR4300, tabla 7-14 ("Delay Cycles"). A diferencia del entero (tabla 3-12, que
-  // para la tuberia ENTERA sin excepcion), la FPU es un ENCLAVAMIENTO: la nota al pie dice
-  // "If the result of a floating-point instruction is needed by the subsequent instruction,
-  // one additional pipeline clock is required", o sea que el coste se paga cuando alguien
-  // consume el resultado, no siempre.
+  // Manual NEC VR4300, tabla 7-14 ("Delay Cycles"); la tabla 4 de la especificacion SGI da las
+  // mismas cifras.
   //
   //   Add/Sub  .S 3  .D 3      Mul  .S 5  .D 8      Div  .S 29  .D 58
   //   Sqrt     .S 29 .D 58     Abs/Mov/Neg 1        C.cond 1
@@ -274,13 +291,15 @@ struct CPU {
   //   Cvt.S: desde D 2, desde W/L 5   -   Cvt.D: desde S 1, desde W/L 5
   //   Cvt.W 5   -   Cvt.L 5
   //
-  // De momento hay dos modos y NINGUNO es el enclavamiento fino:
+  // Dos modos:
   //   stat  = solo contar (frecuencia y ciclos potenciales, sin tocar el reloj)
-  //   block = cobrar N-1 SIEMPRE, como si la op bloqueara la tuberia entera
-  // "block" es una COTA SUPERIOR declarada, no el modelo del hardware: sobrecobra cada vez
-  // que detras hay trabajo entero independiente que el VR4300 si solapa. Sirve para acotar
-  // cuanto CPI puede haber aqui antes de pagar el coste de seguir la fecha-de-listo por
-  // registro FP, que es lo que el enclavamiento de verdad necesita. Defecto: apagado.
+  //   block = cobrar N-1 parando la tuberia entera
+  // "block" ES el modelo del hardware, no una cota: la especificacion SGI R4300 rev 2.2 (4.2)
+  // dice "multi-cycle instructions are not allowed to overlap with the execution of any other
+  // instructions. That is, the pipeline will stall until the current instruction in the EX
+  // stage completes". La nota de la tabla 7-14 del manual NEC es OTRO coste, aparte: el ciclo
+  // extra cuando la siguiente instruccion consume el resultado FP (sin puente EX->RF). Con
+  // latencia variable en los casos triviales (fpuTrivial). Defecto: apagado.
   static auto fpuFromEnv() -> u8;
   u8   fpuMode  = fpuFromEnv();
   u32  fpuNested = 0;                    // >0 = un trampolin del JIT ya cobro esta op
@@ -311,7 +330,48 @@ struct CPU {
     u32 total = fpuTable(fmt, op & 63);
     fpuOps++;
     if(fpuMode < 2 || total < 2) return;
+    if(total > 2 && fpuTrivial(fmt, op)) total = 2;
     stallCycles += total - 1; stallTotal += total - 1; fpuStall += total - 1;
+  }
+  // Latencia variable. Especificacion SGI R4300 rev 2.2, 4.3.1: las multiciclo acaban en el
+  // SEGUNDO ciclo en los casos triviales -- add/sub con un operando cero o infinito; mul con
+  // resultado cero/infinito decidible en el primer ciclo o con un operando potencia de 2;
+  // div/sqrt con resultado cero/infinito; y cualquiera de ellas ante una excepcion de fuente
+  // (NaN o subnormal en la entrada, que el VR4300 no calcula). Las conversiones "tambien
+  // acaban en el segundo ciclo en varios casos triviales" sin mas detalle: aqui se toman los
+  // mismos (cero, infinito, NaN, subnormal). La division entera NO tiene atajo (siempre 37/69).
+  // Se mira ANTES de calcular: los operandos son los que la op va a leer.
+  struct FpClass { bool zero, inf, special, pow2; };   // special = NaN o subnormal
+  static auto fpClassS(u32 b) -> FpClass {
+    u32 e = (b >> 23) & 0xff, m = b & 0x7f'ffffu;
+    return { e == 0 && m == 0, e == 0xff && m == 0, (e == 0xff && m) || (e == 0 && m),
+             e != 0 && e != 0xff && m == 0 };
+  }
+  static auto fpClassD(u64 b) -> FpClass {
+    u32 e = (u32)(b >> 52) & 0x7ff; u64 m = b & 0x000f'ffff'ffff'ffffull;
+    return { e == 0 && m == 0, e == 0x7ff && m == 0, (e == 0x7ff && m) || (e == 0 && m),
+             e != 0 && e != 0x7ff && m == 0 };
+  }
+  auto fpuTrivial(u32 fmt, u32 op) const -> bool {
+    u32 fn = op & 63, ft = (op >> 16) & 31, fs = (op >> 11) & 31;
+    if(!((u32)cop0[C0_Status] & (1u << 26))) fs &= ~1u;     // FR=0: mismo emparejamiento que cop1op
+    auto cls = [&](u32 i) -> FpClass {
+      if(fmt == 0x10) return fpClassS((u32)fpr[i]);
+      if(fmt == 0x11) return fpClassD(fpr[i]);
+      return { fmt == 0x14 ? (u32)fpr[i] == 0 : fpr[i] == 0, false, false, false };   // W / L
+    };
+    FpClass a = cls(fs);
+    switch(fn) {
+    case 0x00: case 0x01: case 0x02: case 0x03: {           // ADD SUB MUL DIV: dos operandos
+      FpClass b = cls(ft);
+      if(a.special || b.special || a.inf || b.inf) return true;
+      if(fn == 0x03) return a.zero || b.zero;
+      if(fn == 0x02) return a.zero || b.zero || a.pow2 || b.pow2;
+      return a.zero || b.zero;
+    }
+    case 0x04: return a.special || a.inf || a.zero || (fmt == 0x10 ? (u32)fpr[fs] >> 31 : fpr[fs] >> 63);  // SQRT: negativo = invalida
+    default:   return a.special || a.inf || a.zero;        // conversiones y ROUND/TRUNC/CEIL/FLOOR
+    }
   }
   // Guarda para los trampolines COP1 del JIT: cobran ellos al entrar y silencian el cobro del
   // interprete mientras dure la llamada, porque el camino lento delega en jitInterpOp -> cop1op
@@ -322,14 +382,77 @@ struct CPU {
     ~FpuCharge() { c->fpuNested--; }
   };
 
+  // --- enclavamientos de la tuberia --------------------------------------------
+  // Especificacion SGI R4300 rev 2.2 y n64brew (VR4300): tres paradas de 1 ciclo que dependen
+  // de la PAREJA de instrucciones consecutivas, no de una sola.
+  //   LDI  "hardware will interlock if the result of a load is to be used by the immediately
+  //        following instruction". La deteccion del HW es imprecisa: basta con que el campo rs
+  //        o rt de la siguiente coincida con el rt del load, lo use o no. Un load a gpr solo
+  //        enclava con instrucciones no-float; LWC1/LDC1 solo con las float. rt=0 nunca.
+  //   FP   sin puente EX->RF para resultados de coma flotante (computacionales y conversiones):
+  //        si la siguiente instruccion float lee ese fd, espera un ciclo.
+  //   DCB  "a store operation keeps the D-cache busy for 2 cycles": si la siguiente toca la
+  //        D-cache (y acierta; un fallo ya para por su cuenta), un ciclo mas.
+  // ilk = lo que deja la instruccion ANTERIOR: bit r = gpr r recien cargado, bit 32+f = fpr f
+  // recien producido sin puente. Estado de invitado (savestate); una excepcion vacia la
+  // tuberia y lo pone a 0.
+  // KESTREL_INTERLOCK: 0/off = nada (defecto) - stat = contar sin cobrar - 1/on = cobrar.
+  static auto ilkFromEnv() -> u8;
+  u8   ilkMode = ilkFromEnv();
+  u64  ilk     = 0;
+  // DCB como registro de desplazamiento: bit0 = la op en curso escribio en la D-cache, bit1 =
+  // lo hizo la ANTERIOR y su primer acceso a D aun no ha pasado. Se desplaza en cada frontera
+  // de instruccion; asi el JIT puede deshacer una frontera (bail) con un simple shr.
+  u8   dcbR    = 0;
+  u64  ilkSave = 0;                      // JIT: ilk antes de la frontera de entrada del bloque
+  u32  ilkHitSave = 0;                   // JIT: lo que cobro esa frontera (para deshacerla)
+  u64  ilkHits = 0, dcbHits = 0;         // estadistica del anfitrion
+  u64  ilkStall = 0;                     // ciclos cobrados por los tres conceptos
+  // Mascaras de la instruccion: `use` = lo que consume, devuelve lo que produce.
+  static auto ilkMasks(u32 op, u64& use) -> u64 {
+    u32 OP = op >> 26, rs = (op >> 21) & 31, rt = (op >> 16) & 31;
+    if(OP == 0x11) {                                   // COP1
+      if(rs >= 0x10) {                                 // formato S/D/W/L
+        u32 fs = (op >> 11) & 31, ft = (op >> 16) & 31, fd = (op >> 6) & 31, fn = op & 63;
+        use = (1ull << (32 + fs)) | (1ull << (32 + ft));
+        bool prod = fn <= 0x05 || fn == 0x07 || (fn >= 0x08 && fn <= 0x0f) || (fn >= 0x20 && fn <= 0x25);
+        return prod ? 1ull << (32 + fd) : 0;
+      }
+      use = (rs == 0 || rs == 1) ? 1ull << (32 + ((op >> 11) & 31)) : 0;   // MFC1/DMFC1 leen fs
+      return 0;
+    }
+    if(OP == 0x31 || OP == 0x35) { use = 0; return 1ull << (32 + rt); }    // LWC1/LDC1
+    if(OP == 0x39 || OP == 0x3d) { use = 1ull << (32 + rt); return 0; }    // SWC1/SDC1
+    use = ((1ull << rs) | (1ull << rt)) & ~1ull;
+    bool load = (OP >= 0x20 && OP <= 0x27) || OP == 0x37 || OP == 0x1a || OP == 0x1b;
+    return (load && rt) ? 1ull << rt : 0;
+  }
+  // Frontera de instruccion (antes de ejecutar `op`): cobra la pareja y avanza el estado.
+  auto ilkStep(u32 op) -> void {
+    dcbR = (u8)(dcbR << 1);
+    u64 use; u64 prod = ilkMasks(op, use);
+    if(ilk & use) {
+      ilkHits++;
+      if(ilkMode >= 2) { stallCycles += 1; stallTotal += 1; ilkStall += 1; }
+    }
+    ilk = prod;
+  }
+  auto dcbTouch(bool hit) -> void {       // primer acceso a la D-cache tras un store
+    dcbR &= (u8)~2u;
+    if(!hit) return;
+    dcbHits++;
+    if(ilkMode >= 2) { stallCycles += 1; stallTotal += 1; ilkStall += 1; }
+  }
+
   // Peor caso de ciclos parados que puede acumular UNA instruccion: un fallo de I-cache
   // (siempre posible) mas lo mas caro que pueda hacer ella misma -- fallar en D-cache, ser un
   // acceso no cacheado, o ser un DDIV. Las tres son excluyentes entre si.
   auto stallPerOpMax() const -> u64 {
-    u64 own = missCycles > uncachedCycles ? (u64)missCycles : (u64)uncachedCycles;
+    u64 own = dcMissCycles > uncachedCycles ? (u64)dcMissCycles : (u64)uncachedCycles;
     if(mulDivMode >= 2 && own < 68ull) own = 68ull;    // DDIV/DDIVU, el peor de la tabla
     if(fpuMode  >= 2 && own < 57ull) own = 57ull;    // DIV.D/SQRT.D, el peor de la 7-14
-    return (u64)missCycles + own;
+    if(ilkMode  >= 2) own += 2;                      // enclavamiento de pareja + DCB
+    return (u64)icMissCycles + own;
   }
   // Reloj de invitado en ops: lo retirado mas lo que costaron las paradas. Es lo que ven el
   // campo de video y los plazos de PI/SI. Con el coste de cache apagado == retired.
@@ -340,7 +463,14 @@ struct CPU {
   // el problema esta en el ACOPLE al reloj de invitado; si sigue, esta en el cobro.
   static auto stallClockOn() -> bool;
   static auto stallClockCart() -> bool;
-  auto guestOps() const -> u64 { return stallClockOn() ? retired + stallOps : retired; }
+  // Con las paradas aun sin volcar (ver Memory::cartNow): entre bloques y entre pasos del
+  // interprete stallCycles ya vale 0, pero los trampolines del JIT lo leen a mitad de cadena.
+  auto guestOps() const -> u64 {
+    if(!stallClockOn()) return retired;
+    u64 st = stallOps;
+    if(stallCycles) st += ((u64)stallOpsRem + ((u64)stallCycles << 7)) / cpi256;
+    return retired + st;
+  }
 
   // Ticks que le tocan a `ops` instrucciones, arrastrando el resto y las paradas pendientes.
   // Sin paradas devuelve <= ops siempre (invariante de las guardas del JIT); con ellas puede
@@ -365,8 +495,26 @@ struct CPU {
   // cacheado, lo que sea mas caro) -- eso es stallPerOpMax(). Sin ningun coste activado
   // devuelve exactamente `ops`, asi que las guardas del JIT quedan byte a byte como estaban.
   auto countTicksMax(u32 ops) const -> u64 {
-    if(!missCycles && !uncachedCycles && mulDivMode < 2 && fpuMode < 2) return ops;
+    if(!icMissCycles && !dcMissCycles && !uncachedCycles && mulDivMode < 2 && fpuMode < 2 && ilkMode < 2) return ops;
     return (u64)ops + ((u64)ops * stallPerOpMax() + (u64)stallCycles + 1ull) / 2ull;
+  }
+  // Lo mismo en el reloj de los plazos (Memory::cartNow / guestOps), que NO va en ticks: ahi
+  // una op vale 1 y un ciclo parado vale 128/cpi256 ops. Con CPI < 2 un ciclo pesa MAS de
+  // medio tick, asi que acotar un plazo con countTicksMax se quedaba corto y el bloque se
+  // tragaba el fin de la transaccion del SI o de la tarea del RCP (llegaban tarde con JIT).
+  // Las paradas ya pendientes (stallCycles) las cuenta cartNow; aqui solo las que vienen.
+  auto costsOn() const -> bool {
+    return icMissCycles || dcMissCycles || uncachedCycles || mulDivMode >= 2 || fpuMode >= 2 || ilkMode >= 2;
+  }
+  auto guestOpsMax(u32 ops) const -> u64 {
+    if(!costsOn()) return ops;
+    return (u64)ops + ((u64)ops * stallPerOpMax() * 128ull + cpi256 - 1ull) / cpi256 + 1ull;
+  }
+  auto opsForGuest(u64 g) const -> u32 {                // inversa conservadora
+    if(!costsOn()) return g > 0xffffffffull ? 0xffffffffu : (u32)g;
+    u64 per = 1ull + (stallPerOpMax() * 128ull + cpi256 - 1ull) / cpi256;
+    u64 n = g > 1 ? (g - 1ull) / per : 0;
+    return n > 0xffffffffull ? 0xffffffffu : (u32)n;
   }
   // Cuantas instrucciones caben con SEGURIDAD en `ticks` ticks de Count, contando la peor
   // racha de fallos. Es la inversa conservadora de countTicksMax: se usa para el permiso del
@@ -586,6 +734,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
+    if(__builtin_expect(dcbR & 2, 0)) dcbTouch(l.tagv == (base | 1u));
     if(__builtin_expect(l.tagv != (base | 1u), 0)) dcMiss(idx, base);
     u32 off = phys & 0xf;
     // El valor guest es big-endian dentro de la linea; el anfitrion es little-endian. Un
@@ -605,6 +754,8 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
+    if(__builtin_expect(dcbR & 2, 0)) dcbTouch(l.tagv == (base | 1u));
+    if(__builtin_expect(ilkMode != 0, 0)) dcbR |= 1;
     if(__builtin_expect(l.tagv != (base | 1u), 0)) dcMiss(idx, base);
     u32 off = phys & 0xf;
     switch(size) {
@@ -692,6 +843,18 @@ public:
   // Lectura de una palabra de instrucción por el compilador de bloques (mismo valor
   // que icFetch, pero expuesto para el codegen en jit.cpp sin abrir toda la I-cache).
   auto jitFetchWord(u32 phys) -> u32 { return icFetch(phys); }
+  // Modelo de I-cache EXACTO en el dynarec (solo con KESTREL_ICACHECOST > 0). El interprete
+  // rellena una linea -- y cobra su fallo -- en el fetch de la primera op que la pisa; el
+  // driver del JIT la rellenaba al despachar el bloque entero, y un salto enlazado ni pasaba
+  // por el. Con el coste de fallos encendido eso descuadra el reloj: el bloque emite en cada
+  // frontera de linea la misma comprobacion que icFetch y, si falla, llama a jitIcRefill.
+  // Mientras tanto el compilador lee las palabras sin rellenar (jitPeekWord): un relleno en
+  // tiempo de compilacion cobraria lineas que la ejecucion quiza no alcance.
+  auto jitIcExact() const -> bool { return icMissCycles != 0; }
+  auto jitPeekWord(u32 phys) -> u32;
+  // Rellena la linea `base` (cobra el fallo) y comprueba que las palabras del bloque que entra
+  // en `entry` siguen siendo las compiladas. 0 = cambiaron: bloque muerto, bail.
+  auto jitIcRefill(u32 entry, u32 base) -> u8;
   // Ejecuta un load/store simple-alineado (Etapa 2b) espejando EXACTO el intérprete.
   // Devuelve 1 = hecho limpio; 0 = faultaría (misalign/TLB/ADE) → el bloque hace bail y
   // el intérprete re-ejecuta la op para vectorizar la excepción. Nunca vectoriza aquí.

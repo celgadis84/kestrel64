@@ -6227,3 +6227,91 @@ PI vivia 200 ops fijas y las paradas de cache de la propia prueba se comian el p
 de las lineas, tiempo: `Memory::CART_LATCH_TTL_CYCLES = 330` pasado a ops con el CPI vigente
 (`cartLatchTtl`, 235 ops de fabrica). systemtest 0/3721 en todos los modos y con CPI=2; sm64 md5
 igual en los dos modos nuevos; statehash de jr/pd/sm/dk sin cambio en T1 y T0.
+
+
+## Calibrar el CPI: enclavamientos, costes por fuente, reloj de cartucho con paradas y I-cache exacta en el JIT (2026-09-17)
+
+Peticion: calibrar el CPI con lo que digan ares, libdragon y n64brew. **No hay verdad de
+consola** en ninguna de las fuentes; lo que dan es la semantica de la tuberia y latencias
+documentadas. El defecto (CPI plano 1,4 sin costes) NO se toca: sin captura de HW (campos por
+intercambio de una escena fija) moverlo seria elegir a ojo. Lo que se hace es que el modelo
+fisico sea completo, con numeros de fuente, y que lockstep/threaded/interprete den lo mismo.
+
+Fuentes y numeros:
+
+| pieza | valor | fuente |
+|---|---|---|
+| canalizacion | 1 ciclo/op | SGI R4300 spec rev 2.2; libdragon `TICKS_PER_SECOND = CPU_FREQUENCY/2` (Count a medio ciclo) |
+| fallo I-cache | 48 ciclos | cen64 `vr4300/fault.h`; ares cobra 48 igual |
+| fallo D-cache | 44 ciclos | cen64 (ares 40+40 con volcado) |
+| lectura sin cache | 38 ciclos | cen64 |
+| MULT/DIV enteros | 5/8/37/69, parada de tuberia | NEC tabla 3-12, SGI spec |
+| FPU | tabla 7-14 en bloque (cota superior) | NEC |
+| enclavamientos | LDI (load seguido de uso), DCB (fallo de dato en rama), sin puente FP | n64brew VR4300, SGI spec |
+
+- **Perillas separadas**: `KESTREL_ICACHECOST` / `KESTREL_DCACHECOST` (antes una sola
+  `CACHECOST`), `KESTREL_INTERLOCK=stat|on`. Savestate **v12** (estado de enclavamiento).
+- **Enclavamientos** en interprete y dynarec (`ilkPre` en la frontera de op, deshecho en bail
+  con `bailUndo`). Frecuencia medida: junkrunner64 LDI 16,8 % / DCB 4,4 % (0,212 de CPI),
+  Perfect Dark 1,0 % / 1,0 % (0,020), SM64 1,4 % / 1,96 % (0,034).
+- **Raiz de un descuadre lockstep/interprete con costes encendidos**: `guestOps`/`cartNow`
+  (reloj de SI, PI, VI y RCP) no incluia los `stallCycles` aun no volcados a `stallOps`. El
+  reloj de cartucho iba por detras segun cuando cayera el volcado. Ahora suma lo pendiente
+  (`cartStallRem`/`cartStallCyc`/`cartCpi256` en `Memory`).
+- **Guardas del JIT en unidades de guestOps**: los plazos del SI y del RCP estan en guestOps
+  (op = 1, ciclo parado = 128/cpi256); Compare en ticks de Count. `CPU::guestOpsMax(K)` acota
+  cuanto reloj de cartucho puede mover un bloque de K ops con el peor coste por op, y
+  `opsForGuest(g)` es su inversa. Sin costes son la identidad, y el defecto no cambia ni un bit.
+- **I-cache exacta en el dynarec** (`CPU::jitIcExact`, solo con `ICACHECOST > 0`): el interprete
+  rellena y cobra una linea en el fetch de la primera op que la toca; el JIT rellenaba todas las
+  lineas del bloque en el driver y los saltos enlazados/ITC no rellenaban nada (576k fallos en el
+  interprete contra 259k en el JIT en jr). Ahora cada bloque emite, en la primera op y en cada
+  frontera de linea, el `valid && ptag == base` de `icFetch`; el fallo va a un stub que llama a
+  `jitIcRefill` (rellena, cobra, y comprueba que las palabras siguen siendo las compiladas; si no,
+  bloque muerto y bail). El compilador lee con `jitPeekWord`, que no rellena.
+
+Resultado, jr 40 intercambios lockstep, JIT=0 contra JIT=1, cada perilla sola: statehash igual en
+las seis (DCACHE 594cb750, INTERLOCK 8589a116, UNCACHED 1fc6545b, FPU block 19c7a4fa, ICACHE
+8957b819, PHYS completo a445ad5c6e8ceee9). Con PHYS el `[cpi]` real de jr sale **1,943**.
+
+Mas arreglos que salieron al cruzar lockstep/threaded con cada perilla:
+
+- **Count leido por MFC0** incluye tambien las paradas aun no volcadas (igual que `cartNow`).
+- **`rcpRetire(opStart)`**: los plazos del RCP que vencen DENTRO de una op con parada larga se
+  publican con el instante de arranque de la op (`retireOpStart`), no al final de la parada; y
+  `dpEndArmAt` compara contra ese mismo instante.
+- **`uncachedRead` cobra DESPUES de leer**: el registro se muestrea al principio del acceso por el
+  bus; cobrar antes lo leia 38 ciclos en el futuro.
+- **Salto del bucle de espera del RSP con DPC_CURRENT interpolado** (`dpNextChangeAt(now, cur)`):
+  `idleSkip` aparcaba el RSP hasta el cierre del tramo, pero DPC_CURRENT avanza por interpolacion
+  lineal en pasos de 8 bytes dentro del tramo. Si el bucle sondea CURRENT el despertar es el
+  siguiente paso, no el cierre. PD con CPI 1,0 + enclavamientos divergia T0/T1 por aqui.
+- **Recarga START->CURRENT con el RDP congelado** (`Memory::dpScheduleReload`). DK64 congela el
+  RDP despues de MI_DP (DPC_STATUS set freeze), el microcodigo instala START/END con el RDP
+  congelado y sondea CURRENT hasta verlo recargado. El horario de invitado (`dpcCurrentFor`) solo
+  mira el anillo de tramos, y congelado no se lanzaba ninguno: devolvia el cierre del ultimo tramo
+  para siempre. El RSP no terminaba la tarea y el juego se quedaba en el hilo ocioso
+  (`pc=0x8000094c`) en T0 Y T1 con CPI 1,0 (con CPI 1,4 la CPU descongelaba antes de que el RSP
+  llegara al sondeo). Ahora la recarga se fecha como un tramo vacio de coste cero. Cambia el
+  statehash final de PD por defecto (`92f83ab8` -> `6caa8f2b`, mismo framebuffer `0f0adee7`, T0 == T1).
+
+Matriz de perillas (PD 600 intercambios / DK64 1.500 M, JIT, T0 contra T1): con los dos ultimos
+arreglos todos los campos (`KESTREL_FIELDHASH`) son identicos; el unico statehash distinto es el
+del punto de parada de MAXFLIPS, con el framebuffer igual.
+
+PHYS completo en T0 JIT / T1 JIT / T0 interprete:
+
+| ROM | T1 JIT | T0 JIT | T0 interprete | framebuffer |
+|---|---|---|---|---|
+| junkrunner64 (40 int.) | d0fcb456 41,1 s | d0fcb456 44,4 s | d0fcb456 48,3 s | 75e331cb |
+| Perfect Dark (600 int.) | eb0e7a76 52,2 s | 28c17850 44,1 s | 28c17850 107,1 s | 07e7ff48 |
+| SM64 | 6ea2db66 63,9 s | 6ea2db66 41,0 s | 6ea2db66 73,4 s | 29a0e995 |
+| DK64 (1.500 M ops) | 30516c91 48,7 s | 30516c91 45,6 s | ead6e1cb 128,0 s | d05cd603 |
+
+Las dos celdas distintas son punto de parada, no estado: PD T1 para en MAXFLIPS en otra
+instruccion del spin (campos identicos), y DK64 interprete para exactamente en 1.500 M mientras
+el JIT termina el bloque. Comprobado con `KESTREL_FIELDHASH` en DK64 PHYS interprete contra JIT:
+1393 de 1393 campos iguales. Para eso el hash de campo mezcla `dcbR & 3`: solo bit0 (store en
+curso) y bit1 (store anterior sin primer acceso) tienen semantica; los bits altos son historia
+desplazada que nunca vuelve a bit1, y el JIT la limpia (`=1`) donde el interprete la conserva
+(`|=1`), lo que daba 27 campos "distintos" sin diferencia de comportamiento.

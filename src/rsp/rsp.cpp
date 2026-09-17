@@ -418,7 +418,7 @@ auto Rsp::accSat(int n, bool slice, u16 neg, u16 pos) const -> u16 {
 // La firma del bucle se saca de la propia corriente: mismo PC, misma huella de los 31
 // registros escalares, mismo valor devuelto y misma distancia en ciclos que la vuelta
 // anterior. Si algo de eso cambia, no es un bucle de espera y no se salta nada.
-auto Rsp::idleSkip(u64 now, u32 val) -> void {
+auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   // Solo en Threaded. En Lockstep los dos chips comparten hilo y se turnan por construccion:
   // aparcar al RSP ahi es aparcar al unico hilo que hay, y el que tendria que despertarlo --
   // la CPU -- no puede correr hasta que el RSP vuelva. El microcodigo se quedaba dando vueltas
@@ -443,7 +443,7 @@ auto Rsp::idleSkip(u64 now, u32 val) -> void {
   // esperaba un lanzamiento que ya habia pasado y el RSP solo salia por el tope de la CPU --
   // lejos, y cuanto dependia del anfitrion. Perfect Dark threaded perdia asi un MI_DP entero.
   // Ese lanzamiento tambien es un cambio ya fechado: acota igual que el cierre.
-  u64 until = mem->dpNextChangeAt(now);
+  u64 until = mem->dpNextChangeAt(now, cur);
   if(!until && !mem->dpDrainedAt(now)) { idleNoDrain++; return; }
   // El destino del salto NO puede ser `cartNow()`: es tiempo de anfitrion puro y meteria en el
   // reloj del RSP lo lejos que la CPU hubiera llegado a correr en esa corrida. Con el motor
@@ -506,7 +506,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       if(aw) mem->rdpAwaitGuest(now);
       const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
       setR(rt, val);
-      idleSkip(now, val);
+      idleSkip(now, val, r == 2);
       return;
     }
   }

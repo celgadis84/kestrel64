@@ -1154,6 +1154,12 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // recarga viaja con el trabajo: rdpRunJob publica CURRENT = inicio del span.
         if(rcpMode != RcpMode::Threaded || !rdpBusy.load(std::memory_order_acquire))
           rcp.dpc_current.store(rcp.dpc_start, std::memory_order_release);
+        // Congelado no se lanza ningun tramo, pero la recarga de CURRENT ya ha ocurrido: el
+        // lector del horario de invitado (dpcCurrentFor) solo ve lo que hay en el anillo y
+        // seguia devolviendo el cierre del ultimo tramo. DK64 congela el RDP tras MI_DP, el
+        // microcodigo instala START/END con el RDP congelado y espera a ver CURRENT recargado:
+        // con el valor viejo se quedaba sondeando para siempre y el juego colgado.
+        if((rcp.dpc_status & (1u << 1)) && dpGuestOn()) dpScheduleReload(rcp.dpc_start);
       }
       dpcAdvance();
       // (frozen: no run, CURRENT stays where the START reload left it)
@@ -2771,6 +2777,34 @@ auto Memory::dpBarrierWait(u64 now) -> void {
 // maximo contra dpSchedEnd. Y como el coste se cobra ANTES de pintar, el plazo de fin de
 // tarea nace siempre vivo -- que es lo que antes se rompia y hacia que MI_DP se publicase
 // donde el anfitrion hubiese llegado.
+// Recarga de CURRENT sin tramo (RDP congelado): se fecha como un tramo vacio [addr, addr) de
+// coste cero, para que DPC_CURRENT la vea en el mismo horario de invitado que el resto. No va a
+// la cola del worker (no hay nada que pintar) ni cuenta como pendiente.
+auto Memory::dpScheduleReload(u32 addr) -> void {
+  const u64 kick = lockRspExec ? rspGuestNowAt(rsp.exactCycles())
+                 : tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow();
+  std::lock_guard<std::mutex> lk(rdpMx);
+  const u64 seq  = dpSubSeq.load(std::memory_order_relaxed);
+  const u64 kg   = (tlIsRspThread || tlDpLogApply || lockRspExec) ? kick : kick + 1;
+  u64 t = dpSchedEnd.load(std::memory_order_relaxed);
+  if(kg > t) t = kg;
+  dpLastKick = kick;
+  dpJobAddr[seq & kDpRingM]    = addr;
+  dpJobEndAddr[seq & kDpRingM] = addr;
+  dpJobStartG[seq & kDpRingM]  = t;
+  dpJobEndG[seq & kDpRingM]    = t;
+  dpJobKickG[seq & kDpRingM]   = kg;
+  dpSchedEnd.store(t, std::memory_order_release);
+  dpSubSeq.store(seq + 1, std::memory_order_release);
+  if(rspPark.load(std::memory_order_acquire)) {
+    u64 exp = 0;
+    if(rspParkWake.compare_exchange_strong(exp, kick, std::memory_order_acq_rel)) {
+      { std::lock_guard<std::mutex> g(parkMx); }
+      parkCv.notify_all();
+    }
+  }
+}
+
 auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 kick) -> void {
   const u64 gclk0 = rcp.rdpGclk.load(std::memory_order_relaxed);
   u32 costCur = current;
@@ -3121,8 +3155,8 @@ auto Memory::rspParkWait(u64 now, u64 seq0, u64 until) -> u64 {
   rspParks.fetch_add(1, std::memory_order_relaxed);
   static const bool parkLog = std::getenv("KESTREL_PARKLOG") != nullptr;
   if(parkLog)
-    std::fprintf(stderr, "[pk] now=%llu wall=%.2fms via=%s salto=%lld cart=%llu spins=%u\n",
-                 (unsigned long long)now, parkNs / 1e6,
+    std::fprintf(stderr, "[pk] now=%llu until=%llu cap=%llu sched=%llu wall=%.2fms via=%s salto=%lld cart=%llu spins=%u\n",
+                 (unsigned long long)now, (unsigned long long)until, (unsigned long long)cap, (unsigned long long)dpSchedEnd.load(), parkNs / 1e6,
                  wake ? "wake" : miss ? "miss" : capped ? "cap" : "lifeguard",
                  (long long)((wake ? wake : miss ? miss : capped ? cap : now) - (long long)now),
                  (unsigned long long)cartNow(), spins);
@@ -3494,7 +3528,15 @@ auto Memory::dpEndArmAt(u64 at) -> void {
   const bool wasDue = (rcpPend.load(std::memory_order_relaxed) & 2u) && dpDoneAt <= cartNow();
   if((rcpPend.load(std::memory_order_relaxed) & 2u) && at < dpDoneAt) at = dpDoneAt;
   dpDoneAt = at;
-  if(tlInRetire && tlDpLogApply && tlDpLogAt >= cartNow() && !wasDue) tlRetireArmed = true;
+  // Lockstep corre en linea tras la instruccion los ciclos del RSP de (inicio, fin] de esa
+  // instruccion, y lo que armen vence en el retiro siguiente. Sin paradas cada instruccion
+  // avanza 1 y basta con `at >= ahora`; con una parada (fallo de cache, enclavamiento) la
+  // instruccion avanza varios y una entrada del diario sellada dentro de ese hueco pero por
+  // debajo de `ahora` vencia en este retiro: MI_DP una op antes en Threaded (junkrunner64 con
+  // KESTREL_INTERLOCK=on). Un bloque del JIT nunca cruza la hora de una entrada (rcpDueIn),
+  // asi que ahi `at >= ahora` sigue siendo la condicion entera.
+  if(tlInRetire && tlDpLogApply && (tlDpLogAt >= cartNow() || tlDpLogAt > retireOpStart) && !wasDue)
+    tlRetireArmed = true;
   dpArms.fetch_add(1, std::memory_order_relaxed);
   if(at < cartNow()) { dpLate.fetch_add(1, std::memory_order_relaxed);
     u64 ov = cartNow() - at;
@@ -3522,9 +3564,10 @@ auto Memory::rcpFlushPending(u32 bits) -> void {
   }
 }
 
-auto Memory::rcpRetire() -> void {
+auto Memory::rcpRetire(u64 opStart) -> void {
   u32 pend = rcpPend.load(std::memory_order_acquire);
   if(!pend) return;
+  retireOpStart = opStart;
   u64 now = cartNow();
   // Las barreras PRIMERO. El plazo de MI_DP se arma ahora al lanzar el tramo, o sea que puede
   // vencer antes de que el anfitrion haya pintado un pixel de el; publicar la interrupcion ahi

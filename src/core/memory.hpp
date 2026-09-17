@@ -453,7 +453,10 @@ struct Memory {
   auto spEndArm(u64 cyclesUsed) -> void;             // desde el worker del RSP
   auto dpEndArm(u64 kickOps, u64 gclkUsed) -> void;
   auto dpEndArmAt(u64 at) -> void;   // plazo de fin de tarea del RDP en instante absoluto
-  auto rcpRetire() -> void;               // publica lo vencido (SOLO hilo de CPU)
+  auto rcpRetire(u64 opStart = ~0ull) -> void;   // publica lo vencido (SOLO hilo de CPU)
+  // Instante de invitado en que empezo la instruccion que acaba de retirar el hilo de CPU (lo
+  // pasa System al retiro tras un paso del interprete; ~0 tras un bloque). Ver dpEndArmAt.
+  u64  retireOpStart = ~0ull;
   auto rcpFlushPending(u32 bits) -> void; // publica ya, sin mirar el plazo
   // BARRERA DE INVITADO DEL RDP -- lo que hace que el plazo de arriba no llegue nunca tarde.
   //
@@ -624,6 +627,7 @@ struct Memory {
   // Fecha un tramo de FIFO: le pasa el modelo de coste por encima, le pone instante de
   // arranque y de cierre en el anillo y adelanta dpSchedEnd. SOLO con rdpMx cogido.
   auto dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 kick) -> void;
+  auto dpScheduleReload(u32 addr) -> void;   // recarga START->CURRENT con el RDP congelado
   // El RDP esta ocupado, en tiempo de INVITADO, si quedan trabajos sin cerrar para ese reloj.
   auto dpBusyAt(u64 now) const -> bool {
     return dpSubSeq.load(std::memory_order_acquire) > dpCompletedAt(now);
@@ -721,12 +725,33 @@ struct Memory {
   // Primer instante de invitado posterior a `now` en que DPC_STATUS puede cambiar por el
   // horario ya fechado: cierre del primer tramo abierto o lanzamiento del primero aun no
   // visible. 0 si no hay ninguno.
-  auto dpNextChangeAt(u64 now) const -> u64 {
+  // `cur`: la lectura es DPC_CURRENT. Con un tramo abierto ese valor NO es constante hasta el
+  // cierre: dpcCurrentFor lo reparte linealmente sobre el intervalo del trabajo y avanza una
+  // palabra de 8 B cada (t1-t0)/span ops. El siguiente cambio es el siguiente paso de ese
+  // reparto, no el cierre. Sin esto el bucle de espera del microcodigo se saltaba de golpe
+  // hasta el final del tramo mientras Lockstep lo veia avanzar palabra a palabra y salia
+  // antes (Perfect Dark con CPI 1,0 + interlocks: tarea de SP terminando en otro instante).
+  auto dpNextChangeAt(u64 now, bool cur = false) const -> u64 {
     const u64 sub = dpSubSeq.load(std::memory_order_acquire);
     const u64 c = dpCompletedAt(now), vis = dpVisibleAt(now);
     u64 e = 0;
     if(c < sub)   e = dpJobEndG[c & kDpRingM];
     if(vis < sub) { const u64 k = dpJobKickG[vis & kDpRingM]; if(!e || k < e) e = k; }
+    if(cur && c < vis) {
+      const u32 a0 = dpJobAddr[c & kDpRingM], a1 = dpJobEndAddr[c & kDpRingM];
+      const u64 t0 = dpJobStartG[c & kDpRingM], t1 = dpJobEndG[c & kDpRingM];
+      if(a1 > a0 && t1 > t0 && now < t1) {
+        const u64 span = (u64)(a1 - a0), dur = t1 - t0;
+        // Paso actual (multiplo de 8) y primer instante en que floor(span*(t-t0)/dur) llega
+        // al siguiente. Para now <= t0 el valor es a0, igual que el paso 0.
+        const u64 adv  = now > t0 ? ((span * (now - t0)) / dur) & ~7ull : 0;
+        const u64 nxt  = adv + 8;
+        if(nxt < span) {
+          const u64 t = t0 + (nxt * dur + span - 1) / span;
+          if(t > now && (!e || t < e)) e = t;
+        }
+      }
+    }
     return e > now ? e : 0;
   }
   // Despierta a un RSP aparcado sin que nadie archive un tramo. Hace falta cuando la CPU se
@@ -999,9 +1024,22 @@ public:
   // tragaria. A 0 el siguiente prologo vuelve al trampolin, que ya lo ve (siDueIn).
   u32* jitGuardPtr = nullptr;
   const u64* cartStall = nullptr;       // ops equivalentes a las paradas de cache (CPU::stallOps)
+  // Paradas ya cobradas pero aun sin volcar a stallOps (CPU::stallCycles, su resto y el CPI).
+  // El interprete vuelca en cada instruccion y el JIT al cerrar el bloque: sin sumarlas aqui,
+  // un acceso MMIO a mitad de bloque fechaba su evento sin las paradas de las ops anteriores
+  // del mismo bloque, y el plazo (fin de tarea del RSP/RDP, SI...) nacia antes que en el
+  // interprete. La conversion es lineal con el resto arrastrado, asi que el total sale igual
+  // en los dos modos. Con los costes apagados stallCycles es siempre 0: nada cambia.
+  const u32* cartStallRem = nullptr;
+  const u32* cartStallCyc = nullptr;
+  const u32* cartCpi256   = nullptr;
   auto cartNow() const -> u64 {
-    return (cartClock ? *cartClock : 0) + (cartClockPend ? (u64)*cartClockPend : 0)
-         + (cartStall ? *cartStall : 0);
+    u64 st = 0;
+    if(cartStall) {
+      st = *cartStall;
+      if(*cartStallCyc) st += ((u64)*cartStallRem + ((u64)*cartStallCyc << 7)) / *cartCpi256;
+    }
+    return (cartClock ? *cartClock : 0) + (cartClockPend ? (u64)*cartClockPend : 0) + st;
   }
   // Instrucciones retiradas por campo de video. La fija System desde Clocks::fieldInsns()
   // (unico reloj de tiempo del emulador) y la usa la lectura de VI_V_CURRENT, para que el

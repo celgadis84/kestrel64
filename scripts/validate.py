@@ -56,8 +56,13 @@ VI_FIELD_HZ = 59.94
 # lleva KESTREL_PRDP="0". Sin eso, correr un modo software contra el exe de build-prdp
 # rasterizaria en GPU y el md5 no seria el del oraculo determinista.
 SOFT = {"KESTREL_PRDP": "0"}
-PHYS = {"KESTREL_CPI": "1.0", "KESTREL_CACHECOST": "60", "KESTREL_UNCACHEDCOST": "60",
-        "KESTREL_FPUCOST": "stat", "KESTREL_MULDIVCOST": "stat"}
+# Modelo fisico completo: 1 ciclo por instruccion + las paradas que documenta el HW.
+# Fallos de cache y lectura sin cache de cen64 (vr4300/fault.h: 48 I / 44 D / 38), latencias
+# multiciclo de la especificacion SGI R4300 rev 2.2 (MULT 5, DIV 37... paran la tuberia,
+# FPU en bloque) y los enclavamientos de pareja (LDI, sin puente FP, DCB) de n64brew/SGI.
+PHYS = {"KESTREL_CPI": "1.0", "KESTREL_ICACHECOST": "48", "KESTREL_DCACHECOST": "44",
+        "KESTREL_UNCACHEDCOST": "38", "KESTREL_FPUCOST": "block", "KESTREL_MULDIVCOST": "1",
+        "KESTREL_INTERLOCK": "on"}
 MODES = {
     "interp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", **SOFT},
     "jit":           {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", **SOFT},

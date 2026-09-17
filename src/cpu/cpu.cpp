@@ -240,17 +240,18 @@ auto CPU::cpiFromEnv() -> u32 {
 // dentro el coste medio de los fallos, promediado. Encender esto sin bajar antes el CPI base a
 // la canalizacion pura contaria la penalizacion DOS veces y el juego iria al ralenti. La
 // recalibracion (CPI base + presupuesto de campo) va aparte y se mide, no se adivina.
-auto CPU::missFromEnv() -> u32 {
-  static const u32 v = [] {
-    const char* e = std::getenv("KESTREL_CACHECOST");
+auto CPU::missFromEnv(const char* own) -> u32 {
+  // Sin static: se llama dos veces (I y D) con perillas distintas. Solo corre al construir.
+  {
+    const char* e = std::getenv(own);
+    if(!e || !*e) e = std::getenv("KESTREL_CACHECOST");
     if(!e || !*e) return 0u;
     if(!std::strcmp(e, "0") || !std::strcmp(e, "off")) return 0u;
     if(!std::strcmp(e, "1") || !std::strcmp(e, "on"))  return 60u;   // ~640 ns @ 93,75 MHz
     unsigned long n = std::strtoul(e, nullptr, 0);
     if(n > 1024) n = 1024;                 // cota de cordura: countTicksMax multiplica por esto
     return (u32)n;
-  }();
-  return v;
+  }
 }
 
 // Ciclos que cuesta UNA lectura no cacheada. Misma latencia de RDRAM que un fallo de cache
@@ -288,7 +289,7 @@ auto CPU::stallClockOn() -> bool {
   return v;
 }
 auto CPU::fpuFromEnv() -> u8 {
-  static const u8 v = [] -> u8 {
+  static const u8 v = []() -> u8 {
     const char* e = std::getenv("KESTREL_FPUCOST");
     if(!e || !*e) return 0;
     if(!std::strcmp(e, "stat")) return 1;                        // contar sin cobrar
@@ -297,8 +298,18 @@ auto CPU::fpuFromEnv() -> u8 {
   }();
   return v;
 }
+auto CPU::ilkFromEnv() -> u8 {
+  static const u8 v = []() -> u8 {
+    const char* e = std::getenv("KESTREL_INTERLOCK");
+    if(!e || !*e) return 0;
+    if(!std::strcmp(e, "stat")) return 1;                        // contar sin cobrar
+    if(!std::strcmp(e, "0") || !std::strcmp(e, "off")) return 0;
+    return 2;                                                     // 1 / on
+  }();
+  return v;
+}
 auto CPU::mulDivFromEnv() -> u8 {
-  static const u8 v = [] -> u8 {
+  static const u8 v = []() -> u8 {
     const char* e = std::getenv("KESTREL_MULDIVCOST");
     if(!e || !*e) return 0;
     if(!std::strcmp(e, "stat")) return 1;                       // contar sin cobrar
@@ -332,6 +343,7 @@ auto CPU::reset() -> void {
   llbit = false;
   if(mem) mem->cartClock = &retired;   // PI write-latch decay clock (retired-instr count)
   if(mem) mem->cartStall = stallClockCart() ? &stallOps : nullptr;  // + las ops equivalentes a las paradas de cache
+  if(mem) { mem->cartStallRem = &stallOpsRem; mem->cartStallCyc = &stallCycles; mem->cartCpi256 = &cpi256; }
   if(mem) mem->jitGuardPtr = &jitGuard;
   if(mem) mem->cartClockPend = &jitPending;   // + lo que la cadena del JIT aun no ha commiteado
 }
@@ -572,10 +584,10 @@ auto CPU::refreshDebugArmed() -> void {
 // --- memory (segment rules + TLB translation via translate()) ----------------
 // Cached data accesses route through the write-back D-cache; uncached (KSEG1) and
 // non-RDRAM targets go straight to the bus. `pe` is the reverse-endian-adjusted phys.
-auto CPU::read8 (u64 v) -> u8  { u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()) return (u8)dcRead(pe,1); chargeUncached(); ramUncached(pe, 1); return mem->read8 (pe); }
-auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); chargeUncached(); ramUncached(pe, 2); return mem->read16(pe); }
-auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); chargeUncached(); ramUncached(pe, 4); return mem->read32(pe); }
-auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); chargeUncached(); ramUncached(pe, 8); return mem->read64(pe); }
+auto CPU::read8 (u64 v) -> u8  { u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()) return (u8)dcRead(pe,1); return uncachedRead(pe, 1, [&]{ return mem->read8(pe); }); }
+auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); return uncachedRead(pe, 2, [&]{ return mem->read16(pe); }); }
+auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); return uncachedRead(pe, 4, [&]{ return mem->read32(pe); }); }
+auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=xlat(v,AccRead);  if(memAbort||!mem) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); return uncachedRead(pe, 8, [&]{ return mem->read64(pe); }); }
 auto CPU::write8 (u64 v, u8  x) -> void { u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } ramUncached(pe,1); mem->write8 (pe, x); }
 auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } ramUncached(pe,2); mem->write16(pe, x); }
 auto CPU::seenWatch(u64 p, u32 size) -> void {
@@ -655,7 +667,7 @@ auto CPU::dcFlush(u32 idx) -> void {
 // tag de ultimo escritor y el punto de vigilancia.
 auto CPU::dcMiss(u32 idx, u32 base) -> void {
   dcMisses++;
-  chargeMiss();     // el relleno de linea paga la latencia de RDRAM (ver countTicks)
+  chargeDcMiss();   // el relleno de linea paga la latencia de RDRAM (ver countTicks)
   DCacheLine& l = dcache[idx];
   u8* const ram = mem->rdram.data();
   const u32  sz = (u32)mem->rdram.size();
@@ -707,7 +719,7 @@ auto CPU::pokePhysCoherent(u32 phys, u32 size, u64 val) -> void {
 auto CPU::icFill(u32 idx, u32 base) -> void {
   icMisses++;
   ramCpuBytes += 32;
-  chargeMiss();     // idem: un fallo de I cuesta lo mismo que uno de D
+  chargeIcMiss();   // idem, con su propio coste: la linea de I son 8 palabras
   ICacheLine& l = icache[idx];
   l.ptag = base; l.valid = true; l.seq = ++icSeq;
   if(base + 32 <= mem->rdram.size()) std::memcpy(l.data, &mem->rdram[base], 32);
@@ -1230,6 +1242,7 @@ auto CPU::step() -> void {
   pc = nextPc;
   nextPc = pc + 4;
   justBranched = false;
+  if(ilkMode) ilkStep(op);
   execute(op);
   // Log taken control transfers (target differs from the sequential fall-through).
   // The jump ring-buffer + wild-jump traps are debug-only, so skip the whole block
@@ -1347,6 +1360,7 @@ auto CPU::setBadVAddr(u64 vaddr) -> void {
 
 auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
   bumpXlat();   // EXL/modo cambian → invalida el fetch fast-path del intérprete
+  ilk = 0; dcbR = 0;   // la excepcion vacia la tuberia: no queda pareja
   u32 status = (u32)cop0[C0_Status];
   bool bd = inDelay;
   bool exl = status & 0x2;
@@ -1901,11 +1915,11 @@ auto CPU::execute(u32 op) -> void {
     if(cpuMode() != 0 && !((u32)cop0[C0_Status] & 0x1000'0000u)) { takeException(11); break; }
     { u64 a=gpr[RS]+SIMM; translate(a,AccRead); if(memAbort) break; cacheOp((op >> 16) & 0x1f, a); } break;
   case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
-              u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : (chargeUncached(), ramUncached(pe,4), mem->read32(pe));
+              u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : uncachedRead(pe, 4, [&]{ return mem->read32(pe); });
               set(RT, sext32(val)); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x31: /*LWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet32(RT, read32(gpr[RS]+SIMM)); break;
   case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
-              u32 pe=(u32)pa; u64 val = (cacheable(va)&&pe<mem->rdram.size()) ? dcRead(pe,8) : (chargeUncached(), ramUncached(pe,8), mem->read64(pe));
+              u32 pe=(u32)pa; u64 val = (cacheable(va)&&pe<mem->rdram.size()) ? dcRead(pe,8) : uncachedRead(pe, 8, [&]{ return mem->read64(pe); });
               set(RT, val); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x35: /*LDC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet64(RT, read64(gpr[RS]+SIMM)); break;
   case 0x37: /*LD*/  set(RT, read64(gpr[RS]+SIMM)); break;
@@ -2448,9 +2462,8 @@ auto CPU::jitMem(u32 op) -> u8 {
   bool inRdram = cacheable(a) && pe < mem->rdram.size();
   if(!store) {
     u64 raw = inRdram ? dcRead(pe, sz)
-            : (chargeUncached(), ramUncached(pe, sz),
-               sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
-             : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe));
+            : uncachedRead(pe, sz, [&]{ return sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
+                                             : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe); });
     switch(OPc) {
       case 0x20: set(RT, sext8 ((u8) raw)); break;
       case 0x21: set(RT, sext16((u16)raw)); break;
@@ -2525,9 +2538,8 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
   bool inRdram = cacheable(a) && pe < mem->rdram.size();
   if constexpr(!store) {
     u64 raw = inRdram ? dcRead(pe, sz)
-            : (chargeUncached(), ramUncached(pe, sz),
-               sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
-             : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe));
+            : uncachedRead(pe, sz, [&]{ return sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
+                                             : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe); });
     if      constexpr(OPc == 0x20) set(rt, sext8 ((u8) raw));
     else if constexpr(OPc == 0x21) set(rt, sext16((u16)raw));
     else if constexpr(OPc == 0x23) set(rt, sext32((u32)raw));
@@ -2679,6 +2691,13 @@ auto CPU::readCop0(u32 reg) -> u64 {
   switch(reg) {
     case 7: case 21: case 22: case 23: case 24: case 25: case 31: return cop0Unused;
     case C0_PRId:   return 0x0000'0b22;   // constant R4300i revision
+    // Count lleva dentro las paradas ya ocurridas aunque aun no se hayan volcado: el fallo de
+    // I-cache del fetch de ESTA instruccion (o su enclavamiento) para la tuberia antes de que
+    // llegue a ejecutarse, y el reloj sigue corriendo mientras. El interprete vuelca
+    // stallCycles tras ejecutar (countAdd al final del paso); sin esto un osGetCount que abre
+    // linea leia Count 24 ticks corto y el dynarec (que suma lo pendiente, ver jit.cpp MFC0)
+    // armaba otro Compare. Sin paradas pendientes, la suma vale 0 y es el registro de siempre.
+    case C0_Count:  return (u32)((u32)cop0[reg] + (u32)(((u64)countFrac + ((u64)stallCycles << 7)) >> 8));
     default: return cop0[reg];
   }
 }
