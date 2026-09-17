@@ -6315,3 +6315,27 @@ el JIT termina el bloque. Comprobado con `KESTREL_FIELDHASH` en DK64 PHYS interp
 curso) y bit1 (store anterior sin primer acceso) tienen semantica; los bits altos son historia
 desplazada que nunca vuelve a bit1, y el JIT la limpia (`=1`) donde el interprete la conserva
 (`|=1`), lo que daba 27 campos "distintos" sin diferencia de comportamiento.
+
+## 2026-09-17 — DMA SP->RDRAM del RSP en el diario (`KESTREL_DMALOG`)
+
+Pedido: "ataca al JIT del RSP". Medido antes de tocar nada (hostprof sobre el hilo del RSP,
+junkrunner64 200 intercambios prdp threaded-jit): el codigo que emite el dynarec del RSP es ~9 %
+del hilo. El resto es espera: el RSP va por delante de la CPU y se para en citas
+(`spReadSync`) cada vez que tiene que tocar algo que la CPU ve. Censo por sitio: 564k citas antes
+de un DMA del SP (277k SP_RD_LEN, 287k SP_WR_LEN) y 266k esperas al diario vacio antes de ese
+mismo DMA. libdragon (rspq/rdpq) lanza un DMA por tramo de comandos del RDP.
+
+- **SP_WR_LEN (DMEM/IMEM -> RDRAM) va al diario** (`Memory::spDmaLogPush`, reg 16). Los bytes se
+  copian YA de la memoria del SP a un anillo de 1 MB (`dmaPay`), los registros SP_MEM_ADDR /
+  SP_DRAM_ADDR / *_LEN cambian en el instante del RSP, y la CPU deja los bytes en RDRAM al llegar
+  al instante (`spDmaLogApply` desde `dpLogApply`), en orden con las escrituras DPC/SP_STATUS del
+  mismo diario. Cae al camino de siempre (cita + copia) con `watchAddr`, `KESTREL_DMAGUARD`,
+  traza del SP, transferencias de mas de 256 KB o si el rango pisa una imagen de color/z que el
+  RDP tiene en vuelo.
+- SP_RD_LEN (RDRAM -> SP) sigue con cita: el microcodigo necesita los bytes que la CPU haya
+  escrito HASTA su instante, y eso solo se sabe con la CPU alli.
+- junkrunner64 200 intercambios, A/B x3 con `KESTREL_DMALOG=0/1`: 11,45 s -> 10,93 s (-4,5 %),
+  statehash `be723abf`, framebuffer `75e331cb`. Techo sin ninguna cita (`KESTREL_DMARDV=0`,
+  incorrecto): 7,0 s. El diario no sale gratis: cada entrada es un plazo que corta los bloques
+  del JIT de la CPU (`rcpDueIn`). PD 600 / SM64 300 / DK64 1.500 M: T0 == T1 (`6caa8f2b`,
+  `79895dc7`, `e7098ab4`).

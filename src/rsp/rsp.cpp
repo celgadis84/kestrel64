@@ -561,7 +561,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
       mem->dpLogPush(now, reg, v);
       return;
     }
-    if(mem->dpReadAhead(now) || mem->dpLogPending()) mem->dpLogWait(now, true);
+    if(mem->dpReadAhead(now) || mem->dpLogPending()) { mem->dpLogWait(now, true); }
     mem->rcpRegWrite32(PHYS_DPC + (reg << 2), v);
     return;
   }
@@ -576,14 +576,23 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     mem->dpLogPush(mem->rspGuestNowAt(exactCycles()), 8u | 4u, v);
     return;
   }
+  static const u32 dmaRdv = []{ const char* e = std::getenv("KESTREL_DMARDV"); return e ? (u32)std::strtoul(e, nullptr, 0) : 3u; }();
+  // SP_WR_LEN (DMEM/IMEM -> RDRAM) al diario, como DPC: los bytes se copian YA de la memoria
+  // del SP (el microcodigo puede reescribirla enseguida) y la CPU los deja en RDRAM al llegar
+  // al instante del RSP. Es el mismo resultado que la cita, sin que el RSP se pare a esperar.
+  // libdragon (rspq) lanza uno por tramo de comandos del RDP: 287k citas menos en junkrunner64.
+  // KESTREL_DMALOG=0 lo vuelve a la cita (para bisecar).
+  static const bool dmaLog = []{ const char* e = std::getenv("KESTREL_DMALOG"); return !e || std::strcmp(e, "0"); }();
+  if((rd & 7) == 3 && dmaLog && (dmaRdv & 2u) && mem->rcpMode == Memory::RcpMode::Threaded && Memory::dpLogOn()
+     && !Memory::dpRdvOn() && (mem->rcpPend.load(std::memory_order_acquire) & 8u)
+     && mem->spDmaLogPush(mem->rspGuestNowAt(exactCycles()), v))
+    return;
   // Un DMA puede leer o pisar RDRAM que toca un tramo aun en el diario: vaciarlo antes.
-  if(((rd & 7) == 2 || (rd & 7) == 3) && mem->dpLogPending()) mem->dpLogWait(0, false);
   // Un DMA del SP lee o escribe RDRAM en SU instante de invitado. En Threaded el RSP va por
   // delante de la CPU, asi que sin cita leia un buffer que la CPU aun no habia escrito (rspq de
   // libdragon: la CPU mete comandos y el microcodigo los baja por DMA) o dejaba en RDRAM datos
   // que la CPU veia antes de tiempo. Medido junkrunner64: MI_DP 66 ops tarde y statehash
   // distinto de Lockstep; con la cita, igual. KESTREL_DMARDV=0 la quita (para bisecar).
-  static const u32 dmaRdv = []{ const char* e = std::getenv("KESTREL_DMARDV"); return e ? (u32)std::strtoul(e, nullptr, 0) : 3u; }();
   if(((rd & 7) == 2 || (rd & 7) == 3) && (dmaRdv & (1u << ((rd & 7) - 2))) && mem->rcpMode == Memory::RcpMode::Threaded) {
     const u64 now = mem->rspGuestNowAt(exactCycles());
     if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now); }

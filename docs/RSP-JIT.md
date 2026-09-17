@@ -625,6 +625,13 @@ palo largo es el RDP. Se queda porque es correcto, no cuesta nada en el camino
 caliente y en un microcodigo que use estas cargas de verdad (los de audio y los
 que empaquetan normales) el CALL si se paga. A/B: `KESTREL_RSPJIT_NOVECPACK=1`.
 
+## El dynarec del RSP NO es el cuello en libdragon (2026-09-17)
+
+hostprof del hilo del RSP en junkrunner64 (200 intercambios, prdp threaded-jit): el codigo
+emitido es ~9 % del hilo; el grueso son las citas con la CPU (`spReadSync`, `dpLogWait`)
+alrededor de los DMA del SP que lanza rspq. Mejorar el codegen aqui no mueve la pared; lo que la
+mueve es quitar citas sin perder semantica (ver STATUS 2026-09-17, DMA SP->RDRAM en el diario).
+
 ## Siguiente
 
 0. **Enlace directo con retroenlaces** (`jmp rel32` cableado en vez del sondeo por

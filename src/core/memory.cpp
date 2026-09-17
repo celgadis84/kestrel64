@@ -1555,6 +1555,94 @@ auto Memory::spDma(bool toRam) -> void {
   rcp.sp_rd_len = rcp.sp_wr_len = 0xff8;
 }
 
+// DMA SP -> RDRAM apuntado en el diario (ver DpLogDma en memory.hpp). Solo hilo del RSP, con la
+// barrera del SP armada y el reloj exacto ya publicado por el llamador (Rsp::mtc0). Devuelve false
+// y deja el camino de siempre (cita + copia en el acto) cuando hay diagnostico puesto, cuando la
+// transferencia es demasiado grande para el anillo o cuando cae encima de lo que el RDP puede
+// estar pintando.
+auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
+  static const bool diag = std::getenv("KESTREL_DMAGUARD") != nullptr;
+  if(diag || watchAddr || spTrace()) return false;
+  const u32 length = ((len & 0xfff) + 8) & ~7u;
+  const u32 count  = ((len >> 12) & 0xff) + 1;
+  const u32 skip   = (len >> 20) & 0xfff;
+  const u64 total  = (u64)length * count;
+  if(total > kDmaPayN / 4) return false;
+  const u32 memAddr = rcp.sp_mem_addr & 0x1fff;
+  const bool imem   = (memAddr & 0x1000) != 0;
+  u32 memOff        = memAddr & 0xff8;
+  const u32 dram    = rcp.sp_dram_addr & 0xfffff8;
+  if(rcpPend.load(std::memory_order_acquire) & 4u) {
+    // Mismo criterio de solape que rspDmaRdpWait, pero sin esperar: si pisa una imagen del RDP
+    // en vuelo, camino de siempre.
+    const u32 lo = dram, hi = dram + (length + skip) * count;
+    for(;;) {
+      const u32 s0 = dpWrSeq.load(std::memory_order_acquire);
+      if(s0 & 1u) { std::this_thread::yield(); continue; }
+      bool hit = false;
+      for(u32 i = 0; i < SoftRdp::kWrSlots; i++)
+        hit |= lo < dpWrHi[i].load(std::memory_order_acquire) && dpWrLo[i].load(std::memory_order_acquire) < hi;
+      if(dpWrSeq.load(std::memory_order_acquire) != s0) continue;
+      if(hit) return false;
+      break;
+    }
+  }
+  // Anillo de bytes o diario llenos: que la CPU aplique lo pendiente (el reloj ya esta
+  // publicado). Hay que hacerlo ANTES de rellenar dpLogDma: con el diario lleno la ranura de la
+  // cola es la de la cabeza, aun sin aplicar.
+  if(dmaPayTail + total - dmaPayHead.load(std::memory_order_acquire) > kDmaPayN
+     || dpLogTail.load(std::memory_order_relaxed) - dpLogHead.load(std::memory_order_acquire) >= kDpLogN)
+    dpLogWait(at, false);
+  ramBytesRsp.fetch_add(total, std::memory_order_relaxed);
+  const std::vector<u8>& sp = imem ? this->imem : this->dmem;
+  const u64 pay = dmaPayTail;
+  u64 w = pay;
+  for(u32 c = 0; c < count; c++) {
+    for(u32 i = 0; i < length; ) {
+      const u32 mo = (memOff + i) & 0xfff;
+      u32 n = length - i;
+      if(n > 0x1000u - mo) n = 0x1000u - mo;                      // vuelta de la SP mem
+      const u64 wo = w & kDmaPayM;
+      if(n > kDmaPayN - wo) n = (u32)(kDmaPayN - wo);              // vuelta del anillo
+      std::memcpy(&dmaPay[wo], &sp[mo], n);
+      w += n; i += n;
+    }
+    memOff = (memOff + length) & 0xfff;
+  }
+  dmaPayTail = w;
+  // Los registros cambian en el instante del RSP, igual que cualquier otra escritura suya al SP.
+  rcp.sp_mem_addr  = (imem ? 0x1000 : 0) | memOff;
+  rcp.sp_dram_addr = (dram + (length + skip) * count) & 0xffffff;
+  rcp.sp_rd_len = rcp.sp_wr_len = 0xff8;
+  const u32 t = dpLogTail.load(std::memory_order_relaxed);
+  dpLogDma[t & kDpLogM] = {dram, length, count, skip, pay};
+  dmaLogPushes.fetch_add(1, std::memory_order_relaxed);
+  dpLogPush(at, 16u, 0);
+  return true;
+}
+
+// Aplicacion en el hilo de quien consume el diario: la mitad RDRAM del DMA de arriba.
+auto Memory::spDmaLogApply(const DpLogDma& d) -> void {
+  u64 r = d.pay;
+  u32 dram = d.dram;
+  for(u32 c = 0; c < d.count; c++) {
+    for(u32 i = 0; i < d.length; ) {
+      const u64 ro = r & kDmaPayM;
+      u32 n = d.length - i;
+      if(n > kDmaPayN - ro) n = (u32)(kDmaPayN - ro);
+      const u32 dd = dram + i;
+      if(dd < rdram.size()) {
+        u32 m = n;
+        if(m > (u32)(rdram.size() - dd)) m = (u32)(rdram.size() - dd);  // final de los chips
+        std::memcpy(&rdram[dd], &dmaPay[ro], m);
+      }
+      r += n; i += n;
+    }
+    dram += d.length + d.skip;
+  }
+  dmaPayHead.store(r, std::memory_order_release);
+}
+
 // Arranca el command processor del RDP sobre lo que haya pendiente entre el ultimo trozo
 // encolado y DPC_END. Se llama desde la escritura de DPC_END y TAMBIEN al limpiar FREEZE:
 // congelar el RDP en HW para el procesador de comandos pero NO tira lo pendiente, asi que
@@ -2954,7 +3042,9 @@ auto Memory::dpLogApply(u64 upTo) -> void {
     const DpLogEnt e = dpLog[h & kDpLogM];
     if(e.at > upTo) break;
     tlDpLogApply = true; tlDpLogAt = e.at;
-    if(e.reg & 8u) {
+    if(e.reg & 16u) {
+      spDmaLogApply(dpLogDma[h & kDpLogM]);
+    } else if(e.reg & 8u) {
       rcpRegWrite32(BASE_SP + ((e.reg & 7u) << 2), e.v);
       spLogPend.fetch_sub(1, std::memory_order_release);
       if(e.v & 0x180u) spLogCrit.fetch_sub(1, std::memory_order_release);

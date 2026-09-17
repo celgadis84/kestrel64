@@ -416,6 +416,20 @@ struct Memory {
   std::atomic<bool> rspLogWait{false};           // el RSP esta parado en dpLogWait
   std::atomic<u64> dpLogPushes{0}, dpLogWaits{0};
   std::atomic<u32> dpLogWaives{0};
+  // DMA SP -> RDRAM del RSP en el mismo diario (reg = 16). El motor lee la memoria del SP en el
+  // instante del SP_WR_LEN, y ese instante es del RSP: los bytes se copian ahi a `dmaPay`. Lo que
+  // espera es la escritura en RDRAM, que la CPU aplica al llegar al instante y en orden con los
+  // DPC_END apuntados (el tramo que los lee se lanza despues). Antes era una cita por DMA:
+  // junkrunner64 (rspq de libdragon, un DMA por trozo de comandos del RDP) 287k citas.
+  struct DpLogDma { u32 dram, length, count, skip; u64 pay; };
+  DpLogDma dpLogDma[kDpLogN]{};
+  static constexpr u64 kDmaPayN = 1ull << 20, kDmaPayM = kDmaPayN - 1;
+  std::vector<u8> dmaPay = std::vector<u8>(kDmaPayN);
+  u64 dmaPayTail = 0;                            // solo el hilo del RSP
+  std::atomic<u64> dmaPayHead{0};                // lo avanza quien aplica
+  std::atomic<u64> dmaLogPushes{0};
+  auto spDmaLogPush(u64 at, u32 len) -> bool;    // true = apuntado (ver memory.cpp)
+  auto spDmaLogApply(const DpLogDma& d) -> void;
   // Escrituras del RSP a SP_STATUS en el mismo diario (reg = 8|4). El microcodigo cambia
   // SIG0..SIG7 con la CPU por detras en tiempo de invitado; aplicadas al registro en el acto,
   // la vuelta en que el bucle de sondeo de la CPU las veia la decidia el anfitrion (junkrunner64:

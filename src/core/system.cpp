@@ -1008,8 +1008,9 @@ auto System::run() -> void {
       // una por borde cruzado; si suben al millon es que el grano se ha perdido.
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
-      std::fprintf(stderr, "[dplog] %llu apuntadas, %llu esperas, %u renuncias\n",
-                   (unsigned long long)memory.dpLogPushes.load(), (unsigned long long)memory.dpLogWaits.load(), memory.dpLogWaives.load());
+      std::fprintf(stderr, "[dplog] %llu apuntadas (%llu DMA), %llu esperas, %u renuncias\n",
+                   (unsigned long long)memory.dpLogPushes.load(), (unsigned long long)memory.dmaLogPushes.load(),
+                   (unsigned long long)memory.dpLogWaits.load(), memory.dpLogWaives.load());
       // Fallos de cache primaria del tramo. Es la materia prima del CPI real: el VR4300 no
       // gasta un numero fijo de ciclos por instruccion, gasta uno mas la penalizacion de
       // RDRAM de cada fallo. Sin esta cuenta el CPI solo se puede suponer.
