@@ -6391,3 +6391,33 @@ Paradas de la barrera en jr: 44.347 (0,85 s) -> **174 (0,40 s)**, y esas 174 son
 (~2,4 ms cada una). `cpuWait` 13,0 % -> 8,4 %. Statehash sin mover en los cuatro (jr `be723abf`,
 PD `6caa8f2b`, SM64 `79895dc7`, DK64 `e7098ab4`), dos corridas iguales cada uno. `KESTREL_DPBARSYNC=0`
 vuelve al comportamiento de SoftRDP. Con SoftRDP en su hilo no cambia nada: la barrera sigue entera.
+
+## 2026-09-17 — Tres callejones sin salida en el reparto CPU->RDP (medidos y descartados)
+
+Perfil del hilo de CPU (junkrunner64, 200 cuadros, Parallel-RDP, 1.832 muestras): **14,36 %** cae
+fuera de imagen (ntdll) y **8,73 %** de ese total entra desde `dpcAdvance`. Desensamblando las dos
+direcciones de retorno calientes: estan justo detras de `std::mutex::unlock` y de
+`condition_variable::notify_all` dentro de `rdpSubmit` en linea. O sea, la CPU paga dos llamadas al
+kernel por DPC_END para despertar a un worker dormido, ~308.000 veces en 200 cuadros (rdpq de
+libdragon manda ~1.600 tramos diminutos por cuadro). Tres intentos de quitarlo, los tres fallidos:
+
+1. **Sacar varios trabajos de golpe en el worker.** Instrumentada la profundidad de la cola justo
+   despues de cada `pop`: `0:304290 1:3578 2:369 3:13`. La cola esta VACIA el 98,7 % de las veces;
+   no hay nada que agrupar. Instrumentacion retirada.
+
+2. **Girar mas antes de dormir** (`KESTREL_RDPSPIN`). A/B de cuatro juegos: 32768 -> jr 9061 /
+   PD 14631 / SM64 8449 / DK64 13860 ms; 131072 -> jr 9045 / PD 14419 / SM64 8408 /
+   DK64 **14661** ms (+5,8 %). El anfitrion (i7-870, 4c/8t) va con CPU ~100 %, RSP ~86 % y RDP
+   63-86 %: esta sin nucleos, y el worker girando se los roba a los otros dos. Se queda 32768.
+
+3. **Aplazar el reparto**: juntar hasta 32 tramos contiguos antes de pasarselos al worker. Es
+   invisible para el invitado (el horario lo fecha `dpScheduleSpan` y las lecturas de DPC salen de
+   el, no de la cola), asi que la idea era legitima; pero **pierde por goleada**: PD 15,0 -> 18,8 s,
+   SM64 8,4 -> 16,3 s, y junkrunner64 **se cuelga**. Dos razones: (a) con la cola vacia el 98,7 %
+   del tiempo, retener trabajo no esconde nada, solo quita solape CPU<->RDP y amontona el pintado
+   en la barrera de SYNC_FULL; (b) `rspDmaRdpWait` espera a `rcpPend & 4`, que el tramo aplazado no
+   arma nunca, asi que el RSP gira para siempre. Revertido.
+
+**Conclusion**: el coste de despertar al worker no se quita ni agrupando, ni girando, ni
+aplazando. Mientras el RDP viva en otro hilo y el juego mande tramos diminutos, esas dos llamadas
+al kernel por tramo son el precio del solape, y el solape vale mas que ellas.
