@@ -458,7 +458,38 @@ auto System::quiesceRcp() -> void {
   for(int i = 0; i < 64 && memory.rsp.running; i++) memory.rsp.step(1u << 20);
 }
 
+// Reposo del invitado. Antes el estado se tomaba donde cayera la peticion y quiesceRcp
+// terminaba a la fuerza lo que hubiera en vuelo. Con las citas de Threaded eso ya no vale: un
+// RSP a mitad de tarea espera a que la CPU llegue a un instante de invitado, y la CPU esta
+// parada esperandole a el -- medido, SM64 con KESTREL_REWIND=1 avanzaba un punado de ciclos
+// de RSP cada dos segundos. Y en los dos modos, terminar la tarea o aplicar el diario antes
+// de su instante cambia la partida: la foto no era de la maquina que seguia corriendo.
+// Asi que no se fuerza nada: la CPU sigue corriendo subtramos hasta que el RCP esta quieto
+// por si mismo, y ahi quiesceRcp solo drena trabajo de anfitrion (pixeles del RDP).
+// Los fines de tarea armados y sin vencer (rcpPend bits 0-1) SI caben en un reposo: van en el
+// estado con su plazo.
+auto System::rcpAtRest() -> bool {
+  const bool rspOn = memory.rcpMode == Memory::RcpMode::Threaded
+                   ? memory.rspBusy.load(std::memory_order_acquire) : memory.rsp.running;
+  if(rspOn) return false;
+  if(memory.rcpPend.load(std::memory_order_acquire) & (4u | 8u | 16u)) return false;
+  const u64 now = memory.cartNow();
+  return memory.dpDrainedAt(now) &&
+         memory.dpVisibleAt(now) == memory.dpSubSeq.load(std::memory_order_acquire);
+}
+
+// Tope de subtramos esperando reposo (16 por campo: ~10 s de invitado). Un juego que no
+// suelta nunca el RSP no puede dejar la peticion colgada; pasado el tope se para a la fuerza
+// como antes y se avisa, porque esa foto ya no es de la partida que sigue.
+static constexpr u32 kRestWaitMax = 16 * 600;
+
 auto System::serviceStateReq() -> void {
+  if(!stateReqPending()) return;
+  if(!rcpAtRest() && !cpu.halted && ++stateWaitSlices < kRestWaitMax) return;
+  if(stateWaitSlices >= kRestWaitMax) {
+    std::fprintf(stderr, "[state] sin reposo del RCP en %u subtramos: parada forzada\n", stateWaitSlices);
+  }
+  stateWaitSlices = 0;
   int save = stateSaveReq.exchange(-1, std::memory_order_acq_rel);
   int load = stateLoadReq.exchange(-1, std::memory_order_acq_rel);
   u32 rew  = rewindReq.exchange(0, std::memory_order_acq_rel);
@@ -812,7 +843,9 @@ auto System::run() -> void {
     // Avance por fotogramas: con campos pendientes el bucle corre aunque la pausa este
     // puesta. Se lee aqui y se descuenta abajo, al cerrar el campo.
     const u32 fadv = stepFields.load(std::memory_order_relaxed);
-    if((paused.load() && !fadv) || cpu.halted) {
+    // Una peticion de estado en pausa hace correr la CPU hasta el reposo del RCP (ver
+    // rcpAtRest); en cuanto se atiende, la pausa vuelve a mandar.
+    if((paused.load() && !fadv && !stateReqPending()) || cpu.halted) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       winT0 = clock::now(); winInsn = 0; winRsp = rspNow();  // don't fold idle time into speed
       winRdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
@@ -872,7 +905,12 @@ auto System::run() -> void {
     // Foto de rebobinado. Va FUERA del subtramo de arriba y con el RCP parado a proposito:
     // una foto con el RDP a medias de una lista no se puede volver a meter en la maquina.
     // Apagado, esto es una comparacion contra cero.
-    if(fieldClosed && rewinder.enabled) {
+    // La foto se toma en el primer reposo del RCP a partir del cierre (ver rcpAtRest).
+    if(fieldClosed && rewinder.enabled) rewindDue = true;
+    if(rewindDue && (rcpAtRest() || ++rewindWaitSlices >= kRestWaitMax)) {
+      if(rewindWaitSlices >= kRestWaitMax)
+        std::fprintf(stderr, "[rewind] sin reposo del RCP en %u subtramos: parada forzada\n", rewindWaitSlices);
+      rewindDue = false; rewindWaitSlices = 0;
       std::lock_guard<std::mutex> lk(coreMutex);
       quiesceRcp();
       rewinder.onField(*this);

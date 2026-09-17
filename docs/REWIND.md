@@ -66,6 +66,19 @@ cobra siempre por el extremo VIEJO, que es el que no se va a pedir.
 
 - La foto se toma **con el RCP parado** (`System::quiesceRcp`), igual que un estado guardado:
   una foto con el RDP a medias de una lista no se puede volver a meter en la maquina.
+- Y ademas **en un reposo natural del invitado** (`System::rcpAtRest`): RSP sin tarea, sin
+  diario DPC ni barrera pendientes, RDP drenado y con su ultimo tramo ya visible. Al cerrar el
+  campo la foto queda *debida* y la CPU sigue corriendo subtramos hasta llegar a ese reposo
+  (tope 16x600 subtramos; si se agota se para a la fuerza y lo dice). Antes se forzaba el
+  quiesce en el acto, y eso tenia dos fallos: en Threaded **se colgaba** (el RSP a mitad de
+  tarea esperaba a la CPU en una cita y la CPU esperaba al RSP: 150 s y avisos `[rcp] llevo N x
+  2000 ms esperando`), y en Lockstep acababa la tarea a destiempo, o sea que la foto ya no era
+  un instante del invitado y el futuro con rebobinado salia distinto del futuro sin el. Los
+  estados guardados por MCP (`state.save`/`state.load`) esperan al mismo reposo.
+- El estado (version 11) guarda tambien los **fines de tarea de SP/DP armados y aun sin
+  vencer** (`rcpPend` bits 0-1 + `spDoneAt`/`dpDoneAt`). En un reposo natural salen siempre a
+  cero (medido: 0 de 1300 fotos en SM64, 0 de 1000 en Donkey Kong), pero la parada forzada si
+  puede pillarlos armados, y perderlos es perder una interrupcion.
 - **Cargar un estado guardado borra la cinta**: describe una partida que ya no existe.
 - La cinta de **peliculas TAS** (`docs/TAS.md`) rebobina con el juego, porque la foto incluye
   la seccion `MOVI` con la posicion de la pelicula.
@@ -85,6 +98,15 @@ cobra siempre por el extremo VIEJO, que es el que no se va a pedir.
   `ba62...` exacto, y volver a correr 40 campos da otra vez `3cad...` **byte a byte**. Esto
   ultimo es lo que prueba que el estado restaurado es el mismo, y no uno parecido: si algo del
   estado quedara viejo, el futuro que sale de el seria distinto.
+
+- **Ida y vuelta en cada foto** (`KESTREL_REWIND_RTT=1`, modo de gate `rewind-rtt` dentro de
+  `gate_all.sh`): cada foto que se toma se vuelve a cargar en el acto sobre la maquina viva. Si
+  el estado guardado se dejara algo, el futuro que sale de la carga seria distinto, y la puerta
+  lo ve: systemtest y el md5 de SM64 tienen que salir iguales que sin rebobinado. Verificado
+  ademas el statehash con y sin RTT en Threaded y Lockstep (SM64 300 intercambios `79895dc7`,
+  Perfect Dark 600 `92f83ab8`, junkrunner64 `be723abf`, Donkey Kong `e7098ab4`). Esta prueba
+  destapo un segfault: cargar un estado antes del primer kick del RSP dejaba `rsp.mem` nulo y
+  `bindMem` reventaba; `afterLoad` lo enlaza ahora siempre.
 
 ## Lo que falta
 

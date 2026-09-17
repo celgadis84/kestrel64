@@ -8,9 +8,11 @@ import hashlib, os, subprocess, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "mcp"))
 import kestrel_mcp as k
 
-ROM  = sys.argv[1] if len(sys.argv) > 1 else r"E:\Claude\N64\test_roms\sm64.z64"
+ROM  = sys.argv[1] if len(sys.argv) > 1 else r"E:\Claude\N64\test_roms\Super Mario 64 (USA).z64"
 EXE  = os.path.join(os.path.dirname(__file__), "..", "build", "kestrel64.exe")
 SLOT = 9
+if not os.path.exists(ROM):
+    raise SystemExit(f"FALLO: no existe la ROM {ROM}")
 
 def flips():
     return k.query("rcp.regs")[0]["vi"]["flips"]

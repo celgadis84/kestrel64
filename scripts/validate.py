@@ -70,6 +70,11 @@ MODES = {
     # Igual que threaded-jit pero sin encadenar bloques dentro del dynarec del RSP: bisecta
     # "el enlace del RSP rompe algo" sin tener que apagar el dynarec entero.
     "rspnolink":     {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_RSPJIT_LINK": "0", **SOFT},
+    # Oraculo del estado guardado: threaded-jit con una foto de rebobinado por campo que se
+    # VUELVE A CARGAR al instante (KESTREL_REWIND_RTT). Cualquier trozo de estado de invitado
+    # que la foto no lleve cambia el md5 o cuelga; la foto en si no puede mover la partida.
+    "rewind-rtt":    {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_REWIND": "1",
+                      "KESTREL_REWIND_FIELDS": "1", "KESTREL_REWIND_RTT": "1", **SOFT},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1", **SOFT},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1", **SOFT},
     # Backend RDP en GPU (parallel-rdp). Necesitan un exe de `build-prdp/`, que se

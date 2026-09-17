@@ -15,7 +15,7 @@ for t in rsp_test save_test cheat_test archive_test wildmem_test rewind_test; do
     *) echo "$t: FALLO -> $out"; exit 1 ;;
   esac
 done
-for m in interp jit jit-nolink threaded threaded-jit rspinterp rspnolink; do
+for m in interp jit jit-nolink threaded threaded-jit rspinterp rspnolink rewind-rtt; do
   $PY scripts/validate.py systemtest --mode $m
   $PY scripts/validate.py sm64 --mode $m
 done

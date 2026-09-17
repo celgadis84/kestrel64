@@ -16,6 +16,7 @@
 #include "../rsp/rsp.hpp"
 #include "../rdp/rdp.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 #include <vector>
@@ -24,7 +25,8 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 10;  // 10: ciclos de parada pendientes (coste de fallo de cache);
+constexpr u32 kVersion = 11;  // 11: fines de tarea de SP/DP armados y aun sin vencer;
+                              // 10: ciclos de parada pendientes (coste de fallo de cache);
                               // 9: registros DPS (puerto de test al buffer de spans);
                               // 8: plano oculto de RDRAM (cobertura del RDP para el AA del VI);
                               // 7: transaccion del SI/joybus en vuelo (plazo del mando);
@@ -217,6 +219,15 @@ auto visitMemory(StateIO& io, Memory& m) -> void {
   io.pod(m.viLastRetired);
   io.blob(m.isvHdr, sizeof(m.isvHdr));
   StateVisitor::rdpFifo(io, m);
+  // Fines de tarea armados y aun no publicados. El RCP se para antes de guardar, pero parar
+  // no es publicar: MI_SP / MI_DP tienen su instante de invitado y ese instante puede caer
+  // despues de la foto (medido en SM64: tomas con el fin de DP 11 mil ops por delante). Sin
+  // esto el estado se carga con la tarea acabada y sin nadie que levante la interrupcion, y el
+  // hilo del juego que espera el fin se queda dormido para siempre. Solo los bits de plazo:
+  // barreras y diario ya estan vaciados por quiesceRcp.
+  u32 pend = m.rcpPend.load(std::memory_order_relaxed) & 3u; io.pod(pend);
+  if(!io.writing) m.rcpPend.store(pend, std::memory_order_relaxed);
+  io.pod(m.spDoneAt); io.pod(m.dpDoneAt);
 }
 
 auto visitRam(StateIO& io, Memory& m) -> void {
@@ -306,6 +317,10 @@ auto afterLoad(System& sys) -> void {
   c.refreshDebugArmed();
   // Punteros del RSP a DMEM/IMEM: los vectores no se han movido, pero volver a atarlos
   // no cuesta nada y cubre un vecBlob que hubiera cambiado su tamano.
+  // El RSP solo recibe su Memory en el primer lanzamiento: un estado cargado antes de ese
+  // lanzamiento (emulador recien abierto, o una foto de rebobinado de los primeros campos)
+  // dejaba `mem` nulo y bindMem lo seguia.
+  sys.memory.rsp.mem = &sys.memory;
   sys.memory.rsp.bindMem();
   // El bit de modo repeticion de MI vive duplicado en la guardia de store del dynarec.
   if(sys.memory.cpuStGuard) {

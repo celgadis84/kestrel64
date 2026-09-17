@@ -3022,13 +3022,13 @@ auto Memory::rcpSchedReset() -> void {
     dpJobStartG[i] = dpJobEndG[i] = dpJobKickG[i] = 0;
     dpJobAddr[i] = dpJobEndAddr[i] = 0;
   }
-  // Plazos y barreras: no hay tarea en vuelo (el estado se toma en reposo), asi que nada
-  // esta armado y el ancla de la barrera del SP se vuelve a atar al reloj que acaba de
-  // entrar. Dejarla en el ancla vieja daria un spBarrierAt() de otra partida.
-  rcpPend.store(0, std::memory_order_relaxed);
+  // Barreras: no hay tarea en vuelo (el estado se toma en reposo), asi que ninguna esta
+  // armada y el ancla de la barrera del SP se vuelve a atar al reloj que acaba de entrar.
+  // Dejarla en el ancla vieja daria un spBarrierAt() de otra partida. Los fines de tarea
+  // armados (bits 0-1 y sus plazos) SI son de esta partida: vienen en el estado.
+  rcpPend.store(rcpPend.load(std::memory_order_relaxed) & 3u, std::memory_order_relaxed);
   { std::lock_guard<std::mutex> lk(dpLogMx); dpLogHead.store(0); dpLogTail.store(0); spLogPend.store(0); spLogCrit.store(0); }
   spMarkKick();
-  spDoneAt = dpDoneAt = 0;
   rspRdvAt.store(0, std::memory_order_relaxed);
   dpRdv.store(0, std::memory_order_relaxed);
   rspPark.store(0, std::memory_order_relaxed);

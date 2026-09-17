@@ -192,6 +192,18 @@ struct System {
   // Deja el RCP quieto de verdad (RDP drenado, tarea de RSP terminada). Es la condicion
   // para fotografiar la maquina; la comparten el estado guardado y el rebobinado.
   auto quiesceRcp() -> void;
+  // Punto de reposo del INVITADO: sin tarea de RSP, diario DPC aplicado, horario del RDP
+  // cerrado y visible en el reloj actual. Solo ahi se puede fotografiar la maquina sin
+  // cambiarla: quiesceRcp ya no tiene nada que adelantar. Ver serviceStateReq.
+  auto rcpAtRest() -> bool;
+  auto stateReqPending() const -> bool {
+    return stateSaveReq.load(std::memory_order_relaxed) >= 0 ||
+           stateLoadReq.load(std::memory_order_relaxed) >= 0 ||
+           rewindReq.load(std::memory_order_relaxed) != 0;
+  }
+  u32  stateWaitSlices = 0;   // subtramos corridos esperando reposo para una peticion
+  bool rewindDue = false;     // foto de rebobinado pedida por un cierre de campo y aun no hecha
+  u32  rewindWaitSlices = 0;
 
   auto requestShutdown() -> void { shutdown.store(true); }
 

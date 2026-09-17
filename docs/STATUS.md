@@ -5849,6 +5849,10 @@ Pendiente anotado: carrera esporadica en Threaded vista antes de estos cambios (
 mas/menos en 605 M, dos corridas distintas a 877 M) -- no reaparece en 3 corridas a 1.500 M
 tras el cambio 10; `KESTREL_RSPIDLE=0` en Threaded diverge (tareas de 7,5 M ciclos), sin
 investigar; el savestate no guarda el anillo del horario del RDP ni `dpDoneAt`.
+**Cerrado 2026-09-17:** `KESTREL_RSPIDLE=0` ya no diverge (statehash iguales en T0/T1: jr
+`be723abf`, pd `92f83ab8`, sm `79895dc7`, dk `e7098ab4`), y el savestate (v11) guarda los fines
+de tarea armados `spDoneAt`/`dpDoneAt`; el anillo del horario no hace falta porque la foto se
+toma en reposo natural (ver la seccion del rebobinado al final y `docs/REWIND.md`).
 
 **Gates.** gate_all 477 s / gate_prdp 313 s. systemtest PASS en todos los modos, sm64 md5
 iguales. krom: `RDPTest/CPU` y `RDPTest/RSP` bajan 99,65 -> 99,07 en interp y 100 -> 99,07 en
@@ -6185,3 +6189,27 @@ fija medida en HW) que no tenemos. Sin ella, cambiarlo seria elegir a ojo. Lo qu
 (1) una captura de HW de una escena determinista (intro de Defeccion, contador de campos), (2)
 confirmar la latencia de 60 ciclos por fallo contra la documentacion de la RCP, (3) entonces si,
 mover el defecto y meter la perilla en un modo de gate (punto 4 de GAPS).
+
+## Estados y rebobinado solo en reposo natural del RCP; ida y vuelta en cada foto (2026-09-17)
+
+`KESTREL_REWIND=1` en Threaded se colgaba: la foto de cada campo forzaba `quiesceRcp` a mitad de
+tarea del RSP, el RSP esperaba a la CPU en una cita y la CPU al RSP (150 s, avisos `[rcp] llevo N
+x 2000 ms esperando a que termine la tarea del RSP`). En Lockstep no se colgaba pero terminaba la
+tarea a destiempo, asi que la foto no era un instante del invitado.
+
+- `System::rcpAtRest()`: RSP sin tarea, `rcpPend` sin diario DPC ni barrera (bits 2-4), RDP
+  drenado y su ultimo tramo visible. La foto de rebobinado queda *debida* al cerrar el campo y se
+  toma en el primer subtramo en reposo; `state.save`/`state.load` por MCP esperan igual (tambien
+  con la emulacion en pausa: el bucle sigue corriendo subtramos mientras haya peticion). Tope
+  16x600 subtramos, despues parada forzada con aviso `[state]`/`[rewind]`.
+- Savestate **v11**: `rcpPend & 3` + `spDoneAt`/`dpDoneAt` (fines de tarea armados sin vencer).
+  `rcpSchedReset` conserva esos dos bits. En reposo natural salen 0 (0/1300 fotos SM64, 0/1000
+  DK), pero la via forzada si los ve (pend=2/3 medido con el codigo viejo).
+- `afterLoad` enlaza `rsp.mem` antes de `bindMem`: un estado cargado antes del primer kick del RSP
+  reventaba (segfault en `afterLoad+136`, visto con `lldb --batch`).
+- `KESTREL_REWIND_RTT=1`: cada foto se recarga en el acto. Modo de gate `rewind-rtt` (threaded+jit,
+  foto cada campo) en `gate_all.sh`, systemtest + sm64 md5.
+
+Statehash con/sin rebobinado y con/sin RTT, Threaded y Lockstep: SM64 300 intercambios
+`79895dc77397e307`, PD 600 `92f83ab859532dd0`, junkrunner64 `be723abf` md5 `75e331cb`, DK
+`e7098ab4` md5 `eca336ea`, todos iguales. Pared T1: sin 9/13 s, rew 11/15 s, RTT 19/18 s.

@@ -40,6 +40,17 @@ auto Engine::onField(System& sys) -> void {
   sinceLast = 0;
 
   captureState(sys, scratch);
+  // KESTREL_REWIND_RTT=1 (diagnostico): cada foto se vuelve a cargar al instante. Una maquina
+  // determinista tiene que dar el mismo statehash que sin rebobinado: cualquier trozo de estado
+  // de invitado que la foto no lleve (y que afterLoad reinicie) aparece como divergencia o
+  // cuelgue en el primer campo en que importe.
+  static const bool rtt = [] { const char* e = std::getenv("KESTREL_REWIND_RTT");
+                               return e && *e && std::strcmp(e, "0") != 0; }();
+  if(rtt) {
+    std::string err;
+    if(!restoreState(sys, scratch.data(), scratch.size(), err))
+      std::fprintf(stderr, "[rewind] RTT: fallo al recargar la foto: %s\n", err.c_str());
+  }
   if(!primed) { cur.swap(scratch); primed = true; return; }
 
   std::vector<u8> d;
