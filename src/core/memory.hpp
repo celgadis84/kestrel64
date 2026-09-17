@@ -254,7 +254,9 @@ struct Memory {
 
   // `gen` = generacion del buffer de comandos (ver rdpShadow). Cambia cuando el juego
   // instala un START fresco, o sea otro FIFO.
-  struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; };
+  // sync: el trabajo trae un SYNC_FULL (o no se sabe); syncAt = fin de invitado del ultimo tramo
+  // con SYNC_FULL que se le haya unido. Ver dpBarrierAt.
+  struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; bool sync; u64 syncAt; };
   std::deque<RdpJob>      rdpQueue;
   u64                     dpJobOps = 0;   // instante de invitado del job en vuelo
   // Ocupacion del command DMA del RDP, en trabajos: los encolados mas el que el worker
@@ -506,6 +508,13 @@ struct Memory {
   // cualquiera. Un solo u64 atomico: no hace falta seqlock porque ya no hay pareja de campos
   // que leer coherente -- el arranque de cada tramo vive en el anillo.
   std::atomic<u64> dpSchedEnd{0};
+  // Barrera del RDP con Parallel-RDP: fin de invitado del tramo MAS ANTIGUO aun sin pintar que
+  // trae SYNC_FULL (~0 = ninguno). dpSyncEnds es la cola de esos fines, con rdpMx. La ultima
+  // SYNC de dpScheduleSpan la deja en dpLastSpanSync. Ver dpBarrierAt.
+  std::atomic<u64>  dpSyncBarAt{~0ull};
+  std::deque<u64>   dpSyncEnds;
+  std::atomic<bool> dpBarSyncOnly{false};
+  bool dpLastSpanSync = true;
   // HORARIO DE TRABAJOS DEL RDP EN TIEMPO DE INVITADO.
   //
   // Todo lo que el invitado puede ver del motor -- ocupado/libre, DPC_CURRENT, END_VALID -- se
@@ -629,7 +638,23 @@ struct Memory {
   // Hasta que instante de invitado tiene trabajo el motor. Es un valor FIJO desde que se
   // lanza el tramo: ya no hay nada que "esperar a que se publique", porque el coste se cobra
   // en el mismo hilo que escribe DPC_END y antes de que el anfitrion pinte un solo pixel.
-  auto dpBarrierAt() const -> u64 { return dpSchedEnd.load(std::memory_order_acquire); }
+  // Instante de invitado que la CPU no puede pasar mientras el motor no lo haya alcanzado.
+  //
+  // Con SoftRDP es el fin de TODO lo mandado: el rasterizador lee texturas y escribe pixeles
+  // en RDRAM mientras pinta, asi que la CPU no puede dejar atras un tramo sin pintar.
+  //
+  // Con Parallel-RDP eso no protege nada: el worker solo ENCOLA los comandos (ya copiados en
+  // rdpSnapshot) y la GPU lee texturas y escribe el color image de RDRAM cuando le toca, que es
+  // mas tarde. La unica garantia de RDRAM es el fence de SYNC_FULL (vrdp::runFifo), y ese es
+  // justo el instante en que cae MI_DP y el juego queda autorizado a reescribir sus buffers.
+  // Asi que ahi la barrera es solo el fin del tramo con SYNC_FULL mas antiguo pendiente. Lo
+  // demas que la CPU lee del motor (DPC_STATUS/CURRENT, MI_DP) sale del horario de invitado.
+  // junkrunner64: libdragon manda ~1.600 tramos por cuadro y la CPU se paraba en cada uno a
+  // esperar el relevo del worker (11 % de pared). KESTREL_DPBARSYNC=0 vuelve a lo de SoftRDP.
+  auto dpBarrierAt() const -> u64 {
+    return dpBarSyncOnly.load(std::memory_order_relaxed) ? dpSyncBarAt.load(std::memory_order_acquire)
+                                                         : dpSchedEnd.load(std::memory_order_acquire);
+  }
   // El motor esta drenado en `now` si el ultimo tramo con fecha ya cerro. Entonces
   // DPC_CURRENT vale una constante -- la direccion de cierre de ese tramo -- y no puede
   // cambiar hasta que la CPU meta otro. Leer un dpSchedEnd atrasado aqui es inofensivo:

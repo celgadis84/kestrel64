@@ -6358,3 +6358,36 @@ mueven (jr `be723abf`, PD `6caa8f2b`, SM64 `79895dc7`, DK64 `e7098ab4`, T0 == T1
 Lo que queda en el hilo CPU de jr (hostprof, tanda 512): JIT ~23 %, giro en la barrera del **RDP**
 (`dpSpinUntil`) ~14 %, giro en la barrera del SP ~8 %, dormido en ntdll ~9 %. Cadena: RSP espera
 a CPU, CPU espera al RDP.
+
+## 2026-09-17 — La barrera del RDP, con Parallel-RDP, solo en SYNC_FULL (`KESTREL_DPBARSYNC`)
+
+La barrera del RDP paraba a la CPU en el instante de invitado en que cierra **todo** lo mandado
+al motor. Con SoftRDP eso es lo correcto: el rasterizador lee texturas y escribe pixeles en RDRAM
+mientras pinta, asi que la CPU no puede dejar atras un tramo sin pintar. Con Parallel-RDP no
+protege nada: el worker solo ENCOLA los comandos (que ademas ya van copiados, `rdpSnapshot`), y la
+GPU lee texturas y escribe el color image de RDRAM cuando le toca, que es mas tarde. La unica
+garantia de RDRAM es el fence de `SYNC_FULL` (`vrdp::runFifo`), y ese instante es justo el que la
+CPU no puede pasar: es donde cae MI_DP y donde el juego queda autorizado a reescribir sus buffers.
+
+Con libdragon eso se nota porque rdpq manda el FIFO a trocitos: junkrunner64 hace **325.551
+tramos** en 200 cuadros (~1.600 por cuadro) y solo **203** traen SYNC_FULL. La CPU se paraba en
+cada tramo a esperar el relevo del worker: 44.347 paradas, ~19 us cada una, **11,3 % de pared**.
+
+Ahora `dpBarrierAt()` devuelve, con el worker de Parallel-RDP vivo, el fin del tramo con SYNC_FULL
+**mas antiguo pendiente** (`dpSyncEnds`, cola con `rdpMx`; `~0` = ninguno). Detalle que importa:
+un tramo VACIO (`DPC_END == DPC_CURRENT`, 82.940 de los 325.551 en junkrunner) no pasa por el pase
+de coste, y darlo por "puede traer SYNC_FULL" dejaba la mitad de la ganancia sin coger.
+
+**Medido** (200 flips jr / 600 PD / 300 SM64 / 1.500 M DK64, Parallel-RDP, threaded+JIT):
+
+| | antes | ahora |
+|---|---|---|
+| junkrunner64 | 9,76 s | **9,0-9,4 s** |
+| SM64 | 8,76 s | **8,48 s** |
+| Perfect Dark | 14,79 s | 14,64 s |
+| DK64 | 13,82 s | 13,73 s |
+
+Paradas de la barrera en jr: 44.347 (0,85 s) -> **174 (0,40 s)**, y esas 174 son el fence de verdad
+(~2,4 ms cada una). `cpuWait` 13,0 % -> 8,4 %. Statehash sin mover en los cuatro (jr `be723abf`,
+PD `6caa8f2b`, SM64 `79895dc7`, DK64 `e7098ab4`), dos corridas iguales cada uno. `KESTREL_DPBARSYNC=0`
+vuelve al comportamiento de SoftRDP. Con SoftRDP en su hilo no cambia nada: la barrera sigue entera.

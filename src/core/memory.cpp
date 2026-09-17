@@ -2268,6 +2268,12 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
       dpScheduleSpan(current, end, xbus, costSrc,
                      tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow());
     }
+    const bool sync = dpLastSpanSync;
+    const u64 syncAt = dpSchedEnd.load(std::memory_order_relaxed);
+    if(sync) {
+      if(dpSyncEnds.empty()) dpSyncBarAt.store(syncAt, std::memory_order_release);
+      dpSyncEnds.push_back(syncAt);
+    }
     // El FIFO del RDP es UNO: escribir DPC_END no encola "un trabajo", solo adelanta el
     // puntero final del mismo buffer de comandos. Si el ultimo tramo encolado todavia no ha
     // empezado y este continua exactamente donde acababa, con el mismo modo de bus, es el
@@ -2276,10 +2282,12 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
     if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus
        && rdpQueue.back().gen == rdpGen) {
       rdpQueue.back().end = end;
+      if(sync) { rdpQueue.back().sync = true; rdpQueue.back().syncAt = syncAt; }
     }
     else {
       rdpQueue.push_back({current, end, xbus, rdpGen,
-                          tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow()});
+                          tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow(),
+                          sync, syncAt});
       // Hay trabajo por pintar: la CPU queda acotada por dpBarrierAt(), que es el instante en
       // que el motor termina TODO lo mandado.
       if(dpBarrierOn() && rcpMode == RcpMode::Threaded)
@@ -2344,6 +2352,18 @@ auto Memory::rdpWorkerLoop() -> void {
   // hilo, no en el que llama a startRcpThreads(), para que todo el uso de Vulkan
   // siga ocurriendo en el mismo hilo que antes.
   vrdpBringUp();
+  // Barrera solo en SYNC_FULL (ver dpBarrierAt): solo con Parallel-RDP vivo y pintando en su
+  // worker. Se decide aqui, antes del primer trabajo; hasta entonces vale la barrera entera.
+  {
+    static const bool syncOnly = [] {
+      const char* e = std::getenv("KESTREL_DPBARSYNC");
+      return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
+    }();
+    if(syncOnly && vrdp::active() && !rdpInlineDiag()) {
+      std::lock_guard<std::mutex> lk(rdpMx);
+      dpBarSyncOnly.store(true, std::memory_order_release);
+    }
+  }
   for(;;) {
     RdpJob job;
     // dpPending cuenta tramos encolados + el que se esta pintando, y el worker ya descuento el
@@ -2390,7 +2410,13 @@ auto Memory::rdpWorkerLoop() -> void {
       // dpCompSeq NO es tiempo de invitado: es cuantos trabajos lleva pintados el anfitrion.
       // Solo sirve para que los que esperan sepan que algo se ha movido de verdad.
       dpCompSeq.fetch_add(1, std::memory_order_release);
+      if(job.sync) {
+        while(!dpSyncEnds.empty() && dpSyncEnds.front() <= job.syncAt) dpSyncEnds.pop_front();
+        dpSyncBarAt.store(dpSyncEnds.empty() ? ~0ull : dpSyncEnds.front(), std::memory_order_release);
+      }
       if(rdpQueue.empty()) {
+        dpSyncEnds.clear();
+        dpSyncBarAt.store(~0ull, std::memory_order_release);
         rcpPend.fetch_and(~4u, std::memory_order_release);
         dpBarWaivedAt = ~0ull;
         dpWrReset();   // motor drenado: lo pintado ya esta en RDRAM (ver rspDmaRdpWait)
@@ -2931,6 +2957,8 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpJobKickG[seq & kDpRingM]   = (tlIsRspThread || tlDpLogApply || lockRspExec) ? kick : kick + 1;
   dpSchedEnd.store(t1, std::memory_order_release);
   dpSubSeq.store(seq + 1, std::memory_order_release);
+  // Sin pase de coste no se sabe si trae SYNC_FULL: se da por hecho. Un tramo vacio no trae nada.
+  dpLastSpanSync = costed ? softCost.sawSyncFull : (current != end && rdpCostOn()) || !rdpCostOn();
   // Si el RSP esta aparcado esperando justo esto, su instante de despertar es el lanzamiento
   // de ESTE tramo -- un valor de invitado, o sea determinista. El primero que llega manda.
   // ORDEN: primero se publica el tramo (dpSubSeq, arriba) y DESPUES se mira el aparcamiento,
@@ -3136,6 +3164,8 @@ auto Memory::dpRdvOn() -> bool {
 auto Memory::rcpSchedReset() -> void {
   std::lock_guard<std::mutex> lk(rdpMx);
   dpSchedEnd.store(0, std::memory_order_relaxed);
+  dpSyncEnds.clear();
+  dpSyncBarAt.store(~0ull, std::memory_order_relaxed);
   dpSubSeq.store(0, std::memory_order_relaxed);
   dpCompSeq.store(0, std::memory_order_relaxed);
   dpMaxQuery.store(0, std::memory_order_relaxed);
