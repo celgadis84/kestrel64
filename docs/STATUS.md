@@ -5948,3 +5948,42 @@ Medido, parallel-RDP, threaded-jit:
 gate_all 485 s y gate_prdp 327 s, rc=0, regress=0 en los dos. Sigue por debajo de lo de
 2026-09-10 (17 s por 600 flips, entonces sin ninguna cita): el RSP va a ~22 Mips ocupado y
 queda por perfilar.
+
+Correccion a lo de arriba: la comparacion con 2026-09-10 no vale. Los commits de entonces
+(b91848b, bd89130, 6f92c93, 52c197a) compilados hoy NO llegan a 200 intercambios en 60-120 s:
+el RSP se va apagando (jobs/s 10 -> 2) y el juego se queda parado. No habia regresion que
+bisecar; el perfil de hoy es el punto de partida.
+
+## Guarda `rsp.brake` del prologo del JIT fuera en Threaded con plazos: junkrunner64 -33 % (2026-09-17)
+
+Perfil de anfitrion con simbolos (`build-prof-prdp`) sobre junkrunner64: el hilo del RSP pasa
+~80 % girando en `spReadSync` esperando a la CPU, y el hilo de CPU va al 99 % pero a solo
+26 Mips. `KESTREL_JIT_STATS` lo explica: `[tramp] rsp=55M` -- el prologo de cada bloque
+enlazado caia al trampolin por la guarda "hay tarea de RSP en vuelo", una vez cada ~8
+instrucciones. libdragon deja `rspq` corriendo siempre, asi que la guarda saltaba siempre.
+
+La guarda era un freno de PARED (sin ella la CPU corria por delante del RCP y giraba). Desde
+la barrera del SP ese adelanto no existe en tiempo de invitado: `spBarrierEff` entra en el
+permiso por `rcpDueIn`. Asi que en Threaded con plazos y barrera ya no se emite. Lo unico que
+cubria de verdad era el LANZAMIENTO de tarea en mitad de una cadena (plazo nuevo que el
+permiso no conocia): ahora `rspKick` anula `jitGuard`, igual que `siDma` y `dpScheduleSpan`.
+En Lockstep sigue. `KESTREL_JIT_RSPGUARD=1` la vuelve a poner para bisecar.
+
+Citas del RSP por sitio (antes del cambio, 200 flips): DPC_END escrito 351.250 (el 15 % de
+pared si se quitan, medido como cota -- NO es correcto quitarlas), SP_STATUS por grano 16.121,
+lectura DPC 43.925, BREAK 297.
+
+Medido, parallel-RDP, threaded-jit, md5 y retiradas identicos con y sin guarda:
+
+| | con guarda | sin guarda |
+|---|---|---|
+| junkrunner64 200 flips | 17,9 s | **11,9 s** (`75e331cb`, 470 M) |
+| DK64 1.500 M insns | 13,0 s | **11,7 s** (`eca336ea`) |
+| SM64 300 flips | 7,0 s | 6,7 s (`29a0e995`, 725 campos) |
+| Perfect Dark 600 flips | - | 16/16 arranques limpios, `31784f9d` las 16 |
+
+Los motivos historicos para no quitarla (PD 1/16 colgado, SM64 1804 campos por 300 flips) no
+se reproducen: eran de antes de la barrera. gate_all 479 s, gate_prdp 318 s, regress=0.
+
+Pendiente visto al medir: SM64 300 flips da 797 campos VI en Lockstep y 725 en Threaded, con
+el MISMO md5 de framebuffer; igual con y sin guarda, asi que no es de este cambio.

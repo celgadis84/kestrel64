@@ -1250,8 +1250,22 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       // ella (lockstep, el oraculo, da ~4,09 campos por intercambio; 3,41 con guarda, 6,01 sin).
       // La pared "mejora" de 5,50s a 4,51s justo por eso: son campos girados, no trabajo hecho.
       // KESTREL_JIT_NORSPGUARD=1 la quita para poder medir el A/B.
+      //
+      // Revisado 2026-09-17: en Threaded CON plazos ya sobra. Desde la barrera del SP
+      // (spBarrierEff) la CPU no puede pasar del reloj de invitado publicado por el RSP, y ese
+      // plazo viaja dentro del permiso (rcpDueIn -> siDue en jitReenterProceed), asi que el
+      // adelanto que la guarda frenaba en pared ya no existe en tiempo de invitado. Lo que
+      // quedaba era el coste: libdragon deja `rspq` corriendo siempre, y junkrunner64 caia en
+      // el trampolin cada ~8 instrucciones (55 M llamadas por 200 intercambios, ~30 % del hilo
+      // de CPU). Medido sin ella, mismo md5 y mismas instrucciones retiradas: junkrunner64 200
+      // intercambios 17,9 -> 11,9 s, DK64 1.500 M 13,0 -> 11,7 s, SM64 300 intercambios
+      // 7,0 -> 6,7 s, Perfect Dark 600 intercambios 16/16 arranques limpios y md5 identico.
+      // En Lockstep (o Threaded sin plazos) se queda: ahi no hay barrera que acote.
+      // KESTREL_JIT_RSPGUARD=1 la vuelve a poner en Threaded para bisecar.
       static const bool noRspGuard = std::getenv("KESTREL_JIT_NORSPGUARD") != nullptr;
-      if(!noRspGuard) {
+      static const bool forceRspGuard = std::getenv("KESTREL_JIT_RSPGUARD") != nullptr;
+      const bool barrierBounds = c.mem->rcpMode == Memory::RcpMode::Threaded && Memory::rcpDeadlineOn() && Memory::spBarrierOn();
+      if(!noRspGuard && (forceRspGuard || !barrierBounds)) {
         // `brake`, no `running`: es running MENOS el aparcamiento (ver Rsp::brake). Un RSP
         // aparcado no corre microcodigo ni toca MMIO, y a la CPU la acotan igual la barrera de
         // invitado del SP y rcpPace; devolver el control aqui durante el aparcamiento eran 22 M
@@ -1460,7 +1474,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       e.shift64_imm(4, RAX, 4);                        // shl rax, 4  (x sizeof(ItcEnt))
       e.add_r_r(RDX, RAX);                             // rdx = &itc[idx]
       e.mov_r_m(RAX, RDX, 0);                          // rax = va guardada
-      e.cmp_r_r(RCX, RAX);                             // ¿es este el destino?
+      e.cmp_r_r(RCX, RAX);                             // ï¿½es este el destino?
       usize miss = e.jne_rel32_placeholder();
       // Aqui RDX es el puntero a la entrada (lo usa el jmp de abajo): el scratch es RAX,
       // muerto tras la comparacion.
@@ -2699,7 +2713,7 @@ auto CPU::jitTryBlock() -> u32 {
   jitGuard = 0;                       // el primer bloque siempre pasa por el trampolÃ­n (chequeo completo)
   const u64 entryVAdbg = pc;          // solo para el chequeo de pc canonico de abajo
   // `memAbort` es un pestillo POR INSTRUCCION: lo pone translate() cuando el acceso falla y
-  // significa "esta instruccion abortó". step() lo limpia al empezar cada instruccion; el
+  // significa "esta instruccion abortï¿½". step() lo limpia al empezar cada instruccion; el
   // bloque compilado tambien tiene que hacerlo, porque puede entrar justo despues de que una
   // excepcion lo dejara puesto (p.ej. el prologo de un handler, al que se vectoriza con el
   // pestillo aun a 1). Sin esto, translate() cortocircuita con `return 0` y cualquier op del
@@ -2758,7 +2772,7 @@ auto CPU::jitTryBlock() -> u32 {
   // la op 0: mem-op que faultaria, ALU que desborda). Entonces NO ha pasado nada y no hay
   // estado de flujo que avanzar. Pisar nextPc/inDelay/justBranched aqui destruye una ranura
   // de retardo en curso: si se entro al bloque con inDelay puesto, nextPc guarda el destino
-  // del salto y sustituirlo por pc+4 pierde el salto entero. El intérprete re-ejecuta la op
+  // del salto y sustituirlo por pc+4 pierde el salto entero. El intï¿½rprete re-ejecuta la op
   // 0 con el estado intacto, que es justo lo que el bail promete.
   if(!ctrl && R) {
     // Avanza el estado exactamente R instrucciones secuenciales no-branch.
