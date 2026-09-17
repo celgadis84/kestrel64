@@ -17,6 +17,7 @@ API
     GET  /api/roms?dir=...     escaneo de carpeta -> lista con cabecera leida
     GET  /api/browse?dir=...   navegador de carpetas (el navegador web no puede)
     GET  /api/boxart?id=...    caratula (cache local, descarga si hay red)
+    GET  /api/cartart?id=...   pegatina del cartucho (SOLO cache local, nunca descarga)
     POST /api/launch           arranca el emulador con el perfil
     POST /api/stop             lo mata
     GET  /api/status           estado del proceso + ultimas lineas de salida
@@ -69,6 +70,12 @@ ROOT = os.path.dirname(KESTREL)
 WEB = os.path.join(RES, "web")
 CACHE = os.path.join(STATE, "cache")
 ART = os.path.join(CACHE, "boxart")
+# Arte del CARTUCHO (la pegatina), que no es la caratula de la caja: otro dibujo, otra
+# forma y normalmente solo el logo. No hay ninguna coleccion libre indexada por nombre
+# No-Intro que lo tenga -- libretro-thumbnails solo trae caratulas, capturas y pantallas
+# de titulo -- asi que esta carpeta NO se descarga sola: si alguien deja ahi un
+# "<nombre>.png", el estante lo usa; si no, se recorta la caratula.
+CARTART = os.path.join(CACHE, "cartart")
 PROFILE = os.path.join(STATE, "profile.json")
 os.makedirs(STATE, exist_ok=True)
 
@@ -409,6 +416,16 @@ def art_fetch(keys, region=""):
     return None
 
 
+def cart_local(keys):
+    """Pegatina del cartucho ya presente en cache. Nada de red: no hay fuente libre."""
+    for k in keys:
+        safe = re.sub(r'[\\/:*?"<>|]', "_", k)
+        local = os.path.join(CARTART, safe + ".png")
+        if os.path.isfile(local) and os.path.getsize(local) > 0:
+            return local
+    return None
+
+
 # --------------------------------------------------------------------------- proceso emu
 class Emu:
     def __init__(self):
@@ -568,6 +585,8 @@ class H(BaseHTTPRequestHandler):
             return self._json(self._roms(q.get("dir", [""])[0]))
         if p == "/api/boxart":
             return self._boxart(q)
+        if p == "/api/cartart":
+            return self._cartart(q)
         if p == "/api/status":
             return self._json(EMU.status())
         if p == "/api/tele":
@@ -674,6 +693,17 @@ class H(BaseHTTPRequestHandler):
         if not key:
             return self._send(404, b"no", "text/plain")
         f = art_fetch([k for k in (key, name) if k], q.get("region", [""])[0])
+        if not f:
+            return self._send(404, b"no", "text/plain")
+        with open(f, "rb") as fh:
+            data = fh.read()
+        self._send(200, data, "image/png", {"Cache-Control": "max-age=86400"})
+
+    def _cartart(self, q):
+        """La pegatina del cartucho solo sale de cache: 404 es la respuesta normal y el
+        cliente se apana recortando la caratula."""
+        keys = [k for k in (q.get("id", [""])[0], q.get("name", [""])[0]) if k]
+        f = cart_local(keys)
         if not f:
             return self._send(404, b"no", "text/plain")
         with open(f, "rb") as fh:

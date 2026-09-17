@@ -159,9 +159,30 @@ function mountPad(host, opts) {
   };
 }
 
+/* Deja una imagen con la proporcion `ar` (ancho/alto) recortando por el centro, y la
+   devuelve como lienzo -- que vale de textura igual que una imagen. Hace falta porque el
+   plano de la cara mapea la textura entera de borde a borde: sin recortar, una caratula de
+   1,37 estirada sobre una cara de 1,43 sale ancha. Quitar unos pixeles del borde largo no
+   se nota; deformar, si. */
+function cropTo(img, ar) {
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  if (!iw || !ih || !(ar > 0)) return img;
+  if (Math.abs(iw / ih - ar) < 0.01) return img;
+  let sw = iw, sh = ih;
+  if (iw / ih > ar) sw = Math.round(ih * ar); else sh = Math.round(iw / ar);
+  const c = document.createElement("canvas");
+  c.width = sw; c.height = sh;
+  c.getContext("2d").drawImage(img, Math.round((iw - sw) / 2), Math.round((ih - sh) / 2),
+                               sw, sh, 0, 0, sw, sh);
+  return c;
+}
+
+const AR_COVER = MODELS.COVER.w / MODELS.COVER.h;
+const AR_LABEL = MODELS.LABEL.w / MODELS.LABEL.h;
+
 /* -------------------------------------------------------------------- el estante */
-// Caja de carton + cartucho del juego elegido. `setArt(url)` cuelga la caratula de la cara
-// frontal de la caja; si la imagen no carga, la caja se queda con su color liso.
+// Caja de carton + cartucho del juego elegido. `setArt(url, labelUrl)` cuelga la caratula
+// en la cara frontal de la caja; si la imagen no carga, la caja se queda con su color liso.
 function mountShelf(host, opts) {
   opts = opts || {};
   let sc;
@@ -172,16 +193,16 @@ function mountShelf(host, opts) {
 
   const b = new GL.Builder();
   // La caja de pie y el cartucho apoyado delante y a la derecha, girado un poco.
-  b.push(M4.mul(M4.trans(-3.6, 0, 0), M4.rotY(-0.26)));
+  b.push(M4.mul(M4.trans(-5.4, 0, 0), M4.rotY(-0.26)));
   b.merge(MODELS.buildBox());
   b.pop();
-  b.push(M4.mul(M4.mul(M4.trans(8.2, -3.6, 5.0), M4.rotY(0.50)), M4.rotX(-0.08)));
+  b.push(M4.mul(M4.mul(M4.trans(9.8, -0.9, 5.0), M4.rotY(0.50)), M4.rotX(-0.08)));
   b.merge(MODELS.buildCart(), "cart:");
   b.pop();
   sc.setMesh(b.build());
   sc.gloss = 0.6;
 
-  const st = { yaw: -0.30, pitch: 0.16, dist: 44, min: 24, max: 88, tx: 0, ty: 0, tz: 0 };
+  const st = { yaw: -0.30, pitch: 0.16, dist: 54, min: 28, max: 104, tx: 0, ty: 0, tz: 0 };
   const p = pump(sc);
   const cam = orbit(canvas, sc, st, p.redraw);
 
@@ -202,13 +223,26 @@ function mountShelf(host, opts) {
 
   return {
     canvas,
-    // La caratula se usa para la caja y, recortada por el propio UV, tambien de etiqueta.
-    setArt(url) {
-      if (!url) { sc.tex.cover = null; sc.tex.label = null; p.redraw(); return; }
-      const im = new Image();
-      im.onload = () => { sc.setTexture("cover", im); sc.setTexture("label", im); p.redraw(); };
-      im.onerror = () => { p.redraw(); };
-      im.src = url;
+    // La caratula de la caja y la pegatina del cartucho NO son la misma imagen: el cartucho
+    // lleva su propio arte, con otra forma y normalmente solo el logo. Si hay un escaneo de
+    // la pegatina (`labelUrl`) se usa; si no, se recorta la caratula por el centro a la
+    // forma de la pegatina, que es lo mas parecido que se puede sacar de lo que hay.
+    setArt(url, labelUrl) {
+      // Soltar las de antes: `setArt` se puede llamar mas de una vez sobre la misma escena.
+      ["cover", "label"].forEach(k => {
+        if (sc.tex[k]) sc.gl.deleteTexture(sc.tex[k]);
+        sc.tex[k] = null;
+      });
+      if (!url && !labelUrl) { p.redraw(); return; }
+      const load = (u, key, ar, fb) => {
+        if (!u) return;
+        const im = new Image();
+        im.onload = () => { sc.setTexture(key, cropTo(im, ar)); p.redraw(); };
+        im.onerror = () => { if (fb) load(fb, key, ar, null); else p.redraw(); };
+        im.src = u;
+      };
+      load(url, "cover", AR_COVER, null);
+      load(labelUrl || url, "label", AR_LABEL, labelUrl ? url : null);
     },
     destroy() { spin = false; if (ro) ro.disconnect(); sc.dispose(); canvas.remove(); },
   };
@@ -272,9 +306,9 @@ function mountCarousel(host, opts) {
   let hover = -1;
 
   const CAM = {                        // ojo y punto de mira por vista
-    ring: { eye: [0, 10, 60], tgt: [0, 1, -7] },
-    flow: { eye: [0, 1.5, 66], tgt: [0, 0.5, 0] },
-    wall: { eye: [0, 0, 104], tgt: [0, 0, 0] },
+    ring: { eye: [0, 9, 78], tgt: [0, 1, -9] },
+    flow: { eye: [0, 1.5, 88], tgt: [0, 0.5, 0] },
+    wall: { eye: [0, 0, 140], tgt: [0, 0, 0] },
   };
 
   const itemFor = (s, c) => slotItem(items.length, K, s, c);
@@ -287,7 +321,7 @@ function mountCarousel(host, opts) {
       const col = i % COLS, row = Math.floor(i / COLS);
       const dy = row - cur / COLS;
       if (Math.abs(dy) > 2.6) return null;
-      let m = GL.M4.mul(GL.M4.trans((col - (COLS - 1) / 2) * 15.8, -dy * 21.5, 0),
+      let m = GL.M4.mul(GL.M4.trans((col - (COLS - 1) / 2) * 22.2, -dy * 15.6, 0),
                         GL.M4.rotY((col - (COLS - 1) / 2) * 0.07));
       m = GL.M4.mul(m, GL.M4.rotX(dy * 0.05));
       const k = Math.max(0, 1 - a);
@@ -296,7 +330,7 @@ function mountCarousel(host, opts) {
                z: -Math.abs(dy) };
     }
     if (mode === "ring") {
-      const step = 0.50, R = 34;
+      const step = 0.50, R = 48;
       const th = d * step;
       if (a > half + 0.5 || Math.abs(th) > 2.0) return null;
       let m = GL.M4.mul(GL.M4.mul(GL.M4.trans(0, 0, -R), GL.M4.rotY(th)), GL.M4.trans(0, 0, R));
@@ -308,7 +342,7 @@ function mountCarousel(host, opts) {
     // flow
     if (a > 7.5) return null;
     const t = Math.tanh(d * 1.25);
-    const x = d * 6.6 + t * 7.2;
+    const x = d * 9.3 + t * 10.1;
     const zz = -Math.min(a, 7) * 1.9 + (1 - Math.min(a, 1)) * 7.0;
     let m = GL.M4.mul(GL.M4.trans(x, 0, zz), GL.M4.rotY(-t * 1.05));
     const k = Math.max(0, 1 - a);
@@ -325,7 +359,7 @@ function mountCarousel(host, opts) {
     if (sc.tex[key]) { sc.gl.deleteTexture(sc.tex[key]); sc.tex[key] = null; }
     if (!url) return;
     const im = new Image();
-    im.onload = () => { if (sl.url === url) { sc.setTexture(key, im); pmp.redraw(); } };
+    im.onload = () => { if (sl.url === url) { sc.setTexture(key, cropTo(im, AR_COVER)); pmp.redraw(); } };
     im.onerror = () => { if (sl.url === url) pmp.redraw(); };
     im.src = url;
   }

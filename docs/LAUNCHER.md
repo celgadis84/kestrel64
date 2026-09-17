@@ -123,7 +123,8 @@ al emulador = anadir una fila; el frontend dibuja el control solo y el backend l
 | `GET /api/builds` | compilaciones presentes (`build/`, `build-prdp/`) |
 | `GET /api/browse?dir=` | navegador de carpetas (el navegador web no puede) |
 | `GET /api/roms?dir=` | lista de ROMs con la cabecera leida |
-| `GET /api/boxart?id=&name=` | caratula, cache local |
+| `GET /api/boxart?id=&name=` | caratula de la caja, cache local + descarga |
+| `GET /api/cartart?id=&name=` | pegatina del cartucho, SOLO cache local (404 es normal) |
 | `POST /api/launch` | arranca el emulador con el perfil |
 | `POST /api/stop` / `GET /api/status` | control y salida en vivo |
 
@@ -233,7 +234,11 @@ funcionalidad no depende del 3D.
 
 Mando, cartucho y caja estan **dibujados en codigo** (`web/models.js`), con medidas del
 aparato real en centimetros: mando 17.3 cm de ancho, cartucho 8.8 x 11.4 x 2.1, caja de
-carton 13.5 x 19.0 x 3.0. No hay ningun modelo descargado, y no por gusto: los modelos de
+carton **19.0 x 13.3 x 2.8**. La caja va APAISADA: la de N64 de Norteamerica y Europa mide
+190 x 133 x 28 mm, mas ancha que alta -- la vertical es la de SNES. Estaba al reves (13.5 x
+19.0) y las caratulas, que son apaisadas, salian aplastadas de lado. Las medidas salen del
+modulo (`MODELS.BOX`, `CART`, `COVER`, `LABEL`) porque quien cuelga una imagen necesita saber
+a que proporcion recortarla. No hay ningun modelo descargado, y no por gusto: los modelos de
 N64 que circulan por los repositorios 3D o no son descargables o llevan licencias
 (`Editorial`, "todos los derechos reservados") que no permiten meterlos dentro de un
 programa que se reparte. Comprobado antes de escribir una linea, via
@@ -311,12 +316,11 @@ que se tragaba los cuatro botones que tenia encima.
 
 ## Biblioteca y caratulas
 
-Siete modos de vista. Los tres de caratula son **3D de verdad** (ver la seccion siguiente):
+Seis modos de vista. Los tres de caratula son **3D de verdad** (ver la seccion siguiente):
 **Coverflow 3D** (fila recta, las de los lados giradas hacia dentro), **Carrusel 3D** (anillo
 giratorio, al estilo de USB Loader GX) y **Rejilla 3D** (pared de cajas). Los otros cuatro son
 de texto: **Filas** estilo Netflix agrupadas por region, **Tabla** con ID de cartucho, region,
-formato, tamano y CRC, **Lista Wonder** (filas altas al estilo WonderMenu, ver mas abajo) y
-**Estante**, que pone la caja de carton y el cartucho del juego elegido con la caratula de
+formato, tamano y CRC, y **Estante**, que pone la caja de carton y el cartucho del juego elegido con la caratula de
 textura (si no hay caratula, la portada se queda de un gris azulado, que se lee como "no hay"
 y no como un fallo de carga). Flechas navegan, rueda del raton mueve, Enter lanza, doble clic
 lanza.
@@ -331,6 +335,23 @@ arte de N64. La fuente practica es **libretro-thumbnails**
 convencion No-Intro, o sea por nombre de FICHERO, no por el nombre interno del cartucho. Por
 eso se prueba primero el nombre del fichero y luego el interno. Alternativas si hace falta
 mas cobertura: TheGamesDB y ScreenScraper (las dos con clave de API).
+
+**La pegatina del cartucho NO es la caratula de la caja.** Son dos dibujos distintos y con
+otra forma: la caratula es apaisada (~1.43 de ancho por alto) y la pegatina casi cuadrada
+(~0.88), y normalmente la pegatina lleva solo el logo. No hay ninguna coleccion libre
+indexada por nombre No-Intro que las tenga: libretro-thumbnails solo publica `Named_Boxarts`,
+`Named_Snaps` y `Named_Titles`; la `N64_Cartridge_Art_Collection` de Internet Archive es un
+LIBRO escaneado (1726 paginas en epub/pdf/djvu), no ficheros por juego; ScreenScraper si las
+tiene (`media=support-2D`) pero pide cuenta de desarrollador. Asi que `cache/cartart/` **no
+se descarga sola**: si alguien deja ahi un `<nombre>.png` el estante lo usa, y si no, se
+recorta la caratula por el centro a la forma de la pegatina, que es lo mas parecido que se
+puede sacar de lo que hay.
+
+**Nada se deforma nunca.** El plano de cada cara mapea la textura entera de borde a borde, o
+sea que una caratula de 1.37 estirada sobre una cara de 1.44 sale ancha. `scene3d.js`
+`cropTo(img, ar)` recorta por el centro sobre un lienzo y pasa el lienzo de textura
+(`texImage2D` acepta un `<canvas>` igual que una imagen). Quitar unos pixeles del borde largo
+no se nota; deformar, si.
 
 El nombre exacto solo acierta si la ROM viene nombrada como No-Intro, que casi nunca pasa. Asi
 que ademas se baja **una vez** el indice del directorio (1117 entradas, entran enteras en una
@@ -449,41 +470,16 @@ puente MCP: marcos con la longitud por delante, JSON y detras los bytes crudos. 
 del perfilador pausan el nucleo un instante y restauran el estado anterior, porque el bucle de
 marcha libre tiene cogido el candado del nucleo en tandas de ~un campo de video.
 
-## Referencia estetica: WonderMenu
-
-<https://github.com/lmcd/WonderMenu> — menu/lanzador para flashcarts de N64, escrito para
-correr EN la consola. Es la estetica que queremos replicar en el lanzador de kestrel64: la
-referencia no es un lanzador de PC (RetroArch, Big Box), es un menu de cartucho, hecho con
-la paleta y las limitaciones de la maquina.
-
-Lo que hay que mirar de el, en orden:
-
-- **Tipografia y espaciado**: fuente de mapa de bits pensada para 320x240 y sobreescaneo,
-  con margenes gordos. Nuestro lanzador vive en un navegador a resolucion de PC, asi que el
-  parecido tiene que salir de la proporcion y del pixelado deliberado, no de copiar tamanos.
-- **Paleta**: pocos colores, planos, alto contraste. Nada de degradados de escritorio.
-- **Layout de lista**: una columna de juegos con seleccion resaltada y un panel lateral con
-  los datos del cartucho, que es justo lo que ya sacamos de la cabecera (ID, region, formato,
-  tamano, CRC). Encaja con la vista **Tabla** que ya existe.
-- **Transiciones**: cortas y duras, sin suavizado; se lee como hardware, no como web.
-- **Sonido de menu**: pitidos cortos al mover y al elegir.
-
-Ya no es solo una nota de direccion artistica: **esta implementada** en la biblioteca que
-abre el propio emulador (`src/ui/library_win32.cpp`, seccion siguiente). En el lanzador web
-de `tools/launcher/` sigue pendiente, y cuando se ataque entra como un tema/piel mas (las
-seis vistas siguen), no como una reescritura.
-
 ## Temas: el aspecto sale de tokens, no de reglas repetidas
 
-El lanzador tiene dos aspectos y se elige en el desplegable de arriba a la derecha:
+El lanzador trae un aspecto, y se elige en el desplegable de arriba a la derecha:
 
 | tema | de que va |
 |------|-----------|
-| **Tema cernicalo** | el de siempre: fondo azulado, acento ambar, esquinas de 12 px |
-| **Tema WonderMenu** | monocromo, letra de titular ancha, pastilla maciza de radio 17 |
+| **Tema cernicalo** | fondo azulado, acento ambar, esquinas de 12 px |
 
 Todo el aspecto vive en variables de `:root` en `web/style.css`. El tema es un atributo del
-elemento raiz (`<html data-theme="wonder">`) y lo unico que hace `applyTheme()` en `app.js`
+elemento raiz (`<html data-theme="kestrel">`) y lo unico que hace `applyTheme()` en `app.js`
 es ponerlo: el navegador reevalua los tokens solo, no hay que repintar nada a mano ni volver
 a montar ninguna vista 3D. Un nombre de tema desconocido cae al de fabrica. Se guarda en el
 perfil como `theme`, igual que `viewmode`.
@@ -491,41 +487,16 @@ perfil como `theme`, igual que `viewmode`.
 Los tokens que un tema puede cambiar, ademas de los colores de siempre: `--font-display`
 (letra de titulares, con su `--disp-track` y `--disp-weight`), `--bgimg` (los degradados del
 fondo), `--glass`/`--glass2` (barras superior e inferior), `--onacc` (letra sobre el acento),
-`--selbg`/`--seltxt`/`--selr` (fondo, letra y radio de lo elegido). Anadir un tercer tema es
+`--selbg`/`--seltxt`/`--selr` (fondo, letra y radio de lo elegido). Anadir otro tema es
 anadir un bloque `:root[data-theme="..."]` y su nombre a `THEMES`, nada mas.
-
-### De donde sale el tema WonderMenu
-
-De leer la fuente de [lmcd/WonderMenu](https://github.com/lmcd/WonderMenu), que es un menu de
-flashcart de N64. Lo que se replica es la **disposicion y la paleta**, no los recursos: el
-proyecto es AGPLv3, asi que **no se copia ni una fuente ni un sprite**.
-
-Lo que dice su fuente y aqui se imita:
-
-- La paleta es monocroma de verdad: su `util/Color.h` solo define `CLEAR`, `BLACK`, `WHITE`,
-  `RED`, `GREEN` y `BLUE`. De ahi que el tema ponga `--acc` a blanco y deje el rojo y el
-  verde solo para aviso y "todo bien".
-- El subtitulo es **el mismo blanco del titulo con el alfa a la mitad** (`a *= 0.5`), no un
-  gris distinto. En la Lista Wonder eso es `opacity:.5` sobre `currentColor`, no otro color.
-- Lo elegido es una **pastilla maciza** redondeada, no un borde: radio 17 cuando esta
-  expandida y 8 cuando no, con rectangulos que **sobresalen por los dos lados** y 5 px mas de
-  alto. En CSS: `margin:0 -15px` con `padding:0 15px` y `height` de 72 a 77 px.
-- Las medidas de una fila: etiqueta a 112 px del borde, subtitulo 20 px por debajo,
-  accesorios de la derecha separados 12 px con 15 px de margen, contador de 50 px de ancho.
-- Sus titulares van en Unbounded 900. Aqui la pila es
-  `"Unbounded","Archivo Black","Segoe UI Variable Display","Segoe UI",system-ui` — si la
-  fuente no esta instalada cae sola, no se descarga nada (el lanzador funciona sin red).
-
-Un desvio deliberado: **el fondo NO es negro**. En el original la pastilla de lo elegido es
-negra maciza con letra blanca, y sobre un fondo negro no se veria. El tema usa gris carbon
-(`--bg:#2b2b32`), que es lo que deja resaltar la pastilla sin salirse del monocromo.
 
 ### Prueba
 
 `web/smoke_theme.html` mete el lanzador en un iframe y comprueba lo que de verdad puede
-fallar: que el selector existe con sus dos opciones, que `applyTheme()` cambia el atributo,
-que los tokens resuelven distinto (`--selr` 0px contra 17px, `--bg`, `--acc`,
-`--font-display`), que el selector se sincroniza, que un tema inventado cae al de fabrica,
+fallar: que el selector existe con su opcion, que `applyTheme()` pone el atributo, que el
+selector se sincroniza, que TODOS los tokens que un tema puede cambiar estan definidos y no
+vacios (que es lo que hace que meter otro tema sea escribir un bloque de `:root` y nada
+mas), que un tema inventado cae al de fabrica,
 que `body` pinta fondo propio (si fuera transparente tomaria el del anfitrion) y que el
 evento `change` aplica el tema. Que `touch()` lo GUARDA no se ve desde el iframe --- `CFG` es
 un `let` de guion clasico y no cuelga de `window` --- asi que eso se mira desde fuera leyendo
@@ -686,4 +657,3 @@ cliente.
 - Vigilar escrituras (`KESTREL_WATCHP`) desde el depurador, y puntos de ruptura sobre el RSP.
 - Segundo, tercer y cuarto mando (hoy solo `KESTREL_PAD1`).
 - Cambiar opciones en caliente sin reiniciar el emulador.
-- La piel WonderMenu en el lanzador web, como un tema mas de los que ya hay.

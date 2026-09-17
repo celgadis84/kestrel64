@@ -6554,3 +6554,38 @@ lo que hace cara cualquiera de las dos opciones. La union de tramos contiguos en
 esta (`rdpSubmit`), y la union en el consumidor esta medida y descartada (seccion del 2026-09-17
 sobre los tres callejones del reparto CPU->RDP).
 
+## 2026-09-18 -- Bajar la prioridad de los workers del RCP: medido, empate (descartado)
+
+Hipotesis del anfitrion, no del invitado: tres hilos calientes del RCP sobre cuatro nucleos
+fisicos (i7-870). Cuando no caben, el planificador de Windows reparte a partes iguales, y eso
+no es lo que interesa -- el hilo del RSP gira porque ESPERA al de CPU, y el worker del RDP gira
+para ahorrarle al productor un `notify_all` (seccion anterior). Los dos pueden ceder sin perder
+nada; el de CPU no. Bajarles la prioridad deberia devolverle nucleo al camino critico.
+
+Parche: `setSelfPriority(const char*)` leyendo `KESTREL_PRIORSP` / `KESTREL_PRIORDP` en el rango
+-2..2 sobre `SetThreadPriority(GetCurrentThread(), ...)`, llamado desde cada worker justo tras
+publicar su asa. Sin variable puesta no hace nada, o sea que las puertas son bit-identicas.
+
+Los dos workers a `THREAD_PRIORITY_BELOW_NORMAL`, minimo de tres corridas intercaladas por juego:
+
+| juego | base | -1/-1 | delta |
+|-------|------|-------|-------|
+| junkrunner64 | 7.837 | 7.760 | -1,0 % |
+| Perfect Dark | 13.370 | 13.468 | +0,7 % |
+| SM64 | 8.169 | 8.184 | +0,2 % |
+| DK64 | 13.019 | 13.080 | +0,5 % |
+
+Todo dentro del ruido de pared (~2 %), md5 de framebuffer identico en los cuatro. Tres de los
+cuatro salen peor por poco: no hay senal. **Descartado**, parche fuera del arbol.
+
+Por que no funciona, que es lo que se aprende: el problema no es COMO reparte el planificador
+cuando los tres hilos estan listos, es que los workers estan listos casi siempre aunque no
+tengan trabajo -- el worker del RDP quema el 65 % de un nucleo pintando el 10 % del tiempo. Un
+hilo de prioridad baja que gira sigue ocupando el nucleo entero mientras el de prioridad normal
+no lo pida en ese instante exacto. La prioridad no convierte un giro en un hueco. La palanca que
+si movia la aguja fue espaciar el sondeo del reloj dentro del giro (seccion del 2026-09-17), que
+ataca el coste real: la linea de cache que el worker le robaba al hilo de CPU.
+
+La ronda que intentaba separar RDP-solo de RSP-solo salio contaminada (el usuario estaba jugando
+en la misma maquina: jr 16.303 ms, dk 23.930 ms contra ~8.000 / ~13.100 normales) y se tira, no
+se interpreta.

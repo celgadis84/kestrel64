@@ -27,10 +27,10 @@ using kestrel::u32;
 using kestrel::u64;
 using kestrel::usize;
 
-// ============================================================ estetica (WonderMenu)
+// ============================================================ estetica
 //
-// La referencia no es un lanzador de PC sino un menu de cartucho: WonderMenu corre EN la
-// consola, con la paleta y las limitaciones de la maquina. De ahi salen las cuatro
+// La referencia no es un lanzador de escritorio sino un menu de cartucho: algo que corre EN
+// la consola, con la paleta y las limitaciones de la maquina. De ahi salen las cuatro
 // decisiones de las que cuelga todo lo demas:
 //
 //  1. La escena entera se dibuja en un lienzo de 384x216 y se sube a la ventana con
@@ -58,8 +58,11 @@ constexpr u32 kColAcc   = 0xf2ba20;        // acento calido (el amarillo de los 
 // distancia focal kFocal; una tarjeta a z = kDepth sale a escala 1:1, o sea que kHalfW/kHalfH
 // son directamente el medio ancho y el medio alto de la caratula central en el lienzo.
 constexpr float kFocal = 300.0f, kDepth = 300.0f;
-constexpr float kHalfW = 33.0f, kHalfH = 46.0f;   // caja de N64: relacion ~0.72
-constexpr float kSideX = 67.0f, kStepX = 24.0f;   // salto al primer lateral, y entre laterales
+// La caja de N64 de Norteamerica y Europa es APAISADA (190 x 133 mm de carton, relacion
+// ~1.43), no vertical: eso es la caja de SNES. Las caratulas escaneadas que se descargan
+// tienen esa misma forma, asi que la tarjeta va apaisada y la imagen entra entera.
+constexpr float kHalfW = 46.0f, kHalfH = 32.0f;   // caja de N64: relacion ~1.43
+constexpr float kSideX = 93.0f, kStepX = 33.0f;   // salto al primer lateral, y entre laterales
 constexpr float kSideZ = 78.0f, kStepZ = 52.0f;
 constexpr float kTilt  = 1.02f;                   // ~58 grados de giro sobre Y
 constexpr float kMaxD  = 4.2f;                    // tarjetas visibles a cada lado
@@ -67,7 +70,7 @@ constexpr int   kCarY  = 76;                      // altura del centro del carru
 constexpr float kReflFrac = 0.30f;                // trozo de caratula que se refleja
 constexpr float kReflTop  = 0.34f;                // opacidad del reflejo en la costura
 
-constexpr int kTexW = 132, kTexH = 184;    // tamano al que se normaliza toda caratula
+constexpr int kTexW = 184, kTexH = 132;    // tamano al que se normaliza toda caratula
 
 // Bandas verticales del lienzo.
 constexpr int kBarH   = 15;                // cabecera

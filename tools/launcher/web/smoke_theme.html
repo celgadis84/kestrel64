@@ -20,30 +20,26 @@ f.onload = () => {
       const tok = n => w.getComputedStyle(root).getPropertyValue(n).trim();
       const sel = d.querySelector("#theme");
       ok(!!sel, "hay selector de tema");
-      ok(sel && sel.options.length === 2, "opciones: " + (sel ? sel.options.length : -1));
+      ok(sel && sel.options.length === 1, "opciones: " + (sel ? sel.options.length : -1));
 
       // de fabrica
       w.applyTheme("kestrel");
       const k = { selr: tok("--selr"), bg: tok("--bg"), acc: tok("--acc"), disp: tok("--font-display") };
       ok(root.dataset.theme === "kestrel", "atributo kestrel: " + root.dataset.theme);
       ok(k.selr === "0px", "kestrel --selr=" + k.selr);
+      ok(sel.value === "kestrel", "el selector se sincroniza: " + sel.value);
 
-      // wonder
-      w.applyTheme("wonder");
-      const n = { selr: tok("--selr"), bg: tok("--bg"), acc: tok("--acc"), disp: tok("--font-display") };
-      ok(root.dataset.theme === "wonder", "atributo wonder: " + root.dataset.theme);
-      ok(n.selr === "17px", "wonder --selr=" + n.selr);
-      ok(n.bg !== k.bg, "--bg cambia: " + k.bg + " -> " + n.bg);
-      ok(n.acc !== k.acc, "--acc cambia: " + k.acc + " -> " + n.acc);
-      ok(/Unbounded/.test(n.disp), "--font-display wonder: " + n.disp);
-      ok(sel.value === "wonder", "el selector se sincroniza: " + sel.value);
+      // Los tokens que un tema puede cambiar tienen que existir y no estar vacios: es lo
+      // que hace que meter otro tema sea escribir un bloque de :root y nada mas.
+      ["--selr", "--bg", "--acc", "--font-display", "--selbg", "--seltxt", "--glass", "--onacc"]
+        .forEach(t => ok(tok(t) !== "", "token " + t + " definido: " + tok(t)));
 
       // nombre inventado -> fabrica
       const back = w.applyTheme("no-existe");
       ok(back === "kestrel" && root.dataset.theme === "kestrel", "tema desconocido cae a kestrel: " + back);
 
       // el cuerpo pinta fondo propio (no hereda del anfitrion)
-      w.applyTheme("wonder");
+      w.applyTheme("kestrel");
       const bodyBg = w.getComputedStyle(d.body).backgroundColor;
       ok(bodyBg && bodyBg !== "rgba(0, 0, 0, 0)", "body con fondo propio: " + bodyBg);
 
@@ -51,8 +47,8 @@ f.onload = () => {
       // Se comprueba donde importa de verdad: el POST a /api/config. El guardado va con
       // 350 ms de rebote, asi que se espera y luego lo verifica el guion de fuera leyendo
       // profile.json (que se salva y se restaura alrededor de la prueba).
-      sel.value = "wonder"; sel.dispatchEvent(new w.Event("change"));
-      ok(root.dataset.theme === "wonder", "el evento change aplica el tema: " + root.dataset.theme);
+      sel.value = "kestrel"; sel.dispatchEvent(new w.Event("change"));
+      ok(root.dataset.theme === "kestrel", "el evento change aplica el tema: " + root.dataset.theme);
       setTimeout(() => {
         say(L.some(x => x.startsWith("MAL")) ? "== HAY FALLOS ==" : "== TODO BIEN ==");
         // Lo que queda por comprobar (que `touch()` guarda `theme` de verdad) no se ve desde

@@ -424,6 +424,14 @@ function artUrl(r) {
          "&region=" + encodeURIComponent((r.header && r.header.region) || "");
 }
 
+// La pegatina del cartucho es otro dibujo, no la caratula de la caja. El servidor solo la
+// sirve si esta en cache (no hay coleccion libre de donde bajarla), asi que aqui lo normal
+// es un 404 y el estante se apana recortando la caratula.
+function cartUrl(r) {
+  return "/api/cartart?id=" + encodeURIComponent(r.id) +
+         "&name=" + encodeURIComponent((r.header && r.header.name) || "");
+}
+
 function renderStage() {
   const st = $("#stage");
   const list = filtered();
@@ -436,7 +444,7 @@ function renderStage() {
   if (MODE !== "shelf" && SHELF) { SHELF.destroy(); SHELF = null; }
   if (!LAYOUT3D[MODE] && LIB3D) { LIB3D.destroy(); LIB3D = null; LIB3D_KEY = ""; }
   if (LAYOUT3D[MODE]) r3D(st, list, LAYOUT3D[MODE]);
-  else ({rows: rRows, list: rList, wmrows: rWonder, shelf: rShelf}[MODE] || rRows)(st, list);
+  else ({rows: rRows, list: rList, shelf: rShelf}[MODE] || rRows)(st, list);
   updateDock();
 }
 
@@ -606,39 +614,6 @@ function rList(st, list) {
   });
 }
 
-/* Lista de filas altas al estilo WonderMenu (el menu de flashcart de lmcd): una fila por
-   cartucho, caratula pequena a la izquierda, titulo grande, subtitulo a media tinta y los
-   datos del cartucho a la derecha. Lo elegido no se pinta con un borde sino con una
-   pastilla maciza que SOBRESALE por los dos lados y crece un poco de alto, que es
-   justo lo que hace el original. Todo sale de los tokens (`--selbg`, `--seltxt`, `--selr`,
-   `--font-display`), asi que la misma vista vale con el tema de fabrica y con el de
-   WonderMenu sin una sola regla duplicada. No se copia ni un recurso del proyecto
-   original: es AGPLv3 y aqui solo se replica la DISPOSICION. */
-function rWonder(st, list) {
-  st.innerHTML = `<div class="wrows"></div>`;
-  const w = $(".wrows", st);
-  list.forEach((r, i) => {
-    const h = r.header || {};
-    const d = document.createElement("div");
-    d.className = "wrow" + (i === SEL ? " sel" : "");
-    d.innerHTML = `<div class="wart"></div>
-      <div class="wtxt"><b>${r.title}</b><i>${r.file}</i></div>
-      <div class="wmeta"><span>${h.region_label || "?"}</span>
-        <span>${h.fmt || "?"}</span><em>${h.mb || "?"} MB</em></div>`;
-    const im = new Image();
-    im.src = artUrl(r);
-    im.onload = () => $(".wart", d).appendChild(im);
-    im.onerror = () => $(".wart", d).classList.add("ph");
-    d.onclick = () => (i === SEL ? activate() : pick(i));
-    d.ondblclick = launch;
-    w.appendChild(d);
-  });
-  // Con las flechas la fila elegida se sale de la ventana enseguida; se trae a la vista
-  // sin animacion porque el repintado es completo y la animacion se veria como un salto.
-  const sel = $(".wrow.sel", w);
-  if (sel) sel.scrollIntoView({block: "nearest"});
-}
-
 /* Estante: la caja de carton y el cartucho del juego elegido, en 3D de verdad, con la
    caratula puesta de textura. Se navega con las flechas como en las demas vistas. */
 function rShelf(st, list) {
@@ -652,7 +627,7 @@ function rShelf(st, list) {
   if (typeof SCENE3D !== "undefined") SHELF = SCENE3D.mountShelf(host, {});
   if (!SHELF) { host.innerHTML = `<p class="hint">Este navegador no da WebGL.</p>`; return; }
   host.insertBefore(SHELF.canvas, $(".shelf-name", host));
-  SHELF.setArt(r ? artUrl(r) : null);
+  SHELF.setArt(r ? artUrl(r) : null, r ? cartUrl(r) : null);
   st.onwheel = e => {
     e.preventDefault();
     const n = SEL + (e.deltaY > 0 ? 1 : -1);
@@ -1088,7 +1063,7 @@ function closeModal(el) { el.classList.remove("on"); if (PADGL) PADGL.hide(); }
 /* El tema vive en un atributo del <html> y TODO lo demas sale de las variables de
    :root, asi que cambiarlo no repinta nada: el navegador reevalua los tokens solo.
    Los temas validos estan en style.css; uno desconocido cae al de fabrica. */
-const THEMES = ["kestrel", "wonder"];
+const THEMES = ["kestrel"];
 function applyTheme(name) {
   const th = THEMES.includes(name) ? name : "kestrel";
   document.documentElement.dataset.theme = th;

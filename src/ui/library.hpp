@@ -2,7 +2,7 @@
 // kestrel64 -- biblioteca de ROMs con carrusel 3D de caratulas.
 //
 // Es la puerta de entrada del emulador cuando se abre sin ROM (doble clic en el .exe, o
-// "Archivo > Abrir ROM..." desde la ventana del juego). La estetica es la de WonderMenu
+// "Archivo > Abrir ROM..." desde la ventana del juego). La estetica es la de un menu
 // (menu de flashcart de N64): lienzo de baja resolucion escalado por entero, tipografia de
 // mapa de bits, pocos colores planos y transiciones cortas. Ver docs/LAUNCHER.md.
 //

@@ -174,8 +174,8 @@ function buildController() {
     b.part(id, col);
     b.push(M4.trans(x, y + h / 2 - 0.06, z)).add(cylinder(r, h, 26, r * 0.94)).pop();
   };
-  btn("B", C.b, 4.60, -0.55, 0.52, 0.32, YR);
-  btn("A", C.a, 5.55,  0.65, 0.66, 0.34, YR);
+  btn("B", C.b, 4.60, -0.55, 0.60, 0.33, YR);
+  btn("A", C.a, 5.60,  0.70, 0.60, 0.33, YR);
   // Las cuatro C van en rombo sobre un rebaje redondo, no sobre una plancha cuadrada.
   const ccx = 7.05, ccz = -0.85, cd = 0.72;
   b.part(null, C.bodyDark);
@@ -199,12 +199,27 @@ function buildController() {
     b.push(M4.mul(M4.trans(t[1] * 6.55, TOP - 0.30, -2.75), M4.rotX(-0.62)))
      .add(roundedBox(2.5, 0.62, 1.15, 0.28, 4)).pop();
   }
-  // Ranura del Controller Pak, en la trasera del mango central: se ve desde abajo.
+  // Bahia del Controller Pak: va en el CANTO DE ATRAS del cuerpo, centrada, como un cajon
+  // que sobresale un poco del contorno -- no en la pala central, que es donde estaba. El
+  // conector de 32 patillas mira hacia atras y el cable sale justo por encima.
+  b.part(null, C.body);
+  b.push(M4.trans(0, -0.10, -4.35)).add(roundedBox(3.60, 1.95, 1.30, 0.22, 3)).pop();
   b.part(null, [0.16, 0.165, 0.185]);
-  b.push(M4.trans(0, -2.55, 0.30)).add(roundedBox(2.05, 1.45, 0.55, 0.10, 2)).pop();
+  b.push(M4.trans(0, -0.10, -4.72)).add(roundedBox(2.95, 1.35, 0.70, 0.10, 2)).pop();
+  b.part(null, [0.72, 0.70, 0.66]);                       // peine del conector, metalico
+  b.push(M4.trans(0, -0.10, -4.90)).add(roundedBox(2.35, 0.34, 0.30, 0.05, 1)).pop();
+
+  // Cable: sale por detras, por encima de la bahia. Un tramo corto basta; lo que se lee es
+  // de donde sale, y sale del centro del canto trasero, no de un lateral.
+  b.part(null, [0.17, 0.175, 0.195]);
+  b.push(M4.mul(M4.trans(0, 0.55, -4.60), M4.rotX(Math.PI / 2)))
+   .add(cylinder(0.24, 1.60, 16)).pop();
+
+  // Z: en la cara de ABAJO, arriba del todo de la pala central, justo donde arranca del
+  // cuerpo -- ahi es donde llega el indice. Estaba media pala mas abajo.
   b.part("Z", C.bodyDark);
-  b.push(M4.mul(M4.trans(0, -1.70, 2.30), M4.rotX(0.38)))
-   .add(roundedBox(1.55, 0.62, 1.45, 0.28, 4)).pop();
+  b.push(M4.mul(M4.trans(0, -1.28, 1.40), M4.rotX(0.30)))
+   .add(roundedBox(1.45, 0.55, 1.55, 0.26, 4)).pop();
 
   return b.build();
 }
@@ -212,10 +227,15 @@ function buildController() {
 /* ---------------------------------------------------------------- el cartucho */
 // 8.8 x 11.4 x 2.1 cm: carcasa, resalte superior para agarrar, etiqueta hundida y la
 // ranura del conector abajo. La etiqueta admite textura ("label").
+// Medidas de las piezas, en centimetros y tomadas del objeto real. Salen del modulo porque
+// quien cuelga una imagen necesita saber a que proporcion recortarla.
+const BOX = { w: 19.0, h: 13.3, d: 2.8 };      // caja de carton NTSC/PAL
+const CART = { w: 8.8, h: 11.4, d: 2.1 };      // cartucho
+
 function buildCart(opts) {
   opts = opts || {};
   const b = new Builder();
-  const w = 8.8, h = 11.4, d = 2.1;
+  const w = CART.w, h = CART.h, d = CART.d;
 
   b.part(null, opts.shell || C.cart);
   b.push(M4.trans(0, 0, 0)).add(roundedBox(w, h, d, 0.28, 3)).pop();
@@ -225,19 +245,27 @@ function buildCart(opts) {
   b.push(M4.trans(0, -h / 2 + 0.28, 0)).add(roundedBox(w - 1.6, 0.55, d - 0.5, 0.1, 2)).pop();
 
   // Etiqueta: rebaje claro + plano con la textura, un pelo por delante.
+  // Rebaje y pegatina. Medido sobre una foto de cartucho real: la pegatina ocupa el 88 %
+  // del ancho y el 77 % del alto, centrada (lo que sobra arriba es el reborde de agarre y
+  // abajo el faldon liso). Sale casi cuadrada, 0,88 de ancho por alto -- nada que ver con
+  // la caratula apaisada de la caja, que es justo por lo que son dos imagenes distintas.
   b.part(null, C.cartLbl);
-  b.push(M4.trans(0, -0.35, d / 2 - 0.02)).add(roundedBox(w - 1.0, h - 3.2, 0.12, 0.06, 2)).pop();
+  b.push(M4.trans(0, 0.1, d / 2 - 0.02)).add(roundedBox(w - 0.9, h - 2.4, 0.12, 0.06, 2)).pop();
   b.part("LABEL", C.cartLbl, opts.labelTex || "label");
-  b.push(M4.trans(0, -0.35, d / 2 + 0.06)).add(plane(w - 1.2, h - 3.4)).pop();
+  b.push(M4.trans(0, 0.1, d / 2 + 0.06)).add(plane(w - 1.1, h - 2.6)).pop();
   return b.build();
 }
 
 /* -------------------------------------------------------------------- la caja */
 // La caja de carton: 13.5 x 19.0 x 3.0 cm. La portada va de textura en la cara frontal, y
 // el lomo lleva la franja roja de las cajas europeas de N64.
+// Caja de carton del juego. La de Norteamerica y Europa es APAISADA: 190 x 133 x 28 mm,
+// mas ancha que alta, al reves que la de SNES o la de Game Boy. Los escaneos de caratula
+// que se descargan tienen esa misma forma (1,37-1,43 de ancho por alto segun quien midiera
+// los margenes), asi que la caja lleva las medidas reales y la caratula entra sin deformar.
 function buildBox(opts) {
   opts = opts || {};
-  const w = opts.w || 13.5, h = opts.h || 19.0, d = opts.d || 3.0;
+  const w = opts.w || BOX.w, h = opts.h || BOX.h, d = opts.d || BOX.d;
   const b = new Builder();
 
   b.part(null, opts.color || C.box);
@@ -254,7 +282,13 @@ function buildBox(opts) {
   return b.build();
 }
 
-return { buildController, buildCart, buildBox, plane, padOutline, handleRings, COLORS: C };
+// COVER y LABEL son las caras donde se pega la imagen; su proporcion es la que hay que
+// pedirle al recorte para que nada se estire.
+const COVER = { w: BOX.w - 0.3, h: BOX.h - 0.3 };
+const LABEL = { w: CART.w - 1.1, h: CART.h - 2.6 };
+
+return { buildController, buildCart, buildBox, plane, padOutline, handleRings,
+         COLORS: C, BOX, CART, COVER, LABEL };
 })();
 
 if (typeof module !== "undefined") module.exports = MODELS;
