@@ -6463,3 +6463,94 @@ Barrido del espaciado (jr/PD/SM64/DK64, ms): cada vuelta 9.239/14.809/8.365/13.6
 es una REGRESION clara -- jr 7.892 -> 9.936 ms, SM64 8.299 -> 8.727. Alli la latencia manda,
 porque quien espera es el palo largo y cada microsegundo que tarda en ver la barrera levantada
 lo paga la corrida entera. Revertido; el espaciado es solo del hilo del RSP.
+
+## 2026-09-17 -- Cuatro intentos mas de recortar coste de anfitrion (los cuatro, negativos)
+
+Tras el espaciado del sondeo del reloj (seccion anterior) el perfil del hilo del RSP seguia
+diciendo 31,8 % fuera de la imagen. Cuatro hipotesis, las cuatro medidas y las cuatro
+descartadas. Bench: minimo de 2-3 corridas intercaladas A/B por juego, ruido de pared ~2 %.
+
+**1. Periodo del `yield` del hilo del RSP.** `spReadSync` y `dpLogWait` ceden el nucleo una de
+cada 256 vueltas; con el sondeo espaciado cada vuelta cuesta una fraccion de lo que costaba, o
+sea que el mismo periodo cede muchas mas veces por segundo. Barrido (ms, minimo de la tanda):
+
+| periodo | jr | PD | SM64 | DK64 |
+|---------|----|----|------|------|
+| 16 | 7.968 | 13.609 | **8.746** | **13.642** |
+| 256 (actual) | 7.995 | 13.349 | 8.224 | 13.233 |
+| 1024 | 7.855 | 13.569 | 8.185 | 13.304 |
+| 4096 | 7.914 | 13.663 | 8.283 | 13.075 |
+| 65536 | 8.047 | 13.624 | 8.158 | 13.160 |
+
+Meseta plana de 256 en adelante; solo ceder MUCHO (16) hace dano (SM64 +6 %, DK64 +3 %). O sea
+que el `yield` no es el coste: el 27 % que el perfil apunta a `rspCv.notify_all()` es tiempo de
+un hilo que YA esta esperando, no camino critico. Knob revertido (no se anade un knob que no
+mueve nada).
+
+**2. Memo de la barrera del SP en el hilo de CPU.** El giro de `spBarrierWait` convierte el
+reloj publicado del RSP a ops en cada vuelta (multiplicacion de 128 bits + ancla del
+lanzamiento) sobre un valor que el worker solo publica cada pocos miles de instrucciones de
+microcodigo. Memoizado de dos formas:
+
+- con `thread_local` en `spBarrierAt()`: **peor en los cuatro** (+1,4 % jr, +1,0 % PD, +1,4 %
+  SM64, +0,2 % DK64). En Windows la indireccion de TLS cuesta mas que la propia multiplicacion.
+- con variables locales del propio bucle (sin TLS, sin estado compartido): empate en PD y
+  ligeramente peor en los otros tres.
+
+`PaceDiv` ya es multiplicacion-desplazamiento: el `div` que el perfil marca al 5,3 % es codigo
+inlineado de toda la ruta de retiro atribuido a esa linea, no una division lenta. Revertido.
+
+**3. Reorden del despacho del dynarec.** `jitTryBlock` (7,9 % del hilo de CPU) mira la cache
+negativa -- con su `icFetch` de validacion -- ANTES de buscar el bloque. Mirarla solo cuando no
+hay bloque (con bloque compilado no puede haber fallo de compilacion pendiente) quita ese
+`icFetch` del camino comun. Medido: empate en jr/SM64/DK64 y **PD 1,5 % peor de forma
+consistente** -- PD acierta mucho en la cache negativa, y esos aciertos ahora pagan primero una
+busqueda en la tabla. El intercambio no sale a cuenta. Revertido (el `cartNow()` duplicado de la
+comprobacion de plazo tambien iba en el mismo parche y tampoco se aprecia).
+
+**4. Giro adaptativo del worker del RDP.** Ver la seccion siguiente: el giro constante no se
+puede mejorar leyendo la profundidad del acierto.
+
+## 2026-09-17 -- El worker del RDP quema 65 % de un nucleo estando 10 % ocupado
+
+Dato del latido (`KESTREL_HEARTBEAT=1`), junkrunner64 200 intercambios:
+
+```
+[hb] occupancy: rdp 10%(cpu 65%) rsp 77%(cpu 81%) cpuWait 11% | jobs/s: rsp=33 rdp=37697
+```
+
+El worker del RDP pinta el 10 % del tiempo de pared y sin embargo gasta el 65 % de un nucleo:
+la diferencia es el giro de `rdpSpinLen()` (32768 vueltas) entre trabajo y trabajo. Con 37.700
+tramos por segundo en jr y 44.250 en PD, el giro casi nunca llega a agotarse.
+
+Ese giro NO esta ahi por latencia -- 131072 vueltas son ~200 us, mucho mas que cualquier
+despertar del planificador --: esta ahi porque mientras el worker gira, `rdpWaiting` es falso y
+el PRODUCTOR (el hilo de CPU o el del RSP) se ahorra el `notify_all`, que a 44.000 tramos/s es
+una llamada al kernel constante. Es un trueque directo: nucleo del worker a cambio de llamadas
+al kernel del productor. Y el lado bueno del trueque depende del juego:
+
+| giro | jr | PD | SM64 | DK64 |
+|------|----|----|------|------|
+| 2048 | 8.365 | 13.841 | 8.915 | 13.584 |
+| 8192 | 8.122 | 13.635 | 8.545 | 13.521 |
+| 32768 (actual) | 7.886 | 13.442 | 8.217 | **13.037** |
+| 131072 | 7.864 | **12.989** | 8.304 | 14.107 |
+
+PD gana un 3,4 % subiendo a 131072; DK64 pierde un 8 % con ese mismo valor, repetido en dos
+rondas. Bajar de 32768 es peor en todos. 32768 se queda como el compromiso.
+
+**Lo que no funciona para resolver la tension**:
+
+- *Giro adaptativo por profundidad del acierto* (media movil de la vuelta en la que llega el
+  tramo, girar el cuadruple de esa media, acotado): con tope 131072 DK64 sigue en 14.044 ms. Los
+  aciertos de DK64 tambien son profundos, asi que la regla no distingue "acierto que valia la
+  pena esperar" de "aqui habria que haber dormido". Adaptativo == constante.
+- *Mas `pause` en el giro* (una por vuelta o una de cada 4, en vez de una de cada 16), por si el
+  dano fuera de hermano logico SMT: DK64 sigue en 14.050-14.146 ms con tope 131072. No es SMT,
+  es nucleo fisico entero.
+
+La salida real no es tunear el giro, es que haya menos tramos: 44.000 `DPC_END` por segundo es
+lo que hace cara cualquiera de las dos opciones. La union de tramos contiguos en el productor ya
+esta (`rdpSubmit`), y la union en el consumidor esta medida y descartada (seccion del 2026-09-17
+sobre los tres callejones del reparto CPU->RDP).
+
