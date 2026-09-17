@@ -5987,3 +5987,21 @@ se reproducen: eran de antes de la barrera. gate_all 479 s, gate_prdp 318 s, reg
 
 Pendiente visto al medir: SM64 300 flips da 797 campos VI en Lockstep y 725 en Threaded, con
 el MISMO md5 de framebuffer; igual con y sin guarda, asi que no es de este cambio.
+
+## Traduccion directa ckseg0/ckseg1 tambien con KX=1: junkrunner64 -30 % (2026-09-17)
+
+Perfil de CPU de junkrunner64 tras quitar la guarda `rsp.brake`: `translate()` 9,3 % + `xlatDirect`
+1,4 %. libdragon deja Status = `...e3` (KX|SX|UX), y tanto `CPU::xlatDirect` como el camino en
+linea de `emitMemOp` en el JIT exigian KX=0, asi que TODOS los accesos a memoria caian en
+`translate()` completo. Semantica HW: en kernel con KX=1 las direcciones extendidas en signo
+`0xFFFFFFFF_80000000..BFFFFFFF` son ckseg0/ckseg1, mapeo directo identico a kseg0/kseg1 (el mismo
+`& 0x1FFFFFFF` que ya hacia `translate()`). El chequeo de kernel (EXL/ERL o KSU==0) se mantiene.
+
+| Prueba (prdp threaded-jit) | Antes | Despues | md5 |
+|---|---|---|---|
+| junkrunner64 200 flips | 13,6 / 12,0 s | 8,2 / 8,4 s | `75e331cb` ambos |
+| DK64 1.500 M | 11,7 s | 11,8 s | `eca336ea` |
+| SM64 300 flips | 6,7 s | 6,7 s | `29a0e995` |
+| PD 600 flips | - | 9,0 s x4 | `31784f9d` x4 |
+
+Juegos de libultra corren con KX=0: neutros, como se espera.

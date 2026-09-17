@@ -522,7 +522,7 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
       e.test_al_imm8((u8)(fsz - 1));                  // desalineada: el interprete vectoriza
       fastFail[nFail++] = e.jne_rel32_placeholder();
     }
-    e.test_m8_imm(RBX, stOff, 0x98);                  // KSU!=0 o KX: traduccion general
+    e.test_m8_imm(RBX, stOff, 0x18);                  // KSU!=0: traduccion general (KX=1 = ckseg0, mismo AND)
     fastFail[nFail++] = e.jne_rel32_placeholder();
     e.cmp_r32_m(RAX, RBX, szOff);                     // fisica fuera de RDRAM (o sin bus): MMIO
     fastFail[nFail++] = e.jae_rel32_placeholder();

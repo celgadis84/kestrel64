@@ -552,7 +552,7 @@ private:
   // Camino rapido de traduccion, en linea en el llamador. Cubre lo unico que hace un juego
   // de N64 en la practica: direccion de compatibilidad (los 32 bits altos son la extension de
   // signo del bit 31) dentro de kseg0/kseg1, con la CPU en modo kernel y direccionamiento de
-  // 32 bits (Status.KX=0). Esos dos segmentos son DIRECTOS -- no pasan por la TLB, no pueden
+  // 32 bits o su gemelo ckseg0/ckseg1 de 64 (KX=1). Esos dos segmentos son DIRECTOS -- no pasan por la TLB, no pueden
   // fallar y no miran el ASID --, asi que la traduccion entera es un AND, exactamente el
   // `return va & 0x1FFF'FFFF` de translate(). Tampoco tocan xlatCacheable, igual que alli:
   // la cacheabilidad de esos segmentos la decide el segmento (ver cacheable()).
@@ -560,9 +560,12 @@ private:
   // el caso general (TLB, 64 bits, usuario/supervisor, xkphys, AdE).
   inline auto xlatDirect(u64 v, u64& pa) const -> bool {
     u32 st = (u32)cop0[C0_Status];
-    // kernel = EXL/ERL puestos o KSU==0; ademas KX (bit 7) claro para quedarse en 32 bits.
-    bool kernel32 = ((st & 0x6u) != 0 || (st & 0x18u) == 0) && (st & 0x80u) == 0;
-    if(__builtin_expect(!kernel32, 0)) return false;
+    // kernel = EXL/ERL puestos o KSU==0. KX da igual: con direccionamiento de 64 bits la misma
+    // direccion extendida en signo cae en ckseg0/ckseg1 (0xFFFFFFFF_80000000..BFFFFFFF), que
+    // translate() resuelve con el mismo AND. libdragon arranca con KX|SX|UX puestos y sin esto
+    // cada acceso a memoria del JIT pagaba translate() entero (9 % de la CPU en junkrunner64).
+    bool kernel = (st & 0x6u) != 0 || (st & 0x18u) == 0;
+    if(__builtin_expect(!kernel, 0)) return false;
     if(__builtin_expect((s64)v != (s32)(u32)v, 0)) return false;
     if(__builtin_expect(((u32)v & 0xC000'0000u) != 0x8000'0000u, 0)) return false;
     pa = (u32)v & 0x1FFF'FFFFu;
