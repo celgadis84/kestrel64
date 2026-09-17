@@ -5903,6 +5903,10 @@ Cuatro fugas de tiempo de anfitrion, cerradas en orden:
 Nota: el dynarec del RSP no actualiza `exactLeft` antes de llamar a helpers, asi que el reloj
 de MFC0 dentro de un bloque no es exacto; no ha hecho falta para este oraculo (RSPJIT=0 tambien
 divergia por las causas de arriba).
+**Cerrado 2026-09-17:** MFC0/MTC0 ya salen del bloque por `Rsp::jitCop0`, que pone `exactLeft =
+jitBudget + rem` (el saldo exacto de esa instruccion); `jitExec` solo lo usan helpers que no
+leen el reloj. Comprobado: statehash con `KESTREL_RSPJIT=0` identico al del dynarec (jr
+`be723abf`, pd `92f83ab8`, sm `79895dc7`, dk `e7098ab4`).
 
 **krom prdp preexistente:** `gate_prdp` marca regress=6 improve=45 (GRB12/15/24Decode 100->0,
 I8Decode, PPU2BPPTile8x8, Cycle1ShadeTriangle16BPP). El exe de d75ca9b da exactamente las
@@ -6213,3 +6217,13 @@ tarea a destiempo, asi que la foto no era un instante del invitado.
 Statehash con/sin rebobinado y con/sin RTT, Threaded y Lockstep: SM64 300 intercambios
 `79895dc77397e307`, PD 600 `92f83ab859532dd0`, junkrunner64 `be723abf` md5 `75e331cb`, DK
 `e7098ab4` md5 `eca336ea`, todos iguales. Pared T1: sin 9/13 s, rew 11/15 s, RTT 19/18 s.
+
+## Modo de puerta con el modelo fisico de ciclos; el latch del bus del PI decae en tiempo (2026-09-17)
+
+`gate_all.sh` gana `phys` (Lockstep+JIT) y `phys-threaded`: `KESTREL_CPI=1.0 CACHECOST=60
+UNCACHEDCOST=60 FPUCOST=stat MULDIVCOST=stat`, systemtest + sm64 (GAPS punto 4). Primer fruto:
+`cart-writing: Temp value decay` (variante SH) fallaba 1/3721 porque el valor escrito al bus del
+PI vivia 200 ops fijas y las paradas de cache de la propia prueba se comian el plazo. Es descarga
+de las lineas, tiempo: `Memory::CART_LATCH_TTL_CYCLES = 330` pasado a ops con el CPI vigente
+(`cartLatchTtl`, 235 ops de fabrica). systemtest 0/3721 en todos los modos y con CPI=2; sm64 md5
+igual en los dos modos nuevos; statehash de jr/pd/sm/dk sin cambio en T1 y T0.

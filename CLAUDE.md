@@ -87,7 +87,8 @@ thread just burns more spin-wait instructions, so Mips can rise while the emulat
 gets slower. `bench` fixes the guest work (N VI fields) and times the wall clock.
 
 Modes: `interp`, `jit`, `jit-nolink`, `threaded`, `threaded-jit` (plus
-`threaded-trace`, `threaded-nolink`). A change is done when systemtest and sm64
+`threaded-trace`, `threaded-nolink`; en `gate_all` ademas `rspinterp`, `rspnolink`, `rewind-rtt` y
+`phys`/`phys-threaded` = modelo fisico de ciclos encendido, CPI 1,0 + costes de cache/FPU/MUL-DIV). A change is done when systemtest and sm64
 pass in **all five** and krom shows no regression.
 
 **The sm64 gate stops on VI buffer swaps, not on an instruction count**

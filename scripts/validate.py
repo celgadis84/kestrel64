@@ -56,6 +56,8 @@ VI_FIELD_HZ = 59.94
 # lleva KESTREL_PRDP="0". Sin eso, correr un modo software contra el exe de build-prdp
 # rasterizaria en GPU y el md5 no seria el del oraculo determinista.
 SOFT = {"KESTREL_PRDP": "0"}
+PHYS = {"KESTREL_CPI": "1.0", "KESTREL_CACHECOST": "60", "KESTREL_UNCACHEDCOST": "60",
+        "KESTREL_FPUCOST": "stat", "KESTREL_MULDIVCOST": "stat"}
 MODES = {
     "interp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", **SOFT},
     "jit":           {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", **SOFT},
@@ -75,6 +77,13 @@ MODES = {
     # que la foto no lleve cambia el md5 o cuelga; la foto en si no puede mover la partida.
     "rewind-rtt":    {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_REWIND": "1",
                       "KESTREL_REWIND_FIELDS": "1", "KESTREL_REWIND_RTT": "1", **SOFT},
+    # Modelo fisico de ciclos de CPU encendido (fallos de cache y accesos sin cache a 60
+    # ciclos, FPU y MUL/DIV con su coste estatico, canalizacion a 1,0). No es el defecto
+    # porque falta calibrarlo contra consola real, pero sus plazos tienen que seguir naciendo
+    # y muriendo en el mismo reloj: sin un modo en la bateria se pudren sin que nadie lo vea
+    # (el del SI vivio asi). Lockstep y Threaded, y los dos tienen que dar el mismo md5.
+    "phys":          {"KESTREL_THREADS": "0", "KESTREL_JIT": "1", **PHYS, **SOFT},
+    "phys-threaded": {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", **PHYS, **SOFT},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1", **SOFT},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1", **SOFT},
     # Backend RDP en GPU (parallel-rdp). Necesitan un exe de `build-prdp/`, que se

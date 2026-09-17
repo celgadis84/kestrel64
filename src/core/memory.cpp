@@ -604,7 +604,7 @@ auto Memory::cartRom32(u32 phys) -> u32 {
 //
 // snapper64 se quedaba ahi (pc=0x8005b6c8) y nunca llegaba a configurar el VI: origin=0,
 // width=0, ctrl=0 tras 1151 campos. El plazo es el mismo latch que ya existia
-// (CART_LATCH_TTL), medido en el reloj de invitado, asi que una lectura inmediata de
+// (cartLatchTtl), medido en el reloj de invitado, asi que una lectura inmediata de
 // PI_STATUS despues de la escritura sigue viendo IO_BUSY como en HW.
 auto Memory::piIoDecay() -> void {
   if(cartLatchValid && cartNow() >= cartLatchExpiry) {
@@ -654,7 +654,7 @@ auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
   }
   cartLatch = v;
   cartLatchValid = true;
-  cartLatchExpiry = now + CART_LATCH_TTL;
+  cartLatchExpiry = now + cartLatchTtl;
   rcp.pi_status |= 0x2u;                     // IOBUSY set while the bus write is pending
 }
 

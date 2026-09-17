@@ -1057,7 +1057,15 @@ public:
     paceCpuNum = num ? num : 1; paceCpuDen = den ? den : 1;
     paceDivNum.set(paceCpuNum); paceDivDen.set(paceCpuDen);
   }
-  static constexpr u64 CART_LATCH_TTL = 200;
+  // El valor que la CPU deja en el bus del PI al escribir en el cartucho se va solo: es carga
+  // en las lineas, o sea TIEMPO, no instrucciones. n64-systemtest lo mide en consola con un
+  // bucle de 3 instrucciones y lo situa hacia las 70 vueltas: ~210 instrucciones a canalizacion
+  // de 1 ciclo mas los dos accesos sin cache del propio test (escritura y lectura, ~60 ciclos
+  // cada uno) = ~330 ciclos de CPU. Guardarlo en ops fijas hacia que con el modelo fisico
+  // (KESTREL_CPI=1.0 + costes de cache) las paradas se comieran el plazo y el valor muriera a
+  // las 10 vueltas. System lo pasa a ops con el CPI vigente (cartLatchTtl).
+  static constexpr u64 CART_LATCH_TTL_CYCLES = 330;
+  u64 cartLatchTtl = 235;   // ops; lo fija System desde CART_LATCH_TTL_CYCLES y el CPI
   auto isCart(u32 phys) const -> bool { return !rom.empty() && phys >= 0x1000'0000 && phys < 0x1fc0'0000; }
   auto cartRom32(u32 phys) -> u32;               // aligned 32-bit ROM word (0 if past image)
   auto cartRead(u32 phys, u32 nbytes) -> u32;    // CPU read from cart space (latch + 16-bit mux)

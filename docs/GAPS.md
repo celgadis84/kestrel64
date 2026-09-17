@@ -1056,7 +1056,18 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
    8 s Parallel-RDP. Recuperar ese solape es el siguiente punto de rendimiento y es
    independiente de la correccion.
 
-4. **PENDIENTE -- las puertas no encienden la perilla.** Ni `gate_all` ni `gate_prdp` ponen
+4. **CERRADO 2026-09-17 -- modos `phys` (Lockstep+JIT) y `phys-threaded` en `gate_all.sh`**
+   (`KESTREL_CPI=1.0 CACHECOST=60 UNCACHEDCOST=60 FPUCOST=stat MULDIVCOST=stat`, systemtest +
+   sm64 md5). Nada mas encenderlos cazaron un plazo podrido del mismo patron: el latch del bus
+   del PI (`cart-writing: Temp value decay`, variante SH) moria a las 10 vueltas porque su vida
+   eran 200 ops fijas y las paradas de cache de la propia prueba (dos accesos sin cache + fallos
+   de I-cache) se comian el plazo. La descarga del bus es tiempo: ahora
+   `CART_LATCH_TTL_CYCLES = 330` ciclos (~70 vueltas de 3 instrucciones medidas en consola por
+   n64-systemtest + los dos accesos sin cache) pasados a ops con el CPI vigente
+   (`cartLatchTtl`; 235 ops de fabrica, 165 con CPI 2, 330 con CPI 1). systemtest 0/3721 en
+   phys, phys-threaded, interp, jit, threaded-jit y CPI=2; statehash de jr/pd/sm/dk sin cambio.
+   Texto original del pendiente:
+   **las puertas no encendian la perilla.** Ni `gate_all` ni `gate_prdp` ponen
    `KESTREL_CACHECOST`, asi que los puntos de arriba pueden pudrirse sin que nadie se entere;
    el del SI vivio asi hasta que se busco otra cosa. Ya no hay excusa de determinismo: con el
    3b resuelto, Threaded tambien clava la traza, asi que el modo que se anada puede ser de los

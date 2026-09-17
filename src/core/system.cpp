@@ -133,6 +133,8 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   // instrucciones que caben en un campo viene de un KESTREL_CPI puesto a mano.
   if(hwSpeed) cpu.cpi256 = CPU::kCpiDefault256;
   clocks.cyclesPerInsn = (double)cpu.cpi256 / 128.0;
+  // Plazos que son tiempo de verdad y viven en el reloj de ops: 1 op = cpi256/128 ciclos.
+  memory.cartLatchTtl = Memory::CART_LATCH_TTL_CYCLES * 128 / cpu.cpi256;
   if(hwSpeed)
     std::printf("[system] modo FIEL A CONSOLA: CPU %.2f MHz, RSP %.2f MHz, RDRAM x1.00, "
                 "CPI %.4f, %.2f campos/s clavados\n",
