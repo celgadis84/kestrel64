@@ -760,8 +760,10 @@ auto Memory::write64(u32 addr, u64 value) -> void {
 auto Memory::rcpReg32(u32 phys) -> u32 { return mmioRead32(phys); }
 auto Memory::rcpRegWrite32(u32 phys, u32 value) -> void {
   // La CPU no puede tocar DPC por delante de escrituras del RSP ya fechadas en su pasado.
-  if(!tlIsRspThread && !tlDpLogApply && (phys & 0x1ff0'0000u) == (BASE_DPC & 0x1ff0'0000u)
-     && (rcpPend.load(std::memory_order_relaxed) & 16u))
+  // Lo mismo con SP: el diario lleva tambien las escrituras del RSP a SP_STATUS.
+  if(!tlIsRspThread && !tlDpLogApply && (rcpPend.load(std::memory_order_relaxed) & 16u)
+     && ((phys & 0x1ff0'0000u) == (BASE_DPC & 0x1ff0'0000u)
+         || (phys & 0x1ff0'0000u) == (BASE_SP & 0x1ff0'0000u)))
     dpLogApply(cartNow());
   wrtag::markRange(phys, 4, wrtag::kCpu, (u32)storePc);
   watchHit(phys, 4, value, false);
@@ -804,6 +806,8 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     }
     return 0;
   case BASE_SP & 0x1ff0'0000:
+    if(!tlIsRspThread && !tlDpLogApply && (rcpPend.load(std::memory_order_relaxed) & 16u))
+      dpLogApply(cartNow());
     if(a >= BASE_SP_PC) return (off & 0xff) == 0 ? rcp.sp_pc : 0;
     switch(off & 0xff) {
     case 0x00: return rcp.sp_mem_addr;
@@ -999,7 +1003,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         for(u32 i = 0; i < 8; i++)
           pair(9 + 2*i, 10 + 2*i, [&,i]{ clr(1u << (7+i)); }, [&,i]{ set(1u << (7+i)); });
         const u32 changed = (before ^ rcp.sp_status.load(std::memory_order_acquire)) & 0x7f80u;
-        const bool fromRsp = tlIsRspThread || lockRspExec;
+        const bool fromRsp = tlIsRspThread || lockRspExec || tlDpLogApply;
         // CLEAR_HALT con el nucleo en marcha: no-op en hardware, pero con grano > 1 hay que
         // recordarlo por si el RSP hace BREAK antes de ver las senales que lo acompanan.
         const bool lateHalt = !fromRsp && !wasHalted && (v & 1u) && !(v & 2u);
@@ -2910,7 +2914,13 @@ auto Memory::dpLogApply(u64 upTo) -> void {
     const DpLogEnt e = dpLog[h & kDpLogM];
     if(e.at > upTo) break;
     tlDpLogApply = true; tlDpLogAt = e.at;
-    rcpRegWrite32(BASE_DPC + (e.reg << 2), e.v);
+    if(e.reg & 8u) {
+      rcpRegWrite32(BASE_SP + ((e.reg & 7u) << 2), e.v);
+      spLogPend.fetch_sub(1, std::memory_order_release);
+      if(e.v & 0x180u) spLogCrit.fetch_sub(1, std::memory_order_release);
+    } else {
+      rcpRegWrite32(BASE_DPC + (e.reg << 2), e.v);
+    }
     tlDpLogApply = false;
     // head se mueve DESPUES de aplicar: quien espera el diario vacio ya ve el efecto.
     dpLogHead.store(h + 1, std::memory_order_release);
@@ -3010,7 +3020,7 @@ auto Memory::rcpSchedReset() -> void {
   // esta armado y el ancla de la barrera del SP se vuelve a atar al reloj que acaba de
   // entrar. Dejarla en el ancla vieja daria un spBarrierAt() de otra partida.
   rcpPend.store(0, std::memory_order_relaxed);
-  { std::lock_guard<std::mutex> lk(dpLogMx); dpLogHead.store(0); dpLogTail.store(0); }
+  { std::lock_guard<std::mutex> lk(dpLogMx); dpLogHead.store(0); dpLogTail.store(0); spLogPend.store(0); spLogCrit.store(0); }
   spMarkKick();
   spDoneAt = dpDoneAt = 0;
   rspRdvAt.store(0, std::memory_order_relaxed);

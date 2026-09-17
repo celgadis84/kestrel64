@@ -6053,4 +6053,35 @@ Medido parallel-RDP threaded-jit, A/B intercalado `KESTREL_DPLOG=0/1`, md5 ident
 
 Visto de paso, ya existia con la cita: `[statehash]` al parar por flips en junkrunner64 varia
 entre corridas (EPC dentro del bucle ocioso a 3 instrucciones), con framebuffer identico.
-Pendiente de mirar si es solo el punto de parada.
+Resuelto en la seccion siguiente: no era el punto de parada.
+
+## Escrituras del RSP a SP_STATUS en el diario (2026-09-17)
+
+La variacion de `[statehash]` en junkrunner64 era una divergencia real del invitado. Con
+`KESTREL_INTLOG=2` los avisos caian en la misma instruccion retirada pero con otro PC: la CPU
+recorria caminos distintos entre avisos. Traza de lecturas MMIO de la CPU (temporal) en 4
+corridas: 1,7 M lecturas, el 99 % `SP_STATUS` en bucle de sondeo, y la primera diferencia en la
+lectura 163.377: `0x5800 -> 0x5400` (SIG4 -> SIG3) una vuelta antes o despues segun la corrida.
+
+Causa: el microcodigo (rspq) escribe las senales de SP_STATUS por MTC0 y eso iba directo al
+registro en tiempo de pared. El RSP va por DELANTE de la CPU en tiempo de invitado (la barrera
+solo impide lo contrario), asi que la CPU veia cambios de su futuro en cuanto el anfitrion los
+hacia. El camino inverso (CPU -> RSP) ya estaba fechado (`spSigRing`/`spStatusForRsp`); este no.
+
+Arreglo: la escritura del RSP a SP_STATUS va al mismo diario que DPC (`reg = 8|4`), con su
+instante exacto, y la CPU la aplica al llegar ahi (tambien antes de leer o escribir cualquier
+registro SP). Aplicada desde el diario cuenta como del RSP (`fromRsp` incluye `tlDpLogApply`), y
+un SET_INTR levanta MI_SP en ese instante y no antes. Excepciones que siguen en el acto:
+SET_HALT/CLEAR_HALT (paran o lanzan el nucleo). El RSP no lee SP_STATUS con escrituras suyas
+aun en el diario (`spLogPend` -> `dpLogWait`), y su BREAK espera si alguna toca INTR_ON_BREAK
+(`spLogCrit`). `KESTREL_SPLOG=0` vuelve a la escritura directa.
+
+A/B intercalado prdp threaded-jit, audio off, 2 rondas:
+
+| Prueba | directo | diario | statehash | md5 |
+|---|---|---|---|---|
+| junkrunner64 200 flips | 7,08-7,15 s | 6,92-7,04 s | varia -> `51c2098c` 8/8 | `75e331cb` |
+| Perfect Dark 600 flips | 10,6-10,7 s | 9,9-10,6 s | `92f83ab8` | `0f0adee7` |
+| SM64 300 flips | 6,83-6,84 s | 6,70 s | `79895dc7` | `29a0e995` |
+| DK64 1.500 M | 11,24-11,25 s | 11,29-11,33 s | `e7098ab4` | `eca336ea` |
+

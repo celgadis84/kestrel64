@@ -183,7 +183,7 @@ a 4 M, asi que hay que bajarlo para ver nada; ademas de los contadores de siempr
 --se emiten EN LINEA en el codigo generado, o sea que con STATS puesto el JIT emite codigo
 distinto-- y `[cadena] rotasPorTramp`; con ellos se mato la hipotesis del enlace secuencial,
 ver `docs/PERF-CPU.md` §20.5) ·
-`KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_DPLOG=0` (el RSP vuelve a esperar a la CPU en cada escritura DPC -- cita `spReadSync` -- en vez de apuntarla en el diario `Memory::dpLogPush` para que la CPU la aplique al llegar a su instante; de fabrica diario, junkrunner64 -20 % de pared, mismo md5. Telemetria `[dplog]` al cerrar) · `KESTREL_RSPDPAWAIT=1` (el RSP vuelve a esperar al worker del RDP antes de leer DPC_CURRENT/STATUS; por defecto no: salen del horario de invitado) · `KESTREL_DMASPAN=0` (un DMA del RSP espera al RDP drenado SIEMPRE que haya trabajo en vuelo, no solo si solapa color/z image) · `KESTREL_RCPWAIT=<ms>` (cada cuanto da parte una espera del hilo de CPU sobre un worker del RCP -- `rspAwaitIdle`, el kick del RSP y `rdpDrain`; por defecto 2000, `=0` = espera muda de antes. No abandona la espera, la parte en rondas e imprime el estado del dominio: asi un worker que deja de publicar se ve como lo que es en vez de parecer lentitud) · `KESTREL_FIELDHASH=1` /
+`KESTREL_WATCHDOG=<s>` (liveness + stuck-thread RIP) · `KESTREL_DPLOG=0` (el RSP vuelve a esperar a la CPU en cada escritura DPC -- cita `spReadSync` -- en vez de apuntarla en el diario `Memory::dpLogPush` para que la CPU la aplique al llegar a su instante; de fabrica diario, junkrunner64 -20 % de pared, mismo md5. Telemetria `[dplog]` al cerrar) · `KESTREL_SPLOG=0` (las escrituras del microcodigo a SP_STATUS vuelven a caer en el registro en el acto en vez de ir al diario con su instante; de fabrica diario, arregla el statehash variable de junkrunner64) · `KESTREL_RSPDPAWAIT=1` (el RSP vuelve a esperar al worker del RDP antes de leer DPC_CURRENT/STATUS; por defecto no: salen del horario de invitado) · `KESTREL_DMASPAN=0` (un DMA del RSP espera al RDP drenado SIEMPRE que haya trabajo en vuelo, no solo si solapa color/z image) · `KESTREL_RCPWAIT=<ms>` (cada cuanto da parte una espera del hilo de CPU sobre un worker del RCP -- `rspAwaitIdle`, el kick del RSP y `rdpDrain`; por defecto 2000, `=0` = espera muda de antes. No abandona la espera, la parte en rondas e imprime el estado del dominio: asi un worker que deja de publicar se ve como lo que es en vez de parecer lentitud) · `KESTREL_FIELDHASH=1` /
 `KESTREL_FIELDDUMP=<n>` (localise a divergence) · `KESTREL_MAXFLIPS=<n>` (stop after n buffer swaps) ·
 `KESTREL_VITICKS=<n>` (VI ticks per field, default 16 — ver `docs/VI-CLOCK.md`) ·
 `KESTREL_CPI=<n>` (ciclos de CPU por instruccion retirada; **de fabrica 1,4**, que es la parte
@@ -229,7 +229,10 @@ de IMEM alrededor del PC).
 que crucen pagina, resolviendo por `tlbProbePhys` en vez de exigir misma pagina) ·
 `KESTREL_JIT_NORSPGUARD=1` (quita del camino rapido la guarda "hay tarea de RSP en vuelo".
 MEDIDO 2026-09-03: sigue haciendo falta -- sin ella PD cuelga 1 de cada 16 arranques y SM64 emite
-1804 campos VI por 300 intercambios en vez de 1024, o sea la CPU gasta lo ganado girando) ·
+1804 campos VI por 300 intercambios en vez de 1024, o sea la CPU gasta lo ganado girando.
+Desde 2026-09-17 solo importa en Lockstep: en Threaded con plazos la guarda ya no esta, la barrera
+del SP acota en tiempo de invitado) · `KESTREL_JIT_RSPGUARD=1` (vuelve a poner esa guarda en Threaded,
+para bisecar) ·
 `KESTREL_PACESLACK=<n>` (holgura del regulador CPU<->RSP, por defecto **4096 = `jit::kGuardMaxOps`**;
 ver el comentario largo sobre `kPaceSlack` en `src/core/memory.cpp`: por encima de la granularidad
 del dynarec la holgura la tendria que justificar el hardware, y no la justifica) · `KESTREL_PACEGRAIN=<n>`.

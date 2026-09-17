@@ -416,6 +416,13 @@ struct Memory {
   std::atomic<bool> rspLogWait{false};           // el RSP esta parado en dpLogWait
   std::atomic<u64> dpLogPushes{0}, dpLogWaits{0};
   std::atomic<u32> dpLogWaives{0};
+  // Escrituras del RSP a SP_STATUS en el mismo diario (reg = 8|4). El microcodigo cambia
+  // SIG0..SIG7 con la CPU por detras en tiempo de invitado; aplicadas al registro en el acto,
+  // la vuelta en que el bucle de sondeo de la CPU las veia la decidia el anfitrion (junkrunner64:
+  // SIG4->SIG3 una lectura antes o despues segun la corrida, y con ello el statehash).
+  // spLogPend = entradas SP aun sin aplicar (el RSP no puede leer SP_STATUS con ellas dentro);
+  // spLogCrit = las que tocan INTR_ON_BREAK, que el RSP consulta en su BREAK.
+  std::atomic<u32> spLogPend{0}, spLogCrit{0};
   static auto dpLogOn() -> bool;
   auto dpLogPending() const -> bool {
     return dpLogHead.load(std::memory_order_acquire) != dpLogTail.load(std::memory_order_acquire);

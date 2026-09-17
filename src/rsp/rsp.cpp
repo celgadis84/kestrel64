@@ -519,6 +519,8 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < vis) {
       publishExact(); mem->spReadSync(vis);
     }
+    // Sus propias escrituras aun en el diario: tiene que verlas ya.
+    if(mem->spLogPend.load(std::memory_order_acquire)) { publishExact(); mem->dpLogWait(0, false); }
     setR(rt, mem->spStatusForRsp(now));
     return;
   }
@@ -560,6 +562,17 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     mem->rcpRegWrite32(PHYS_DPC + (reg << 2), v);
     return;
   }
+  // SP_STATUS sin HALT: al diario, como DPC (ver Memory::spLogPend). SET_HALT y CLEAR_HALT
+  // siguen en el acto: paran o lanzan el nucleo, y eso lo decide este hilo ahora.
+  // KESTREL_SPLOG=0 las vuelve a aplicar en el acto (para bisecar).
+  static const bool spLog = []{ const char* e = std::getenv("KESTREL_SPLOG"); return !e || std::strcmp(e, "0"); }();
+  if((rd & 7) == 4 && !(v & 3u) && spLog && mem->rcpMode == Memory::RcpMode::Threaded && Memory::dpLogOn()
+     && !Memory::dpRdvOn() && (mem->rcpPend.load(std::memory_order_acquire) & 8u)) {
+    mem->spLogPend.fetch_add(1, std::memory_order_release);
+    if(v & 0x180u) mem->spLogCrit.fetch_add(1, std::memory_order_release);
+    mem->dpLogPush(mem->rspGuestNowAt(exactCycles()), 8u | 4u, v);
+    return;
+  }
   // Un DMA puede leer o pisar RDRAM que toca un tramo aun en el diario: vaciarlo antes.
   if(((rd & 7) == 2 || (rd & 7) == 3) && mem->dpLogPending()) mem->dpLogWait(0, false);
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
@@ -588,6 +601,8 @@ auto Rsp::exec(u32 op) -> void {
     case 0x08: take(r[rs]); break;                                 // JR
     case 0x09: { u32 tgt = r[rs]; setR(rd, (curpc + 8) & 0xfff); take(tgt); } break;  // JALR (read rs before linking rd)
     case 0x0d:                                                     // BREAK
+      // INTR_ON_BREAK decide el aviso del BREAK: no puede quedar escrito en el diario.
+      if(mem->spLogCrit.load(std::memory_order_acquire)) { publishExact(); mem->dpLogWait(0, false); }
       if(Memory::spSigQuant() > 1 && !mem->rcp.sp_intr_on_break) {
         // Senales de la CPU aun aplazadas por el grano: ver Memory::spLateClearHalt.
         const u64 now = mem->rspGuestNowAt(exactCycles());
