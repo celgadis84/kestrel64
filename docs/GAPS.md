@@ -767,9 +767,13 @@ Por ahi va el orden nuevo:
   espera con el motor drenado. Y el sondeo tampoco es el gasto: son ~5 M de instrucciones de
   RSP sobre 291 M de ciclos, un 1,7 %. Lo que cuesta es el trabajo vectorial de verdad, y eso
   lo ataca el JIT del RSP.
-- **`CPU::jitIdleSkip` cuando NO casa** (5,07 % de las muestras). Hoy se comprueba la firma en
-  CADA despacho del JIT, y eso son dos `jitFetchWord` por bloque que casi siempre salen que no.
-  Memoizar el veredicto por bloque/PC lo dejaria en una comparacion.
+- ~~**`CPU::jitIdleSkip` cuando NO casa** (5,07 % de las muestras): memoizar el veredicto
+  negativo por PC~~ **MEDIDO Y DESCARTADO (2026-09-18)**. Tabla de 256 entradas sellada con el
+  numero de relleno de la linea de I-cache: en Threaded neutro (dentro del +-2 % de ruido en los
+  cuatro juegos, min de 6 rondas) y en JIT lockstep, que es donde la CPU si es el palo largo,
+  PIERDE +0,7..+1,2 % de forma consistente. El rechazo rapido ya era mas barato que el memo: la
+  sonda de I-cache y la tabla de 2 KB cuestan mas cargas que los dos `jitFetchWord` sobre una
+  linea que el despachador acaba de leer. Detalle y tablas en `docs/STATUS.md`.
 - **`rspPace`/`rdpPace`** (7,0 % entre los dos): HECHO el reciproco exacto (`struct PaceDiv`,
   `m = ceil(2^79/d)` con su `maxX`, division de verdad por encima del limite), y **no era ahi**.
   A/B intercalado de dos rondas de 5: 4,95/4,96 s con reciproco contra 4,93/4,98 s con division.

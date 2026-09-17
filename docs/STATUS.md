@@ -6671,3 +6671,54 @@ perfil del hilo de CPU en jr lo explica: 22 % en codigo generado por el JIT, ~15
 barrera no se abre hasta que el tramo con SYNC_FULL vence en el horario. Acelerar el anfitrion
 por debajo de esa barrera no devuelve tiempo de pared. **Esta linea esta agotada**; lo que
 queda aqui es horario de invitado, no reparto de hilos.
+
+## 2026-09-18 -- Memoizar el veredicto de `jitIdleSkip`: medido, PIERDE (descartado)
+
+Punto del backlog de `docs/GAPS.md`: el examen del bucle ocioso corre en CADA despacho del JIT
+(5,07 % de las muestras del hilo de CPU en el perfil del 2026-09-11) y casi siempre sale que no,
+asi que memoizar el veredicto NEGATIVO por PC deberia dejarlo en una comparacion.
+
+Implementado tal cual: tabla de 256 entradas `{phys, seq}` en `CPU`, sellada con el numero de
+relleno de la linea de I-cache (`ICacheLine::seq`) -- la misma prueba con la que se revalida un
+bloque, o sea que memo y bloque ven el codigo igual de fresco. Solo se apuntan los rechazos por
+la FORMA del codigo (no es un salto a si mismo, la ranura de retardo no es NOP); los que dependen
+del estado (Status, modo, presupuesto) no se apuntan, que cambian sin que cambie ni un byte.
+
+Correcto: `systemtest[prdp]` 0/3721 · 0/2 · 0/6, `sm64[prdp]` y `sm64[prdp-jit]` md5 `b5521b24`,
+y los 48 framebuffers de la tanda A/B identicos entre las dos ramas.
+
+**Threaded (el modo de uso), min de 6 rondas intercaladas, dos exes:**
+
+| juego | base (ms) | memo (ms) | |
+|-------|-----------|-----------|--|
+| junkrunner64 | 7.313 | 7.341 | +0,4 % |
+| Perfect Dark | 11.650 | 11.581 | -0,6 % |
+| SM64 | 7.688 | 7.710 | +0,3 % |
+| DK64 | 11.939 | 11.854 | -0,7 % |
+
+Todo dentro del +-2 % de ruido de este anfitrion. Ojo con las rondas 1-3, que daban **-4,2 % en
+SM64**: en las rondas 4-6 la maquina entera bajo ~10 % y el supuesto margen desaparecio. Es el
+mismo sesgo que ya mordio con los tramos vacios; min de tres rondas NO basta cuando el efecto
+buscado es del orden del ruido.
+
+**JIT lockstep (`KESTREL_THREADS=0 KESTREL_JIT=1`), donde la CPU SI es el palo largo**, 3 rondas:
+
+| juego | base (ms) | memo (ms) | |
+|-------|-----------|-----------|--|
+| junkrunner64 | 15.671 | 15.866 | +1,2 % |
+| SM64 | 5.509 | 5.570 | +1,1 % |
+| DK64 | 4.872 | 4.904 | +0,7 % |
+
+Aqui el ruido es minimo (jr base 15.671/15.739/16.041 contra memo 15.866/15.914/15.940: los dos
+grupos ni se tocan) y el memo **pierde de forma consistente**. Por que: el rechazo rapido de
+`jitIdleSkip` ya era barato -- `jitPending`, la guarda de tamano, y dos `jitFetchWord` sobre una
+linea de I-cache que acaba de leer el despachador. El memo mete DELANTE una sonda de I-cache mas
+una tabla de 2 KB: mas cargas que las que ahorra, y una estructura extra que compite por la
+cache del anfitrion en el bucle mas caliente que hay.
+
+Leccion general, que es la misma de la linea CPU->RDP: **un % del perfil no es un % de pared**.
+En Threaded no se mueve porque el hilo de CPU pasa el 77 % de las muestras en barreras
+(`spBarrierWait` 43 % activa + `dpBarrierWait` 34 %) esperando al reloj del INVITADO; quitarle
+trabajo a un hilo que espera no devuelve pared. Y en lockstep, donde si la devolveria, resulta
+que el trabajo quitado era mas barato que la memoizacion. Revertido; el punto queda cerrado en
+`docs/GAPS.md`.
