@@ -444,9 +444,14 @@ static auto framebufferHash(Memory& mem) -> u64 {
 // leyendo registros en el mismo instante.
 auto System::quiesceRcp() -> void {
   // Un RSP aparcado espera un tramo que ya no va a llegar: aqui la CPU se para en seco.
+  memory.dpLogFlush.store(true);
   memory.rspParkNudge();
+  memory.dpLogApply(~0ull);
   memory.rdpDrain();
   memory.rspAwaitIdle();
+  memory.dpLogApply(~0ull);
+  memory.rdpDrain();
+  memory.dpLogFlush.store(false);
   // Lockstep: la tarea la lleva ESTE hilo intercalada con la CPU, asi que aqui puede
   // quedar a medias. Se la deja acabar. El tope es el mismo presupuesto de seguridad que
   // usa el propio nucleo: si no para, ya estaba colgada antes de pedir el estado.
@@ -948,6 +953,8 @@ auto System::run() -> void {
       // una por borde cruzado; si suben al millon es que el grano se ha perdido.
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
+      std::fprintf(stderr, "[dplog] %llu apuntadas, %llu esperas, %u renuncias\n",
+                   (unsigned long long)memory.dpLogPushes.load(), (unsigned long long)memory.dpLogWaits.load(), memory.dpLogWaives.load());
       // Fallos de cache primaria del tramo. Es la materia prima del CPI real: el VR4300 no
       // gasta un numero fijo de ciclos por instruccion, gasta uno mas la penalizacion de
       // RDRAM de cada fallo. Sin esta cuenta el CPI solo se puede suponer.

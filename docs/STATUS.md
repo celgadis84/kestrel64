@@ -6005,3 +6005,52 @@ linea de `emitMemOp` en el JIT exigian KX=0, asi que TODOS los accesos a memoria
 | PD 600 flips | - | 9,0 s x4 | `31784f9d` x4 |
 
 Juegos de libultra corren con KX=0: neutros, como se espera.
+
+## Diario de escrituras DPC del RSP: fuera la cita en cada DPC_END (2026-09-17)
+
+La pregunta del usuario (rdpq/rspq de libdragon como colas que nunca se vacian y se comen la
+CPU) apuntaba bien: el coste no era de las colas sino de la CITA entre RSP y CPU en cada
+escritura del microcodigo a DPC. rdpq escribe DPC_END por cada tanda de comandos: 351.250
+citas en 200 flips de junkrunner64, cada una parando el hilo del RSP hasta que la CPU llegase
+a su instante de invitado. Cota medida quitandolas (incorrecto): -31 % de pared.
+
+Arreglo correcto: el RSP apunta `{instante, registro, valor}` en un anillo SPSC
+(`Memory::dpLogPush`, bit 16 de `rcpPend`) y sigue. La CPU lo aplica en su hilo exactamente al
+llegar a ese instante: `rcpRetire` tras cada bloque/instruccion, con el plazo metido en
+`rcpDueIn` para que ningun bloque del JIT se lo salte, y tambien antes de que la propia CPU
+lea o escriba un registro DPC. Mientras se aplica (`tlDpLogApply`) los sellos de
+`rdpSubmit`/`dpScheduleSpan` salen con el instante del RSP y la escritura cuenta como del RSP.
+Por que el orden de invitado es el mismo que con la cita: el RSP publica su reloj exacto antes
+de apuntar y la barrera del SP no deja a la CPU pasar de ese reloj, asi que el instante
+apuntado nunca queda detras de la CPU; empate = la del RSP primero, igual que antes.
+
+Lo que el RSP podria observar de una escritura aun no aplicada espera a que el diario se vacie
+(`dpLogWait`): lecturas DPC (CURRENT/STATUS y el resto) y lanzamientos de DMA (SP_RD/WR_LEN),
+porque la instantanea de comandos se toma al aplicar y las zonas de pintado se calculan ahi.
+Cota de afinar los DMA por solape: ~2 % en junkrunner64, no hecho. XBUS puesto o una escritura
+de STATUS que lo toca van por el camino viejo (espera + escritura directa).
+`KESTREL_DPLOG=0` vuelve a la cita.
+
+Salvavidas de las citas (`rdvWaiveDue`, compartido con `spReadSync` y `dpReadSync`): antes
+soltaba a los 20 ms de pared sin mirar que hacia la CPU. Con el diario salian 4 renuncias en
+cada arranque de junkrunner64: el hilo de CPU estaba en `audio::init` (abrir waveOut, ~80 ms,
+visto suspendiendo el hilo y simbolizando la pila), no bloqueado. Soltar ahi aplica escrituras
+por delante de la CPU. Ahora los 20 ms solo cuentan desde que la CPU esta DENTRO de una espera
+sobre un worker del RCP (`cpuRcpWait`, marcado con `RcpWaitMark` en rspPace, rdpPace,
+rdpDrain, rspAwaitIdle, spBarrierWait); fuera de eso el tope es 2 s. Resultado: 0 renuncias.
+`System::quiesceRcp` vacia el diario (`dpLogFlush`).
+
+Medido parallel-RDP threaded-jit, A/B intercalado `KESTREL_DPLOG=0/1`, md5 identicos:
+
+| Prueba | cita | diario | md5 |
+|---|---|---|---|
+| junkrunner64 200 flips | 8,1-8,5 s | **6,8 s** | `75e331cb` |
+| Perfect Dark 600 flips | 10,8-11,3 s | **9,5-10,3 s** | `31784f9d` |
+| SM64 300 flips | 7,1-7,2 s | **6,7 s** | `29a0e995` |
+| DK64 1.500 M | 11,9-12,0 s | **11,4-11,5 s** | `eca336ea` |
+
+`[sprdv]` en junkrunner64: 410.633 citas -> 15.600. gate_all 490 s, gate_prdp 320 s, regress=0.
+
+Visto de paso, ya existia con la cita: `[statehash]` al parar por flips en junkrunner64 varia
+entre corridas (EPC dentro del bucle ocioso a 3 instrucciones), con framebuffer identico.
+Pendiente de mirar si es solo el punto de parada.

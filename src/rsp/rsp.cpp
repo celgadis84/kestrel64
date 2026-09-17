@@ -489,7 +489,11 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // El RSP no puede leer el FIFO en un instante al que la CPU aun no ha llegado: es
       // la otra escritora del FIFO. Publicar primero el reloj exacto es lo que permite que
       // la barrera del SP la deje llegar hasta aqui. Ver Memory::dpReadSync.
-      if(mem->dpReadAhead(now)) { publishExact(); if(Memory::dpRdvOn()) mem->dpReadSync(now); else mem->spReadSync(now); }
+      // Y tampoco con escrituras suyas propias aun en el diario (ver Memory::dpLogPush).
+      if(mem->dpReadAhead(now) || mem->dpLogPending()) {
+        publishExact();
+        if(Memory::dpRdvOn()) mem->dpReadSync(now); else mem->dpLogWait(now, true);
+      }
       // Sin esperar al worker del RDP: CURRENT y STATUS salen del horario de invitado que fijo
       // dpScheduleSpan al lanzar el tramo, no de por donde vaya el anfitrion. Lo unico del RDP
       // que el RSP podria ver a medias son pixeles, y a la RDRAM solo llega por DMA: esa
@@ -518,6 +522,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     setR(rt, mem->spStatusForRsp(now));
     return;
   }
+  if((rd & 8) && mem->dpLogPending()) { publishExact(); mem->dpLogWait(0, false); }
   u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
                                       : PHYS_SP  + ((rd & 7) << 2));
   setR(rt, data);
@@ -540,11 +545,23 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     // en DK64 threaded: 1 de cada 4 corridas partia distinto un tramo y MI_DP bailaba una op.
     // La CPU nunca va por delante del RSP con tarea en marcha (barrera del SP), asi que basta
     // la misma cita que en las lecturas.
+    // Con el diario (Memory::dpLogPush) no hace falta ni la cita: se apunta con su instante y
+    // la CPU la aplica al llegar ahi. Los cambios de XBUS van por la cita: con el FIFO en DMEM
+    // los comandos los reescribe el propio microcodigo y la copia tiene que ser la de AHORA.
     const u64 now = mem->rspGuestNowAt(exactCycles());
-    if(mem->dpReadAhead(now)) mem->spReadSync(now);
-    mem->rcpRegWrite32(PHYS_DPC + ((rd & 7) << 2), v);
+    const u32 reg = rd & 7;
+    if(mem->rcpMode == Memory::RcpMode::Threaded && Memory::dpLogOn() && !Memory::dpRdvOn()
+       && (mem->rcpPend.load(std::memory_order_acquire) & 8u)
+       && !(mem->rcp.dpc_status.load(std::memory_order_acquire) & 1u) && !(reg == 3 && (v & 3u))) {
+      mem->dpLogPush(now, reg, v);
+      return;
+    }
+    if(mem->dpReadAhead(now) || mem->dpLogPending()) mem->dpLogWait(now, true);
+    mem->rcpRegWrite32(PHYS_DPC + (reg << 2), v);
     return;
   }
+  // Un DMA puede leer o pisar RDRAM que toca un tramo aun en el diario: vaciarlo antes.
+  if(((rd & 7) == 2 || (rd & 7) == 3) && mem->dpLogPending()) mem->dpLogWait(0, false);
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
   // without a BREAK — so Status.broke is NOT set (unlike the BREAK instruction).

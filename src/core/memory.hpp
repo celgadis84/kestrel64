@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -394,6 +395,34 @@ struct Memory {
   std::atomic<u32> rcpPend{0};   // bit0 = fin de SP armado, bit1 = fin de DP armado,
                                  // bit2 = trabajo de RDP en vuelo (ver dpBarrierAt),
                                  // bit3 = barrera del RSP activa (ver spBarrierAt)
+                                 // bit4 = escrituras DPC del RSP por aplicar (ver dpLogPush)
+  // DIARIO DE ESCRITURAS DPC DEL RSP (solo Threaded). Una escritura del microcodigo a DPC
+  // es estado compartido con la CPU, que puede ir por detras en tiempo de invitado y aun
+  // tener escrituras DPC suyas anteriores. Antes el RSP se paraba en cada una hasta que la
+  // CPU llegaba a su instante (cita spReadSync): 351k citas en junkrunner64, el 31 % de la
+  // pared. Ahora el RSP apunta {instante, registro, valor} y sigue; la CPU la aplica en SU
+  // hilo justo al llegar a ese instante (rcpRetire, con el plazo en rcpDueIn), o antes de
+  // tocar ella misma un registro DPC. El orden de invitado sale identico al de la cita: la
+  // barrera del SP no deja a la CPU pasar del reloj publicado del RSP, y el RSP publica el
+  // reloj exacto antes de apuntar, asi que el instante apuntado nunca queda por detras de
+  // la CPU. Todo lo del RSP que puede ver el efecto de una escritura pendiente (lecturas de
+  // DPC, DMA) espera antes a que el diario quede vacio (dpLogWait).
+  // KESTREL_DPLOG=0 vuelve a la cita.
+  struct DpLogEnt { u64 at; u32 reg; u32 v; };
+  static constexpr u32 kDpLogN = 1u << 12, kDpLogM = kDpLogN - 1;
+  DpLogEnt dpLog[kDpLogN]{};
+  std::atomic<u32> dpLogHead{0}, dpLogTail{0};   // head = consumidor, tail = RSP
+  std::mutex dpLogMx;                            // un solo aplicador a la vez
+  std::atomic<bool> rspLogWait{false};           // el RSP esta parado en dpLogWait
+  std::atomic<u64> dpLogPushes{0}, dpLogWaits{0};
+  std::atomic<u32> dpLogWaives{0};
+  static auto dpLogOn() -> bool;
+  auto dpLogPending() const -> bool {
+    return dpLogHead.load(std::memory_order_acquire) != dpLogTail.load(std::memory_order_acquire);
+  }
+  auto dpLogPush(u64 at, u32 reg, u32 v) -> void;   // SOLO hilo del RSP
+  auto dpLogApply(u64 upTo) -> void;                // aplica lo fechado hasta upTo
+  auto dpLogWait(u64 now, bool clock) -> void;      // SOLO hilo del RSP
   auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
   std::atomic<u64> rspDmaRdpWaits{0};
   // Zona que puede estar pintando el RDP (ver rspDmaRdpWait): SoftRdp::kWrSlots intervalos
@@ -524,6 +553,18 @@ struct Memory {
   // que romper, y soltarla deja al RSP leer por delante de la CPU -- con eso volvia a entrar el
   // anfitrion. La barrera del RDP tiene su propio salvavidas (kBarrierMaxWait).
   std::atomic<bool> cpuDpBarWait{false};
+  // Hilo de CPU dentro de una espera sobre un worker del RCP (rspPace, rdpPace, rdpDrain,
+  // rspAwaitIdle, spBarrierWait). Solo ahi puede una cita del RSP ser un bloqueo mutuo; ver
+  // rdvWaiveDue.
+  std::atomic<u32> cpuRcpWait{0};
+  struct RcpWaitMark {
+    std::atomic<u32>& n;
+    explicit RcpWaitMark(std::atomic<u32>& c) : n(c) { n.fetch_add(1, std::memory_order_release); }
+    ~RcpWaitMark() { n.fetch_sub(1, std::memory_order_release); }
+  };
+  auto rdvWaiveDue(bool& timing, std::chrono::steady_clock::time_point& t0,
+                   std::chrono::steady_clock::time_point& t1) -> bool;
+  std::atomic<bool> dpLogFlush{false};   // System::quiesceRcp: aplicar el diario sin esperar
   u32 dpJobAddr[kDpRingN]{};       // DPC_CURRENT al abrir
   u32 dpJobEndAddr[kDpRingN]{};    // DPC_CURRENT al cerrar
   // Instante de invitado en que ARRANCA un trabajo lanzado en `ops`. El motor es UNO: un
@@ -814,6 +855,14 @@ struct Memory {
       u64 b = spBarrierEff();
       u64 e = b > now ? b - now : 0;
       if(e < d) d = e;
+    }
+    if(pend & 16u) {
+      const u32 h = dpLogHead.load(std::memory_order_acquire);
+      if(h != dpLogTail.load(std::memory_order_acquire)) {
+        const u64 at = dpLog[h & kDpLogM].at;
+        u64 e = at > now ? at - now : 0;
+        if(e < d) d = e;
+      }
     }
     return d;
   }
