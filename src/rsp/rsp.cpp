@@ -2010,6 +2010,13 @@ auto Rsp::dumpDpWait() const -> void {
   std::fflush(stderr);
 }
 
+// Instrucciones por tanda de Rsp::step (ver el comentario del bucle). KESTREL_RSPTANDA=N.
+static const u64 kRspTanda = [] {
+  const char* e = std::getenv("KESTREL_RSPTANDA");
+  u64 v = e ? std::strtoull(e, nullptr, 0) : 0;
+  return v ? v : 512ull;
+}();
+
 __attribute__((flatten))
 auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
@@ -2019,8 +2026,8 @@ auto Rsp::step(u64 maxInsns) -> void {
   exactPub = 0;
   // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo CPU
   // (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final. Publicar cada
-  // 8K instrucciones (~200 us de RSP emulado) cuesta un fetch_add y un notify por bloque:
-  // nada frente a las 8K instrucciones, y evita que el regulador tenga que muestrear.
+  // tanda (512 instrucciones de fabrica) cuesta un fetch_add y un notify por bloque:
+  // nada frente a la tanda, y evita que el regulador tenga que muestrear.
   const bool pubMid = mem && mem->rcpMode == Memory::RcpMode::Threaded;
   // El bucle va por tandas. Este anfitrion (Nehalem) despacha UNA carga por ciclo, asi que
   // en un interprete el numero de accesos a memoria por instruccion es el que manda: cada
@@ -2028,11 +2035,16 @@ auto Rsp::step(u64 maxInsns) -> void {
   // carga. Sacando fuera lo que no cambia durante la tanda -- el puntero a IMEM, el
   // interruptor del muestreador, los tres contadores (maxInsns, budget, ran) reducidos a
   // uno solo -- el cuerpo se queda con las cargas que de verdad hacen falta.
-  // La tanda es la misma que ya usaba la publicacion al regulador (8K instrucciones), asi
-  // que tampoco se retrasa nada de lo que el hilo CPU necesita ver.
+  // La tanda es tambien el grano con el que el hilo CPU ve avanzar al RSP, y ese grano es el
+  // que manda en Threaded: la barrera del SP deja pasar a la CPU solo hasta el reloj publicado.
+  // Con 8K instrucciones el RSP se quedaba esperando en spReadSync a una CPU que estaba parada
+  // en su barrera (junkrunner: 6,6 s de 10,7 esperando, huecos de 256 a 16K ops). Barrido en
+  // junkrunner: 8192 10,9 s, 2048 10,0, 512 9,6, 384 9,6, 256 9,7, 128 10,15 -- meseta en
+  // 384-512; por debajo gana el coste de publicar. PD/SM64/DK64 neutros. KESTREL_RSPTANDA.
+  // Solo cambia el grano de publicacion y de sondeo de hostStop: el reloj de invitado es el mismo.
   while(!halt && maxInsns && budget && !hostStop.load(std::memory_order_relaxed)) {
     u64 chunk = maxInsns < budget ? maxInsns : budget;
-    if(chunk > 8192) chunk = 8192;
+    if(chunk > kRspTanda) chunk = kRspTanda;
     const bool prof = profOn;
     const bool useJit = jitOn && jc && !prof;
     const bool jitStats = statsOn;

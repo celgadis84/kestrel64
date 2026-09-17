@@ -6339,3 +6339,22 @@ mismo DMA. libdragon (rspq/rdpq) lanza un DMA por tramo de comandos del RDP.
   incorrecto): 7,0 s. El diario no sale gratis: cada entrada es un plazo que corta los bloques
   del JIT de la CPU (`rcpDueIn`). PD 600 / SM64 300 / DK64 1.500 M: T0 == T1 (`6caa8f2b`,
   `79895dc7`, `e7098ab4`).
+
+## 2026-09-17 — Tanda del RSP 8192 -> 512: el RSP esperaba a una CPU parada en su barrera (`KESTREL_RSPTANDA`)
+
+Histograma de las citas `spReadSync` en junkrunner64 (instrumentacion temporal, ya retirada):
+**6,6 s de 10,7 s** de pared eran el hilo del RSP esperando a la CPU, con huecos tipicos de 256 a
+16K ops. La CPU no iba lenta: estaba parada en la barrera del SP, que solo se mueve cuando el RSP
+publica su reloj, y `Rsp::step` lo publicaba una vez por tanda de 8192 instrucciones. El RSP
+llegaba a un `DMAIn` de rspq (trae el buffer de comandos desde RDRAM, cita obligada por HW),
+pedia a la CPU llegar a su instante, y la CPU llevaba parada hasta 8K instrucciones atras.
+
+Barrido de la tanda en junkrunner64 200 flips (pared): 8192 10,9 s · 2048 10,0 · 1024 10,07 ·
+**512 9,6** · 384 9,58 · 256 9,7 · 128 10,15. Meseta en 384-512; por debajo gana el coste de
+publicar. PD/SM64/DK64 neutros. De fabrica 512 (`kRspTanda` en rsp.cpp). Solo cambia el grano de
+publicacion y de sondeo de `hostStop`; el reloj de invitado es el mismo y los statehash no se
+mueven (jr `be723abf`, PD `6caa8f2b`, SM64 `79895dc7`, DK64 `e7098ab4`, T0 == T1).
+
+Lo que queda en el hilo CPU de jr (hostprof, tanda 512): JIT ~23 %, giro en la barrera del **RDP**
+(`dpSpinUntil`) ~14 %, giro en la barrera del SP ~8 %, dormido en ntdll ~9 %. Cadena: RSP espera
+a CPU, CPU espera al RDP.
