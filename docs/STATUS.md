@@ -5911,3 +5911,40 @@ coinciden al centesimo con `krom-interp.tsv`): se genero con el exe equivocado. 
 actual de parallel-rdp (mean 89,27 / 92,56, la misma de todas las entradas anteriores de esta
 bitacora) es la buena; baseline regenerada con `build-prdp`, `gate_prdp` 319 s regress=0.
 Queda abierto como hueco de accuracy real: GRB12/15/24Decode salen NEGROS en parallel-rdp.
+
+## Salto del bucle de espera del RSP tambien con el RDP OCUPADO: junkrunner64 2x (2026-09-17)
+
+Tras hacer Threaded == Lockstep (d75ca9b, 3dcc2c2) `junkrunner64` (libdragon) se habia vuelto
+muy lento: 200 intercambios de buffer en 37 s, con el hilo del RSP ocupado un 95 % pero
+retirando solo ~9 Mips. El `[det]` lo decia: **8.062.518 lecturas de DPC del RSP** en 300 M
+instrucciones de CPU, `idle=0/0(... drn8043252 ...)`. Es la hipotesis del usuario: `rdpq`
+sondea DP_STATUS en bucle mientras el RDP acaba el tramo, y cada vuelta pedia cita a la CPU
+(`spReadSync`). El salto de `Rsp::idleSkip` solo existia con el motor DRENADO, que es el caso
+de F3DEX (DK64 espera al siguiente buffer); libdragon espera con el motor OCUPADO.
+
+Con el motor ocupado DPC_STATUS tampoco cambia hasta el siguiente instante YA FECHADO del
+horario: el cierre del primer tramo abierto o el lanzamiento del primero aun no visible
+(`Memory::dpNextChangeAt`). Un tramo nuevo de la CPU nace con kick >= cartNow y lo caza el
+aparcamiento igual que antes. Asi que `idleSkip` aparca tambien en ese caso, con el tope
+`rspParkCap = min(cambio, now + kParkLead)`: la barrera efectiva del SP deja a la CPU llegar
+justo hasta ahi y no mas, y el RSP aterriza en ese instante de invitado. `missed()` devuelve
+el menor entre arranque y lanzamiento del tramo colado (con el motor drenado son iguales;
+ocupado, END_VALID cambia ya en el lanzamiento).
+
+Dos detalles de coste: con tope corto la CPU llega enseguida y se queda en la barrera sin
+avisar, y el RSP dormia el plazo entero del condvar (~32 ms de pared por aparcamiento, peor
+que antes). Ahora `rspParkWait` gira 65536 vueltas antes de dormir y `spBarrierWait` notifica
+`parkCv` antes de dormir si el RSP esta aparcado.
+
+Medido, parallel-RDP, threaded-jit:
+
+| | antes | ahora |
+|---|---|---|
+| junkrunner64 200 flips | 37,2 / 36,4 s | **17,9 / 18,0 s** |
+| lecturas DPC del RSP (300 M insns) | 8.062.519 | 27.645 |
+| md5 framebuffer 200 flips | `75e331cb` | `75e331cb` (== Lockstep, 3/3) |
+| DK64 1.500 M insns | `eca336ea` 13 s | `eca336ea` 13 s (4/4, == Lockstep) |
+
+gate_all 485 s y gate_prdp 327 s, rc=0, regress=0 en los dos. Sigue por debajo de lo de
+2026-09-10 (17 s por 600 flips, entonces sin ninguna cita): el RSP va a ~22 Mips ocupado y
+queda por perfilar.

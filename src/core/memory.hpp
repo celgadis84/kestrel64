@@ -653,19 +653,33 @@ struct Memory {
     // la fecha de fin del SP nacia tarde -- una vez cada dos o tres corridas de DK64, que es
     // justo la forma que tenia la divergencia que quedaba.
     if(u64 pk = rspPark.load(std::memory_order_acquire))
-      if(!rspParkWake.load(std::memory_order_acquire)) return pk + kParkLead;
+      if(!rspParkWake.load(std::memory_order_acquire)) return rspParkCap.load(std::memory_order_acquire);
     return spBarrierAt() + (rspRdvAt.load(std::memory_order_acquire) ? kRdvLead : 0);
   }
   // Aparcamiento del RSP en la espera del FIFO. Ver Memory::rspParkWait.
   std::atomic<u64> rspPark{0};       // instante de invitado en que quedo aparcado (0 = no)
   std::atomic<u64> rspParkWake{0};   // lanzamiento que lo despierta (0 = aun ninguno)
+  std::atomic<u64> rspParkCap{0};    // hasta donde puede correr la CPU con el RSP aparcado
   std::atomic<u32> rspParks{0}, rspParkWv{0}, rspParkMiss{0};
   static constexpr u64 kParkLead = 1ull << 24;   // cuanto puede adelantarse la CPU con el RSP aparcado
   std::mutex parkMx;
   std::condition_variable parkCv;
   // seq0 = dpSubSeq visto por idleSkip al comprobar que el motor estaba drenado; sirve
   // para cazar el tramo que se cuele entre esa comprobacion y la publicacion del aparcamiento.
-  auto rspParkWait(u64 now, u64 seq0) -> u64;
+  // `until` != 0: el motor NO esta drenado y el valor leido solo vale hasta ese instante
+  // (proximo cierre o lanzamiento de tramo), asi que la CPU no puede pasar de ahi.
+  auto rspParkWait(u64 now, u64 seq0, u64 until = 0) -> u64;
+  // Primer instante de invitado posterior a `now` en que DPC_STATUS puede cambiar por el
+  // horario ya fechado: cierre del primer tramo abierto o lanzamiento del primero aun no
+  // visible. 0 si no hay ninguno.
+  auto dpNextChangeAt(u64 now) const -> u64 {
+    const u64 sub = dpSubSeq.load(std::memory_order_acquire);
+    const u64 c = dpCompletedAt(now), vis = dpVisibleAt(now);
+    u64 e = 0;
+    if(c < sub)   e = dpJobEndG[c & kDpRingM];
+    if(vis < sub) { const u64 k = dpJobKickG[vis & kDpRingM]; if(!e || k < e) e = k; }
+    return e > now ? e : 0;
+  }
   // Despierta a un RSP aparcado sin que nadie archive un tramo. Hace falta cuando la CPU se
   // para en seco -- savestate, rebobinado, apagado -- porque entonces ni entra tramo nuevo ni
   // avanza cartNow hasta el tope, y la espera solo acabaria por el salvavidas de 200 ms. Le da
@@ -675,7 +689,7 @@ struct Memory {
     u64 pk = rspPark.load(std::memory_order_acquire);
     if(!pk) return;
     u64 exp = 0;
-    rspParkWake.compare_exchange_strong(exp, pk + kParkLead, std::memory_order_acq_rel);
+    rspParkWake.compare_exchange_strong(exp, rspParkCap.load(std::memory_order_acquire), std::memory_order_acq_rel);
     parkCv.notify_all();
   }
   // Deja el horario del RCP como recien arrancado. Se llama al CARGAR un estado: el anillo,

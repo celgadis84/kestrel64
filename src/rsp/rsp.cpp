@@ -432,13 +432,22 @@ auto Rsp::idleSkip(u64 now, u32 val) -> void {
   idlePc = pc; idleHash = h; idleVal = val; idleLen = len; idleAt = cyc;
   if(!same || len < 2 || len > 64) { idleNoSig++; return; }
   const u64 seq0 = mem->dpSubSeq.load(std::memory_order_acquire);
-  if(!mem->dpDrainedAt(now)) { idleNoDrain++; return; }
+  // Motor OCUPADO en `now` (libdragon: rdpq sondea DP_STATUS esperando a que el RDP acabe el
+  // tramo, millones de vueltas por partida). El valor tampoco cambia ahi hasta el siguiente
+  // instante YA FECHADO del horario -- cierre del tramo abierto o lanzamiento del siguiente --
+  // salvo que la CPU meta otro, y eso lo caza el aparcamiento igual que con el motor drenado.
+  // DPC_CURRENT con tramo abierto avanza en cada vuelta: la firma no casa y no llega aqui.
+  u64 until = 0;
+  if(!mem->dpDrainedAt(now)) {
+    until = mem->dpNextChangeAt(now);
+    if(!until) { idleNoDrain++; return; }
+  }
   // El destino del salto NO puede ser `cartNow()`: es tiempo de anfitrion puro y meteria en el
   // reloj del RSP lo lejos que la CPU hubiera llegado a correr en esa corrida. Con el motor
   // drenado en `now` no hay ningun tramo lanzado con fecha posterior, asi que el siguiente nace
   // forzosamente donde la CPU este o mas alla: aterrizar en SU lanzamiento es correcto y ademas
   // es un instante de invitado. Eso es lo que devuelve rspParkWait.
-  const u64 tgt = mem->rspParkWait(now, seq0);
+  const u64 tgt = mem->rspParkWait(now, seq0, until);
   if(tgt <= now) { idleNoRoom++; return; }
   // Vueltas que se pueden saltar: las lecturas en cyc + j*len (j = 1..k) tienen que caer TODAS
   // antes de `tgt`, que es lo que habria visto el bucle dando las vueltas de verdad (Lockstep).

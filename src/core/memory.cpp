@@ -2921,10 +2921,12 @@ auto Memory::rcpSchedReset() -> void {
   rsp.idleNoSig = rsp.idleNoDrain = rsp.idleNoRoom = 0;
 }
 
-auto Memory::rspParkWait(u64 now, u64 seq0) -> u64 {
+auto Memory::rspParkWait(u64 now, u64 seq0, u64 until) -> u64 {
   // Tope de adelanto de la CPU. Es tambien el destino de reserva: si la CPU llega hasta el sin
   // haber lanzado nada, el RSP salta ahi -- instante de invitado exacto -- y se vuelve a aparcar.
-  const u64 cap = now + kParkLead;
+  // Con el motor ocupado (`until`) el tope es ademas el siguiente cambio del horario del RDP:
+  // pasado ese instante la lectura ya no vale, y la CPU tampoco puede dejar atras al RSP.
+  const u64 cap = (until && until < now + kParkLead) ? until : now + kParkLead;
   // CARRERA DE PUBLICACION. dpScheduleSpan mira `rspPark` para saber si tiene que dejar la
   // fecha de despertar, asi que un tramo archivado entre que idleSkip vio el motor drenado y
   // que aqui se publica el aparcamiento no deja ninguna: el aviso se pierde y el RSP se queda
@@ -2936,7 +2938,10 @@ auto Memory::rspParkWait(u64 now, u64 seq0) -> u64 {
   // y la carga con acquire de dpSubSeq es la que hace visible lo que escribio dpScheduleSpan.
   auto missed = [&]() -> u64 {
     if(dpSubSeq.load(std::memory_order_acquire) == seq0) return 0;
-    return dpJobStartG[seq0 & kDpRingM];
+    // Con el motor drenado arranque == lanzamiento. Ocupado, el arranque espera al cierre del
+    // anterior, pero DPC_STATUS (END_VALID) cambia ya en el lanzamiento: gana el menor.
+    const u64 st = dpJobStartG[seq0 & kDpRingM], kk = dpJobKickG[seq0 & kDpRingM];
+    return kk < st ? kk : st;
   };
   if(u64 m = missed()) return m;
   if(cartNow() >= cap) return cap;
@@ -2945,9 +2950,18 @@ auto Memory::rspParkWait(u64 now, u64 seq0) -> u64 {
   // RSP duerme no ejecuta microcodigo ni escribe MMIO, asi que devolver el control al
   // trampolin en cada eslabon de la cadena solo cuesta una llamada por bloque. Ver Rsp::brake.
   rsp.brake = false;
+  rspParkCap.store(cap, std::memory_order_release);
   rspPark.store(now, std::memory_order_release);
   const auto tPark = std::chrono::steady_clock::now();
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
+  // Giro previo a dormir. Con el motor ocupado el tope suele estar a unos pocos miles de
+  // instrucciones de la CPU, y el que lo alcanza no avisa a nadie: la CPU se queda en la
+  // barrera del SP y el RSP dormiria el plazo entero del condvar (~30 ms de pared en Windows).
+  for(u32 k = 0; k < 65536u; ++k) {
+    if(rspParkWake.load(std::memory_order_acquire) || cartNow() >= cap || missed()) break;
+    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    if((k & 15u) == 15u) spinPause();
+  }
   u64 wake = 0, miss = 0;
   bool capped = false;
   u64 seen = cartNow();
@@ -3294,6 +3308,12 @@ auto Memory::spBarrierWait(u64 now) -> void {
     if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;
     if(now < spBarrierEff()) return;
     if((k & 15u) == 15u) spinPause();
+  }
+  // RSP aparcado con tope: llegar a la barrera ES llegar al tope, que es lo que espera el RSP
+  // para despertar. Sin este aviso dormia hasta el vencimiento de su condvar.
+  if(rspPark.load(std::memory_order_acquire)) {
+    { std::lock_guard<std::mutex> g(parkMx); }
+    parkCv.notify_all();
   }
   u64 waited = 0;
   for(;;) {
