@@ -34,6 +34,26 @@ kestrel64's bet is architectural:
   also an own **SoftRDP** rasterizer for hosts with no usable GPU and as a second opinion
   on accuracy.
 
+## Performance
+
+Same host (i7-870, 2009; RX570), parallel-rdp backend, threaded RCP + both dynarecs,
+measured 2026-09-17 as wall clock for a fixed amount of guest work:
+
+| Benchmark | Wall clock |
+|-----------|-----------|
+| junkrunner64 (libdragon), 200 buffer swaps | 8.1 s |
+| Perfect Dark, 600 buffer swaps | 13.4 s |
+| Super Mario 64, 300 buffer swaps | 8.3 s |
+| Donkey Kong 64, 1500 M instructions | 13.2 s |
+
+Those numbers move most when a *host* cost is removed without touching guest semantics -
+one recent example: the RSP thread was polling the CPU thread's retired-instruction
+counter on every spin turn while waiting for a rendezvous, stealing that cache line from
+the thread that is the actual bottleneck; sampling it once every 64 turns bought 12.8% on
+junkrunner64 and 9.2% on Perfect Dark with a bit-identical framebuffer. The log of what
+worked, what regressed and what was reverted lives in `docs/STATUS.md` and
+`docs/baselines/timings.md`.
+
 ## What is implemented
 
 | Area | State |
