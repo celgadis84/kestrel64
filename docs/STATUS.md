@@ -5903,4 +5903,11 @@ divergia por las causas de arriba).
 **krom prdp preexistente:** `gate_prdp` marca regress=6 improve=45 (GRB12/15/24Decode 100->0,
 I8Decode, PPU2BPPTile8x8, Cycle1ShadeTriangle16BPP). El exe de d75ca9b da exactamente las
 mismas cifras, asi que no es de este cambio; baseline prdp desfasada o dependiente del
-anfitrion GPU. Pendiente mirar.
+anfitrion GPU.
+
+**Resuelto:** la `krom-prdp.tsv` que escribio d75ca9b llevaba cifras de SoftRDP (las filas
+de GRB12Decode 100,00, I8Decode 78,73, PPU2BPPTile8x8 66,93 y Cycle1ShadeTriangle16BPP 96,08
+coinciden al centesimo con `krom-interp.tsv`): se genero con el exe equivocado. La salida
+actual de parallel-rdp (mean 89,27 / 92,56, la misma de todas las entradas anteriores de esta
+bitacora) es la buena; baseline regenerada con `build-prdp`, `gate_prdp` 319 s regress=0.
+Queda abierto como hueco de accuracy real: GRB12/15/24Decode salen NEGROS en parallel-rdp.
