@@ -662,9 +662,12 @@ por ser pequeña; se ordena por impacto, no se filtra.*
        camino rapido: los trampolines COP1 (`KC1A`, `KC1C`, `kestrel_jitCMPS/D`) cobran al
        entrar y silencian el cobro del interprete con `CPU::FpuCharge`, porque su camino lento
        delega en `jitInterpOp` -> `cop1op` y contaria dos veces la misma op.
-    3. **Asociatividad.** Las dos caches de aqui son de mapeo directo; las de la VR4300 son de
-       2 vias. El mapeo directo falla de MAS, asi que este sesgo va EN CONTRA de los puntos 1 y
-       2 y hay que medirlo, no suponerlo.
+    3. ~~**Asociatividad.**~~ **CERRADO 2026-09-17 -- no habia sesgo.** Se creia que la VR4300
+       tenia caches de 2 vias. Falso: manual de usuario NEC VR4300/VR4305/VR4310 (U10504EJ7V0UM),
+       "Instruction Cache is direct-mapped, virtually-indexed, and physically-tagged. The capacity
+       is 16 KB." y "Data Cache is a direct-mapped, virtually-indexed and physically-tagged
+       writeback cache. The capacity is 8 KB." (tabla de resumen: lineas de 32 / 16 bytes, "Direct
+       map, virtual index"). El modelo de aqui ya es de mapeo directo: coincide con el HW.
     4. **Recalibrar la base y rehacer el barrido** de "Que falta para mover el defecto" de mas
        arriba, entero (mas juegos, `KESTREL_AUDIOSTAT`, y el numero con un argumento).
 
@@ -742,7 +745,8 @@ Por ahi va el orden nuevo:
   reloj de invitado, no de anfitrion** --- y (b) el pateo del RDP, 10,6 %. Sigue pendiente
   COP0 del RSP dentro del JIT del RSP, pero hay que bajarle la prioridad: la parte
   interpretada que queda ya es ruido.
-
+
+
   Lo de `[det] idle=0/0` en SM64 **ya esta contestado y no es un fallo**. La linea `[det]`
   saca ahora el desglose `idle=saltos/vueltas(sigN/drnN/roomN)`, y en SM64 (300 campos,
   threaded-jit) los 1 041 389 sondeos se van ENTEROS por `sig`: la firma no se repite nunca.

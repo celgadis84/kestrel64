@@ -6141,3 +6141,11 @@ Sin el punto 2 (`tlRetireArmed`) junkrunner64 vuelve a `014e5f41`.
   `0d782d9`, `53de02e`, `27f4ccc` y `ab038e5`: 83-85 s los cuatro, statehash `e7098ab4`. En
   Lockstep el JIT cede casi todo por la guarda de tarea de RSP en vuelo (cobertura 3-5 %,
   `jitdecl rsp=` domina; la guarda nueva de plazo solo declina ~400 veces).
+
+## Caches de la VR4300: mapeo directo, confirmado en el manual NEC (2026-09-17)
+
+`docs/GAPS.md` tenia como sesgo pendiente "las caches de aqui son de mapeo directo y las de la
+VR4300 de 2 vias". El manual de usuario de NEC (U10504EJ7V0UM) lo desmiente: I-cache de 16 KB y
+D-cache de 8 KB, ambas **direct-mapped, virtually-indexed, physically-tagged**, lineas de 32 y
+16 bytes. El modelo del emulador ya era ese. Cerrado sin cambio de codigo. Del hueco de CPI de
+Perfect Dark queda solo lo apuntado: medir dentro de un nivel, no en el titulo.
