@@ -6589,3 +6589,85 @@ ataca el coste real: la linea de cache que el worker le robaba al hilo de CPU.
 La ronda que intentaba separar RDP-solo de RSP-solo salio contaminada (el usuario estaba jugando
 en la misma maquina: jr 16.303 ms, dk 23.930 ms contra ~8.000 / ~13.100 normales) y se tira, no
 se interpreta.
+
+## 2026-09-18 -- No encolar los tramos VACIOS: medido, neutro (descartado)
+
+Seguia el hilo de la seccion anterior ("la salida no es tunear el giro, es que haya menos
+tramos"). Contados en junkrunner64: de los 325.551 tramos de 200 cuadros, **82.940 son vacios**
+-- `DPC_END` reescrito con el valor que ya tenia, `current == end` -- o sea uno de cada cuatro
+no tiene un solo byte que pintar. La idea era no meterlos en `rdpQueue`: el horario del invitado
+(`dpScheduleSpan`) se hace igual, asi que es reparto de trabajo del anfitrion, invisible para el
+juego, exactamente como la union de tramos contiguos que ya esta ahi.
+
+El parche (fuera del arbol) marcaba `nothingToPaint` ANTES del horario -- `dpScheduleSpan`
+machaca `rdpCostHasResume`/`rdpCostLastEnd` -- y exigia tres cosas, no solo `current == end`:
+ningun comando del tramo anterior partido por el borde (`rdpHasResume` del pase de pintado ni
+`rdpCostHasResume` del de coste; un tramo de longitud cero SI pinta cuando reanuda uno de esos
+trozos, via `if(rdpHasResume && rawCur == rdpLastEnd)` en `rdpRunJob`) y `dpPending == 0`, que
+ademas es lo que hace legitimo leer desde el productor una variable del worker: con el motor
+parado, el mutex que tenemos cogido es el mismo con el que el worker publico su ultimo fin de
+trabajo. Tambien habia que dejar `rdpBusy` sin levantar y `wake` en falso para el tramo saltado,
+o el bit de ocupado se quedaba en alto para siempre.
+
+A/B intercalado, `build-prdp`, minimo de tres rondas por juego, md5 de framebuffer identico en
+las 24 corridas:
+
+| juego | encolando (ms) | saltando (ms) | delta |
+|-------|----------------|---------------|-------|
+| junkrunner64 | 7.359 | 7.348 | -0,1 % |
+| Perfect Dark | 11.861 | 11.816 | -0,4 % |
+| SM64 | 7.708 | 7.761 | +0,7 % |
+| DK64 | 11.963 | 11.937 | -0,2 % |
+
+Todo dentro del ruido (~2 %). **Descartado.** La primera ronda daba -5,7 % en jr y era
+calentamiento: el lado A corre siempre primero y paga el disco frio, lo que sesga cualquier
+lectura de ronda unica. Min de tres rondas intercaladas existe justamente para eso.
+
+Por que no mueve, que es lo que se aprende y mata la linea entera:
+
+1. **La fusion ya se los comia.** La rama de fusion va ANTES y tiene prioridad: si el tramo
+   vacio continua donde acababa el ultimo encolado, `rdpQueue.back().end = end` con `end ==
+   current == back().end` es una asignacion que no hace nada. Esos vacios ya costaban cero.
+2. **Cuando no se fusiona, la vuelta de cola es gratis.** El salto solo entra con la cola
+   drenada (`dpPending == 0`), y ahi el worker esta GIRANDO -- quema el 65 % de un nucleo
+   pintando el 10 % del tiempo (seccion del giro). Una vuelta mas de su bucle no le cuesta a
+   nadie tiempo de pared, porque ese nucleo ya estaba ocupado girando.
+3. **El `notify_all` tampoco estaba ahi.** `wake = rdpWaiting && ...`, y `rdpWaiting` es falso
+   casi siempre precisamente por el giro de `KESTREL_RDPSPIN`. La llamada al kernel que se
+   queria ahorrar ya se la ahorraba el giro desde 2026-09-16.
+
+O sea: de los 44.000 `DPC_END`/s, lo que cuesta NO es el enqueue. Encolar un tramo es un
+`push_back` y dos atomicos sobre un mutex que ya esta cogido. Lo que cuesta es llegar hasta
+ahi -- la escritura MMIO, el mutex `rdpMx` y el horario -- y de eso el horario no se puede
+saltar (es lo que el invitado ve) y el mutex lo pide la propia estructura de dos hilos. Queda
+descartada tambien la variante "menos tramos" por el lado de la cola: la cola nunca fue el
+coste. Si hay una palanca aqui, esta en el camino de escritura a `DPC_END`, no en `rdpQueue`.
+
+### Corolario medido: el traspaso al worker tampoco es el coste
+
+Misma tanda, el probe que ya existia (`KESTREL_RDPINLINE=1`: en Threaded el RDP corre en el
+hilo que escribe `DPC_END`, sin cola, sin mutex de traspaso, sin worker que despertar). Si el
+coste de los 44.000 `DPC_END`/s fuera la entrega entre hilos, esto tendria que ganar mucho:
+
+| juego | worker (ms) | en linea (ms) | |
+|-------|-------------|---------------|--|
+| junkrunner64 | 8.066 | 8.260 | +2,4 %, md5 igual |
+| SM64 | 7.968 | 8.072 | +1,3 %, md5 igual |
+| Perfect Dark | 12.656 | 2.230 | md5 distinto (el probe no hace el horario: se sale pronto) |
+| DK64 | 12.474 | 1.336 | idem |
+
+Pierde en los dos que llegan al final. O sea que el hilo del RDP, con su cola y su mutex, no
+esta costando tiempo de pared: quitarlo entero sale peor. (El probe no vale como configuracion
+-- en Threaded se salta `dpScheduleSpan`, asi que el invitado ve otra maquina y PD/DK64 no
+terminan la tanda. Sirve exactamente para lo que se uso: acotar por arriba lo que se podria
+ganar quitando la entrega entre hilos, y ese techo es negativo.)
+
+Con esto quedan medidas y descartadas las **seis** variantes de "menos coste por tramo" en el
+reparto CPU->RDP: juntar pops en el consumidor, girar mas, aplazar el reparto, giro adaptativo,
+bajar la prioridad de los workers, no encolar los vacios, y ahora tambien no tener worker. El
+perfil del hilo de CPU en jr lo explica: 22 % en codigo generado por el JIT, ~15 % en
+`rcpRetire` (que es el giro de las barreras del RDP y del SP, ya contabilizado en 2026-09-11),
+13 % dormido en ntdll. Lo que la CPU espera no es al anfitrion, es al RELOJ DEL INVITADO -- la
+barrera no se abre hasta que el tramo con SYNC_FULL vence en el horario. Acelerar el anfitrion
+por debajo de esa barrera no devuelve tiempo de pared. **Esta linea esta agotada**; lo que
+queda aqui es horario de invitado, no reparto de hilos.
