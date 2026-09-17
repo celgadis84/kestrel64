@@ -1,0 +1,30 @@
+# Perfect Dark NTSC (build del decomp n64decomp/perfect_dark, direcciones de build/ntsc-final/pd.map)
+# Warp autonomo a Defeccion desde el titulo: rellena g_MissionConfig (0x8007dbd8, 20 bytes,
+# stagenum=0x30) y pide el cambio en g_MainChangeToStageNum (0x80043c04). Condicionado a
+# g_StageNum (0x80043d60) == STAGE_TITLE (0x5A) para que deje de actuar al cargar el nivel.
+# Otra version de la ROM = otras direcciones. Uso: KESTREL_CHEATS=<este fichero>.
+[warp defection]
+D1043D62 005A
+8107DBD8 0030
+D1043D62 005A
+8107DBDA 0000
+D1043D62 005A
+8107DBDC 0000
+D1043D62 005A
+8107DBDE 0000
+D1043D62 005A
+8107DBE0 0000
+D1043D62 005A
+8107DBE2 0000
+D1043D62 005A
+8107DBE4 0000
+D1043D62 005A
+8107DBE6 0000
+D1043D62 005A
+8107DBE8 0000
+D1043D62 005A
+8107DBEA 0000
+D1043D62 005A
+81043C04 0000
+D1043D62 005A
+81043C06 0030

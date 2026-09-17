@@ -6149,3 +6149,39 @@ VR4300 de 2 vias". El manual de usuario de NEC (U10504EJ7V0UM) lo desmiente: I-c
 D-cache de 8 KB, ambas **direct-mapped, virtually-indexed, physically-tagged**, lineas de 32 y
 16 bytes. El modelo del emulador ya era ese. Cerrado sin cambio de codigo. Del hueco de CPI de
 Perfect Dark queda solo lo apuntado: medir dentro de un nivel, no en el titulo.
+
+## CPI de Perfect Dark DENTRO de un nivel: la muestra de titulo era la que salia barata (2026-09-17)
+
+`docs/GAPS.md` dejaba el hueco de PD asi: con base 1,0 y los costes de cache PD salia a 1,158-1,199
+contra una cota de 1,45, y la sospecha final era que la muestra (pantalla de titulo) no valia.
+Confirmado. Warp autonomo a Defeccion sin mando ni menu con un fichero de trucos
+(`tools/cheats/pd-ntsc-decomp-warp-defection.cht`: rellena `g_MissionConfig` y pide el cambio de
+nivel mientras `g_StageNum` sea el titulo; direcciones del `pd.map` de la build NTSC del decomp,
+ROM copiada fuera del arbol del decomp para que el `.eep` no caiga alli).
+
+`KESTREL_CPI=1.0 KESTREL_CACHECOST=60 KESTREL_UNCACHEDCOST=60 KESTREL_FPUCOST=stat
+KESTREL_MULDIVCOST=stat`, prdp threaded-jit, cortes a 900 y 2700 intercambios (el primero ya
+dentro del nivel, intro de Defeccion; el segundo ya jugando, HUD del Falcon 2). Tramo = diferencia:
+
+| | titulo (medida vieja) | tramo en nivel 900 -> 2700 |
+|---|---|---|
+| retiradas | -- | 1.768 M |
+| fallos D$ | 0,250 % | **2,29 %** |
+| fallos I$ | 0,013 % | **0,38 %** |
+| ciclos parados / retirada | +0,158 | **+1,73** |
+| ops FP / retiradas | -- | 5,7 % |
+| CPI con base 1,0 | 1,158 | **2,73** |
+
+Dentro del nivel PD falla nueve veces mas de D-cache que en el titulo. Con eso el modelo fisico
+(canalizacion 1,0 + fallos a 60 ciclos) queda muy por ENCIMA de la cota de 1,45, que es cota de
+agresividad (el CPI de verdad puede ser mayor), asi que ya no hay contradiccion: DK64 1,25 frente a
+1,19, SM64 ~1,4-1,5, PD en nivel 2,7.
+
+**El defecto NO se mueve.** Con el defecto actual (CPI plano 1,4, sin costes) el mismo tramo hace
+2.712 M retiradas y 1,35 campos por intercambio; con el modelo fisico 1,71. Son juegos visiblemente
+distintos en velocidad (la intro acaba antes en campos con el modelo fisico porque va por tiempo), y
+elegir entre los dos exige una referencia de consola real (campos por intercambio de una escena
+fija medida en HW) que no tenemos. Sin ella, cambiarlo seria elegir a ojo. Lo que falta, en orden:
+(1) una captura de HW de una escena determinista (intro de Defeccion, contador de campos), (2)
+confirmar la latencia de 60 ciclos por fallo contra la documentacion de la RCP, (3) entonces si,
+mover el defecto y meter la perilla en un modo de gate (punto 4 de GAPS).

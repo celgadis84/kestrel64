@@ -668,6 +668,9 @@ por ser pequeña; se ordena por impacto, no se filtra.*
        is 16 KB." y "Data Cache is a direct-mapped, virtually-indexed and physically-tagged
        writeback cache. The capacity is 8 KB." (tabla de resumen: lineas de 32 / 16 bytes, "Direct
        map, virtual index"). El modelo de aqui ya es de mapeo directo: coincide con el HW.
+    3b. **Muestra de PD en nivel -- HECHA 2026-09-17.** Defeccion (warp por trucos): D$ 2,29 %,
+       I$ 0,38 %, CPI 2,73 con base 1,0. El hueco era la muestra de titulo. Detalle y por que el
+       defecto no se mueve sin captura de HW: `docs/STATUS.md`, seccion del 2026-09-17.
     4. **Recalibrar la base y rehacer el barrido** de "Que falta para mover el defecto" de mas
        arriba, entero (mas juegos, `KESTREL_AUDIOSTAT`, y el numero con un argumento).
 
