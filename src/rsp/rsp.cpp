@@ -437,11 +437,14 @@ auto Rsp::idleSkip(u64 now, u32 val) -> void {
   // instante YA FECHADO del horario -- cierre del tramo abierto o lanzamiento del siguiente --
   // salvo que la CPU meta otro, y eso lo caza el aparcamiento igual que con el motor drenado.
   // DPC_CURRENT con tramo abierto avanza en cada vuelta: la firma no casa y no llega aqui.
-  u64 until = 0;
-  if(!mem->dpDrainedAt(now)) {
-    until = mem->dpNextChangeAt(now);
-    if(!until) { idleNoDrain++; return; }
-  }
+  // Drenado tampoco basta: un tramo ya archivado pero aun no VISIBLE para este reloj (la CPU
+  // lo lanzo en la misma instruccion que el RSP sondea: se ve en el flanco siguiente) puede
+  // cerrar ANTES de verse si no cuesta nada. dpSchedEnd dice "drenado", el aparcamiento
+  // esperaba un lanzamiento que ya habia pasado y el RSP solo salia por el tope de la CPU --
+  // lejos, y cuanto dependia del anfitrion. Perfect Dark threaded perdia asi un MI_DP entero.
+  // Ese lanzamiento tambien es un cambio ya fechado: acota igual que el cierre.
+  u64 until = mem->dpNextChangeAt(now);
+  if(!until && !mem->dpDrainedAt(now)) { idleNoDrain++; return; }
   // El destino del salto NO puede ser `cartNow()`: es tiempo de anfitrion puro y meteria en el
   // reloj del RSP lo lejos que la CPU hubiera llegado a correr en esa corrida. Con el motor
   // drenado en `now` no hay ningun tramo lanzado con fecha posterior, asi que el siguiente nace
@@ -575,6 +578,16 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   }
   // Un DMA puede leer o pisar RDRAM que toca un tramo aun en el diario: vaciarlo antes.
   if(((rd & 7) == 2 || (rd & 7) == 3) && mem->dpLogPending()) mem->dpLogWait(0, false);
+  // Un DMA del SP lee o escribe RDRAM en SU instante de invitado. En Threaded el RSP va por
+  // delante de la CPU, asi que sin cita leia un buffer que la CPU aun no habia escrito (rspq de
+  // libdragon: la CPU mete comandos y el microcodigo los baja por DMA) o dejaba en RDRAM datos
+  // que la CPU veia antes de tiempo. Medido junkrunner64: MI_DP 66 ops tarde y statehash
+  // distinto de Lockstep; con la cita, igual. KESTREL_DMARDV=0 la quita (para bisecar).
+  static const u32 dmaRdv = []{ const char* e = std::getenv("KESTREL_DMARDV"); return e ? (u32)std::strtoul(e, nullptr, 0) : 3u; }();
+  if(((rd & 7) == 2 || (rd & 7) == 3) && (dmaRdv & (1u << ((rd & 7) - 2))) && mem->rcpMode == Memory::RcpMode::Threaded) {
+    const u64 now = mem->rspGuestNowAt(exactCycles());
+    if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now); }
+  }
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
   // without a BREAK — so Status.broke is NOT set (unlike the BREAK instruction).

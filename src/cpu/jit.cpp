@@ -2477,6 +2477,22 @@ auto CPU::jitTryBlock() -> u32 {
   // la pagina siguiente puede mapear a otro sitio -> lo ejecuta el interprete.
   if(bi >= 0 && cc->blocks[bi].crossPage && !ck0Route) { JDECL(DR_MISC); return 0; }   // Step2: bloque invalidado por SMC → recompila (insert lo sobrescribe in-place)
   if(bi < 0) {
+    // Plazo cerca: no compilar un bloque que probablemente no se va a poder ejecutar. Con la
+    // CPU a pocas ops de un plazo (barrera del SP, fin de tarea, SI, borde de timer) cada op la
+    // da el interprete y el despacho siguiente cae en pc+4, un lider NUEVO: se compilaba un
+    // bloque entero por op para declinarlo acto seguido (plazo < K). Medido en DK64 Threaded
+    // con la cita de DMA (KESTREL_DMARDV): ~25 us por op, la CPU tardaba cientos de us en
+    // cubrir las decenas de ops que la separaban de la cita. Solo es coste de anfitrion: el
+    // bloque se compila la proxima vez que se llegue a este lider con margen. Un bloque tiene
+    // como mucho kMaxOps ops mas la ranura de retardo.
+    {
+      u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
+      const u64 kFit = countTicksMax(65);
+      u64 due = mem->siDueIn(mem->cartNow());
+      { u64 r = mem->rcpDueIn(mem->cartNow()); if(r < due) due = r; }
+      if((u64)(u32)(cmp - cnt) <= kFit || due <= kFit)
+        { JDECL(DR_TIMER); return 0; }
+    }
     // Reclamo de buffer: si el buf ejecutable desbordó (fugas por dead-mark en SMC pesado),
     // clear global recupera memoria antes de recompilar. Sin esto el JIT quedaría muerto.
     if(cc->buf.overflowed()) cc->clear();

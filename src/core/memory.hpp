@@ -686,6 +686,7 @@ struct Memory {
   // que es hasta donde la barrera del SP deja llegar a la CPU mientras dura la cita.
   static constexpr u64 kRdvGrain = 32768;
   std::atomic<u64> rspRdvAt{0};          // instante del RSP mientras esta en la cita (0 = no)
+  std::atomic<u32> rspSyncWait{0};       // RSP en spReadSync esperando a la CPU (ver rspPace)
   auto spBarrierEff() const -> u64 {
     // Con el RSP aparcado la barrera no protege nada: no hay evento que pueda nacer tarde
     // porque el RSP no puede generar ninguno hasta que la CPU le eche trabajo.

@@ -27,6 +27,7 @@ static thread_local bool tlIsRspThread = false;
 // RSP y se sella con SU instante, aunque la ejecute otro hilo.
 static thread_local bool tlDpLogApply = false;
 static thread_local kestrel::u64 tlDpLogAt = 0;
+static thread_local bool tlInRetire = false, tlRetireArmed = false;   // ver rcpRetire
 
 namespace kestrel {
 
@@ -2528,6 +2529,10 @@ auto Memory::rspPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
     if(rspRdvAt.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
     // Igual con el RSP esperando a que la CPU aplique su diario DPC (ver dpLogWait).
     if(rspLogWait.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
+    // Y con el RSP en la cita exacta de spReadSync (sondeo de SP_STATUS, lecturas y escrituras
+    // de DPC, DMA): espera a que la CPU llegue a su instante, y frenarla aqui dejaba a los dos
+    // hilos parados hasta el timeout del condvar (bloqueo mutuo de latencia, no de logica).
+    if(rspSyncWait.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
     // Lo mismo, pero en grande: con el RSP aparcado (ver rspParkWait) el unico que puede
     // desatascar la escena es la CPU, y el freno la ata al avance de un reloj que por
     // definicion no avanza.
@@ -2544,7 +2549,8 @@ auto Memory::rspPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
       rspWaiters.fetch_add(1);
       rspCv.wait_for(lk, std::chrono::microseconds(500), [&]{
         return !rspBusy.load(std::memory_order_acquire)
-            || rsp.cyclesRun.load(std::memory_order_relaxed) != rspNow;
+            || rsp.cyclesRun.load(std::memory_order_relaxed) != rspNow
+            || rspSyncWait.load(std::memory_order_acquire);
       });
       rspWaiters.fetch_sub(1);
     }
@@ -3245,6 +3251,7 @@ auto Memory::spStatusForRsp(u64 now) -> u32 {
 auto Memory::spReadSync(u64 now) -> void {
   if(cartNow() >= now) return;
   spRdv.fetch_add(1, std::memory_order_relaxed);
+  RcpWaitMark sw_{rspSyncWait};   // antes de mirar rspWaiters: el regulador suelta a la CPU
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
   std::chrono::steady_clock::time_point t0{}, t1{};
@@ -3484,8 +3491,10 @@ auto Memory::dpEndArmAt(u64 at) -> void {
   // Dos SYNC_FULL seguidos sin que el hilo de CPU haya pasado por rcpRetire: el segundo no
   // puede hacerse visible ANTES que el primero, asi que el plazo solo puede irse hacia
   // adelante. MI_DP es un bit de nivel, con publicarlo una vez basta.
+  const bool wasDue = (rcpPend.load(std::memory_order_relaxed) & 2u) && dpDoneAt <= cartNow();
   if((rcpPend.load(std::memory_order_relaxed) & 2u) && at < dpDoneAt) at = dpDoneAt;
   dpDoneAt = at;
+  if(tlInRetire && tlDpLogApply && tlDpLogAt >= cartNow() && !wasDue) tlRetireArmed = true;
   dpArms.fetch_add(1, std::memory_order_relaxed);
   if(at < cartNow()) { dpLate.fetch_add(1, std::memory_order_relaxed);
     u64 ov = cartNow() - at;
@@ -3521,15 +3530,20 @@ auto Memory::rcpRetire() -> void {
   // vencer antes de que el anfitrion haya pintado un pixel de el; publicar la interrupcion ahi
   // le ensenaria al invitado un fotograma que todavia no existe en RDRAM. La barrera es justo
   // lo que garantiza que, cuando el reloj del invitado llega al cierre, el trabajo esta hecho.
+  // Un plazo de MI_DP que arma el propio diario aplicado en ESTE retiro no vence en el: en
+  // Lockstep el RSP en linea corre despues de rcpRetire, asi que lo que arma en `t` vence en el
+  // retiro de t+1. Vencerlo aqui adelantaba MI_DP una op en Threaded (junkrunner64).
+  tlRetireArmed = false; tlInRetire = true;
   if(pend & 16u) dpLogApply(now);
   if(pend & 4u) dpBarrierWait(now);
   if(pend & 8u) spBarrierWait(now);
   pend = rcpPend.load(std::memory_order_acquire);
   // Lo que el RSP haya apuntado mientras esperabamos, si ya toca (no puede quedar detras).
   if(pend & 16u) { dpLogApply(now); pend = rcpPend.load(std::memory_order_acquire); }
+  tlInRetire = false;
   u32 due = 0;
   if((pend & 1u) && now >= spDoneAt) due |= 1u;
-  if((pend & 2u) && now >= dpDoneAt) due |= 2u;
+  if((pend & 2u) && now >= dpDoneAt && !tlRetireArmed) due |= 2u;
   if(due) rcpFlushPending(due);
 }
 

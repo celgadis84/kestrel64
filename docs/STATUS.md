@@ -6085,3 +6085,47 @@ A/B intercalado prdp threaded-jit, audio off, 2 rondas:
 | SM64 300 flips | 6,83-6,84 s | 6,70 s | `79895dc7` | `29a0e995` |
 | DK64 1.500 M | 11,24-11,25 s | 11,29-11,33 s | `e7098ab4` | `eca336ea` |
 
+
+## Threaded == Lockstep en statehash: cita DMA, MI_DP del diario y aparcamiento (2026-09-17)
+
+Objetivo: el `[statehash]` de Threaded igual al de Lockstep (el oraculo), no solo el md5 del
+fotograma. Antes junkrunner64 daba `51c2098c` en Threaded contra `be723abf` en Lockstep.
+Cuatro arreglos, todos de semantica de tiempo de invitado:
+
+1. **Cita en los DMA del SP** (`Rsp::mtc0`, SP_RD_LEN/SP_WR_LEN). El DMA lee o escribe RDRAM en
+   el instante del RSP, que en Threaded va por delante de la CPU: rspq de libdragon bajaba un
+   buffer que la CPU aun no habia escrito. Ahora el RSP publica su reloj y espera en
+   `spReadSync` a que la CPU llegue. MI_DP de junkrunner64 iba 66 ops tarde; con la cita, igual.
+   `KESTREL_DMARDV` (mascara: bit0 RD, bit1 WR; de fabrica 3, `=0` la quita para bisecar).
+   `rspSyncWait` hace que el regulador (`rspPace`) suelte a la CPU mientras dura la cita: si no,
+   los dos hilos quedaban mirandose hasta el timeout del condvar.
+2. **MI_DP armado por el diario no vence en el mismo retiro** (`tlRetireArmed`). En Lockstep el
+   RSP en linea corre DESPUES de `rcpRetire`, asi que un SYNC_FULL escrito en `t` vence en el
+   retiro de `t+1`. El diario aplicado dentro del retiro de `t` lo vencia ahi: MI_DP una op
+   antes (junkrunner64). Solo cuenta si la entrada es del instante actual y el plazo no estaba
+   ya vencido.
+3. **Aparcamiento del RSP con tramo archivado pero aun no visible** (`Rsp::idleSkip`). Un tramo
+   que la CPU lanza en la misma op que el RSP sondea se ve en el flanco siguiente
+   (`dpJobKickG = kick+1`), y con coste 0 cierra antes de verse: `dpSchedEnd <= now` decia
+   "drenado", el RSP aparcaba esperando un lanzamiento que YA estaba archivado y solo salia por
+   el tope de la CPU (`kParkLead`, 16 M ops) o el salvavidas. Perfect Dark threaded perdia un
+   MI_DP entero (152.932.562) al activar el punto 2. Ahora `dpNextChangeAt` acota tambien con
+   el motor drenado: ese lanzamiento es un cambio ya fechado.
+4. **JIT: no compilar con un plazo encima** (`jitTryBlock`). Con Count/Compare, SI o RCP a menos
+   de un bloque maximo (65 ops) el bloque nuevo no se iba a poder ejecutar y cada op
+   interpretada compilaba otro. Solo coste de anfitrion: DK64 threaded con la cita DMA
+   23,6 -> 12,2 s.
+
+prdp threaded-jit, audio off (`ab.sh`), Threaded == Lockstep en las cuatro:
+
+| Prueba | statehash | md5 | Threaded |
+|---|---|---|---|
+| junkrunner64 200 flips | `be723abf` | `75e331cb` | ~10,5 s |
+| Perfect Dark 600 flips | `92f83ab8` | `0f0adee7` | ~13,2 s |
+| SM64 300 flips | `79895dc7` | `29a0e995` | ~8,2 s |
+| DK64 1.500 M | `e7098ab4` | `eca336ea` | ~12,2 s |
+
+Coste: la cita DMA sube la pared frente a la seccion anterior (junkrunner64 7,0 -> 10,5 s,
+PD 10 -> 13 s): la mayor parte es la CPU esperando al RDP en la GPU (barrera DP) mientras el RSP
+espera a la CPU. `KESTREL_DMARDV=0` recupera la velocidad a cambio del statehash de Lockstep.
+Sin el punto 2 (`tlRetireArmed`) junkrunner64 vuelve a `014e5f41`.
