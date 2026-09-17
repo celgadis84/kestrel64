@@ -6129,3 +6129,15 @@ Coste: la cita DMA sube la pared frente a la seccion anterior (junkrunner64 7,0 
 PD 10 -> 13 s): la mayor parte es la CPU esperando al RDP en la GPU (barrera DP) mientras el RSP
 espera a la CPU. `KESTREL_DMARDV=0` recupera la velocidad a cambio del statehash de Lockstep.
 Sin el punto 2 (`tlRetireArmed`) junkrunner64 vuelve a `014e5f41`.
+
+## Dos pendientes cerrados sin cambio de codigo (2026-09-17)
+
+- **SM64 300 flips, 797 campos VI en Lockstep y 725 en Threaded**: falso. Las corridas se
+  hicieron seguidas y la primera dejaba `Super Mario 64 (USA).eep` escrito; la segunda arrancaba
+  con partida guardada (otro camino de menus: 811 M ops, statehash `5527b2d8`). Borrando el
+  `.eep` antes de cada corrida los dos modos dan 797 campos, 891 M ops y `79895dc7`. Al medir a
+  mano hay que borrar el `.eep` como hace `ab.sh`.
+- **DK64 1.500 M en Lockstep ~83 s "frente a ~60 s"**: no es regresion. Medido compilando
+  `0d782d9`, `53de02e`, `27f4ccc` y `ab038e5`: 83-85 s los cuatro, statehash `e7098ab4`. En
+  Lockstep el JIT cede casi todo por la guarda de tarea de RSP en vuelo (cobertura 3-5 %,
+  `jitdecl rsp=` domina; la guarda nueva de plazo solo declina ~400 veces).
