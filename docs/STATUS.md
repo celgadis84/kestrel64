@@ -8010,3 +8010,39 @@ repite), visible para un manejador que mire el registro.
 casos -- direccion, granularidad de doblepalabra, R contra W por separado, cacheado
 (ckseg0) y sin cachear (kseg1, misma fisica), WatchHi imposible, diferido por EXL y por
 ERL, mascaras de lectura de los dos registros y paridad con el dynarec. ALL PASS.
+
+## 2026-09-18 -- IPL3 LLE en cartuchos CIC-6105/7105: no habia regresion, habia mala prueba
+
+Durante el barrido de "que queda de HLE" apunte que Perfect Dark y Donkey Kong 64 se colgaban
+con `KESTREL_LLE_IPL3=1`. **Es falso, y la culpa era de la prueba.** La medida se hizo con
+`KESTREL_MAXINSN=30000000`, y ese tope esta por debajo de lo que cuesta arrancar de verdad:
+
+- El camino HLE **se salta el IPL3 entero** -- copia el segmento de arranque desde ROM y salta
+  al punto de entrada. El LLE ejecuta el IPL3 real: inicializacion de RDRAM, copia del segmento
+  por DMA del PI y la **suma de comprobacion del CIC sobre 1 MB**, que es un bucle largo.
+- En PD, ademas, detras del IPL3 va su propio cargador. A 30 M instrucciones el kernel aun no
+  ha tocado `Status.IM` (sigue `00`, `IE=0`) y no ha caido **ni una** interrupcion; a 300 M ya
+  van `IE=1`, `IM=ff` y 3220 interrupciones. O sea que a 30 M no estaba colgado: estaba dentro
+  del arranque.
+
+Medido otra vez con la senal correcta -- **intercambios de buffer**, que es lo que usan las
+puertas -- en lockstep, `KESTREL_MAXFLIPS=20`:
+
+| cartucho | IPL3 | pared | framebuffer |
+|---|---|---|---|
+| Donkey Kong 64 | LLE | 20 s | `5683d22e66c393d50602b648b1ec660d` |
+| Donkey Kong 64 | HLE | 18 s | `5683d22e66c393d50602b648b1ec660d` (identico) |
+| Perfect Dark | LLE | 17 s | `1d1a7056828ee55bac9756f10e7e2a33` |
+| Perfect Dark | HLE | 15 s | `9392cd488ce6fe6e068e0379e8e046a8` |
+
+DK64 sale **byte a byte igual** por los dos caminos, que es exactamente lo que ya se apunto el
+2026-09-04. PD difiere en **3586 pixeles de 331776 (1,08 %)**, todos dentro del logo que esta
+entrando por fundido: un fotograma de desfase por lo que cuesta ejecutar el IPL3 de verdad, no
+un fallo. Sigue sin cambiarse el defecto, por la razon de siempre (solo hay ROMs de tres CICs;
+ver `docs/GAPS.md`).
+
+**La leccion, que vale para cualquier prueba futura:** un tope de instrucciones NO sirve para
+decidir si un arranque progresa. Dos caminos de arranque distintos gastan cantidades de
+instrucciones distintas ANTES de la misma escena, asi que el tope corta en sitios distintos del
+juego y el de arranque mas fiel parece muerto. Las senales validas son el intercambio de buffer
+(estado del juego) y la cuenta de interrupciones (`[exchist]`), no el contador de instrucciones.

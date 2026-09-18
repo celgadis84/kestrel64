@@ -546,6 +546,20 @@ por ser pequeña; se ordena por impacto, no se filtra.*
   6101/6103/6106/5101, cuyos IPL3 reales no ha ejecutado nadie aqui. Cambiar el arranque de
   todo el parque apoyandose en tres CICs seria justo lo contrario de verificar. Se queda
   como opcion, y se revisa cuando haya ROMs de esos CICs.
+  **Re-verificado el 2026-09-18** y de paso corregida una falsa alarma propia: una prueba con
+  `KESTREL_MAXINSN=30000000` hizo parecer que PD y DK64 se colgaban con el IPL3 LLE. No se
+  cuelgan: el tope estaba por DEBAJO de lo que cuesta arrancar de verdad. El camino HLE se
+  salta el IPL3 entero, mientras que el LLE ejecuta la inicializacion de RDRAM, la copia del
+  segmento de arranque y la suma de comprobacion del CIC sobre 1 MB; en PD el kernel no
+  enciende las interrupciones hasta pasados **cientos de millones** de instrucciones (a 30 M
+  `Status.IM` sigue a 00 y no ha caido ni una interrupcion; a 300 M van 3220). Con la prueba
+  correcta -- por INTERCAMBIOS de buffer, que es lo que usan las puertas -- los dos cartuchos
+  llegan al framebuffer en 17-20 s de pared: **DK64 da el md5 `5683d22e66c393d50602b648b1ec660d`
+  identico entre LLE y HLE**, y PD difiere en 3586 pixeles de 331776 (1,08 %), todos en el logo
+  que entra por fundido, o sea el mismo fotograma de desfase de siempre. Leccion: un tope de
+  instrucciones NO sirve para decidir si un arranque LLE progresa, porque mueve el punto de
+  corte a un sitio distinto del juego; la senal buena es el intercambio de buffer o la cuenta
+  de interrupciones.
 - ~~Ampliar `KESTREL_EXCODD` a TLBL(2)~~ **CERRADO 2026-09-04** — el filtro ya no va por
   numero de codigo sino por el estado real del TLB: TLBL(2)/TLBS(3) se vuelcan cuando
   `tlbAnyValid()` es falso, es decir cuando no hay una sola entrada con el bit V puesto y
@@ -1258,7 +1272,10 @@ pintar, y la copia nueva les reescribe los comandos debajo del rasterizador. El 
 acaba ejecutando datos (`EPC` = `3c0239e0`, que es `lui $2,0x39e0`, una INSTRUCCION, no una
 direccion). Arreglo: ocho generaciones y coger la LIBRE mas baja, drenando si no quedara
 ninguna (`KESTREL_RDPGENS`, `[dpgen]`). Ocho corridas identicas bit a bit contra 2 de 8 que
-divergian. Detalle completo en `docs/STATUS.md` (2026-09-18). Se deja debajo el rastro de la
+divergian. **Cierre confirmado en el punto original de fallo** (2026-09-18):
+cuatro corridas de 3e9 instrucciones con `KESTREL_PRDP=1`, dos en Lockstep y dos en
+Threaded, dan el MISMO `[statehash] 17c2962b082d80b9` -- o sea Threaded ya da el valor del
+oraculo, no solo un valor estable. Detalle completo en `docs/STATUS.md` (2026-09-18). Se deja debajo el rastro de la
 investigacion porque los descartes siguen valiendo.
 
 
