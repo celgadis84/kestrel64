@@ -865,6 +865,13 @@ Por ahi va el orden nuevo:
   empata y 1 M es peor en PD, porque detras del yield van el aviso al hilo de CPU y el
   salvavidas de pared. Queda pendiente el OTRO 17,9 % de `dpLogWait` que si esta dentro de
   imagen.
+- **Sacar de la vuelta de la cita las dos lineas que casi nunca se mueven: COBRADO (2026-09-18).**
+  `KESTREL_RDVCHEAP`. `dpLogFlush` (solo lo escribe la CPU al pararse) y `rspStop`/`hostStop`
+  (solo al cerrar) se miraban en CADA vuelta de `dpLogWait` y `spReadSync`; ahora van a la misma
+  cadencia que la condicion de salida (1 de cada 64). Dos tandas intercaladas de min-de-4:
+  PD -2,94 % / -2,73 %, SM64 -1,77 % / -2,17 %, con las cuatro lecturas de cada brazo disjuntas
+  en los dos juegos y las dos tandas; jr y DK64 planos. md5 identico. Es la contraparte de la
+  leccion del memo de `spBarrierAt()`: en un hilo que gira, quitar trafico de coherencia SI paga.
 - Presentacion sin copia (zero-copy).
 - Sombra de MXCSR — 0,7 %.
 - Coste de llamada de `runFifo`.

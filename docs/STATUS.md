@@ -7544,3 +7544,37 @@ Comprobado ademas lo que este pomo pone en riesgo:
   vueltas de unos pocos ns siguen cayendo muy por debajo de 20 ms.
 
 Que queda: el OTRO 17,9 % de `dpLogWait`, el que si esta dentro de la imagen.
+
+
+## 2026-09-18 -- Lo que quedaba dentro de la vuelta de la cita: dos lineas que casi nunca se mueven
+
+Con el yield ya espaciado a 65536 vueltas, la vuelta del bucle de cita se queda en esto: mirar la
+condicion de salida (`ready()` / `cartNow()`, ya espaciada a 1 de cada 64 por `KESTREL_RDVPOLL`),
+y DOS lecturas atomicas que no son condicion de salida y que si se hacian en cada vuelta:
+
+- `dpLogFlush` -- aviso de vaciado del diario, que solo escribe la CPU al pararse
+  (`System::quiesceRcp`).
+- `rspStop` / `rsp.hostStop` -- la parada del anfitrion, que solo se escribe al cerrar.
+
+Ninguna de las dos cambia mas de un punado de veces por corrida. `KESTREL_RDVCHEAP` (por defecto
+puesto) las mete en la MISMA cadencia que la condicion de salida, o sea 1 de cada 64 vueltas. El
+cierre se retrasa como mucho 63 vueltas de unos pocos ns.
+
+Dos tandas intercaladas de min-de-4, Parallel-RDP, ms de pared:
+
+| juego | tanda A (0 -> 1) | tanda B (0 -> 1) |
+|---|---|---|
+| Perfect Dark | 10925 -> 10604 (**-2,94 %**) | 10936 -> 10637 (**-2,73 %**) |
+| SM64 | 7354 -> 7224 (**-1,77 %**) | 7404 -> 7243 (**-2,17 %**) |
+| junkrunner64 | 7414 -> 7395 (-0,26 %) | 7337 -> 7428 (+1,24 %) |
+| DK64 | 11276 -> 11301 (+0,22 %) | 11323 -> 11300 (-0,20 %) |
+
+En PD y SM64 las CUATRO lecturas de cada brazo son disjuntas en las dos tandas (PD tanda A:
+10604..10814 contra 10925..11066), o sea que no es el minimo el que gana, es la distribucion
+entera. jr y DK64 salen planos: jr tiene la muestra sucia (su brazo `0` trae 7947 y 7821 de
+cola) y es ademas el juego que menos se cita por el diario DPC. md5 del framebuffer identico en
+las 4 x 4 corridas: esto no toca estado de invitado.
+
+Por que pega tanto en PD: es el que mas sondea DPC (1,81 M de citas por corrida), o sea el que
+mas vueltas de bucle da, y cada vuelta se ahorra dos lecturas de lineas compartidas. Es la misma
+leccion de la manana pero por el lado bueno -- quitar TRAFICO DE COHERENCIA si paga.

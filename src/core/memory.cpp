@@ -3053,6 +3053,23 @@ static auto rdvTightTurns() -> u32 {
 // (`rspCv.notify_all`) y el salvavidas de pared (`rdvWaiveDue`), asi que espaciarlo retrasa
 // las dos cosas. A 65536 vueltas de unos pocos ns la comprobacion sigue cayendo muy por
 // debajo de los 20 ms del salvavidas.
+// Con el yield espaciado a 65536 vueltas, lo que queda dentro de la vuelta de la cita son dos
+// lecturas atomicas que NO son la condicion de salida: el aviso de vaciado del diario
+// (`dpLogFlush`, que solo escribe la CPU al pararse en `System::quiesceRcp`) y la parada del
+// anfitrion (`rspStop`/`hostStop`, que solo se escribe al cerrar). Ninguna de las dos cambia
+// mas de un punado de veces por corrida, asi que mirarlas en CADA vuelta es sondear dos lineas
+// que casi nunca se mueven. Con esto pasan a la MISMA cadencia que `ready()`/`cartNow()`
+// (`KESTREL_RDVPOLL`, 1 de cada 64): el cierre se retrasa como mucho 63 vueltas de unos pocos
+// ns, que no lo nota nadie.
+// KESTREL_RDVCHEAP=0 vuelve a mirarlas en cada vuelta.
+static auto rdvCheapTurn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_RDVCHEAP");
+    return !(e && *e && (!std::strcmp(e, "0") || !std::strcmp(e, "off")));
+  }();
+  return v;
+}
+
 // Barrido intercalado, min de 4, Parallel-RDP, ms de pared, DOS tandas independientes
 // (256 -> 65536): jr -0,51 / -0,47, PD -0,65 / +0,04, SM64 -1,00 / -0,60, DK64 -0,37 / -0,29.
 // Siete de ocho lecturas a favor y md5 de framebuffer identico en las 4 x 7 corridas. La
@@ -3376,11 +3393,15 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
   bool timing = false;
   const u32 tight = rdvTightTurns(), pm = rdvPollMask(), ym = rdvYieldMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
+  const bool cheap = rdvCheapTurn();
   for(u32 k = 0;; ++k) {
     // Espaciado como en spReadSync: `ready()` lee el reloj y el diario de la CPU.
-    if(k < tight || (k & pm) == pm) { if(ready()) break; }
-    if(dpLogFlush.load(std::memory_order_acquire)) dpLogApply(~0ull);
-    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    const bool look = (k < tight || (k & pm) == pm);
+    if(look) { if(ready()) break; }
+    if(look || !cheap) {
+      if(dpLogFlush.load(std::memory_order_acquire)) dpLogApply(~0ull);
+      if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    }
     if((k & 15u) == 15u) spinPause();
     if((k & ym) != ym) continue;
     std::this_thread::yield();
@@ -3693,9 +3714,11 @@ auto Memory::spReadSync(u64 now) -> void {
   bool timing = false;
   const u32 tight = rdvTightTurns(), pm = rdvPollMask(), ym = rdvYieldMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
+  const bool cheap = rdvCheapTurn();
   for(u32 k = 0;; ++k) {
-    if(k < tight || (k & pm) == pm) { if(cartNow() >= now) break; }
-    if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+    const bool look = (k < tight || (k & pm) == pm);
+    if(look) { if(cartNow() >= now) break; }
+    if((look || !cheap) && (rspStop || rsp.hostStop.load(std::memory_order_relaxed))) break;
     if((k & 15u) == 15u) spinPause();
     if((k & ym) != ym) continue;
     std::this_thread::yield();
