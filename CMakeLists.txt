@@ -123,6 +123,27 @@ if(WIN32)
   target_link_libraries(wildmem_test PRIVATE winmm)
 endif()
 
+# Excepcion Watch de COP0 (ExcCode 23): WatchLo/WatchHi vigilan una doblepalabra fisica
+# y disparan ANTES de completar el acceso. El interprete es el oraculo; mientras la
+# vigilancia esta armada el driver no deja correr al dynarec.
+add_executable(watch_test EXCLUDE_FROM_ALL
+  test/watch_test.cpp
+  src/telemetry/hostprof.cpp
+  src/cpu/cpu.cpp
+  src/cpu/jit.cpp
+  src/video/vifilter.cpp
+  src/core/memory.cpp
+  src/core/archive.cpp
+  src/rdp/rdp.cpp
+  src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
+  src/audio/audio.cpp
+)
+target_include_directories(watch_test PRIVATE src)
+if(WIN32)
+  target_link_libraries(watch_test PRIVATE winmm)
+endif()
+
 # Cheat engine unit test (GameShark code families; no windowing deps).
 add_executable(cheat_test EXCLUDE_FROM_ALL
   test/cheat_test.cpp
@@ -159,7 +180,7 @@ target_include_directories(rewind_test PRIVATE src)
 
 # Los tests compilan rsp.cpp, que usa SSSE3 en el difusor de banda: sin el mismo juego de
 # instrucciones que el binario principal no enlaza.
-foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test)
+foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test)
   if(NOT MSVC)
     if(KESTREL_BUILD_LOCAL)
       target_compile_options(${t} PRIVATE -march=native)

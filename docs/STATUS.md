@@ -7962,3 +7962,51 @@ anfitrion, que es divergencia directa; hasta ahora solo se sabia CUANTOS, no POR
 
 OJO: estas lineas solo salen si la corrida para por `KESTREL_MAXFLIPS`, `KESTREL_MAXSYNCS` o
 `KESTREL_MAXFIELDS`. Con `KESTREL_MAXINSN` el bloque de cierre no se ejecuta.
+
+## 2026-09-18 -- Excepcion Watch de COP0: implementada, y lo que destapo el test
+
+**Barrido LLE pedido por el usuario.** Repaso de que queda de alto nivel en el emulador:
+CPU R4300i completa (ISA entera, LL/SC/LLD/SCD, los cuatro no alineados, traps, CACHE,
+TLBR/TLBWI/TLBWR/TLBP, ERET, 64 bits), caches primarias con tags y coste, TLB con ASID,
+FPU con banderas Cause del FCSR y Unimplemented Operation, RSP LLE (ISA vectorial entera),
+RDP LLE (parallel-rdp, con SoftRDP como oraculo), VI con AA/divot/de-dither, AI que saca
+las muestras de la RDRAM por DMA, PI/SI/joybus con los tiempos de bus medidos. Lo que
+queda de HLE: (1) el arranque IPL3 (`CPU::fastBoot`), opcional ya con `KESTREL_LLE_IPL3=1`;
+(2) el PIF-NUS (no hay nucleo SM5 ni PIF ROM; el joybus se resuelve en C y el CIC se
+identifica por CRC, sin reto/respuesta); (3) Transfer Pak, VRU y 64DD. Y **una excepcion
+del R4300i sin implementar: Watch**.
+
+**El hueco.** WatchLo (18) y WatchHi (19) se escribian y se leian como registros, pero no
+vigilaban nada: un invitado que armara el vigia no recibia jamas la excepcion 23. No lo
+usa un juego normal -- lo usan depuradores, el `osSetWatchLo` del SDK y los tests -- pero
+es una excepcion del procesador que faltaba.
+
+**Lo implementado.** `CPU::watchTrip` compara la direccion FISICA por doblepalabra:
+PAddr0 en WatchLo[31:3], R en el bit 1, W en el bit 0 (el bit 2 no existe y lee 0), y
+PAddr1 en WatchHi[3:0], que son los bits [35:32] de la fisica y en N64 solo pueden ser
+cero porque no hay nada por encima de 4 GB. Es **precisa**: se toma ANTES de completar el
+acceso, asi que ni el store llega a memoria ni el load al registro. Y se **difiere** con
+Status.EXL o ERL puestos, que es lo que impide que el propio vector se cuelgue sobre si
+mismo. Mientras el vigia esta armado manda el interprete (`cpu.watchArmed`, un booleano
+por bloque en el driver): el codigo emitido no compara cada direccion contra WatchLo.
+
+**Dos fallos que caza el test nuevo, no la lectura del codigo.**
+1. Los ganchos en `read*`/`write*` no bastaban: SB, SH, SW, SD, LL y LLD estan INLINE en el
+   decodificador y no pasan por esas funciones. Con solo esos ganchos el vigia veia los
+   loads y NO veia ni un store. Ademas los ganchos estaban antes de comprobar `memAbort`,
+   asi que un fallo de TLB podia encadenar una segunda excepcion sobre una fisica basura.
+2. SWL/SWR/SDL/SDR se implementan aqui como lectura-modificacion-escritura, pero en el bus
+   son SOLO un store: su lectura interna no debe disparar el vigia de LECTURA
+   (`readNoWatch32/64`).
+
+**De regalo, un fallo viejo y general.** En CUALQUIER acceso abortado (AdE, TLB o Watch) el
+registro destino se escribia con el cero que devuelve `read*()`. En el hardware la
+instruccion no se completa y el registro se queda como estaba. Ahora `set()` respeta
+`memAbort`, que se limpia al principio de cada paso, asi que el alcance es la instruccion
+en curso. Invisible en juego (tras un fallo de TLB el manejador vuelve y la instruccion se
+repite), visible para un manejador que mire el registro.
+
+**Test.** `test/watch_test.cpp` (objetivo `watch_test`, ya dentro de `gate_all.sh`): 15
+casos -- direccion, granularidad de doblepalabra, R contra W por separado, cacheado
+(ckseg0) y sin cachear (kseg1, misma fisica), WatchHi imposible, diferido por EXL y por
+ERL, mascaras de lectura de los dos registros y paridad con el dynarec. ALL PASS.

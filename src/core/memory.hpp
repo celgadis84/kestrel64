@@ -3,9 +3,9 @@
 //
 // RAM-backed regions (RDRAM, SP DMEM/IMEM, PIF RAM) + cartridge ROM, plus the RCP
 // MMIO register blocks (MI/SP/DPC/VI/AI/PI/RI/SI) with their DMA engines and
-// interrupt aggregation (M2). RSP/RDP task completion is HLE-faked here until the
-// LLE cores land, so the boot ROM clears its hardware handshake. Named RAM regions
-// are exposed to the telemetry server for MCP inspection.
+// interrupt aggregation (M2). RSP and RDP are LLE: the tasks run on the real vector
+// core and the real rasterizer, and this file only drives their DMA, registers and
+// interrupts. Named RAM regions are exposed to the telemetry server for MCP inspection.
 
 #include "types.hpp"
 #include "../rdp/rdp.hpp"

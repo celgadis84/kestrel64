@@ -689,8 +689,18 @@ struct CPU {
   static auto disasm(u32 op, u64 pc) -> std::string;
 
 private:
-  // r0 is hardwired to zero: writes through set() are dropped for index 0.
-  inline auto set(u32 i, u64 v) -> void { if(i) gpr[i] = v; }
+  // r0 is hardwired to zero: writes through set() are dropped for index 0. Y si el acceso
+  // de esta instruccion aborto (memAbort: AdE, TLB o Watch), la instruccion NO se completa:
+  // en el hardware el registro destino se queda como estaba, no con el cero que devuelve
+  // read*(). memAbort se limpia al principio de cada paso, asi que el alcance es la
+  // instruccion en curso.
+  inline auto set(u32 i, u64 v) -> void { if(i && !memAbort) gpr[i] = v; }
+
+  // Lectura interna de SWL/SWR/SDL/SDR: en el bus esas instrucciones son SOLO un store,
+  // asi que su lectura-modificacion-escritura no debe disparar el vigia de LECTURA. El
+  // store final si pasa por write32/write64 y alli se aplica el vigia de escritura.
+  inline auto readNoWatch32(u64 v) -> u32 { bool w = watchArmed; watchArmed = false; u32 r = read32(v); watchArmed = w; return r; }
+  inline auto readNoWatch64(u64 v) -> u64 { bool w = watchArmed; watchArmed = false; u64 r = read64(v); watchArmed = w; return r; }
 
   auto read8 (u64 vaddr) -> u8;
   auto read16(u64 vaddr) -> u16;
@@ -700,7 +710,7 @@ private:
   auto write16(u64 vaddr, u16 v) -> void;
   auto write32(u64 vaddr, u32 v) -> void;
   auto write64(u64 vaddr, u64 v) -> void;
-  auto seenWatch(u64 paddr, u32 size) -> void;   // debug: track SEEN_EXCEPTION discriminant
+  auto seenWatch(u64 paddr, u32 size) -> void;   // debug: anillo de KESTREL_SEENADDR (apagado sin la variable)
 
   // Cacheability of a data/fetch access: KSEG1 (0xA0000000..0xBFFFFFFF) and the
   // uncached XKPHYS windows bypass; KSEG0 and cached-mapped regions go through the
@@ -803,6 +813,23 @@ private:
     return false;
   }
 
+  // Excepcion Watch (ExcCode 23). El R4300i compara la direccion FISICA de cada acceso de
+  // datos contra WatchLo/WatchHi con grano de doble palabra: WatchLo lleva PAddr0 en los bits
+  // [31:3] mas R (bit 1) y W (bit 0), y WatchHi lleva PAddr1, los bits [35:32] de la fisica,
+  // que en N64 son siempre cero. Se dispara ANTES de completar el acceso, y no se toma si
+  // Status.EXL o Status.ERL estan puestos -- ahi el hardware la difiere, porque el manejador
+  // de excepciones tiene que poder tocar memoria. No fija BadVAddr (Watch no lo hace).
+  // Solo se mira si el invitado la ha ARMADO (R o W a uno): `watchArmed` es falso siempre en
+  // un juego normal, asi que el coste en el camino de datos es un booleano.
+  inline auto watchTrip(u64 phys, Access acc) -> bool {
+    const u32 lo = (u32)cop0[18];
+    if(!(lo & (acc == AccWrite ? 1u : 2u))) return false;
+    if(((u32)cop0[19] & 0xFu) != 0) return false;             // PAddr1 != 0: imposible en N64
+    if(((u32)phys >> 3) != (lo >> 3)) return false;
+    if((u32)cop0[C0_Status] & 0x6) return false;              // EXL o ERL: diferida
+    memAbort = true; takeException(23); return true;
+  }
+
   // RDRAM init/repeat broadcast: while MI_MODE armed it, the next store to RDRAM is
   // replicated across a byte span (the whole source register drives the datapath, so
   // this needs the full 64-bit reg, not the size-truncated store value). Consumes the
@@ -844,6 +871,8 @@ private:
   auto deliverInterrupt() -> void;        // cold: vector an enabled pending interrupt
 
 public:
+  // WatchLo del invitado con R o W armado: el driver manda al interprete (ver watchTrip).
+  bool watchArmed = false;
   // --- dynarec (Etapa 2a) ----------------------------------------------------
   // Cache de bloques compilados (x86-64) para runs secuenciales de ops ALU seguras.
   // Gated por KESTREL_JIT en stepCpu; el intérprete es el fallback para todo lo demás.

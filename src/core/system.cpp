@@ -267,7 +267,10 @@ auto System::stepCpu(u64 n) -> u64 {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
     // de un borde de timer/interrupt, o ante una op no soportada → cae al intérprete.
     // El bloque solo se toma con el RSP parado, así que no altera el interleave 2:3.
-    if(jitOn) {
+    // Con la excepcion Watch armada manda el interprete: es precisa (se toma ANTES de
+    // completar el acceso) y el codigo emitido no compara cada direccion contra WatchLo.
+    // Un juego normal no la arma nunca, asi que esto es un booleano por bloque.
+    if(jitOn && !cpu.watchArmed) {
       // Ventana que le queda a esta llamada: una cadena de bloques enlazados no puede
       // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
       cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
