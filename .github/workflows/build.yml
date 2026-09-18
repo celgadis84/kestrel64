@@ -1,0 +1,53 @@
+# Puerta de COMPILACION, no de exactitud.
+#
+# Lo que este runner puede hacer es comprobar que el arbol compila de cero en una maquina
+# limpia y que pasan las pruebas unitarias que no tocan ninguna ROM. Lo que NO puede hacer
+# es validar el emulador: systemtest, la suite krom y el contraste lockstep-vs-threaded
+# necesitan ROMs, y en este repositorio no entra ni entrara ninguna. Por eso los binarios
+# que se publican en Releases NO salen de aqui -- salen de la maquina de desarrollo, ya
+# pasados por `scripts/gate_all.sh` y `scripts/gate_prdp.sh`, y los sube `scripts/publish.py`.
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      # El mismo toolchain que en desarrollo: clang64 de MSYS2. parallel-rdp esta
+      # vendorizado en third_party/, asi que aqui no se descarga nada mas.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-vulkan-devel
+            mingw-w64-clang-x86_64-glfw
+
+      - name: configure (parallel-RDP)
+        run: cmake -S . -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DKESTREL_PRDP=ON
+
+      - name: build
+        run: cmake --build build-ci -j4
+
+      # Estas seis no cargan ninguna ROM: devuelven != 0 si falla algo.
+      - name: unit tests
+        run: |
+          cmake --build build-ci -j4 --target rsp_test save_test wildmem_test cheat_test archive_test rewind_test
+          for t in rsp_test save_test wildmem_test cheat_test archive_test rewind_test; do
+            echo "== $t =="
+            ./build-ci/$t.exe || exit 1
+          done

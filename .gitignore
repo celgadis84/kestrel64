@@ -47,3 +47,6 @@ kestrel64-*-setup.exe
 
 # notas locales de sesion
 scratchpad/
+
+# Huellas de los ficheros publicados (scripts/publish.py), se regeneran.
+SHA256SUMS.txt
