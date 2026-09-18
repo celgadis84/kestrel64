@@ -40,9 +40,19 @@ construcción. **Simplificación conocida**: un VR4300 real retira ~1.0–1.3M o
 el HW. Modelar el CPI medio de verdad es el siguiente paso de precisión, y hay que
 hacerlo aquí, no en dos sitios.
 
-El bucle del sistema corre `tickInsns()` ops y llama a `viTick(cpu.retired)`. Ticks de
-sub-campo hacen falta porque hay ROMs que reprograman `VI_INTR` *dentro* del campo; con
-un tick por campo esas reprogramaciones se pierden.
+El bucle del sistema corre `tickInsns()` ops y llama a `viTick(cpu.guestOps())`.
+
+**Actualizado 2026-09-18.** Ese subtramo ya NO es lo que fija la precision de `MI_VI`. Antes
+si: la interrupcion caia en el borde del subtramo siguiente al cruce, o sea hasta
+1/`viTicksPerField` de campo tarde (~1 ms con 16). Ahora el VI tiene plazo propio en el mismo
+reloj de invitado que el SI y el PI -- `viNextEvent()` calcula el instante del proximo cruce
+de `VI_INTR` o del proximo cierre de campo, `evNextAt` lo pliega con el del AI, y `stepCpu`
+remata en la instruccion exacta. Lo mismo para `MI_AI` (`aiNextEvent()`).
+
+`viTicksPerField` queda como coste de ANFITRION puro: cada cuanto vuelve el bucle a mirar. La
+prueba es que cambiarlo de 1 a 64 ya no mueve el `[statehash]` del invitado, ni en Lockstep ni
+en Threaded. Una ROM que reprograme `VI_INTR` dentro del campo tampoco depende ya del
+subtramo: la escritura del registro rearma el plazo y saca al JIT de la cadena.
 
 ## viTick: cruce, no nivel
 

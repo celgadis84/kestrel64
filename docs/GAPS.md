@@ -835,13 +835,16 @@ foto de estado (version 13). Ademas `loadRom` programa `PI_BSD_DOM1_*` desde los
 porque el arranque es HLE. `KESTREL_PIINSTANT=1` recupera el final instantaneo para bisecar.
 Detalle y cuentas en `docs/STATUS.md`.
 
-- (3) **AHORA SI**: agenda general de eventos por marca de tiempo. Ya hay TRES plazos
-  artesanales (temporizador del COP0, SI y PI) y cuatro si se cuentan los del RCP
-  (`rcpDueIn`). Los tres sitios de `jit.cpp` que los consultan ya hacen el mismo pliegue a
-  mano -- `ioDueIn()` y luego minimo con `rcpDueIn()`, y el borde de `Count`==`Compare`
-  aparte porque vive en el COP0 --, o sea que el patron esta pidiendo una sola llamada
-  `nextEventIn(now)` que devuelva el minimo de todos y, al vencer, diga CUAL vencio. Eso es
-  lo que evita que el cuarto plazo sea otra guarda suelta mas.
+- (3) **CERRADO 2026-09-18.** Agenda de eventos por instante. Los plazos del VI (cruce de la
+  linea de `VI_INTR` y cierre de campo) y del AI (fin de bufer del DAC) se arman igual que el
+  del SI y el del PI, y los cinco se pliegan en un solo `eventDueIn(now)` que consultan las
+  tres guardas de `jit.cpp`. `MI_VI` llegaba hasta ~1 ms tarde (caia en el borde del subtramo
+  del bucle, no en el cruce) y `MI_AI` igual; ahora los dos caen en la instruccion exacta. La
+  prueba es que `KESTREL_VITICKS` -- un ajuste de ANFITRION -- ya no mueve el `[statehash]`
+  del invitado, de 1 a 64, ni en Lockstep ni en Threaded. Detalle en `docs/STATUS.md`.
+  Queda FUERA, y sigue suelto: el borde `Count`==`Compare` del COP0, que vive en la CPU y no
+  en `Memory`, y los plazos del RCP (`rcpDueIn`), que se pliegan aparte en los mismos tres
+  sitios. Meterlos en la misma llamada es cosmetica, no exactitud: los dos ya son exactos.
 
 
 ### snapper64: lo que la bateria mide y nosotros no modelamos

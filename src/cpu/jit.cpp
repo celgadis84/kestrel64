@@ -2254,7 +2254,7 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   u64 siDue = ~0ull;
   if(mem) {
     u64 now = mem->cartNow();
-    siDue = mem->ioDueIn(now);
+    siDue = mem->eventDueIn(now);
     // El fin de tarea del RCP en Threaded es otro plazo del mismo reloj: si el bloque se lo
     // traga, MI_SP / MI_DP caen en una instruccion distinta a la del interprete. Se mete en
     // el mismo cupo, que ya esta en unidades de cartNow().
@@ -2413,7 +2413,7 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
   u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
   u64 lim = opsForTicks((u64)(u32)(cmp - cnt));
   u64 now = mem->cartNow();
-  u64 due = mem->ioDueIn(now);
+  u64 due = mem->eventDueIn(now);
   { u64 r = mem->rcpDueIn(now); if(r < due) due = r; }
   if(due != ~0ull) { u64 d = opsForGuest(due); if(d < lim) lim = d; }
   if((u64)jitOpsBudget < lim) lim = jitOpsBudget;
@@ -2673,7 +2673,7 @@ auto CPU::jitTryBlock() -> u32 {
     {
       u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
       const u64 kFit = countTicksMax(65);
-      u64 due = mem->ioDueIn(mem->cartNow());
+      u64 due = mem->eventDueIn(mem->cartNow());
       { u64 r = mem->rcpDueIn(mem->cartNow()); if(r < due) due = r; }
       if((u64)(u32)(cmp - cnt) <= kFit || due <= guestOpsMax(65))
         { JDECL(DR_TIMER); return 0; }

@@ -1300,7 +1300,10 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
                  }
                  rcp.vi_origin = nv; } break;
     case 0x08: rcp.vi_width = v & 0xfff; break;
-    case 0x0c: rcp.vi_intr = v & 0x3ff; break;
+    // Reprogramar la linea de coincidencia (o la altura del campo) mueve el plazo del VI:
+    // el que estuviera armado se calculo con el valor viejo. Se invalida y se saca al JIT de
+    // la cadena, igual que hace piArm, para que el siguiente prologo lo recalcule.
+    case 0x0c: rcp.vi_intr = v & 0x3ff; viNextAt = viNextEvent(viLastRetired); evArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
     case 0x10: {
       static int vilog = std::getenv("KESTREL_VILOG") ? 1 : 0;
       if(vilog) { static u32 n=0; if((n++ & 0x3f)==0)
@@ -1308,7 +1311,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       clearIntr(MI_VI); break;   // VI_CURRENT write acks the VI interrupt
     }
     case 0x14: rcp.vi_burst = v; break;
-    case 0x18: rcp.vi_vsync = v; break;
+    case 0x18: rcp.vi_vsync = v; viNextAt = viNextEvent(viLastRetired); evArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
     case 0x1c: rcp.vi_hsync = v; break;
     case 0x20: rcp.vi_leap = v; break;
     case 0x24: rcp.vi_hstart = v; break;
@@ -1322,6 +1325,13 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     switch(off & 0xff) {
     case 0x00: rcp.ai_dram = v & 0xffffff; break;
     case 0x04: {  // AI_LEN write: enqueue a DMA buffer (the "go" for the audio FIFO)
+      // El DAC se pone al dia ANTES de tocar la cola. aiAcc y aiLastRetired son un credito
+      // fechado: armar el plazo del nuevo bufer sobre un aiLastRetired viejo lo adelantaba
+      // tanto como llevara sin mirarse el AI, o sea un trozo de subtramo -- y eso hace que el
+      // instante de MI_AI dependa de viTicksPerField, que es un ajuste de ANFITRION. Medido
+      // en junkrunner64: la PRIMERA MI_AI caia 183 instrucciones antes con VITICKS=16 que
+      // con 4, y a partir de ahi el invitado divergia.
+      aiTick(cartNow());
       u32 len = v & 0x3ffff;
       rcp.ai_len = len;
       if(spTrace()) { static u32 n=0; if(n++<20) std::fprintf(stderr,"[ai] LEN write #%u len=%u fifo=%u dac=%u\n",n,len,rcp.ai_fifo_count,rcp.ai_dacrate); }
@@ -1332,6 +1342,10 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         rcp.ai_fifo_len[rcp.ai_fifo_count]  = len;
         if(rcp.ai_fifo_count == 0) rcp.ai_play_remaining = len;  // starts playing now
         rcp.ai_fifo_count++;
+        // Un bufer nuevo en la cola pone plazo donde no lo habia (o lo adelanta): se rearma
+        // y se saca al JIT de la cadena, igual que hacen piArm y la escritura de VI_INTR.
+        aiArm();
+        if(jitGuardPtr) *jitGuardPtr = 0;
         // Fan the accepted buffer out to the host speakers. Read-only on RDRAM, so
         // this cannot perturb determinism (systemtest / lockstep md5 unaffected).
         u32 rate = rcp.ai_dacrate ? (aiVidClock / (rcp.ai_dacrate + 1)) : 32'000u;
@@ -1341,7 +1355,9 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     }
     case 0x08: rcp.ai_ctrl = v & 1; break;
     case 0x0c: clearIntr(MI_AI); break;
-    case 0x10: rcp.ai_dacrate = v; break;
+    // La frecuencia del DAC cambia la pendiente del drenaje: el plazo armado se calculo con
+    // la vieja y ya no vale.
+    case 0x10: aiTick(cartNow()); rcp.ai_dacrate = v; aiArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
     case 0x14: rcp.ai_bitrate = v; break;
     }
     return;
@@ -2053,6 +2069,10 @@ auto Memory::viTick(u64 retiredNow) -> bool {
   }
   // El DAC drena por muestras, no por campos: fuera del cierre de campo, en cada subtramo.
   aiTick(retiredNow);
+  // Rearma el plazo: a partir de aqui el bucle (y la guarda del JIT) saben en que instruccion
+  // EXACTA vuelve a haber trabajo de VI, en vez de mirarlo cada campo/viTicksPerField.
+  viNextAt = viNextEvent(retiredNow);
+  evArm();   // aiTick (justo arriba) ya ha rearmado aiNextAt; aqui se pliegan los dos
   return fieldClose;
 }
 
@@ -2071,12 +2091,12 @@ auto Memory::aiTick(u64 retiredNow) -> void {
   // retiradas) y se drenan TANTOS bufers como quepan en el tiempo transcurrido.
   u64 delta = retiredNow > rcp.aiLastRetired ? retiredNow - rcp.aiLastRetired : 0;
   rcp.aiLastRetired = retiredNow;
-  if(rcp.ai_fifo_count == 0) { rcp.aiAcc = 0; return; }   // en silencio no se acumula credito
+  if(rcp.ai_fifo_count == 0) { rcp.aiAcc = 0; aiNextAt = ~0ull; return; }   // en silencio no se acumula credito
   // Un salto enorme (arranque, savestate, pausa larga) no debe vaciar la FIFO de golpe.
   if(delta > viFieldInsns * 4) delta = viFieldInsns * 4;
   u32 rate = rcp.ai_dacrate ? (aiVidClock / (rcp.ai_dacrate + 1)) : 32'000u;
   u64 den  = viFieldInsns * (u64)viFieldHzMilli;      // instrucciones por segundo x1000
-  if(den == 0) return;
+  if(den == 0) { aiNextAt = ~0ull; return; }
   rcp.aiAcc += delta * ((u64)rate * 4ull * 1000ull);
   u64 bytes = rcp.aiAcc / den;
   rcp.aiAcc -= bytes * den;
@@ -2090,6 +2110,9 @@ auto Memory::aiTick(u64 retiredNow) -> void {
     raiseIntr(MI_AI);
     rcp.ai_play_remaining = rcp.ai_fifo_count ? rcp.ai_fifo_len[0] : 0;
   }
+  // Plazo del proximo fin de bufer: a partir de aqui el bucle sabe en que instruccion EXACTA
+  // toca MI_AI, en vez de enterarse al final del subtramo (ver aiNextEvent).
+  aiNextAt = aiNextEvent();
 }
 
 

@@ -150,6 +150,11 @@ struct System {
   // Clocks::rspInsnsPerCpuInsn() (4/3 stock) so the two cores make progress
   // together - required for CPU<->RSP SIGNAL handshakes.
   auto stepCpu(u64 n) -> u64;
+  // stepCpu remata el plazo del VI en la instruccion exacta del cruce, que casi siempre cae
+  // dentro del subtramo y no en su borde: si ahi se cerro un campo, el bucle de arriba tiene
+  // que enterarse igual (trucos, avance por fotogramas, hash de campo). Lo consume y lo
+  // limpia la misma vuelta del bucle.
+  bool viFieldPend = false;
   // Acumulador en punto fijo del ratio: por cada instruccion de CPU se suma rspStepNum
   // y se ejecuta una instruccion de RSP por cada rspStepDen acumulados. En enteros para
   // que el reparto sea identico en cada corrida; el constructor los fija desde clocks.

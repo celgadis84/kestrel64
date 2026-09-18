@@ -1230,10 +1230,18 @@ public:
 
   // --- interrupt aggregation (MI) --------------------------------------------
   auto raiseIntr(u32 bit) -> void {
-    static int irqt = std::getenv("KESTREL_IRQTRACE") ? 1 : 0;
+    // KESTREL_IRQTRACE=<n>: las n primeras subidas de CADA interrupcion, con el INSTANTE de
+    // invitado en que caen. Es la sonda con la que se comprueba que un plazo es exacto: dos
+    // corridas con ajustes distintos de anfitrion (KESTREL_VITICKS) tienen que dar la MISMA
+    // lista. =1 mantiene el comportamiento historico (12 por tipo).
+    static u64 irqt = std::getenv("KESTREL_IRQTRACE")
+                    ? std::strtoull(std::getenv("KESTREL_IRQTRACE"), nullptr, 0) : 0ull;
     if(irqt) { const char* nm = bit==MI_SP?"SP":bit==MI_SI?"SI":bit==MI_AI?"AI":bit==MI_VI?"VI":bit==MI_PI?"PI":bit==MI_DP?"DP":"?";
-      static u32 cnt[6]={}; int idx = bit==MI_SP?0:bit==MI_SI?1:bit==MI_AI?2:bit==MI_VI?3:bit==MI_PI?4:5;
-      if(cnt[idx]++ < 12) std::fprintf(stderr,"[irq] %s #%u mask=%02x intr=%02x\n",nm,cnt[idx],rcp.mi_mask,rcp.mi_intr|bit); }
+      static u64 cnt[6]={}; int idx = bit==MI_SP?0:bit==MI_SI?1:bit==MI_AI?2:bit==MI_VI?3:bit==MI_PI?4:5;
+      const u64 lim = irqt > 1 ? irqt : 12ull;
+      if(cnt[idx]++ < lim) std::fprintf(stderr,"[irq] %s #%llu at=%llu mask=%02x intr=%02x\n",
+                                        nm,(unsigned long long)cnt[idx],(unsigned long long)cartNow(),
+                                        rcp.mi_mask,rcp.mi_intr|bit); }
     if(bit == MI_VI) { evVi++; if(evLvl >= 2) ev("mi+", bit, rcp.mi_mask); } else ev("mi+", bit, rcp.mi_mask);
     {  // fetch_or: el valor previo dice si el latch ya estaba puesto (aviso fundido).
       u32 prev = rcp.mi_intr.fetch_or(bit, std::memory_order_release);
@@ -1327,6 +1335,63 @@ public:
   // devuelve true cuando ese tramo ha cerrado un campo de video.
   auto viTick(u64 retiredNow) -> bool;
   u64  viLastRetired = 0;   // posicion del VI en el tick anterior
+  // Reloj de invitado (mismas unidades que viLastRetired, o sea CPU::guestOps) del PROXIMO
+  // evento del VI: el cruce de la linea programada en VI_INTR o el cierre de campo, lo que
+  // caiga antes. A 0 significa "recalcular ya" (arranque, savestate, o el invitado ha
+  // reprogramado VI_INTR/VI_V_SYNC y el plazo viejo ya no vale).
+  u64  viNextAt = 0;
+  // Instante del proximo evento del VI visto desde `now`, con la MISMA aritmetica que usa
+  // viTick para detectar cruces (misma division entera, mismo `off`): si las dos no
+  // coincidieran, el plazo apuntaria a una instruccion en la que viTick no dispara nada.
+  auto viNextEvent(u64 now) const -> u64 {
+    const u64 field = viFieldInsns ? viFieldInsns : 1;
+    const u32 total = rcp.viHalflines();
+    const u64 off   = (u64)(rcp.vi_intr & 0x3fe) * field / (total ? total : 1u);
+    // Estrictamente DESPUES de `now`: en `now` ya se ha mirado (viLastRetired == now).
+    const u64 nextLine  = now < off ? off : off + ((now - off) / field + 1) * field;
+    const u64 nextField = (now / field + 1) * field;
+    return nextLine < nextField ? nextLine : nextField;
+  }
+  // Instrucciones que faltan para ese evento. Mismo papel que siDueIn/piDueIn: el VI es el
+  // cuarto plazo del emulador y hasta ahora era el unico que NO era exacto -- el bucle solo
+  // miraba el VI viTicksPerField veces por campo, asi que MI_VI caia en el borde del
+  // subtramo (~1 ms tarde) mientras SI, PI y el fin de tarea del RCP ya clavaban la
+  // instruccion. Nunca devuelve ~0: el barrido de video no se para nunca.
+  auto viDueIn(u64 now) const -> u64 { return viNextAt > now ? viNextAt - now : 0; }
+
+  // Reloj de invitado del proximo fin de bufer del AI, o ~0 con la FIFO vacia. El AI ya
+  // drenaba la CANTIDAD correcta (por muestras del DAC, no por campos), pero el INSTANTE de
+  // MI_AI seguia cayendo en el borde del subtramo, porque quien mira el cruce es aiTick y a
+  // aiTick solo lo llamaba viTick. Medido en junkrunner64: con viTicksPerField 4 y 16 el
+  // estado de la CPU divergia a las ~130M instrucciones, o sea que un ajuste de ANFITRION
+  // movia al invitado. Aqui se resuelve la misma ecuacion que el bucle de aiTick pero al
+  // reves: cuantas instrucciones faltan para que el credito acumulado llegue a los bytes que
+  // le quedan al bufer en curso.
+  auto aiNextEvent() const -> u64 {
+    if(!rcp.ai_fifo_count) return ~0ull;
+    const u64 den = viFieldInsns * (u64)viFieldHzMilli;   // instrucciones por segundo x1000
+    if(!den) return ~0ull;
+    const u64 rate = rcp.ai_dacrate ? (u64)(aiVidClock / (rcp.ai_dacrate + 1)) : 32'000ull;
+    const u64 R    = rate * 4ull * 1000ull;               // bytes x1000 por instruccion x den
+    if(!R) return ~0ull;
+    const u64 need = (u64)rcp.ai_play_remaining * den;
+    if(rcp.aiAcc >= need) return rcp.aiLastRetired;       // ya vencido: se remata al mirarlo
+    return rcp.aiLastRetired + (need - rcp.aiAcc + R - 1) / R;   // techo: el cruce es >=
+  }
+  u64 aiNextAt = ~0ull;
+  // Lo que mira el bucle por instruccion: el minimo de los dos plazos del barrido/DAC. Se
+  // guarda ya plegado para que la comprobacion del camino caliente sea UNA comparacion.
+  u64 evNextAt = 0;
+  auto evArm() -> void { evNextAt = viNextAt < aiNextAt ? viNextAt : aiNextAt; }
+  auto aiArm() -> void { aiNextAt = aiNextEvent(); evArm(); }
+  auto evDueIn(u64 now) const -> u64 { return evNextAt > now ? evNextAt - now : 0; }
+  // El minimo de TODOS los plazos que no son del RCP. Las guardas del JIT consultan este,
+  // no cada uno por su cuenta, que es lo que evita que cada plazo nuevo sea otra guarda
+  // suelta mas (docs/GAPS.md, agenda general de eventos).
+  auto eventDueIn(u64 now) const -> u64 {
+    const u64 a = ioDueIn(now), b = evDueIn(now);
+    return a < b ? a : b;
+  }
   // --- AI drain tick (paces audio DMA FIFO), called once per field from viTick --
   auto aiTick(u64 retiredNow) -> void;
 

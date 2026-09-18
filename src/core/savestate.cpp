@@ -25,7 +25,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 13;  // 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 14;  // 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -220,6 +220,10 @@ auto visitMemory(StateIO& io, Memory& m) -> void {
   io.blob(m.flashPageBuf, sizeof(m.flashPageBuf));
   io.pod(m.cartLatch); io.pod(m.cartLatchValid); io.pod(m.cartLatchExpiry);
   io.pod(m.viLastRetired);
+  io.pod(m.viNextAt); io.pod(m.aiNextAt); io.pod(m.evNextAt);      // plazo del VI armado: la instruccion exacta del proximo cruce de
+                           // VI_INTR o cierre de campo. Se guarda por lo mismo que el del PI:
+                           // un estado cargado sin el lo recalcularia en la instruccion
+                           // siguiente, no en la que tocaba, y el rewind dejaria de ser bit a bit.
   io.blob(m.isvHdr, sizeof(m.isvHdr));
   StateVisitor::rdpFifo(io, m);
   // Fines de tarea armados y aun no publicados. El RCP se para antes de guardar, pero parar

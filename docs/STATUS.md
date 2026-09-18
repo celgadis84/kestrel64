@@ -7178,3 +7178,86 @@ cartucho en un instante distinto. Lo que importa de esa prueba no es el valor si
 juego que descarrila cuando el acoplamiento CPU-RCP se afloja de mas (1 de cada 8 con
 `kPaceSlack` a 1 M), y es el unico liston que dice si un cambio de tiempos de invitado ha
 roto algo que las puertas no ven.
+
+## 2026-09-18 -- MI_VI y MI_AI dejan de llegar tarde: agenda de eventos por instante
+
+El SI y el PI ya rematan su plazo en la instruccion exacta. El barrido de video no: `viTick`
+se llamaba UNA vez por subtramo del bucle (`Clocks::tickInsns()` = campo / `viTicksPerField`,
+16 por defecto), asi que `MI_VI` no caia en el cruce de la linea programada en `VI_INTR` sino
+en el borde del subtramo siguiente -- **hasta ~1 ms tarde**. Y `aiTick`, que cuelga de
+`viTick`, arrastraba el mismo defecto para `MI_AI`.
+
+Lo del AI merece una nota, porque en el barrido anterior lo di por bueno y NO lo era. `aiTick`
+drena por muestras del DAC y acumula el credito en `aiAcc`, asi que la CANTIDAD de audio que
+consume es correcta e independiente de la granularidad. Lo que no era independiente es el
+INSTANTE en que se ve que un bufer se ha acabado: eso se miraba solo cuando alguien llamaba a
+`aiTick`, o sea en el borde del subtramo. Drenar bien la cantidad y levantar tarde la
+interrupcion son dos cosas distintas.
+
+### La sonda: un ajuste de anfitrion no puede mover al invitado
+
+`viTicksPerField` es un ajuste de ANFITRION -- cada cuanto vuelve el bucle a mirar el RCP --
+y por tanto cambiarlo no puede cambiar ni una instruccion de lo que ve el juego. Esa es la
+prueba, y es binaria. Antes de este cambio, junkrunner64 a 200 M instrucciones daba:
+
+| `KESTREL_VITICKS` | 1 | 4 | 16 | 64 |
+|---|---|---|---|---|
+| `[statehash]` ANTES | `045d2dfe…` | `49f0daf8…` | `e403ad4e…` | `49f0daf8…` |
+| `[statehash]` AHORA | `e403ad4e65ba9c4d` | igual | igual | igual |
+
+Cuatro huellas distintas donde tenia que haber una. Ahora hay una, y la misma en Lockstep y
+en Threaded. Con SM64 (que es el que tiene audio de verdad) pasa lo mismo: `cec13be0a57c7e8a`
+con `VITICKS` 4, 16 y 64 en interprete.
+
+Aviso para la proxima vez: con JIT y `KESTREL_MAXINSN` la huella SI puede moverse aunque el
+emulador sea exacto, porque el tope corta a mitad de cadena y el ultimo bloque se pasa por un
+puñado de ops. Eso es la sonda, no el emulador. Se distingue mirando la traza de
+interrupciones (`KESTREL_IRQTRACE=<n>`, que ahora imprime el instante de invitado de cada
+subida): si las dos listas son identicas y solo cambia el corte final, no hay divergencia.
+
+### La maquinaria
+
+Un plazo armado por evento, en el mismo reloj de invitado que ya usan el SI y el PI:
+
+- `viNextEvent(now)` resuelve la MISMA aritmetica que `viTick` usa para detectar cruces
+  (mismo `off`, misma division entera) pero al reves: cuando cae el proximo cruce de la linea
+  de `VI_INTR` o el proximo cierre de campo, lo que llegue antes. Si no coincidieran, el
+  plazo apuntaria a una instruccion en la que `viTick` no dispara nada.
+- `aiNextEvent()` hace lo propio con el DAC: cuantas instrucciones faltan para que el credito
+  acumulado llegue a los bytes que le quedan al bufer en curso.
+- `evNextAt` es el minimo de los dos, ya plegado, para que la comprobacion del camino caliente
+  sea UNA comparacion por instruccion.
+- `eventDueIn(now)` = min(`ioDueIn`, `evDueIn`) es lo que consultan las TRES guardas de
+  `jit.cpp`, que antes plegaban a mano `siDueIn`/`piDueIn`. Un plazo nuevo ya no es otra
+  guarda suelta: se mete en `eventDueIn` y las tres guardas lo respetan solas.
+
+El subtramo se queda como estaba: `stepCpu` remata el plazo en la instruccion exacta y le
+pasa el cierre de campo al bucle por `viFieldPend`, porque los trucos, el avance por
+fotogramas y los volcados de diagnostico siguen colgando de ahi.
+
+### El detalle que costo encontrar
+
+La primera version dejaba `MI_AI` **peor** que antes. La traza lo señalo en una linea: la
+PRIMERA `MI_AI` caia en 53844235 con `VITICKS=4` y en 53844052 con 16, 183 instrucciones de
+diferencia. El motivo es que `aiAcc`/`aiLastRetired` son un credito FECHADO, y al encolar un
+bufer (escritura de `AI_LEN`) se armaba el plazo sobre un `aiLastRetired` viejo -- tan viejo
+como llevara el AI sin mirarse, o sea un trozo de subtramo. La correccion es poner el DAC al
+dia **antes** de tocar la cola: `aiTick(cartNow())` al principio del manejador de `AI_LEN` y
+de `AI_DACRATE`. El VI no necesita esto porque sus eventos son posiciones ABSOLUTAS del
+campo, no un credito acumulado.
+
+### Efecto lateral: `viTicksPerField` se queda sin trabajo de precision
+
+Su unica razon de ser era esa: cuanto mas fino el subtramo, menos tarde llegaba `MI_VI`. Ya
+no. A partir de ahora es solo cada cuanto vuelve el bucle a mirar, o sea coste de anfitrion
+puro, y subirlo es gratis en exactitud. Queda como barrido aparte.
+
+### Validacion
+
+`gate_all` 734 s: systemtest `Base 0/3721 Timing 0/2 Cycle 0/6` y sm64
+`d35bd8aa9b13d459ce9332c07a79a53a` en los diez modos software, krom interp 371/371
+`mean_exact` 88,72 / `mean_close` 92,07 regress=0. `gate_prdp` 518 s: systemtest 0/3721,
+sm64 `b5521b24d8fc280fbf102df22d7d30cb` en prdp y prdp-jit -- o sea la huella de
+parallel-RDP tampoco se mueve --, krom prdp 371/371 89,27 / 92,56 regress=0. Perfect Dark
+con Parallel-RDP y threaded-jit, 15 arranques de 15 limpios. Las dos puertas recompilan
+`build/` y `build-prdp/` enteros porque cambia `memory.hpp`.

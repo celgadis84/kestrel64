@@ -272,6 +272,9 @@ auto System::stepCpu(u64 n) -> u64 {
               // (DK64 Lockstep divergia del interprete en el hilo ocioso).
               if(memory.siBusy && memory.cartNow() >= memory.siDoneAt) memory.siFinish();
               if(memory.piBusy && memory.cartNow() >= memory.piDoneAt) memory.piFinish();
+              // Y el del VI, por lo mismo: la linea de VI_INTR y el cierre de campo caen en
+              // una instruccion concreta, no en el borde del subtramo del bucle de arriba.
+              if(cpu.guestOps() >= memory.evNextAt) viFieldPend |= memory.viTick(cpu.guestOps());
               if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire();
               rspInterleave();
               if(paced) memory.rcpPace(cpu.guestOps()); continue; }
@@ -295,6 +298,13 @@ auto System::stepCpu(u64 n) -> u64 {
     if(memory.siBusy && memory.cartNow() >= memory.siDoneAt) memory.siFinish();
     // Y el del PI: la DMA del cartucho tampoco termina en la instruccion que la arranca.
     if(memory.piBusy && memory.cartNow() >= memory.piDoneAt) memory.piFinish();
+    // Y el del VI: el barrido de video es el cuarto plazo. Antes el VI solo se miraba al
+    // final de cada subtramo (campo/viTicksPerField), asi que MI_VI llegaba hasta ~1 ms
+    // tarde y ademas su instante dependia de viTicksPerField, que es un ajuste de
+    // anfitrion. Aqui se remata en la instruccion exacta, como el SI y el PI, y el JIT
+    // tiene prohibido meterse el plazo dentro de un bloque (eventDueIn en jitTryBlock).
+    // La comparacion es una lectura de campo y un entero: no hay coste medible.
+    if(cpu.guestOps() >= memory.evNextAt) viFieldPend |= memory.viTick(cpu.guestOps());
     // Y el fin de tarea del RCP en Threaded, por lo mismo: lo arma un worker con el coste ya
     // modelado y se hace visible cuando el reloj de invitado llega, no cuando el anfitrion
     // termina de calcular. Con Lockstep o con KESTREL_RCPDEADLINE=0 nunca hay nada armado y
@@ -876,6 +886,10 @@ auto System::run() -> void {
       // Con el reloj de invitado, no con las ops retiradas a secas: si un campo trae muchos
       // fallos de cache, en HW ese campo hace MENOS trabajo de CPU, no el mismo en mas tiempo.
       fieldClosed = memory.viTick(cpu.guestOps());
+      // El cierre de campo lo detecta casi siempre stepCpu, en la instruccion exacta del
+      // cruce; aqui solo se recoge. La llamada de arriba se queda porque es la que mueve
+      // VI_V_CURRENT y drena el AI en cada subtramo aunque no haya cruzado nada.
+      if(viFieldPend) { fieldClosed = true; viFieldPend = false; }
       // Trucos: el motor del GameShark colgaba de la interrupcion del VI, asi que el ritmo
       // es el campo de video y no el fotograma del juego. Va aqui dentro, con el nucleo
       // parado bajo coreMutex, para que las escrituras no crucen con la CPU ni con el RCP.
