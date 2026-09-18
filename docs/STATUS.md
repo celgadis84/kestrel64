@@ -7578,3 +7578,50 @@ las 4 x 4 corridas: esto no toca estado de invitado.
 Por que pega tanto en PD: es el que mas sondea DPC (1,81 M de citas por corrida), o sea el que
 mas vueltas de bucle da, y cada vuelta se ahorra dos lecturas de lineas compartidas. Es la misma
 leccion de la manana pero por el lado bueno -- quitar TRAFICO DE COHERENCIA si paga.
+
+
+## 2026-09-18 -- Los cinco campos del reloj de invitado, en UNA linea de cache
+
+Tercera del dia por el mismo hilo, y la mas gorda: no cambia ni una instruccion de logica, solo
+DONDE viven cinco campos de `CPU`.
+
+`Memory::cartNow()` -- lo que contesta "por donde va la CPU" -- lee cinco sitios:
+
+| campo | donde estaba |
+|---|---|
+| `retired` | bloque de control de ejecucion |
+| `jitPending` | bloque del JIT |
+| `stallCycles` | bloque de coste de cache |
+| `stallOps` | idem, unas lineas mas abajo |
+| `stallOpsRem` | idem |
+
+Sueltos por el struct, a cientos de bytes unos de otros. Y quien mas llama a `cartNow()` es el
+HILO DEL RSP: cada vuelta de sondeo de sus citas (`spReadSync`, `dpLogWait`) pregunta por ahi.
+O sea que cada sondeo tiraba de VARIAS lineas que el hilo de CPU reescribe sin parar, y cada
+una es un viaje de coherencia entre nucleos.
+
+Juntos ocupan 28 bytes: **una sola linea**. Van con `alignas(64)` justo detras de `gpr[32]`
+(offset 256, ya alineado; el JIT exige que `gpr` siga siendo el primer miembro, `RBX == cpu`).
+Escribirlos los escribe solo el hilo de CPU, asi que compartir linea entre ellos no cuesta nada.
+
+Dos tandas intercaladas de min-de-4, dos binarios que solo se diferencian en esto:
+
+| juego | tanda A | tanda B |
+|---|---|---|
+| Perfect Dark | 10666 -> 10350 (**-2,96 %**) | 10609 -> 10378 (**-2,18 %**) |
+| junkrunner64 | 7438 -> 7238 (**-2,69 %**) | 7430 -> 7223 (**-2,79 %**) |
+| DK64 | 11351 -> 11174 (**-1,56 %**) | 11320 -> 11147 (**-1,53 %**) |
+| SM64 | 7236 -> 7143 (**-1,29 %**) | 7204 -> 7084 (**-1,67 %**) |
+
+Ocho de ocho, y en las dos tandas las cuatro lecturas de cada brazo son DISJUNTAS en los cuatro
+juegos. md5 del framebuffer identico en las 4 x 4 x 2 corridas, y el `[statehash]` de
+junkrunner64 a 400 M da `dc07d7ac23fef2e1` en los CUATRO cruces {base, colocado} x {lockstep,
+threaded}: es colocacion pura.
+
+Por que esta sale mas cara que la del yield: aqui no se ahorra una llamada al kernel de vez en
+cuando, se ahorra un viaje de coherencia en CADA sondeo, y jr -- que en los dos cambios
+anteriores salia plano porque casi no se cita por el diario DPC -- si lo nota, porque `cartNow()`
+se pregunta pase lo que pase.
+
+Cambio de colocacion, no de semantica: la foto de estado serializa campo a campo
+(`savestate.cpp`, `io.pod(c.retired)`) y el JIT saca los desplazamientos con `offsetof`.

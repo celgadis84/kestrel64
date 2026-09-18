@@ -18,6 +18,25 @@ namespace jit { struct CodeCache; }
 struct CPU {
   // --- architectural state ---------------------------------------------------
   u64 gpr[32] = {};
+
+  // --- reloj de invitado, los cinco campos JUNTOS en una linea de cache ------
+  // `Memory::cartNow()` los lee los cinco de una vez, y quien mas lo llama es el HILO DEL RSP:
+  // cada vuelta de sondeo de sus citas (`spReadSync`, `dpLogWait`) pregunta por donde va la CPU.
+  // Sueltos por el struct -- `retired` estaba en el bloque de control de ejecucion, las paradas
+  // a cientos de bytes y `jitPending` en el del JIT -- ese sondeo tiraba de VARIAS lineas que el
+  // hilo de CPU reescribe sin parar, y cada una es un viaje de coherencia. Juntos ocupan 28 B:
+  // una sola linea. Escribirlos los escribe solo el hilo de CPU, asi que compartir linea entre
+  // ellos no cuesta nada. Es cambio de COLOCACION, no de semantica: la foto de estado los
+  // serializa campo a campo y el JIT saca los desplazamientos con `offsetof`.
+  alignas(64) u64 retired = 0;   // instructions retired
+  // ops retiradas por los bloques ya ejecutados de la cadena del JIT y AUN sin commitear
+  u32  jitPending  = 0;
+  // Ciclos de parada acumulados y aun no volcados a Count. Estado de invitado (savestate):
+  // en el interprete se drena en cada op, en el JIT al cerrar el bloque.
+  u32  stallCycles = 0;
+  u64  stallOps    = 0;          // ops equivalentes a las paradas ya cobradas
+  u32  stallOpsRem = 0;          // resto de esa division (estado de invitado)
+
   u64 pc = 0;
   u64 nextPc = 0;
   u64 curPc = 0;       // address of the instruction currently executing (for EPC/fault reports)
@@ -72,7 +91,6 @@ struct CPU {
   //    a 0 (así, en cualquier retorno al driver, pending==0 y el valor devuelto es exacto).
   //  - jitChain = enlaces consumidos desde la última entrada por el driver. Presupuesto duro:
   //    sin él, un bucle auto-enlazado no devolvería el control hasta el borde del timer.
-  u32  jitPending = 0;
   u32  jitChain = 0;
   //  - jitChainOps = ops ya commiteadas por la cadena en ESTA entrada del driver. jitTryBlock
   //    las suma a las del último bloque: quien llama (stepCpu) tiene que ver el total real, o
@@ -207,7 +225,6 @@ struct CPU {
   u32  dcMissCycles = missFromEnv("KESTREL_DCACHECOST");
   // Ciclos de parada acumulados y aun no volcados a Count. Estado de invitado (savestate):
   // en el interprete se drena en cada op, en el JIT al cerrar el bloque.
-  u32  stallCycles = 0;
   u64  stallTotal  = 0;                  // estadistica del anfitrion: ciclos cobrados en total
   // El resto del emulador mide el tiempo de invitado en INSTRUCCIONES RETIRADAS: el campo de
   // video (Memory::viTick / viFieldInsns), la lectura de VI_V_CURRENT, el plazo del SI y el
@@ -215,8 +232,6 @@ struct CPU {
   // invitado (Count) y el reloj del video correrian a ritmos distintos -- que es exactamente
   // el bug de "dos relojes" que documenta Clocks::cyclesPerInsn. Asi que las paradas tambien
   // se traducen a ops equivalentes: 1 op = cpi256/128 ciclos de CPU.
-  u64  stallOps    = 0;                  // ops equivalentes a las paradas ya cobradas
-  u32  stallOpsRem = 0;                  // resto de esa division (estado de invitado)
   auto chargeIcMiss() -> void { stallCycles += icMissCycles; stallTotal += icMissCycles; }
   auto chargeDcMiss() -> void { stallCycles += dcMissCycles; stallTotal += dcMissCycles; }
 
@@ -537,7 +552,6 @@ struct CPU {
   // --- run control -----------------------------------------------------------
   bool  halted = false;
   std::string haltReason;
-  u64   retired = 0;       // instructions retired
   u32   lastUnimplemented = 0;
   u64   exceptions = 0;    // exceptions/interrupts taken
 

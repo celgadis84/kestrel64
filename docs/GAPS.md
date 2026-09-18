@@ -872,6 +872,14 @@ Por ahi va el orden nuevo:
   PD -2,94 % / -2,73 %, SM64 -1,77 % / -2,17 %, con las cuatro lecturas de cada brazo disjuntas
   en los dos juegos y las dos tandas; jr y DK64 planos. md5 identico. Es la contraparte de la
   leccion del memo de `spBarrierAt()`: en un hilo que gira, quitar trafico de coherencia SI paga.
+- **Los cinco campos del reloj de invitado en UNA linea de cache: COBRADO (2026-09-18).**
+  `retired`, `jitPending`, `stallCycles`, `stallOps` y `stallOpsRem` estaban sueltos por el
+  struct `CPU`; `Memory::cartNow()` los lee los cinco y quien mas lo llama es el hilo del RSP en
+  cada vuelta de sondeo de sus citas. Juntos (28 B, `alignas(64)`, detras de `gpr` porque el JIT
+  exige `gpr` en offset 0) el sondeo tira de una linea en vez de varias. Dos tandas intercaladas
+  de min-de-4, OCHO de ocho a favor y lecturas disjuntas en los cuatro juegos: PD -2,96 / -2,18,
+  jr -2,69 / -2,79, DK64 -1,56 / -1,53, SM64 -1,29 / -1,67. Colocacion pura: md5 identico y
+  `[statehash]` de jr a 400 M `dc07d7ac23fef2e1` en los cuatro cruces.
 - Presentacion sin copia (zero-copy).
 - Sombra de MXCSR — 0,7 %.
 - Coste de llamada de `runFifo`.
