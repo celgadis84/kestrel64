@@ -85,7 +85,7 @@ CATEGORIES = [
       tri=True, adv=True),
     O("barspin", "KESTREL_BARSPIN", "Vueltas de la barrera del SP", "int", 0, adv=True,
       min=0, max=1000000,
-      help="0 = por defecto (2048). Cuanto gira la CPU en la barrera del RSP antes de dormir."),
+      help="0 = por defecto (16384). Cuanto gira la CPU en la barrera del RSP antes de dormir."),
     O("rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", "int", 32768, adv=True,
       min=0, max=10000000,
       help="Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. "

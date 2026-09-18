@@ -2605,12 +2605,21 @@ static inline void spinPause() { if(g_spinPauseOn) _mm_pause(); }
 
 // Vueltas de espera activa de la barrera del SP antes de dormir. KESTREL_BARSPIN lo ajusta
 // (0 = dormir directamente). Tambien es solo coste de anfitrion.
+// 2026-09-16 se midio PLANO de 2048 a 1 M y se dejo en 2048. RE-BARRIDO 2026-09-18, ya con los
+// diarios (dpLog/spLog/dmaLog) y dpBarSync puestos: ya no es plano. Min de 5 rondas
+// intercaladas, Parallel-RDP, ms de pared, 2048 -> 16384:
+//   jr 7286 -> 7261, PD 11579 -> 11551, DK64 11810 -> 11802, SM64 7599 -> 7474 (-1,6 %).
+// En SM64 las cinco lecturas de cada lado casi no se solapan ({7474,7490,7577,7579,7613} contra
+// {7599,7599,7646,7659,7808}); en los otros tres es empate. 131072 ya cobra +1,9 % en jr, asi que
+// el optimo esta en 16384 y no mas arriba. Por que se movio: con los diarios la barrera se abre
+// mucho antes -- el RSP apunta y sigue en vez de citarse -- asi que la espera que antes tocaba
+// dormir ahora cabe dentro del giro, y dormir cuesta un viaje al kernel que el giro se ahorra.
 static auto barSpinLen() -> u32 {
   static const u32 v = []() -> u32 {
     const char* e = std::getenv("KESTREL_BARSPIN");
     if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
                   if(end && !*end && n >= 0 && n <= 1'000'000) return (u32)n; }
-    return 2048u;
+    return 16384u;
   }();
   return v;
 }

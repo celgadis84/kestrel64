@@ -6764,3 +6764,56 @@ Es un cambio de grano de publicacion y de sondeo, no de semantica: el reloj de i
 mismo. Comprobado -- los 16 framebuffers del barrido con md5 identico por juego, y el
 `[statehash]` de junkrunner64 a 400 M de instrucciones da `7f1b537e69aad3f4` en las cuatro
 combinaciones de {512, 1024} x {lockstep, threaded}.
+
+## 2026-09-18 -- Re-barrido de las perillas que se afinaron ANTES de los diarios
+
+La tanda del RSP no fue un caso aislado. Varias perillas de espera se calibraron entre el
+2026-09-11 y el 2026-09-16, y despues de eso entraron los diarios (`dpLog`, `spLog`, `dmaLog`) y
+`dpBarSync`, que quitaron casi todas las citas `spReadSync` entre la CPU y el RSP. Una perilla de
+espera no es una constante del emulador: es una constante del ACOPLAMIENTO que haya en ese
+momento. Cambiado el acoplamiento, hay que re-barrer. Barridas las tres que quedaban, min de 4-5
+rondas intercaladas, un solo barrido por perilla, md5 identico por juego en todas.
+
+### `KESTREL_BARSPIN` 2048 -> 16384 (se coge)
+
+Vueltas que gira la CPU en la barrera del SP antes de dormir.
+
+| vueltas | jr | PD | SM64 | DK64 |
+|---------|----|----|------|------|
+| 256 | 7.525 | 11.788 | 7.662 | 11.984 |
+| 2048 (lo de antes) | 7.245 | 11.568 | 7.520 | 11.827 |
+| **16384 (nuevo)** | **7.240** | 11.571 | **7.484** | **11.773** |
+| 131072 | 7.386 | **11.564** | 7.493 | 11.756 |
+
+Confirmado con un A/B a dos bandas y 5 rondas: jr 7.286 -> 7.261, PD 11.579 -> 11.551,
+DK64 11.810 -> 11.802, **SM64 7.599 -> 7.474 (-1,6 %)**. En SM64 las cinco lecturas de cada lado
+casi no se solapan ({7.474, 7.490, 7.577, 7.579, 7.613} contra {7.599, 7.599, 7.646, 7.659,
+7.808}); en los otros tres es empate limpio. El 2026-09-16 esto se midio **plano de 2048 a 1 M** y
+por eso se dejo en 2048; hoy ya no es plano, y 131072 cobra +1,9 % en junkrunner64, asi que el
+optimo esta en 16384 y no mas arriba.
+
+Por que se movio: con los diarios la barrera se abre mucho antes -- el RSP apunta su escritura y
+sigue en vez de citarse con la CPU -- asi que la espera que antes obligaba a dormir ahora cabe
+dentro del giro, y dormir cuesta un viaje al kernel que el giro se ahorra. Antes girar mas no
+servia porque la espera era larga de todos modos; ahora si.
+
+### `KESTREL_RDVPOLL` se queda en 64 (medido, ya estaba en su optimo)
+
+Una de cada n vueltas el bucle de espera del HILO DEL RSP mira el reloj de la CPU.
+
+| n | jr | PD | SM64 | DK64 |
+|---|----|----|------|------|
+| 16 | 7.779 | 11.988 | **7.506** | 12.032 |
+| **64 (actual)** | 7.254 | **11.656** | 7.521 | **11.806** |
+| 256 | **7.190** | 11.954 | 8.093 | 11.919 |
+| 1024 | 7.955 | 13.504 | 9.959 | 13.483 |
+
+64 gana PD y DK64, empata con 16 en SM64 y solo pierde 0,9 % contra 256 en junkrunner64, que a
+cambio cuesta +7,6 % en SM64. 1024 se hunde en los cuatro (+5 a +16 %). Es un optimo estrecho de
+verdad y ya estaba puesto: no se toca.
+
+### Regla que sale de aqui
+
+Cuando se cierre una via que quite citas entre hilos, **re-barrer las perillas de espera** antes
+de dar por buena ninguna. Dos de las tres se habian quedado desfasadas, y las dos por el mismo
+motivo: menos citas ⇒ esperas mas cortas ⇒ conviene girar mas y publicar menos fino.
