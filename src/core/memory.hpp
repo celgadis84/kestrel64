@@ -1460,6 +1460,14 @@ private:
   // Corre el bloque de ordenes de la PIF RAM y rellena las respuestas de mandos/EEPROM;
   // devuelve los microsegundos de linea joybus que costo (ver el bloque SI de arriba).
   auto pifProcessJoybus() -> u32;
+  // Desafio anti-pirateria del CIC-NUS-6105 (ver el cuerpo en memory.cpp). Lo pide el juego
+  // poniendo el bit 1 del byte de control y leyendo el bloque; la respuesta ocupa los 15
+  // bytes 0x30..0x3E de la PIF RAM.
+  auto pifCicChallenge() -> void;
+public:
+  // El cartucho esta firmado con CIC-NUS-6105 / 7105, que es el unico chip cuyo desafio
+  // tiene algoritmo de verdad. Lo pone CPU::fastBoot al identificar la imagen del IPL3.
+  bool cic6105 = false;
 };
 
 }  // namespace kestrel

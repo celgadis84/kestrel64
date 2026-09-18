@@ -144,6 +144,26 @@ if(WIN32)
   target_link_libraries(watch_test PRIVATE winmm)
 endif()
 
+# PIF-NUS unit test: byte de control de la PIF RAM y desafio anti-pirateria del CIC-6105.
+# Se conduce por los registros del SI, que es la puerta de verdad, no por las internas.
+add_executable(pif_test EXCLUDE_FROM_ALL
+  test/pif_test.cpp
+  src/telemetry/hostprof.cpp
+  src/cpu/cpu.cpp
+  src/cpu/jit.cpp
+  src/video/vifilter.cpp
+  src/core/memory.cpp
+  src/core/archive.cpp
+  src/rdp/rdp.cpp
+  src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
+  src/audio/audio.cpp
+)
+target_include_directories(pif_test PRIVATE src)
+if(WIN32)
+  target_link_libraries(pif_test PRIVATE winmm)
+endif()
+
 # Cheat engine unit test (GameShark code families; no windowing deps).
 add_executable(cheat_test EXCLUDE_FROM_ALL
   test/cheat_test.cpp
@@ -180,7 +200,7 @@ target_include_directories(rewind_test PRIVATE src)
 
 # Los tests compilan rsp.cpp, que usa SSSE3 en el difusor de banda: sin el mismo juego de
 # instrucciones que el binario principal no enlaza.
-foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test)
+foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test pif_test)
   if(NOT MSVC)
     if(KESTREL_BUILD_LOCAL)
       target_compile_options(${t} PRIVATE -march=native)

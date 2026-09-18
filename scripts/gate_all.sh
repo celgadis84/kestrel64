@@ -7,8 +7,8 @@ cmake --build build -j 8 >/dev/null || { echo "gate_all: build no compila"; exit
 
 # Tests unitarios primero: cuestan segundos y se pudren solos si nadie los compila (asi se
 # quedaron rsp_test y save_test sin que ningun gate lo notara).
-cmake --build build -j 8 --target rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test >/dev/null   || { echo "gate_all: los tests unitarios no compilan"; exit 1; }
-for t in rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test; do
+cmake --build build -j 8 --target rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test pif_test >/dev/null   || { echo "gate_all: los tests unitarios no compilan"; exit 1; }
+for t in rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test pif_test; do
   out=$(./build/$t.exe 2>&1 | tail -1)
   case "$out" in
     *"ALL PASS"*) echo "$t: $out" ;;

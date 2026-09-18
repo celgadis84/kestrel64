@@ -8046,3 +8046,50 @@ decidir si un arranque progresa. Dos caminos de arranque distintos gastan cantid
 instrucciones distintas ANTES de la misma escena, asi que el tope corta en sitios distintos del
 juego y el de arranque mas fiel parece muerto. Las senales validas son el intercambio de buffer
 (estado del juego) y la cuenta de interrupciones (`[exchist]`), no el contador de instrucciones.
+
+## 2026-09-18 -- El byte de control de la PIF RAM y el desafio del CIC-NUS-6105
+
+**El hueco, encontrado en el barrido LLE.** El byte 0x3F de la PIF RAM **no es un byte de
+datos**: es el buzon con el que la CPU le pide trabajo al PIF, y el PIF apaga cada bit en
+cuanto acepta el encargo. kestrel lo ignoraba por completo. Tres consecuencias:
+
+1. El bloque de ordenes del joybus se ejecutaba en **toda** lectura de 64 bytes, pidiera o
+   no el juego que se ejecutara.
+2. El bit 0 (`CONT_CMD_EXE` del SDK, que libultra escribe en `OSPifRam.pifstatus`
+   -- desplazamiento 0x3C de la estructura, 0x3F del bloque -- antes de **cada** escritura
+   del bloque, en 13 sitios distintos de la libreria) no se apagaba nunca. Un juego que
+   relea ese byte esperando a que el PIF lo baje se queda dando vueltas para siempre.
+3. El bit 1, el **desafio anti-pirateria del CIC**, no estaba implementado.
+
+**Lo implementado, con el instante correcto de cada bit.** El bit 0 lo consume el PIF al
+RECIBIR el bloque, o sea en el DMA **RDRAM -> PIF**; los transferimientos del joybus en si
+siguen donde estaban, en la lectura, que es donde el hardware los corre. El bit 1 se sirve
+en el DMA **PIF -> RDRAM**, y **no es una transaccion de joybus**: el PIF habla con el chip
+CIC del cartucho por su linea serie propia, asi que durante esa lectura los mandos no se
+sondean. Los demas bits documentados (0x08 terminar arranque, 0x10 cerrar la PIF ROM, 0x20
+acuse de la suma, 0x40 comprobar la suma) se dejan intactos: un juego que empaquete banderas
+ahi tiene que releer lo que escribio.
+
+**El desafio del 6105.** El juego deja 15 bytes (30 nibbles) en PIF RAM 0x30..0x3E, pone el
+bit 1 y lee el bloque; el PIF pasa los nibbles al CIC y escribe la respuesta de 30 nibbles
+en el mismo sitio. El algoritmo es una maquina de estados por nibble con una tabla de 32
+entradas indexada por `(sel << 4 | data)`, `key` arranca en 0xB y `data = key + 5*mem[i]`.
+Publicado en n64brew (paginas PIF-NUS y CIC-NUS); solo lo llevan el 6105 y el 7105. Un
+cartucho que no sea de ese chip **no recibe respuesta inventada**: el bloque se queda como
+estaba, que es lo que hace el hardware. `Memory::cic6105` lo pone `CPU::fastBoot` al
+identificar la imagen del IPL3, ANTES de la bifurcacion HLE/LLE, asi que los dos caminos de
+arranque lo tienen.
+
+**Por que hay vector de oro y no traza de juego.** Ninguno de los tres juegos de la mesa
+(PD, DK64, SM64) pide el desafio durante la intro -- `KESTREL_SILOG=1` da `desafios=0` en
+los tres --, asi que no hay ROM que sirva de oraculo aqui. La respuesta se fija contra una
+**transcripcion independiente** del algoritmo publicado: los mismos 30 nibbles pasados por
+las dos implementaciones dan la misma salida, asi que una errata en la tabla o en la maquina
+de estados hace fallar el test en vez de producir una respuesta con buena pinta.
+
+**Test.** `test/pif_test.cpp` (objetivo `pif_test`, ya dentro de `gate_all.sh`), conducido
+por los REGISTROS DEL SI, no por las tripas, para que una regresion en el descodificado de
+registro tambien salte: desafio contra el vector de oro; el desafio apaga su bit; sin 6105 el
+bloque queda intacto; el desafio NO sondea el joybus (zona de respuesta envenenada con 0xAA
+que sigue en 0xAA); el bit 0 se consume en el DMA de escritura; estado del mando 1
+(`0x05 0x00 0x00`); y solo se apaga el bit 0 (`0x31` -> `0x30`). ALL PASS 7/7.

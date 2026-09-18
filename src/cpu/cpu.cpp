@@ -359,6 +359,8 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
   bool pal = (bootTvType == 0);                     // 0 PAL / 1 NTSC / 2 MPAL (MPAL carts use NTSC chips)
   int  cicId = pal ? cic.idPal : cic.idNtsc;
   bool is6105 = (cic.crc == kCrcCic6105);
+  // El PIF necesita saberlo: el desafio anti-pirateria solo lo contesta este chip.
+  if(mem) mem->cic6105 = is6105;
   // Arrancar por IPL3 real o emular su resultado. El camino HLE no es generico: sabe
   // reproducir el efecto de los IPL3 que CONOCE (direccion de arranque propia de cada CIC,
   // la etapa RSP del 6105, la copia del primer megabyte desde ROM+0x1000). Un cartucho con

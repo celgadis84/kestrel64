@@ -1859,6 +1859,20 @@ auto Memory::siDma(bool toPif) -> void {
     // RDRAM -> PIF RAM: solo deja el bloque de ordenes en la PIF. El PIF NO lo ejecuta
     // aqui (ver el comentario del DMA de lectura).
     for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) pifram[i] = rdram[dram + i];
+    // Byte de CONTROL de la PIF RAM (0x3F). No es un byte de datos: es donde la CPU le pide
+    // trabajo al PIF, y el PIF apaga el bit en cuanto lo acepta. El bit 0 ("ejecutar el
+    // bloque de ordenes", `CONT_CMD_EXE` del SDK, que libultra escribe en `pifstatus` antes
+    // de CADA escritura del bloque) se consume aqui: el PIF lo lee al recibir el bloque,
+    // analiza las ordenes y lo borra. Sin borrarlo, un juego que relea el byte esperando a
+    // que se apague se queda dando vueltas para siempre. Los transferimientos del joybus en
+    // si no van aqui, van en la lectura (ver abajo), que es donde el hardware los corre.
+    if(pifram[63] & 0x01) pifram[63] = (u8)(pifram[63] & ~0x01u);
+  } else if(pifram[63] & 0x02) {
+    // Bit 1 del byte de control: DESAFIO del CIC. No es una transaccion de joybus -- el PIF
+    // habla con el chip CIC del cartucho por su linea serie propia -- asi que esta lectura
+    // no toca a los mandos. Ver pifCicChallenge().
+    pifCicChallenge();
+    pifram[63] = (u8)(pifram[63] & ~0x02u);
   } else {
     // PIF RAM -> RDRAM: el PIF ejecuta el bloque de ordenes JUSTO ANTES de entregarlo.
     // Es lo que hace el hardware y de lo que depende el SDK: osContStartReadData solo
@@ -1901,6 +1915,55 @@ auto Memory::siFinish() -> void {
   }
   rcp.si_status = 0;
   raiseIntr(MI_SI);
+}
+
+// --- Desafio anti-pirateria del CIC-NUS-6105 ---------------------------------
+// Los cartuchos firmados con 6105/7105 (Perfect Dark, Donkey Kong 64, Majora's Mask,
+// Banjo-Tooie...) pueden preguntarle al chip CIC algo que solo el chip sabe contestar. El
+// juego deja 15 bytes en la PIF RAM (0x30..0x3E), pone el bit 1 del byte de control y lee el
+// bloque: el PIF le pasa al CIC los 30 NIBBLES en orden, el CIC devuelve otros 30, y el juego
+// compara con lo que esperaba. Un cartucho copiado sin CIC autentico no puede contestar.
+//
+// El algoritmo es una maquina de estados sobre nibbles con una tabla de 32 entradas indexada
+// por (seleccion << 4 | dato); esta publicado en n64brew (paginas PIF-NUS y CIC-NUS) desde que
+// se volco la ROM del 6105. No hay nada especifico de un juego aqui: es la funcion del chip.
+//
+// Ningun otro CIC implementa esta orden, y ningun cartucho que no sea 6105 la pide. Si llegara
+// igualmente, lo unico honesto es no inventarse una respuesta: se deja el bloque como estaba
+// (que es lo que el juego leeria de una linea que nadie contesta) y se avisa una vez.
+auto Memory::pifCicChallenge() -> void {
+  if(std::getenv("KESTREL_SILOG"))
+    std::fprintf(stderr, "[silog] desafio del CIC (6105=%d) pc=0x%08x\n", (int)cic6105, (u32)storePc);
+  if(!cic6105) {
+    static bool warned = false;
+    if(!warned) { warned = true;
+      std::fprintf(stderr, "[pif] desafio del CIC pedido por un cartucho que no es 6105: sin respuesta\n"); }
+    return;
+  }
+  static const u8 kLut[32] = {
+    0x4, 0x7, 0xa, 0x7, 0xe, 0x5, 0xe, 0x1,
+    0xc, 0xf, 0x8, 0xf, 0x6, 0x3, 0x6, 0x9,
+    0x4, 0x1, 0xa, 0x7, 0xe, 0x5, 0xe, 0x1,
+    0xc, 0x9, 0x8, 0x5, 0x6, 0x3, 0xc, 0x9,
+  };
+  u8 nib[30];
+  for(int i = 0; i < 15; i++) { nib[i * 2] = (u8)(pifram[0x30 + i] >> 4); nib[i * 2 + 1] = (u8)(pifram[0x30 + i] & 0xf); }
+  u8 key = 0xb, sel = 0;
+  for(int i = 0; i < 30; i++) {
+    u8 data = (u8)((key + 5 * nib[i]) & 0xf);
+    nib[i] = data;
+    key = kLut[(sel << 4) | data];
+    u8 mod = (u8)(data >> 3);            // bit alto del nibble
+    u8 mag = (u8)(data & 7);             // los tres bajos
+    if(mod) mag = (u8)(~mag & 7);
+    if(mag % 3 != 1) mod = (u8)!mod;
+    if(sel) {                            // dos datos fuerzan el signo cuando venimos de 1
+      if(data == 0x1 || data == 0x9) mod = 1;
+      if(data == 0xb || data == 0xe) mod = 0;
+    }
+    sel = mod;
+  }
+  for(int i = 0; i < 15; i++) pifram[0x30 + i] = (u8)((nib[i * 2] << 4) | nib[i * 2 + 1]);
 }
 
 // Run the 64-byte PIF RAM joybus command block and fill in device responses,
