@@ -91,7 +91,7 @@ static const Option kOpt_rcp[] = {
   {"rspinline", "KESTREL_RSPINLINE", "RSP en linea", OType::Bool, "0", "Ejecuta la tarea del RSP dentro del hilo de CPU en vez de cederla al hilo del RCP.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"rdpinline", "KESTREL_RDPINLINE", "RDP en linea", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"rdpdrain", "KESTREL_RDPDRAIN", "Drenar RDP en cada sync", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
-  {"paceslack", "KESTREL_PACESLACK", "Holgura del regulador RCP", OType::Int, "0", "0 = por defecto. Cuanto puede adelantarse la CPU al RSP antes de esperar.", true, false, false, 0, 1e+06, 0, nullptr, 0, false},
+  {"paceslack", "KESTREL_PACESLACK", "Holgura del regulador RCP", OType::Int, "0", "0 = por defecto (65536 con las barreras de invitado puestas, 4096 sin ellas). Cuanto puede adelantarse la CPU al RSP antes de esperar.", true, false, false, 0, 1e+06, 0, nullptr, 0, false},
   {"occ", "KESTREL_OCC", "Muestreo de solape (us)", OType::Int, "0", "0 = apagado. Periodo del muestreador de ocupacion de los hilos del RCP.", true, false, false, 0, 100000, 0, nullptr, 0, false},
 };
 

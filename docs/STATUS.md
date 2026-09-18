@@ -6979,3 +6979,54 @@ perilla de espera es constante del acoplamiento y no del emulador.
 
 Guest-neutro: 15 volcados de framebuffer por juego y tanda, un solo md5 cada uno
 (jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`, DK64 `eca336ea`).
+
+## 2026-09-18 -- La holgura del regulador cuando las barreras son la autoridad: 4096 -> 65536
+
+`kPaceSlack` (`KESTREL_PACESLACK`) es la ultima perilla del regulador que quedaba sin re-barrer
+desde que los diarios (`dpLog`/`spLog`/`dmaLog`) y `dpBarSync` cambiaron el acoplamiento. El
+barrido decia 65536 y el 2026-09-03 esa perilla se BAJO de 1 M a 4096 por **correccion**, no por
+velocidad, asi que la primera reaccion fue no tocarla. Lo que cambio el veredicto es que las
+barreras de invitado llegaron DESPUES de aquella nota.
+
+**Lo que el hardware no justifica es el adelanto en tiempo de INVITADO.** Y hoy ese adelanto ya no
+lo acota el regulador: `rspKick` arma `rcpPend|8` en CADA lanzamiento de tarea (Threaded con
+`spBarrierOn()` y `rcpDeadlineOn()`), y `rcpRetire` llama a `spBarrierWait` en cada retiro, que
+para el reloj del invitado en `spBarrierAt()` -- el instante al que el RSP ha trabajado de verdad
+-- pase lo que pase con la holgura. El RDP tiene lo suyo con `dpBarrierWait` (`rcpPend|4`). Con las
+dos puestas la holgura del regulador ya no decide CUANTO se adelanta la CPU emulada, solo cada
+cuanto interviene el freno del ANFITRION antes de que mande la barrera. Ahi si es una perilla de
+rendimiento, y una corta cuesta: el freno entra tantas veces por campo que la CPU pasa mas tiempo
+en el condvar que emulando.
+
+Por eso el cambio NO es subir la constante, es `Memory::paceSlack()`: 65536 cuando las barreras son
+la autoridad (Threaded + `SPBARRIER` + `DPBARRIER` + `RCPDEADLINE`, o sea la configuracion normal)
+y 4096 cuando alguna de esas escotillas de depuracion esta apagada y el regulador vuelve a ser el
+unico freno de invitado. `KESTREL_PACESLACK`, si se pone, fija las dos: una perilla, un valor.
+El regulador solo corre en Threaded (`system.cpp`, `const bool paced = rcpMode == Threaded`), asi
+que Lockstep no se entera de nada de esto.
+
+Barrido intercalado, min de 5, Parallel-RDP, ms de pared, DOS tandas independientes:
+
+| juego | tanda 1: 4096 | 65536 | tanda 2: 4096 | 65536 | 1048576 |
+|---|---|---|---|---|---|
+| junkrunner64 | 7195 | **7051** | 7205 | **7057** | 7089 |
+| Perfect Dark | 11423 | **11353** | 11445 | **11406** | 11239 |
+| SM64 | 7459 | **7425** | 7485 | **7354** | 7341 |
+| DK64 | 11741 | **11674** | 11774 | **11604** | 11598 |
+
+Ocho de ocho a favor de 65536, y md5 de framebuffer identico en las 30 corridas (jr `75e331cb`,
+PD `0f0adee7`, SM64 `29a0e995`, DK64 `eca336ea`).
+
+**El liston de esta perilla NO es la pared.** Es el mismo con que se fijo el 4096: arranques
+limpios de Perfect Dark. Con 1 M descarrilaba ~1 de cada 8 y acababa girando en un hilo con IE=0
+tomando una excepcion de coprocesador por vuelta. Prueba hecha, 600 intercambios por arranque:
+**30 de 30 limpios con 65536** (15 intercalados contra un control de 15 con 4096, mas 15 sueltos),
+todos `rc=0` y todos con md5 `0f0adee7`. A una tasa de fallo de 1 de cada 8, 30 arranques limpios
+dejan un 1,8 % de probabilidad de no haberlo visto.
+
+**1 M sigue descartado** aunque en la tanda 2 midiera bien en tres juegos: es el orden de magnitud
+que descarrilaba, no hay nada que lo justifique, y la barrera del SP se puede apagar por variable.
+
+Solo coste de anfitrion: `[statehash]` de junkrunner64 a 400 M `7f1b537e69aad3f4` en Lockstep y en
+Threaded con el cambio puesto. systemtest/sm64 PASS en los diez modos, md5 `d35bd8aa` y `b5521b24`,
+krom interp 88,72/92,07 regress=0, krom prdp 89,27/92,56 regress=0.

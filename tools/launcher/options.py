@@ -103,7 +103,8 @@ CATEGORIES = [
     O("rdpdrain", "KESTREL_RDPDRAIN", "Drenar RDP en cada sync", "bool", False, adv=True),
     O("paceslack", "KESTREL_PACESLACK", "Holgura del regulador RCP", "int", 0, adv=True,
       min=0, max=1000000,
-      help="0 = por defecto. Cuanto puede adelantarse la CPU al RSP antes de esperar."),
+      help="0 = por defecto (65536 con las barreras de invitado puestas, 4096 sin ellas). "
+           "Cuanto puede adelantarse la CPU al RSP antes de esperar."),
     O("occ", "KESTREL_OCC", "Muestreo de solape (us)", "int", 0, adv=True,
       min=0, max=100000,
       help="0 = apagado. Periodo del muestreador de ocupacion de los hilos del RCP."),

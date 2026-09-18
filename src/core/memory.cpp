@@ -2585,8 +2585,35 @@ auto Memory::rspAwaitIdle() -> void { RcpWaitMark rwm_{cpuRcpWait};
 // sobre codigo TLB-mapeado: la curva es plana de 4 K a 1 M. Default = jit::kGuardMaxOps.
 // 4096 == jit::kGuardMaxOps. No se incluye jit.hpp aqui a proposito: el core no debe depender
 // del backend de CPU.
-static const u64 kPaceSlack = std::getenv("KESTREL_PACESLACK")
+//
+// MATIZ 2026-09-18, y no deshace lo de arriba: lo que el hardware no justifica es el ADELANTO
+// EN TIEMPO DE INVITADO, y desde que existen las barreras de invitado ese adelanto ya no lo
+// acota el regulador. La barrera del SP se arma en CADA lanzamiento de tarea (ver rspKick) y
+// spBarrierWait clava el reloj del invitado en spBarrierAt() -- el instante al que el RSP ha
+// trabajado de verdad -- en cada retiro, holgura aparte; la del RDP hace lo propio con el
+// motor. Con las dos puestas, la holgura del regulador ya no decide CUANTO se adelanta la CPU
+// emulada, solo cada cuanto interviene el freno del ANFITRION antes de que mande la barrera.
+// Ahi si es una perilla de rendimiento, y una corta cuesta: el freno entra tantas veces por
+// campo que la CPU pasa mas tiempo en el condvar que emulando.
+// Barrido intercalado, min de 5, Parallel-RDP, ms de pared, DOS tandas independientes
+// (4096 -> 65536):
+//   tanda 1   jr 7195 -> 7051, PD 11423 -> 11353, SM64 7459 -> 7425, DK64 11741 -> 11674
+//   tanda 2   jr 7205 -> 7057, PD 11445 -> 11406, SM64 7485 -> 7354, DK64 11774 -> 11604
+// Ocho de ocho a favor y md5 de framebuffer identico en las 30 corridas. El liston de esto NO
+// es la pared, es el mismo con que se fijo el 4096: arranques limpios de Perfect Dark. 30 de 30
+// con 65536 (mas los 15 de control con 4096), todos con md5 0f0adee7 y sin descarrilar.
+// 1 M sigue DESCARTADO: es el orden de magnitud que descarrilaba, y aunque hoy midiera bien no
+// hay nada que lo justifique.
+// Cuando las barreras NO estan (KESTREL_SPBARRIER=0, KESTREL_DPBARRIER=0, KESTREL_RCPDEADLINE=0,
+// que son escotillas de depuracion) el regulador vuelve a ser el unico freno de invitado y la
+// holgura vuelve a 4096, que es lo unico que justifica el emulador. Ver paceSlack().
+static const bool kPaceSlackSet = std::getenv("KESTREL_PACESLACK")
+                               && *std::getenv("KESTREL_PACESLACK");
+static const u64 kPaceSlack = kPaceSlackSet
                             ? std::strtoull(std::getenv("KESTREL_PACESLACK"), nullptr, 0) : 4096;
+// Holgura cuando las barreras de invitado son la autoridad. KESTREL_PACESLACK, si esta puesta,
+// manda sobre las dos: una perilla, un valor.
+static const u64 kPaceSlackBar = kPaceSlackSet ? kPaceSlack : 65536;
 static constexpr u64 kPaceMaxWait = 20'000'000ull;    // ns; salvavidas por episodio
 // Tope de las barreras de invitado (RDP y RSP). No es el mismo caso que kPaceMaxWait: el
 // regulador espera a que un contador AVANCE, cosa que pasa cada pocos microsegundos,
@@ -2640,6 +2667,14 @@ static const u64 kPaceGrain = std::getenv("KESTREL_PACEGRAIN")
 
 // Freno de los DOS dominios del RCP. El permiso que vuelve es el mas corto de los dos: la
 // CPU no puede adelantar ni al RSP ni al RDP mas de lo que el hardware permite.
+// Holgura efectiva del regulador. Con las barreras de invitado puestas son ELLAS las que
+// acotan el adelanto de la CPU emulada, asi que el regulador puede intervenir menos veces;
+// sin ellas, el regulador es el unico freno y la holgura es la del dynarec (kGuardMaxOps).
+auto Memory::paceSlack() -> u64 {
+  return (rcpMode == RcpMode::Threaded && spBarrierOn() && dpBarrierOn() && rcpDeadlineOn())
+       ? kPaceSlackBar : kPaceSlack;
+}
+
 auto Memory::rcpPace(u64 cpuOps) -> u32 {
   u32 a = rspPace(cpuOps);
   u32 b = rdpPace(cpuOps);
@@ -2648,17 +2683,18 @@ auto Memory::rcpPace(u64 cpuOps) -> u32 {
 
 auto Memory::rspPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
   if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return 0xFFFF'FFFFu; }
+  const u64 slack = paceSlack();
   u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
   if(!pacePrimed) {
     pacePrimed = true; paceGiveUp = false; paceWaitedNs = 0;
     paceCpu0 = cpuOps; paceRsp0 = rspNow;
     paceEpisodes.fetch_add(1, std::memory_order_relaxed);
-    return paceGrant(0, kPaceSlack);
+    return paceGrant(0, slack);
   }
   if(paceGiveUp) return 0xFFFF'FFFFu;
   for(;;) {
     u64 ahead = cpuOps - paceCpu0;
-    u64 allow = paceDivDen.div((rspNow - paceRsp0) * paceCpuNum) + kPaceSlack;
+    u64 allow = paceDivDen.div((rspNow - paceRsp0) * paceCpuNum) + slack;
     if(ahead <= allow) return paceGrant(ahead, allow);
     // El freno ata la CPU al avance en CICLOS del RSP, y eso presupone que el RSP esta
     // trabajando. Cuando esta parado en una cita de lectura del FIFO (dpReadSync) el que
@@ -2666,19 +2702,19 @@ auto Memory::rspPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
     // siguiente buffer de comandos. Frenarla ahi es frenar al que tiene la pelota, y los dos
     // hilos se quedan mirandose hasta que salta el timeout del condvar. Quien acota a la CPU
     // en esa ventana es la barrera del SP con su adelanto (kRdvLead), no el regulador.
-    if(rspRdvAt.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
+    if(rspRdvAt.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + slack);
     // Igual con el RSP esperando a que la CPU aplique su diario DPC (ver dpLogWait).
-    if(rspLogWait.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
+    if(rspLogWait.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + slack);
     // Y con el RSP en la cita exacta de spReadSync (sondeo de SP_STATUS, lecturas y escrituras
     // de DPC, DMA): espera a que la CPU llegue a su instante, y frenarla aqui dejaba a los dos
     // hilos parados hasta el timeout del condvar (bloqueo mutuo de latencia, no de logica).
-    if(rspSyncWait.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + kPaceSlack);
+    if(rspSyncWait.load(std::memory_order_acquire)) return paceGrant(ahead, ahead + slack);
     // Lo mismo, pero en grande: con el RSP aparcado (ver rspParkWait) el unico que puede
     // desatascar la escena es la CPU, y el freno la ata al avance de un reloj que por
     // definicion no avanza.
     if(rspPark.load(std::memory_order_acquire) &&
        !rspParkWake.load(std::memory_order_acquire))
-      return paceGrant(ahead, ahead + kPaceSlack);
+      return paceGrant(ahead, ahead + slack);
     paceHolds.fetch_add(1, std::memory_order_relaxed);
     auto t0 = std::chrono::steady_clock::now();
     {
@@ -2770,17 +2806,18 @@ auto Memory::paceGrant(u64 ahead, u64 allow) -> u32 {
 // cuestion de fidelidad, nunca puede ser una via de bloqueo.
 auto Memory::rdpPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
   if(!rdpBusy.load(std::memory_order_acquire)) { dpacePrimed = false; return 0xFFFF'FFFFu; }
+  const u64 slack = paceSlack();
   u64 gclkNow = rcp.rdpGclk.load(std::memory_order_acquire);
   if(!dpacePrimed) {
     dpacePrimed = true; dpaceGiveUp = false; dpaceWaitedNs = 0;
     dpaceCpu0 = cpuOps; dpaceGclk0 = gclkNow;
     dpaceEpisodes.fetch_add(1, std::memory_order_relaxed);
-    return paceGrant(0, kPaceSlack);
+    return paceGrant(0, slack);
   }
   if(dpaceGiveUp) return 0xFFFF'FFFFu;
   for(;;) {
     u64 ahead = cpuOps - dpaceCpu0;
-    u64 allow = paceDivDen.div((gclkNow - dpaceGclk0) * paceCpuNum) + kPaceSlack;
+    u64 allow = paceDivDen.div((gclkNow - dpaceGclk0) * paceCpuNum) + slack;
     if(ahead <= allow) return paceGrant(ahead, allow);
     dpaceHolds.fetch_add(1, std::memory_order_relaxed);
     auto t0 = std::chrono::steady_clock::now();

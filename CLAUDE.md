@@ -234,9 +234,15 @@ MEDIDO 2026-09-03: sigue haciendo falta -- sin ella PD cuelga 1 de cada 16 arran
 Desde 2026-09-17 solo importa en Lockstep: en Threaded con plazos la guarda ya no esta, la barrera
 del SP acota en tiempo de invitado) · `KESTREL_JIT_RSPGUARD=1` (vuelve a poner esa guarda en Threaded,
 para bisecar) ·
-`KESTREL_PACESLACK=<n>` (holgura del regulador CPU<->RSP, por defecto **4096 = `jit::kGuardMaxOps`**;
-ver el comentario largo sobre `kPaceSlack` en `src/core/memory.cpp`: por encima de la granularidad
-del dynarec la holgura la tendria que justificar el hardware, y no la justifica) · `KESTREL_PACEGRAIN=<n>`.
+`KESTREL_PACESLACK=<n>` (holgura del regulador CPU<->RSP; **DOS defectos** desde el 2026-09-18:
+**65536** cuando las barreras de invitado son la autoridad -- Threaded con `SPBARRIER`, `DPBARRIER`
+y `RCPDEADLINE` puestas, o sea la configuracion normal -- y **4096 = `jit::kGuardMaxOps`** cuando
+alguna de esas escotillas esta apagada y el regulador vuelve a ser el unico freno. Poner la
+variable fija las dos. Razon: lo que el hardware no justifica es el ADELANTO EN TIEMPO DE INVITADO,
+y con las barreras puestas ese adelanto lo clava `spBarrierWait` en `spBarrierAt()` en cada retiro,
+holgura aparte; entonces la holgura solo decide cada cuanto interviene el freno del ANFITRION. Ver
+el comentario largo sobre `kPaceSlack`/`paceSlack()` en `src/core/memory.cpp`. 1 M sigue descartado:
+es el valor que descarrilaba Perfect Dark 1 de cada 8 arranques) · `KESTREL_PACEGRAIN=<n>`.
 
 **Python**: `scripts/validate.py` pide numpy y el python de MSYS (`/c/msys64/clang64/bin/python`,
 el primero del PATH cuando se exporta clang64) NO lo tiene. Usar siempre el de Windows,

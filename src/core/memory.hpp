@@ -967,6 +967,7 @@ struct Memory {
   // compartida, no una lectura local. Por eso van juntas: antes eran dos llamadas seguidas
   // (rcpPace + paceAllowance) que releian el mismo par de lineas. Quien no quiera el permiso
   // ignora el retorno.
+  auto paceSlack() -> u64;
   auto rcpPace(u64 cpuOps) -> u32;
  private:
   auto paceGrant(u64 ahead, u64 allow) -> u32;   // permiso a partir de lo ya leido
