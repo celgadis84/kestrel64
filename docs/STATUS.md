@@ -7625,3 +7625,78 @@ se pregunta pase lo que pase.
 
 Cambio de colocacion, no de semantica: la foto de estado serializa campo a campo
 (`savestate.cpp`, `io.pod(c.retired)`) y el JIT saca los desplazamientos con `offsetof`.
+
+## 2026-09-18 -- junkrunner64 tumbaba el emulador: division entera por cero en `aiArm()`
+
+`junkrunner64` es, por diseno, una ROM que escribe basura en los registros del RCP. Con
+`KESTREL_MAXINSN=3000000000` el anfitrion se moria:
+
+```
+HOST EXCEPTION 0xc0000094
+```
+
+0xc0000094 es `STATUS_INTEGER_DIVIDE_BY_ZERO`: no es un fallo del invitado, es el
+procesador del ANFITRION lanzando `#DE`. El RIP crudo no dice nada -- con ASLR cambia en
+cada arranque --, asi que la primera pieza fue saber de que imagen era. Con el modulo y su
+base, RVA = `0x9a993`, y `llvm-symbolizer` sobre el exe lo puso en `kestrel::Memory::aiArm()`.
+
+Debajo, `aiNextEvent()`:
+
+```cpp
+const u64 rate = rcp.ai_dacrate ? (u64)(aiVidClock / (rcp.ai_dacrate + 1)) : 32'000ull;
+```
+
+`rcp.ai_dacrate` es `u32`. Con `0xffffffff` dentro, el `+ 1` da la vuelta a 0 EN ARITMETICA
+DE 32 BITS antes de la division, y `aiVidClock / 0` mata el proceso. La guarda de `?:` no
+sirve de nada: 0xffffffff no es cero.
+
+La division no era el fallo, era el sintoma. El fallo estaba en la ESCRITURA: el registro se
+guardaba crudo. AI_DACRATE tiene CATORCE bits -- n64brew, Audio Interface, `DACRATE[13:0]` --
+y AI_BITRATE tiene CUATRO, `BITRATE[3:0]`; lo que se escriba por encima el hardware no lo
+guarda. O sea que en una consola real `0xffffffff` se queda en `0x3fff` y `+1` no da la
+vuelta nunca. Enmascarar en la escritura es la semantica de hardware, y de paso el `#DE` se
+vuelve imposible por construccion:
+
+```cpp
+case 0x10: aiTick(cartNow()); rcp.ai_dacrate = v & 0x3fff; aiArm(); ...
+case 0x14: rcp.ai_bitrate = v & 0xf; break;
+```
+
+Es la misma convencion que ya seguia el fichero tres lineas mas abajo con el PI
+(`rcp.pi_dram_addr = v & 0x00ff'fffe;`).
+
+Con el arreglo, cuatro corridas de junkrunner64 a 3e9 instrucciones terminan con `rc=0` y
+cero `HOST EXCEPTION`.
+
+### El manejador de fallos ahora dice DONDE
+
+Lo que costo tiempo aqui fue el diagnostico, no el arreglo, asi que el manejador aprende la
+leccion: antes de nada mira si el RIP cae dentro de una imagen cargada. Si cae, imprime el
+fichero, la base y el RVA -- que es lo estable y lo que se le puede dar a `addr2line`. Si no
+cae en ninguna, lo dice, porque en este emulador eso significa una cosa concreta: el codigo
+que el dynarec genera al vuelo. Esa distincion decide a que mitad del programa se mira.
+
+## 2026-09-18 -- Separar en lineas de cache los indices del diario DPC: NO REPRODUCE
+
+Hipotesis razonable y de la misma familia que las tres anteriores: `dpLogHead` la escribe
+SOLO la CPU y `dpLogTail` SOLO el hilo del RSP, pero cada uno LEE la del otro en su vuelta
+caliente, y estaban en la MISMA linea. Ping-pong de escritura puro. Se probo el reparto
+(`alignas(64)` a cada lado, los contadores con la cola) y lo mismo con el anillo `dmaPay`.
+
+Dos tandas intercaladas, min-de-N, mismos binarios:
+
+| juego | tanda 1 | tanda 2 |
+|---|---|---|
+| junkrunner64 | -0,96 % | **+0,21 %** |
+| Perfect Dark | -0,41 % | -0,55 % |
+| SM64 | -0,56 % | **+0,03 %** |
+| DK64 | -0,30 % | -0,13 % |
+
+Ni una sola lectura disjunta en ningun juego, y jr y SM64 cambian de signo entre tandas. Por
+la regla de la casa -- si el margen cabe dentro del ruido hace falta una SEGUNDA tanda
+intercalada, y si no reproduce no existe -- se revierte.
+
+Por que esta no paga y la de los cinco campos del reloj si: alli lo que se junto era lo que
+lee `cartNow()`, que el hilo del RSP pregunta en CADA vuelta de sondeo. Aqui el diario DPC se
+toca una vez por tramo, no por vuelta, asi que el trafico de coherencia que se ahorra es de
+otro orden de magnitud.

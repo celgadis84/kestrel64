@@ -31,6 +31,28 @@ static LONG WINAPI crashFilter(EXCEPTION_POINTERS* ep) {
   auto* rec = ep->ExceptionRecord;
   std::fprintf(stderr, "\n==== HOST EXCEPTION 0x%08lx at host RIP %p ====\n",
                (unsigned long)rec->ExceptionCode, rec->ExceptionAddress);
+  // De donde es ese RIP. El numero pelado no dice NADA: con ASLR cambia en cada arranque.
+  // Lo primero que hay que saber es si el fallo cayo dentro de una imagen -- y entonces el
+  // desplazamiento desde su base es estable y se lo puede tragar `addr2line` -- o en memoria
+  // sin imagen, que en este emulador significa el codigo que el dynarec genera al vuelo.
+  // Esa distincion decide a que mitad del programa se mira.
+  {
+    const void* rip = rec->ExceptionAddress;
+    HMODULE mod = nullptr;
+    if(GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                          | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCSTR)rip, &mod) && mod) {
+      char path[MAX_PATH] = {0};
+      GetModuleFileNameA(mod, path, (DWORD)sizeof path);
+      std::fprintf(stderr, "  modulo %s  base=%p  RVA=0x%llx\n", path, (void*)mod,
+                   (unsigned long long)((const char*)rip - (const char*)mod));
+    } else {
+      MEMORY_BASIC_INFORMATION mbi{};
+      const bool ok = VirtualQuery(rip, &mbi, sizeof mbi) != 0;
+      std::fprintf(stderr, "  RIP FUERA de toda imagen%s -> codigo emitido por el dynarec\n",
+                   ok && mbi.Type == MEM_PRIVATE ? " (memoria privada)" : "");
+    }
+  }
   if(rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
     std::fprintf(stderr, "  access violation: %s at host addr 0x%llx\n",
                  rec->ExceptionInformation[0] == 0 ? "READ" :

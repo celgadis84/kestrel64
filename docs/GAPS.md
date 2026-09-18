@@ -1247,3 +1247,47 @@ modos), o sea que la imagen coincide; lo que no coincide es el reparto por campo
 Por donde empezar: `[ds]` (`KESTREL_DPSCHED=1`) de las dos corridas, primer tramo cuyo `kick`
 difiera. El horario es todo tiempo de invitado en los dos modos, asi que la diferencia tiene que
 estar en el instante en que la CPU llega a la escritura de `DPC_END`, no en el coste.
+
+## junkrunner64 no es determinista en Threaded a 3e9 instrucciones (2026-09-18, ABIERTO)
+
+Salio buscando otra cosa (el `#DE` de `aiArm`, ya arreglado) y sobrevive al arreglo.
+
+`KESTREL_PRDP=1 KESTREL_AUDIO=0 KESTREL_MAXINSN=3000000000`, borrando el estado del invitado
+entero antes de cada corrida (`.eep`/`.sra`/`.fla` **y el `.mpk` del Controller Pak**, que la
+primera version de la prueba se dejaba puesto y es estado persistente que el invitado lee):
+
+| modo | corridas | `[statehash]` |
+|---|---|---|
+| Lockstep (`KESTREL_THREADS=0`) | 3 | `17c2962b082d80b9` las tres |
+| Threaded | 3 | `47d2193726e88bcc`, `3c9a4e01ffb4732c`, `47d2193726e88bcc` |
+
+O sea: Lockstep es determinista, Threaded no. Las corridas terminan con `rc=0` y cero
+`HOST EXCEPTION` desde el arreglo de la mascara AI, asi que no es el fallo del anfitrion; y no
+es el Controller Pak, porque se borra. El rastro de las corridas divergentes muestra al
+invitado saltando a direcciones imposibles (`jl 0xa0020ee8 -> 0xea242004`), o sea que el
+programa se ha descarrilado de verdad, no es solo la huella.
+
+Alcance, que importa para no exagerarlo: **el punto de validacion normal no lo ve**. A 400 M
+instrucciones jr sigue dando el mismo `[statehash]` en Lockstep y en Threaded, y es lo que
+cruzan las puertas. Esto aparece mucho mas tarde, con una ROM cuyo proposito es meter basura
+en los registros del RCP.
+
+Por donde empezar, en este orden (son las perillas que deciden el orden entre hilos):
+`KESTREL_SPLOG=0`, `KESTREL_DPLOG=0`, `KESTREL_DMALOG=0`, `KESTREL_DMARDV=3/0`,
+`KESTREL_DPBARSYNC=0`, `KESTREL_RSPDPAWAIT=1`. La que vuelva a hacerlo determinista senala el
+camino por el que se cuela un instante de invitado que no se esta clavando. Despues,
+`KESTREL_FIELDHASH=1` para acotar el campo exacto en que las dos corridas se separan.
+
+## Crecimiento de memoria con el invitado descarrilado (2026-09-18, SIN REPRODUCIR)
+
+Durante la caceria de arriba quedo un `kestrel64.exe` huerfano con **5,2 GB** de conjunto de
+trabajo, suficiente para que el sistema matara otros procesos. Al volver a medirlo no
+reproduce: siete corridas de junkrunner64 a 3e9 instrucciones muestreadas cada 15 s se quedan
+planas en **282 MB de WS / 608 MB privado** de principio a fin.
+
+Descartado por lectura de codigo como origen posible de esa cifra: el buffer de codigo emitido
+del dynarec esta topado en 16 MB y se recicla entero (`CodeCache::clear`), la sombra del FIFO
+son dos buffers del tamano de la RDRAM (`rdpShadow[2]`), el anillo de eventos es de 16384
+entradas fijas y `dpLog`/`dmaPay` son anillos de tamano fijo. Queda por mirar el lado de
+parallel-rdp y el camino con ventana/presentacion, que es el que NO tenia la corrida que se
+midio plana.

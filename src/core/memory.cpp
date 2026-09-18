@@ -1358,8 +1358,13 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x0c: clearIntr(MI_AI); break;
     // La frecuencia del DAC cambia la pendiente del drenaje: el plazo armado se calculo con
     // la vieja y ya no vale.
-    case 0x10: aiTick(cartNow()); rcp.ai_dacrate = v; aiArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
-    case 0x14: rcp.ai_bitrate = v; break;
+    // El registro tiene CATORCE bits (n64brew, Audio Interface: DACRATE[13:0]); lo que se
+    // escriba por encima el hardware no lo guarda. Guardarlo crudo no era solo inexacto: con
+    // 0xffffffff dentro, el `dacrate + 1` de `aiNextEvent` daba la vuelta a 0 en aritmetica de
+    // 32 bits y el anfitrion se moria de division entera por cero. Una ROM que escriba basura
+    // en los registros -- junkrunner64 lo hace a proposito -- tumbaba el emulador entero.
+    case 0x10: aiTick(cartNow()); rcp.ai_dacrate = v & 0x3fff; aiArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
+    case 0x14: rcp.ai_bitrate = v & 0xf; break;                 // BITRATE[3:0], igual
     }
     return;
   case BASE_PI & 0x1ff0'0000:
