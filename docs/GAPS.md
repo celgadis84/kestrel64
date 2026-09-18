@@ -825,18 +825,23 @@ tragaria el vencimiento (`jitTryBlock` consulta `siDueIn()` igual que ya hacia c
 `siToPif`, `siDram`, `siDoneAt`) viaja en la foto de estado, que subio a version 7.
 `KESTREL_SIINSTANT=1` recupera el comportamiento viejo (final instantaneo) para comparar.
 
-**PI: pendiente.** `piDma()` sigue poniendo `pi_status = 0x8` (hecho) nada mas empezar. En la
-consola la DMA del PI va a palabras por ciclo del bus del cartucho con los tiempos de
-latencia/pulso/liberacion que programan `PI_BSD_DOM*`. Lo que falta:
+**PI: CERRADO 2026-09-18.** `piDma()` ya no pone `pi_status = 0x8` (hecho) nada mas empezar:
+arma un plazo (`piArm`) con la duracion que sale de los tiempos de latencia/pulso/liberacion
+programados en `PI_BSD_DOM*`, y `MI_PI` no se levanta hasta que el reloj de invitado llega al
+final (`piFinish`). Misma maquinaria que el SI: campo de ocupado (`piBusy`/`piDoneAt`),
+vencimiento contra `cpu.retired`, guarda del JIT (`ioDueIn()` = el minimo del SI y el PI) y
+foto de estado (version 13). Ademas `loadRom` programa `PI_BSD_DOM1_*` desde los bytes
+0x01..0x03 de la cabecera, que es lo que hace el IPL2 en la consola y aqui no hacia nadie
+porque el arranque es HLE. `KESTREL_PIINSTANT=1` recupera el final instantaneo para bisecar.
+Detalle y cuentas en `docs/STATUS.md`.
 
-- (2) mismo esquema que el SI para el PI, con los tiempos de `PI_BSD_DOM*`. El plazo del SI ya
-  dejo hecha la maquinaria (campo de ocupado + vencimiento contra `retired` + guarda del JIT +
-  foto de estado), asi que el PI es sobre todo calcular el coste por palabra y decidir que pasa
-  con las DMA largas de decenas de kilobytes, que si duran lo suyo obligan a mirar como
-  interactuan con el troceado del JIT.
-- (3) solo entonces plantear una agenda general de eventos por marca de tiempo. Hoy hay dos
-  plazos artesanales (temporizador del COP0 y SI); con un tercero conviene unificarlos en vez de
-  seguir sumando guardas sueltas en `jitTryBlock`.
+- (3) **AHORA SI**: agenda general de eventos por marca de tiempo. Ya hay TRES plazos
+  artesanales (temporizador del COP0, SI y PI) y cuatro si se cuentan los del RCP
+  (`rcpDueIn`). Los tres sitios de `jit.cpp` que los consultan ya hacen el mismo pliegue a
+  mano -- `ioDueIn()` y luego minimo con `rcpDueIn()`, y el borde de `Count`==`Compare`
+  aparte porque vive en el COP0 --, o sea que el patron esta pidiendo una sola llamada
+  `nextEventIn(now)` que devuelva el minimo de todos y, al vencer, diga CUAL vencio. Eso es
+  lo que evita que el cuarto plazo sea otra guarda suelta mas.
 
 
 ### snapper64: lo que la bateria mide y nosotros no modelamos

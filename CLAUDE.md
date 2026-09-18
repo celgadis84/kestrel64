@@ -195,6 +195,14 @@ admite mas de 2 porque las guardas de borde de timer del JIT cuentan ops. Ver `d
 que la arranco, como antes del 2026-09-08. De fabrica el SI factura el tiempo de la linea
 joybus -- 4 us por bit, parada de consola 3 us, parada del mando 4 us -- y remata el DMA en
 diferido levantando `MI_SI` al vencer el plazo; ver `docs/GAPS.md`) ·
+`KESTREL_PIINSTANT=1` (igual para el PI: el DMA del cartucho vuelve a terminar en la
+instruccion que lo arranca, como antes del 2026-09-18. De fabrica el PI factura la duracion
+real del traslado con los tiempos que programan `PI_BSD_DOM*` -- bus de 16 bits por paginas
+de `2^(PGS+2)` bytes, `LAT+1` al entrar en la pagina, `(PWD+1)+(RLS+1)` por palabra de 16
+bits; con los valores de cabecera de un cartucho normal salen 5,375 MB/s -- y levanta
+`MI_PI` al vencer. `loadRom` programa ademas `PI_BSD_DOM1_*` desde los bytes 0x01..0x03 de
+la cabecera, que es lo que hace el IPL2 y aqui no hacia nadie por ser HLE el arranque; ver
+`docs/STATUS.md`) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
 `KESTREL_CPUIDLE=0` (apaga el cobro en bloque del hilo ocioso del invitado -- `beq $0,$0,-1`
 con NOP en la ranura de retardo; el salto usa el MISMO permiso que una cadena enlazada del JIT,

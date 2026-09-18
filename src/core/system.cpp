@@ -271,6 +271,7 @@ auto System::stepCpu(u64 n) -> u64 {
               // instruccion, asi que aqui tambien. Sin esto MI_SI llegaba una op tarde con JIT
               // (DK64 Lockstep divergia del interprete en el hilo ocioso).
               if(memory.siBusy && memory.cartNow() >= memory.siDoneAt) memory.siFinish();
+              if(memory.piBusy && memory.cartNow() >= memory.piDoneAt) memory.piFinish();
               if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire();
               rspInterleave();
               if(paced) memory.rcpPace(cpu.guestOps()); continue; }
@@ -292,6 +293,8 @@ auto System::stepCpu(u64 n) -> u64 {
     // que el plazo se alejaba mas cuanto mas llevaba corriendo el juego. SM64 con
     // KESTREL_CACHECOST=60 se quedaba sin lecturas de mando y sin dibujar nada.
     if(memory.siBusy && memory.cartNow() >= memory.siDoneAt) memory.siFinish();
+    // Y el del PI: la DMA del cartucho tampoco termina en la instruccion que la arranca.
+    if(memory.piBusy && memory.cartNow() >= memory.piDoneAt) memory.piFinish();
     // Y el fin de tarea del RCP en Threaded, por lo mismo: lo arma un worker con el coste ya
     // modelado y se hace visible cuando el reloj de invitado llega, no cuando el anfitrion
     // termina de calcular. Con Lockstep o con KESTREL_RCPDEADLINE=0 nunca hay nada armado y

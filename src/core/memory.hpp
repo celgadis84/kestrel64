@@ -1284,6 +1284,37 @@ public:
     if(!siBusy) return ~0ull;
     return siDoneAt > now ? siDoneAt - now : 0;
   }
+
+  // --- PI: la DMA del cartucho tampoco es instantanea ---------------------------------
+  // Mismo esquema que el SI, y por el mismo motivo: en la consola el motor del PI va a 16
+  // bits por acceso al bus del cartucho con los tiempos de PI_BSD_DOM*, asi que una carga de
+  // nivel de cientos de kilobytes tarda decenas de milisegundos y el juego se duerme en la
+  // cola del PI mientras. Rematarla en la instruccion que la arranca le devuelve el control
+  // al hilo del juego antes de tiempo (y hace que una pantalla de carga no exista).
+  bool piBusy   = false;    // PI_STATUS bit 0 (DMA_BUSY) mientras la transferencia va en vuelo
+  u64  piDoneAt = 0;        // reloj de invitado (cartNow()) en que termina
+  static constexpr u32 PI_DMA_BUSY = 1u << 0;   // PI_STATUS bit 0
+  auto piXferCycles(u32 cartPhys, u32 len) const -> u64;  // ciclos de RCP del traslado
+  auto piArm(u32 cartPhys, u32 len) -> void;   // arma el plazo (la copia ya esta hecha)
+  auto piFinish() -> void;                     // vence: levanta MI_PI
+  auto piDueIn(u64 now) const -> u64 {
+    if(!piBusy) return ~0ull;
+    return piDoneAt > now ? piDoneAt - now : 0;
+  }
+  // Los dos plazos de entrada/salida en uno. Los sitios que no pueden tragarse un plazo
+  // (guarda del JIT, permiso de la cadena) miran ESTE, no cada uno por su lado.
+  auto ioDueIn(u64 now) const -> u64 {
+    const u64 a = siDueIn(now), b = piDueIn(now);
+    return a < b ? a : b;
+  }
+  // Ciclos del RCP (62,5 MHz) -> instrucciones retiradas, por el unico reloj del emulador
+  // (instrucciones por campo x campos por segundo), igual que usToInsns pero sin pasar por
+  // microsegundos enteros: un DMA corto del PI dura unos pocos us y redondearlo a us lo
+  // dejaria en cero. 128 bits en el producto porque un DMA de 16 MB son ~2e8 ciclos.
+  auto rcpCyclesToInsns(u64 cycles) const -> u64 {
+    const unsigned __int128 n = (unsigned __int128)cycles * viFieldInsns * viFieldHzMilli;
+    return (u64)(n / 62'500'000'000ull);
+  }
   // Microsegundos de joybus -> instrucciones retiradas. Pasa por el unico reloj del
   // emulador (instrucciones por campo x campos por segundo), asi que sigue al factor CPI
   // y no reintroduce un segundo reloj.

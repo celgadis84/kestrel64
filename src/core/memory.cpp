@@ -145,8 +145,78 @@ auto Memory::initMap() -> void {
 
 auto Memory::loadRom(std::vector<u8> image) -> void {
   rom = std::move(image);
+  // Tiempos del bus del cartucho, como los pone la consola. En el aparato los escribe el
+  // IPL2 copiando los bytes 0x01..0x03 de la cabecera a PI_BSD_DOM1_{RLS,PGS,PWD,LAT}; aqui
+  // el arranque es HLE, asi que si no se hace a mano los registros se quedan a cero y el
+  // modelo de duracion del DMA del PI (piXferCycles) mediria un cartucho imposible.
+  // Reparto de bits (n64brew, ROM Header): 0x00 reservado (0x80 en los comerciales, NO es
+  // configuracion), 0x01 bits 4-5 = RLS y bits 0-3 = PGS, 0x02 = PWD, 0x03 = LAT.
+  // El valor de casi todos los cartuchos es 0x80371240 -> LAT 64, PWD 18, PGS 7, RLS 3.
+  if(rom.size() >= 4) {
+    rcp.pi_bsd[0] = rom[3];                 // 0x14 DOM1_LAT
+    rcp.pi_bsd[1] = rom[2];                 // 0x18 DOM1_PWD
+    rcp.pi_bsd[2] = (u32)(rom[1] & 0x0fu);  // 0x1C DOM1_PGS
+    rcp.pi_bsd[3] = (u32)((rom[1] >> 4) & 0x03u);   // 0x20 DOM1_RLS
+  }
+  // Dominio 2 (SRAM/FlashRAM y el bus de 0x05000000) se queda como esta: la cabecera no lo
+  // lleva, el IPL2 no lo toca y el juego que usa la pila del save lo programa el mismo antes
+  // de su primer DMA (el SDK pone LAT 5, PWD 0x0C, PGS 0x0D, RLS 2). Inventarle un valor de
+  // reinicio seria fingir un dato que no tenemos; con los registros a cero el modelo cuenta
+  // de menos, que es exactamente lo que hacia antes de existir el plazo.
   resolveSaveType();
   initMap();  // refresh so CART_ROM appears
+}
+
+// Duracion de un DMA del PI en ciclos del RCP, con los tiempos que programan PI_BSD_DOM*.
+// El bus del cartucho es de 16 bits y va por PAGINAS: tras mandar la direccion base se pueden
+// leer 2^(PGS+2) bytes seguidos, y al cruzar la pagina hay que mandarla otra vez.
+//   * LAT+1 ciclos entre la direccion (flanco de ALE_L) y el primer /RD o /WR de la pagina
+//   * PWD+1 ciclos con /RD o /WR abajo, por cada 16 bits
+//   * RLS+1 ciclos con /RD o /WR arriba entre dos palabras de 16 bits
+// Con los valores de fabrica (LAT 64, PWD 18, RLS 3, PGS 7) sale 65 + 256*23 = 5953 ciclos por
+// pagina de 512 B, o sea 95,2 us y 5,375 MB/s: la tasa de lectura de cartucho conocida.
+auto Memory::piXferCycles(u32 cartPhys, u32 len) const -> u64 {
+  const bool dom2 = (cartPhys >= 0x0500'0000u && cartPhys < 0x0600'0000u)
+                 || (cartPhys >= 0x0800'0000u && cartPhys < 0x1000'0000u);
+  const u32 b = dom2 ? 4u : 0u;
+  const u64 lat = rcp.pi_bsd[b + 0] & 0xffu, pwd = rcp.pi_bsd[b + 1] & 0xffu;
+  const u64 pgs = rcp.pi_bsd[b + 2] & 0x0fu, rls = rcp.pi_bsd[b + 3] & 0x03u;
+  const u64 pageBytes = 1ull << (pgs + 2);
+  const u64 perWord = (pwd + 1) + (rls + 1);
+  u64 cycles = 0, addr = cartPhys, left = len;
+  while(left) {
+    const u64 inPage = pageBytes - (addr & (pageBytes - 1));
+    const u64 take = inPage < left ? inPage : left;
+    cycles += (lat + 1) + ((take + 1) / 2) * perWord;
+    addr += take; left -= take;
+  }
+  return cycles;
+}
+
+// Arma el plazo del PI: el motor queda OCUPADO y MI_PI no se levanta hasta que el reloj de
+// invitado llega al final. La copia a la RDRAM ya esta hecha cuando se llama (el motor del
+// aparato la va escribiendo durante la ventana, y un juego que lea antes de la interrupcion
+// esta leyendo basura en las dos maquinas); lo que se retrasa es el FINAL, que es lo unico
+// que el invitado observa de verdad.
+// A/B: KESTREL_PIINSTANT=1 devuelve el comportamiento anterior (termina en la instruccion que
+// lo arranca). Solo para bisecar: en hardware NO pasa.
+auto Memory::piArm(u32 cartPhys, u32 len) -> void {
+  static const bool instant = std::getenv("KESTREL_PIINSTANT") != nullptr;
+  if(instant || !len) { rcp.pi_status = 0x8; raiseIntr(MI_PI); return; }
+  piBusy   = true;
+  piDoneAt = cartNow() + rcpCyclesToInsns(piXferCycles(cartPhys, len));
+  rcp.pi_status = PI_DMA_BUSY;
+  // Lo arranca un store que con el JIT puede ir en mitad de una cadena enlazada cuyo permiso
+  // no conocia este plazo (mismo caso que siDma).
+  if(jitGuardPtr) *jitGuardPtr = 0;
+}
+
+// Vencimiento del plazo del PI.
+auto Memory::piFinish() -> void {
+  if(!piBusy) return;
+  piBusy = false;
+  rcp.pi_status = 0x8;   // DMA done: interrupt pending (bit3), busy bits clear
+  raiseIntr(MI_PI);
 }
 
 auto Memory::saveSize() const -> u32 {
@@ -894,7 +964,10 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     case 0x04: return rcp.pi_cart_addr;
     case 0x08: return rcp.pi_rd_len;
     case 0x0c: return rcp.pi_wr_len;
-    case 0x10: piIoDecay(); return rcp.pi_status;
+    // Si el plazo ya vencio pero nadie lo ha rematado todavia (el invitado sondea
+    // PI_STATUS en vez de dormirse en la interrupcion), rematarlo aqui: el aparato no
+    // ensena DMA_BUSY un ciclo mas de lo que dura la transferencia.
+    case 0x10: piIoDecay(); if(piBusy && cartNow() >= piDoneAt) piFinish(); return rcp.pi_status;
     default: if((off & 0xff) >= 0x14 && (off & 0xff) <= 0x30) return rcp.pi_bsd[((off & 0xff) - 0x14) / 4];
     }
     return 0;
@@ -1279,8 +1352,12 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x08: rcp.pi_rd_len = v & 0xffffff; piDma(/*toCart=*/true);  break;  // RDRAM -> cart
     case 0x0c: rcp.pi_wr_len = v & 0xffffff; piDma(/*toCart=*/false); break;  // cart -> RDRAM
     case 0x10:
-      if(v & (1 << 1)) clearIntr(MI_PI);   // clear PI interrupt
-      rcp.pi_status = 0;
+      // Bit 0 = reinicio del controlador: aborta la transferencia en vuelo. Bit 1 = borrar la
+      // interrupcion. Antes se ponia el registro entero a cero, que con el plazo del PI ya no
+      // vale: el manejador del invitado escribe bit 1 para reconocer MI_PI y eso no puede
+      // apagar DMA_BUSY de una transferencia que todavia esta corriendo.
+      if(v & (1 << 0)) { piBusy = false; rcp.pi_status = 0; }
+      if(v & (1 << 1)) { clearIntr(MI_PI); rcp.pi_status &= ~0x8u; }
       break;
     default: if((off & 0xff) >= 0x14 && (off & 0xff) <= 0x30) rcp.pi_bsd[((off & 0xff) - 0x14) / 4] = v;
     }
@@ -1323,6 +1400,9 @@ static auto dmaVectorWarn() -> bool {
 }
 
 auto Memory::piDma(bool toCart) -> void {
+  // Arrancar una DMA con otra en vuelo no le pasa a un juego sano (el SDK espera a la
+  // interrupcion), pero si ocurre se cierra la anterior en vez de dejar un plazo huerfano.
+  if(piBusy) piFinish();
   // SRAM/FlashRAM save DMA (PI domain 2, 0x08000000). These devices are byte-wide and
   // linear — no ROM 16-bit-bus mux — so a plain byte copy through saveRead/saveWrite is
   // both simpler and correct. This is the path libultra's osPiStartDma uses to persist
@@ -1348,8 +1428,7 @@ auto Memory::piDma(bool toCart) -> void {
       ramBytesPi.fetch_add(len, std::memory_order_relaxed);
       rcp.pi_cart_addr = (cart) & 0xffff'fffe;
       rcp.pi_dram_addr = ((dram + 1) & ~1u) & 0x00ff'fffe;
-      rcp.pi_status = 0x8;
-      raiseIntr(MI_PI);
+      piArm(cartPhys, len);
       return;
     }
   }
@@ -1360,10 +1439,10 @@ auto Memory::piDma(bool toCart) -> void {
     // En la consola el motor LEE la RDRAM aunque el destino sea ROM y no se quede nada:
     // el bus se ocupa igual, asi que el medidor lo cuenta.
     ramBytesPi.fetch_add(len, std::memory_order_relaxed);
+    const u32 cartStart = rcp.pi_cart_addr & 0x1fff'fffe;
     rcp.pi_cart_addr = (rcp.pi_cart_addr + len) & 0xffff'fffe;
     rcp.pi_dram_addr = (rcp.pi_dram_addr + len) & 0x00ff'fffe;
-    rcp.pi_status = 0x8;
-    raiseIntr(MI_PI);
+    piArm(cartStart, len);
     return;
   }
   // cart -> RDRAM (PI WR_LEN): genuine PI DMA transfer engine. The copy is split into
@@ -1375,6 +1454,8 @@ auto Memory::piDma(bool toCart) -> void {
   // documented block algorithm, cf. ares n64/pi/dma.cpp.)
   u8 blk[128];
   s32 length = (s32)((rcp.pi_wr_len & 0x00ff'ffff) + 1);
+  const u32 cartStart = rcp.pi_cart_addr & 0x1fff'fffe;
+  const s32 xferLen = length;
   ramBytesPi.fetch_add((u64)length, std::memory_order_relaxed);
   s32 maxBlock = 128;
   bool firstBlock = true;
@@ -1419,8 +1500,7 @@ auto Memory::piDma(bool toCart) -> void {
   }
   rcp.pi_cart_addr = cart & 0xffff'fffe;
   rcp.pi_dram_addr = dram & 0x00ff'fffe;
-  rcp.pi_status = 0x8;   // DMA done: interrupt pending (bit3), busy bits clear
-  raiseIntr(MI_PI);
+  piArm(cartStart, (u32)xferLen);
 }
 
 // Copia corta sin salir a la CRT. El motor DMA del SP mueve tramos pequenos MUY a menudo

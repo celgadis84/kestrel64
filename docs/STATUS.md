@@ -7030,3 +7030,151 @@ que descarrilaba, no hay nada que lo justifique, y la barrera del SP se puede ap
 Solo coste de anfitrion: `[statehash]` de junkrunner64 a 400 M `7f1b537e69aad3f4` en Lockstep y en
 Threaded con el cambio puesto. systemtest/sm64 PASS en los diez modos, md5 `d35bd8aa` y `b5521b24`,
 krom interp 88,72/92,07 regress=0, krom prdp 89,27/92,56 regress=0.
+
+## 2026-09-18 -- KESTREL_PACEGRAIN re-barrido: se queda en 1024
+
+Ultima perilla del frente abierto el 2026-09-18 ("las perillas que se afinaron ANTES de los
+diarios"). `kPaceGrain` es el suelo del permiso que el regulador concede de una vez: en
+`Memory::paceGrant`, `if(left < kPaceGrain) left = kPaceGrain;`. Grano pequeno = el freno
+interviene mas veces y mas fino; grano grande = menos intervenciones pero el adelanto real
+se pasa del objetivo antes de que nadie lo mire.
+
+Min de 5, intercalado, Parallel-RDP, pared en ms:
+
+| juego | 256 | **1024 (actual)** | 4096 |
+|---|---|---|---|
+| junkrunner64 | 7563 | **7128** | 7531 |
+| Perfect Dark | 12142 | 11805 | **11761** |
+| SM64 | 7888 | 7734 | **7605** |
+| DK64 | 11822 | **11746** | 11749 |
+
+md5 identico en los cuatro por juego (jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`,
+DK64 `eca336ea`): la perilla es de anfitrion, el invitado sale igual.
+
+**Veredicto: 1024 se queda, y no hace falta segunda tanda.** 256 pierde en los cuatro, o
+sea que el suelo importa y esta por encima de 256. Entre 1024 y 4096 no hay ganador: 4096
+gana PD por 0,4 % y SM64 por 1,7 %, empata DK64, y **cobra +5,7 % en junkrunner64**
+(7531 contra 7128). La regla de la casa pide segunda tanda cuando el margen cabe en el
+ruido, pero aqui no hace falta llegar a eso: aunque los tres margenes pequenos fueran
+reales, el de junkrunner64 los triplica y va en contra. Una perilla que gana 1 % de media
+en tres juegos y pierde 5,7 % en el cuarto no se toca.
+
+El porque encaja con el mecanismo: junkrunner64 es el juego con las tareas de RSP mas
+cortas y seguidas, o sea el que mas veces cruza el umbral del regulador por unidad de
+tiempo; con grano 4096 cada concesion se pasa, la CPU adelanta de mas y acaba esperando en
+la barrera del SP, que es exactamente el coste que el grano fino evita. Los juegos con
+tareas largas (PD, SM64) apenas notan el grano porque entre dos intervenciones hay trabajo
+de sobra.
+
+Con esto el re-barrido queda **CERRADO**: ocho perillas revisadas, tres movidas
+(`RSPTANDA` 512->1024, `BARSPIN` 2048->16384, `RDPSPIN` 32768->131072), una movida con
+condicion (`PACESLACK` 4096->65536 solo cuando las barreras de invitado mandan) y cuatro
+confirmadas donde estaban (`RDVPOLL` 64, `DPSPIN` 262144, `RSPSPIN` 0, `PACEGRAIN` 1024).
+
+## 2026-09-18 -- El DMA del PI dura lo que dura: plazo con los tiempos de PI_BSD_DOM*
+
+Segundo plazo de periferico, hermano del que el SI estreno el 2026-09-08. Hasta hoy
+`piDma()` copiaba los bytes y en la MISMA instruccion ponia `PI_STATUS = 0x8` (DMA hecho) y
+levantaba `MI_PI`. O sea que un `osPiStartDma` de 64 KB de cartucho terminaba en cero tiempo
+de invitado: el hilo que se dormia en `osRecvMesg(&dmaMessageQ)` se despertaba antes de
+ceder, y el reparto de trabajo dentro del cuadro no se parecia al del aparato.
+
+### El bus del cartucho, y de donde salen sus tiempos
+
+Fuente: n64brew, *Peripheral Interface* y *ROM Header*. El bus del PI es de **16 bits** y va
+por **paginas**: se manda la direccion base una vez y luego se leen `2^(PGS+2)` bytes
+seguidos; al cruzar la pagina hay que volver a mandarla. Los cuatro registros
+`PI_BSD_DOM1_{LAT,PWD,PGS,RLS}` (`0x0460_0014`..`0x0460_0020`) son todos **ciclos del RCP
+menos uno**:
+
+- `LAT+1` ciclos entre el flanco de la direccion (ALE_L) y el primer `/RD` de la pagina
+- `PWD+1` ciclos con `/RD` abajo, por cada 16 bits
+- `RLS+1` ciclos con `/RD` arriba entre dos palabras de 16 bits
+
+`Memory::piXferCycles` recorre la transferencia pagina a pagina con esa cuenta y devuelve
+ciclos de RCP; `rcpCyclesToInsns` los pasa a instrucciones retiradas con la misma regla de
+tres que ya usaba el VI (`viFieldInsns` / `viFieldHzMilli`), que es el reloj con el que
+vence todo lo demas.
+
+**Cuadre con la realidad.** Con los valores de casi cualquier cartucho comercial
+(`0x80371240` -> LAT 64, PWD 18, PGS 7, RLS 3) sale, por pagina de 512 B:
+`65 + 256*(19+4) = 65 + 5888 = 5953` ciclos de RCP. A 62,5 MHz son **95,2 us por pagina**,
+o sea **5,375 MB/s**: exactamente la tasa de lectura de cartucho que la documentacion da
+por conocida. El modelo no se calibro para que diera eso; da eso porque los tiempos son los
+del hardware.
+
+### El agujero que habia debajo: los PI_BSD_DOM1 estaban a CERO
+
+Al escribir el modelo salio un cartucho imposible (tiempos cero = ancho de banda infinito).
+La razon es que en la consola quien programa esos cuatro registros es el **IPL2**, copiando
+los bytes 0x01..0x03 de la cabecera de la ROM; aqui el arranque es HLE y no lo hacia nadie.
+Ahora lo hace `Memory::loadRom`. Reparto de bits, que se documenta mal por ahi:
+
+| byte | contenido |
+|---|---|
+| 0x00 | **reservado** (0x80 en los comerciales; NO es configuracion, pese a lo que se lee a veces) |
+| 0x01 | bits 4-5 = RLS, bits 0-3 = PGS |
+| 0x02 | PWD |
+| 0x03 | LAT |
+
+El **dominio 2** (SRAM/FlashRAM, bus de `0x0500_0000`) se deja como estaba, a cero: la
+cabecera no lo lleva, el IPL2 no lo toca y el juego que use la pila del save lo programa el
+mismo antes de su primer DMA. Inventarle un valor de reinicio seria fingir un dato que no
+tenemos; con los registros a cero el modelo cuenta de menos, que es justo lo que hacia antes
+de existir el plazo.
+
+### Maquinaria
+
+Identica a la del SI, que para eso se hizo generica:
+
+- `piBusy` / `piDoneAt` = el motor esta ocupado hasta ese valor de `cpu.retired`.
+  `PI_STATUS` devuelve `PI_DMA_BUSY` mientras tanto, que es lo que el invitado sondea.
+- `piDma()` empieza con `if(piBusy) piFinish();` -- en el aparato un DMA nuevo mientras hay
+  otro en vuelo no existe (el juego mira el bit de ocupado antes), pero si pasa, el anterior
+  se da por terminado en vez de perderse.
+- **La copia se hace al armar, no al vencer.** El motor del aparato va escribiendo la RDRAM
+  durante la ventana, asi que un invitado que lea antes de la interrupcion lee basura en las
+  dos maquinas; lo unico que observa de verdad es el FINAL, y eso es lo que se retrasa.
+- El vencimiento se mira por instruccion en `System::stepCpu()` (dos sitios, en espejo de los
+  del SI) y el JIT tiene prohibido compilar un bloque que se tragaria el plazo: los tres
+  `siDueIn()` de `jit.cpp` pasan a `ioDueIn()`, que es el minimo de los dos plazos de E/S.
+- `piArm` pone `*jitGuardPtr = 0` porque lo dispara un store que con el JIT puede ir en mitad
+  de una cadena enlazada cuyo permiso no conocia este plazo (mismo caso que `siDma`).
+- La foto de estado lleva `piBusy` y `piDoneAt`; `kVersion` 12 -> 13.
+
+De paso se arreglo la **escritura a PI_STATUS**, que zapeaba el registro entero. En el
+hardware es un registro de ordenes: bit 0 = reiniciar el controlador (aborta el DMA en
+vuelo), bit 1 = limpiar la interrupcion (y SOLO eso, `pi_status &= ~0x8`). Un juego que
+escriba 2 para reconocer la interrupcion ya no borra de paso el bit de ocupado.
+
+### Validacion
+
+Este es el primer cambio del dia que toca **semantica de invitado**, no coste de anfitrion,
+asi que se esperaba que alguna huella se moviera y habia que mirar cual y por que.
+
+| prueba | resultado |
+|---|---|
+| systemtest interp | PASS 0/3721 - 0/2 - 0/6 |
+| systemtest threaded-jit | PASS 0/3721 - 0/2 - 0/6 |
+| sm64 60 campos, los 9 modos de `gate_all` | md5 `d35bd8aa...` **sin cambio** |
+| krom 371 ROMs | 88,72 / 92,07, regress=0 improve=0 new=0 |
+| junkrunner64 `[statehash]` Lockstep | `6c21ef859df54730` |
+| junkrunner64 `[statehash]` Threaded x3 | `6c21ef859df54730` (3/3, **== Lockstep**) |
+| Perfect Dark, 15 arranques de 600 campos | **15/15 limpios**, md5 `6ff31a96` los quince |
+
+El `[statehash]` de junkrunner64 **si se movio**, de `7f1b537e69aad3f4` a `6c21ef859df54730`,
+y es legitimo: la huella son los registros arquitectonicos de la CPU en el campo 60, o sea
+donde estaba el programa en ese instante, y ahora el programa pasa por un `osPiStartDma` que
+tarda. Que `KESTREL_PIINSTANT=1` tampoco devuelva el valor viejo (`5c38c4a6c74d3be4`) lo
+confirma desde el otro lado: parte del desplazamiento no es el plazo sino los
+`PI_BSD_DOM1_*` ya programados, que antes valian cero. Las dos mitades son cambios de
+hardware genuinos y las dos tenian que mover la huella. Lo que NO podia moverse -- y no se
+movio -- es la igualdad Lockstep == Threaded, que es el oraculo de verdad.
+
+El md5 del framebuffer de Perfect Dark en el campo 600 tambien se movio, de `0f0adee7` a
+`6ff31a96`, por la misma razon: el juego llega a ese campo habiendo hecho las cargas de
+cartucho en un instante distinto. Lo que importa de esa prueba no es el valor sino que sea
+**el mismo en los quince arranques** y que los quince acaben limpios: Perfect Dark es el
+juego que descarrila cuando el acoplamiento CPU-RCP se afloja de mas (1 de cada 8 con
+`kPaceSlack` a 1 M), y es el unico liston que dice si un cambio de tiempos de invitado ha
+roto algo que las puertas no ven.

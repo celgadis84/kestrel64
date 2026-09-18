@@ -25,7 +25,8 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 12;  // 12: pareja pendiente de la tuberia (enclavamientos);
+constexpr u32 kVersion = 13;  // 13: plazo del PI en vuelo (piBusy/piDoneAt);
+                              // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
                               // 9: registros DPS (puerto de test al buffer de spans);
@@ -245,6 +246,9 @@ auto visitRam(StateIO& io, Memory& m) -> void {
   // despues de que el juego arranque la lectura del mando se carga sin plazo armado, nadie
   // levanta MI_SI y el hilo que espera en la cola del SI no despierta nunca.
   io.pod(m.siBusy); io.pod(m.siToPif); io.pod(m.siDram); io.pod(m.siDoneAt);
+  // Plazo del PI en vuelo (v13). Sin esto un estado guardado en mitad de una carga de
+  // nivel revive con el motor ocupado para siempre o con la interrupcion perdida.
+  io.pod(m.piBusy); io.pod(m.piDoneAt);
   io.vecBlob(m.pifram);
   io.vecBlob(m.eeprom);
   io.vecBlob(m.saveRam);
