@@ -1320,6 +1320,38 @@ datos del propio invitado, y cuando eso aterriza respecto a las lecturas de la C
 reloj del anfitrion. Si con `SYNCRDP=1` (RDP sincrono) deja de divergir en los dos backends,
 es eso.
 
+### El fallo del centinela del JIT era UNA causa, no LA causa (2026-09-18)
+
+Arreglado el `kNoLink` (ver `docs/STATUS.md`), el corte de cuatro brazos a 1200 campos sale
+**limpio en los cuatro**, tres corridas cada uno, rastro `[ft]` identico linea a linea:
+
+| brazo | corridas | 1 vs 2 | 1 vs 3 |
+|---|---|---|---|
+| `prdp` | 3 | IGUAL | IGUAL |
+| `prdp` + `SYNCRDP=1` | 3 | IGUAL | IGUAL |
+| `soft` | 3 | IGUAL | IGUAL |
+| `soft` + `SYNCRDP=1` | 3 | IGUAL | IGUAL |
+
+O sea que la divergencia del campo 715 era ESO: la excepcion del anfitrion no mataba el proceso,
+el manejador la recogia y la corrida seguia con lo que hubiera quedado. Y de paso **la hipotesis
+del RDP queda sin apoyo**: con el RDP sincrono (`SYNCRDP=1`) el resultado es el mismo que con el
+worker suelto, en los dos backends.
+
+Pero el repro ORIGINAL, 3e9 instrucciones, **sigue divergiendo**:
+
+```
+T1 [statehash] 838832a63dfcb610
+T1 [statehash] 62498feb6e150c22
+T1 (sin huella: la corrida no llego al tope)
+T0 [statehash] 17c2962b082d80b9    <- lockstep, el mismo de siempre
+```
+
+Asi que queda cola mas alla del campo 1200. Lo siguiente es estirar el `[ft]` hasta donde
+divergen -- 3e9 instrucciones son ~4500 campos -- y mirar la primera linea distinta con las
+escotillas de pared ya descartadas y el anfitrion ya sin caerse. La tercera corrida ademas no
+llego al tope de instrucciones: eso es una segunda pista, porque el invitado se quedo parado
+antes, y conviene saber DONDE.
+
 ## Crecimiento de memoria con el invitado descarrilado (2026-09-18, SIN REPRODUCIR)
 
 Durante la caceria de arriba quedo un `kestrel64.exe` huerfano con **5,2 GB** de conjunto de
