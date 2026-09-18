@@ -6554,6 +6554,81 @@ lo que hace cara cualquiera de las dos opciones. La union de tramos contiguos en
 esta (`rdpSubmit`), y la union en el consumidor esta medida y descartada (seccion del 2026-09-17
 sobre los tres callejones del reparto CPU->RDP).
 
+## 2026-09-18 -- Quien mueve de verdad el bus por el motor de DMA del SP (`[spdma]`)
+
+Pregunta del usuario: en el telemetro `[rdram]` de junkrunner64 el RSP salia a 55-80 MB/s, y
+eso choca con lo que hace `rspq` de libdragon, cuyo bufer de comandos en DMEM es
+`RSPQ_DMEM_BUFFER_SIZE = 0x100` -- **256 bytes**, no KB -- y que en cada recarga refetch-ea el
+bufer ENTERO (`jal DMAIn` con `li t0, DMA_SIZE(RSPQ_DMEM_BUFFER_SIZE, 1)`, `rsp_queue.inc:454`).
+Con eso no salen 80 MB/s ni de lejos.
+
+**La contabilidad estaba bien.** Los dos unicos sitios que suman bytes del SP
+(`Memory::spDma` y `Memory::spDmaLogPush`) decodifican SP_RD_LEN/SP_WR_LEN igual y correcto:
+`length = ((len & 0xfff) + 8) & ~7` es el campo `len-1` mas uno, redondeado a multiplo de 8, y
+`count = ((len >> 12) & 0xff) + 1`. El `skip` NO se suma, que es lo que toca: saltar direcciones
+entre filas no ocupa el bus. No hay off-by-one por ningun lado.
+
+**Lo que faltaba era el desglose.** Un agregado de bytes mezcla cosas que no se parecen en nada:
+la recarga de una cola de comandos (256 B), un lote de `rdpq`, y un cambio de sobrecapa de
+microcodigo (IMEM entero = 4 KB). Ahora `[spdma]` saca, por direccion, cuenta + MB + **tamano
+medio por transferencia**, mas un histograma en cuatro cestas y cuantas transferencias tocan
+IMEM (= cambio de microcodigo).
+
+Medido con Parallel-RDP, tope por intercambios de bufer:
+
+| ROM | rsp MB/s | lee B/transf | escribe B/transf | DMA a IMEM |
+|---|---|---|---|---|
+| junkrunner64 (600 campos) | 80,2 | **1465** | 459 | **106296 (347,6 MB)** |
+| SM64 (300 flips) | 9,2 | 187 | 80 | 4604 (5,7 MB) |
+| DK64 (300 flips) | 5,2 | 232 | 291 | 1973 (2,8 MB) |
+| Perfect Dark (600 flips) | 7,0 | 229 | 71 | 3416 (4,1 MB) |
+
+Conclusiones:
+
+1. **En juegos reales el RSP no es el maestro gordo**: 5-9 MB/s, 1-2 % del pico del bus, con
+   tamanos medios de 70-290 B que encajan con recargas de cola y listas cortas. Quien manda es
+   el RDP (24-37 MB/s: textura + z + color por pixel) y detras el VI (9-30 MB/s: el framebuffer
+   entero por campo). Esto es justo lo que dice el hardware.
+2. **junkrunner64 es patologico y no vale de referencia de ancho de banda.** De sus 601,6 MB
+   leidos, **347,6 MB (58 %) son cargas de IMEM**: 106296 cambios de microcodigo a ~3270 B cada
+   uno, o sea IMEM casi entero cada vez. Un juego normal hace 2000-4600 cambios en la misma
+   ventana; junkrunner hace cien mil, a proposito. Ese es el origen de los 1465 B/transferencia:
+   la media mezclaba recargas de rspq de 256 B con volcados de IMEM completo.
+3. junkrunner64 **si** es una ROM de libdragon (`libdragon`, `rspq`, `RSPQ` en la imagen; nombre
+   interno `SpellCraft`), o sea que el camino de rspq esta de verdad en juego; lo que pasa es que
+   no es lo que domina su trafico.
+
+Aviso de lectura de `[rdram]`: los numeros por maestro son **MB/s, no porcentajes**. El unico
+porcentaje es el de cabecera, y es contra `Memory::kRdramPeakBps` = 562,5 MB/s.
+
+### La cache de imagenes de microcodigo, comprobada contra ese mismo caso
+
+Pregunta encadenada del usuario: si hay una cache de cambios de IMEM, esos cambios deberian
+salir casi gratis. **Salen.** Son dos cosas distintas y conviene no mezclarlas:
+
+- El DMA de 4 KB a IMEM es trafico de INVITADO. En consola real esos bytes viajan por el bus
+  de RDRAM, asi que `[spdma]`/`[rdram]` tienen que contarlos. Quitarlos seria falsear el
+  hardware.
+- El coste de ANFITRION de un cambio de imagen es retraducir el microcodigo, y eso es lo que
+  ahorra `Rsp::jitSelectImage`.
+
+Medido con `KESTREL_RSPJIT_STATS=1`, misma ventana que la tabla de arriba:
+
+| ROM | cambios de IMEM | aciertos / fallos | tasa | bloques compilados | ranuras usadas |
+|---|---|---|---|---|---|
+| junkrunner64 | 106296 | 104715 / 1870 | **98,2 %** | 2882 | 8 de 16 |
+| Perfect Dark | 3416 | 3406 / 10 | **99,7 %** | 1680 | 11 de 16 |
+| SM64 | 4746 | 2777 / 1969 | 58,5 % | 4038 | 16 de 16 |
+
+junkrunner64, que es el caso extremo, cambia de microcodigo 106296 veces y compila 2882 bloques
+en toda la corrida: ~37 cambios por bloque compilado, y sin agotar ranuras (usa 8 de 16). O sea
+que la parte cara del cambio ya es gratis y lo que queda en `[spdma]` es el bus del invitado,
+que es irreductible por definicion.
+
+El unico con mala tasa es SM64 (58,5 %), y es tambien el unico que agota las 16 ranuras. Ya
+estaba medido que subir a 32 no cambia nada (usa 17 y compila los mismos bloques), y el umbral
+`kJitNewWay` esta barrido: 4 y 64 son peores. Se queda.
+
 ## 2026-09-18 -- Bajar la prioridad de los workers del RCP: medido, empate (descartado)
 
 Hipotesis del anfitrion, no del invitado: tres hilos calientes del RCP sobre cuatro nucleos

@@ -1120,6 +1120,28 @@ auto System::run() -> void {
                          mb(memory.ramBytesPi .load(std::memory_order_relaxed)),
                          mb(memory.ramBytesAi .load(std::memory_order_relaxed)),
                          mb(memory.ramBytesSi .load(std::memory_order_relaxed)), "\n");
+            // Desglose del maestro que casi siempre manda, el motor de DMA del SP. Lo que
+            // importa es el TAMANO MEDIO: una cola de comandos (rspq de libdragon recarga
+            // 256 B) no se parece en nada a un cambio de sobrecapa (IMEM+DMEM enteros) ni a
+            // un volcado de lote de rdpq, y el agregado los mezcla.
+            const u64 rc = memory.spDmaRdCnt.load(std::memory_order_relaxed);
+            const u64 rb = memory.spDmaRdBytes.load(std::memory_order_relaxed);
+            const u64 wc = memory.spDmaWrCnt.load(std::memory_order_relaxed);
+            const u64 wb = memory.spDmaWrBytes.load(std::memory_order_relaxed);
+            auto h = [&](const std::atomic<u64>* v, int i) {
+              return (unsigned long long)v[i].load(std::memory_order_relaxed); };
+            std::fprintf(stderr, "[spdma] lee %llu (%.1f MB, %.0f B/ta) escribe %llu (%.1f MB, %.0f B/ta)"
+                         " imem %llu (%.1f MB)\n"
+                         "[spdma] tamanos lee <=64:%llu <=256:%llu <=1K:%llu >1K:%llu |"
+                         " escribe <=64:%llu <=256:%llu <=1K:%llu >1K:%llu\n",
+                         (unsigned long long)rc, rb / 1e6, rc ? (double)rb / rc : 0.0,
+                         (unsigned long long)wc, wb / 1e6, wc ? (double)wb / wc : 0.0,
+                         (unsigned long long)memory.spDmaImemCnt.load(std::memory_order_relaxed),
+                         memory.spDmaImemBytes.load(std::memory_order_relaxed) / 1e6,
+                         h(memory.spDmaRdHist, 0), h(memory.spDmaRdHist, 1),
+                         h(memory.spDmaRdHist, 2), h(memory.spDmaRdHist, 3),
+                         h(memory.spDmaWrHist, 0), h(memory.spDmaWrHist, 1),
+                         h(memory.spDmaWrHist, 2), h(memory.spDmaWrHist, 3));
           }
         }
         // Reparto del TIEMPO DE PARED del hilo de CPU y de los workers. Es la vista que dice

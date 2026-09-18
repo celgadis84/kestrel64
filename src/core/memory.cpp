@@ -1553,6 +1553,12 @@ auto Memory::spDma(bool toRam) -> void {
   u32 skip   = (len >> 20) & 0xfff;
   // Ocupacion del bus: el salto entre filas no se transfiere, solo se saltan direcciones.
   ramBytesRsp.fetch_add((u64)length * count, std::memory_order_relaxed);
+  const u64 nb = (u64)length * count;
+  (toRam ? spDmaWrCnt : spDmaRdCnt).fetch_add(1, std::memory_order_relaxed);
+  (toRam ? spDmaWrBytes : spDmaRdBytes).fetch_add(nb, std::memory_order_relaxed);
+  (toRam ? spDmaWrHist : spDmaRdHist)[spDmaBucket(nb)].fetch_add(1, std::memory_order_relaxed);
+  if(rcp.sp_mem_addr & 0x1000) { spDmaImemCnt.fetch_add(1, std::memory_order_relaxed);
+                                 spDmaImemBytes.fetch_add(nb, std::memory_order_relaxed); }
   u32 memAddr  = rcp.sp_mem_addr & 0x1fff;
   bool imem    = (memAddr & 0x1000) != 0;
   u32 memOff   = memAddr & 0xff8;
@@ -1696,6 +1702,11 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
      || dpLogTail.load(std::memory_order_relaxed) - dpLogHead.load(std::memory_order_acquire) >= kDpLogN)
     dpLogWait(at, false);
   ramBytesRsp.fetch_add(total, std::memory_order_relaxed);
+  spDmaWrCnt.fetch_add(1, std::memory_order_relaxed);        // este camino es solo SP -> RDRAM
+  spDmaWrBytes.fetch_add(total, std::memory_order_relaxed);
+  spDmaWrHist[spDmaBucket(total)].fetch_add(1, std::memory_order_relaxed);
+  if(imem) { spDmaImemCnt.fetch_add(1, std::memory_order_relaxed);
+             spDmaImemBytes.fetch_add(total, std::memory_order_relaxed); }
   const std::vector<u8>& sp = imem ? this->imem : this->dmem;
   const u64 pay = dmaPayTail;
   u64 w = pay;

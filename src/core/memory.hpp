@@ -347,6 +347,17 @@ struct Memory {
   // RDRAM), ni los accesos no cacheados que emite el dynarec por su camino rapido.
   static constexpr double kRdramPeakBps = 562'500'000.0;
   std::atomic<u64>        ramBytesRsp{0};   // motor de DMA del SP: DMEM/IMEM <-> RDRAM
+  // Desglose del motor del SP. El agregado no dice nada util: con rspq de libdragon la
+  // recarga de la cola son 256 B, pero un cambio de sobrecapa mueve IMEM+DMEM enteros y
+  // un lote de rdpq escupe kilobytes de una vez. Separar direccion y cuenta deja ver el
+  // TAMANO MEDIO por transferencia, que es lo que se compara con el microcodigo.
+  std::atomic<u64>        spDmaRdCnt{0}, spDmaRdBytes{0};   // RDRAM -> DMEM/IMEM (DMAIn)
+  std::atomic<u64>        spDmaWrCnt{0}, spDmaWrBytes{0};   // DMEM/IMEM -> RDRAM (DMAOut)
+  std::atomic<u64>        spDmaImemCnt{0}, spDmaImemBytes{0}; // los que tocan IMEM = cambio de microcodigo
+  // Reparto por tamano de UNA transferencia, en cuatro cestas: <=64, <=256 (la recarga de la
+  // cola de rspq cae aqui), <=1K y el resto hasta el techo de 4K de la memoria del SP.
+  std::atomic<u64>        spDmaRdHist[4]{}, spDmaWrHist[4]{};
+  static auto spDmaBucket(u64 n) -> int { return n <= 64 ? 0 : n <= 256 ? 1 : n <= 1024 ? 2 : 3; }
   std::atomic<u64>        ramBytesRdp{0};   // color/z por chunk del buffer de tramo + TMEM
   std::atomic<u64>        ramBytesVi{0};    // barrido de video: el framebuffer entero por campo
   std::atomic<u64>        ramBytesPi{0};    // cartucho/save <-> RDRAM
