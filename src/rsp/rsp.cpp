@@ -2014,7 +2014,7 @@ auto Rsp::dumpDpWait() const -> void {
 static const u64 kRspTanda = [] {
   const char* e = std::getenv("KESTREL_RSPTANDA");
   u64 v = e ? std::strtoull(e, nullptr, 0) : 0;
-  return v ? v : 512ull;
+  return v ? v : 1024ull;
 }();
 
 __attribute__((flatten))
@@ -2038,9 +2038,23 @@ auto Rsp::step(u64 maxInsns) -> void {
   // La tanda es tambien el grano con el que el hilo CPU ve avanzar al RSP, y ese grano es el
   // que manda en Threaded: la barrera del SP deja pasar a la CPU solo hasta el reloj publicado.
   // Con 8K instrucciones el RSP se quedaba esperando en spReadSync a una CPU que estaba parada
-  // en su barrera (junkrunner: 6,6 s de 10,7 esperando, huecos de 256 a 16K ops). Barrido en
-  // junkrunner: 8192 10,9 s, 2048 10,0, 512 9,6, 384 9,6, 256 9,7, 128 10,15 -- meseta en
-  // 384-512; por debajo gana el coste de publicar. PD/SM64/DK64 neutros. KESTREL_RSPTANDA.
+  // en su barrera (junkrunner: 6,6 s de 10,7 esperando, huecos de 256 a 16K ops). El primer
+  // barrido, en junkrunner y con el RSP citandose con la CPU en cada escritura, daba meseta en
+  // 384-512: 8192 10,9 s, 2048 10,0, 512 9,6, 384 9,6, 256 9,7, 128 10,15.
+  // RE-BARRIDO 2026-09-18, despues de que los diarios (dpLog/spLog/dmaLog) y dpBarSync quitaran
+  // casi todas esas citas: con menos citas, publicar fino ya no compra nada y solo cuesta el
+  // fetch_add y el notify por tanda, asi que el optimo se ha movido hacia arriba. Min de 4
+  // rondas intercaladas, Parallel-RDP, mismo md5 de framebuffer en los cuatro juegos:
+  //   grano    jr      pd      sm      dk
+  //     512  7326   11674    7628   11854
+  //    1024  7321   11653    7508   11801   <- defecto nuevo, no pierde en ninguno
+  //    2048  7391   11549    7428   11774
+  //    4096  7571   11517    7389   11761
+  // junkrunner se degrada de forma monotona por encima de 1024 (reproducible en tres barridos)
+  // porque es el que mas veces cita al RSP con la CPU; SM64 en cambio sigue mejorando hasta
+  // 4096. 1024 es el punto que DOMINA al viejo 512: igual o mejor en los cuatro. 2048 y 4096
+  // compran otro 1-3 % en SM64/PD/DK64 pero se lo cobran a junkrunner, asi que no se cogen.
+  // KESTREL_RSPTANDA.
   // Solo cambia el grano de publicacion y de sondeo de hostStop: el reloj de invitado es el mismo.
   while(!halt && maxInsns && budget && !hostStop.load(std::memory_order_relaxed)) {
     u64 chunk = maxInsns < budget ? maxInsns : budget;

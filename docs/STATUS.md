@@ -6722,3 +6722,45 @@ En Threaded no se mueve porque el hilo de CPU pasa el 77 % de las muestras en ba
 trabajo a un hilo que espera no devuelve pared. Y en lockstep, donde si la devolveria, resulta
 que el trabajo quitado era mas barato que la memoizacion. Revertido; el punto queda cerrado en
 `docs/GAPS.md`.
+
+## 2026-09-18 -- El grano con que el RSP publica su reloj: 512 -> 1024
+
+Despues de dos negativos seguidos (los tramos vacios y el memo de `jitIdleSkip`) el perfil
+apunta a lo mismo desde dos lados: el hilo de CPU pasa el 77 % de sus muestras en barreras
+(`spBarrierWait` 43 % girando + `dpBarrierWait` 34 %) esperando al RSP, y el hilo del RSP pasa
+el 26,9 % OCIOSO esperando a la CPU. Los dos esperan y ninguno esta saturado: eso no es falta
+de caudal, es **latencia de ida y vuelta** entre los dos relojes de invitado. La palanca de esa
+latencia ya existe y es `kRspTanda`, el grano con el que `Rsp::step` publica su reloj a la
+barrera del SP. Estaba en 512 desde que se bajo de 8192, y aquel barrido es de ANTES de que
+los diarios (`dpLog`, `spLog`, `dmaLog`) y `dpBarSync` quitaran casi todas las citas
+`spReadSync`. Con menos citas, publicar fino ya no compra nada y solo cuesta el `fetch_add` y
+el `notify` por tanda, asi que el optimo tenia que haberse movido. Re-barrido.
+
+**Min de 4 rondas intercaladas, un solo barrido (las comparaciones entre barridos NO valen: se
+midio 1,8 % de deriva de maquina entre dos de ellos), Parallel-RDP, ms de pared:**
+
+| grano | junkrunner64 | Perfect Dark | SM64 | DK64 |
+|-------|--------------|--------------|------|------|
+| 512 (lo de antes) | 7.326 | 11.674 | 7.628 | 11.854 |
+| **1024 (nuevo)** | **7.321** | **11.653** | **7.508** | **11.801** |
+| 2048 | 7.391 | 11.549 | 7.428 | 11.774 |
+| 4096 | 7.571 | 11.517 | 7.389 | 11.761 |
+
+Se elige **1024 porque DOMINA al 512**: igual o mejor en los cuatro juegos, y -1,6 % en SM64.
+2048 y 4096 compran otro 1-3 % en SM64/PD/DK64 pero se lo cobran a junkrunner64 (+0,9 % y
++3,3 %), que es justamente el que mas cita el RSP con la CPU y el que descubrio el problema en
+su dia; ganar en tres juegos pagandolo en el cuarto no es una mejora, es mover el bulto.
+
+La forma de las dos curvas dice de que va cada juego: junkrunner64 se degrada de forma
+**monotona** por encima de 1024 (reproducible en tres barridos: 1024 7.296, 2048 7.384,
+4096 7.503, 8192 7.628) porque ahi la CPU de verdad espera al reloj publicado; SM64 en cambio
+sigue mejorando hasta 4096, porque lo suyo es el coste de publicar, no la espera. El barrido
+viejo, con las citas puestas, daba el orden INVERTIDO en la parte baja (128 era mejor que
+2048); hoy 128 es el peor de todos. O sea que el numero no es una constante del emulador sino
+del acoplamiento que tenga en cada momento, y hay que re-barrerlo cuando ese acoplamiento
+cambie.
+
+Es un cambio de grano de publicacion y de sondeo, no de semantica: el reloj de invitado es el
+mismo. Comprobado -- los 16 framebuffers del barrido con md5 identico por juego, y el
+`[statehash]` de junkrunner64 a 400 M de instrucciones da `7f1b537e69aad3f4` en las cuatro
+combinaciones de {512, 1024} x {lockstep, threaded}.
