@@ -731,6 +731,21 @@ Por ahi va el orden nuevo:
   ciclo con el que iba a soltarla. Primer paso hecho: pista `PAUSE` en los tres bucles y largo
   del giro ajustable (`KESTREL_SPINPAUSE=0`, `KESTREL_BARSPIN=<n>`). Lo siguiente seria un
   retroceso exponencial y, sobre todo, mirar si el giro hace falta tan largo.
+  **Contestado a medias (2026-09-18):** el giro hace falta MAS largo, no menos. Re-barrido
+  `KESTREL_BARSPIN` ya con los diarios puestos: 2048 -> 16384 gana -1,6 % en SM64 y empata en
+  los otros tres (131072 ya pierde). Lo que queda de esta via no es acortar el giro sino
+  ABARATAR la vuelta: el bucle leia seis lineas por vuelta (`rcpPend`, `rspLogWait` y las
+  cuatro de `spBarrierEff`), todas escritas por el hilo del RSP, o sea que cada vuelta le
+  quitaba en exclusiva lineas que necesita para avanzar -- y avanzar es lo que esperamos.
+  **CERRADO 2026-09-18: medido dos veces, PIERDE.** Variante de detector de cambio +0,1..0,4 %
+  en los cuatro juegos; variante de prueba rapida sobre `spBarrierAt()` -0,1 % en jr y DK64
+  pero +0,84 % en PD y +0,59 % en SM64. De las seis lineas, cinco (`rspPark`, `rspParkWake`,
+  `rspRdvAt`, `rcpPend`, `rspLogWait`) casi nunca se escriben, o sea que estan en estado
+  compartido en la L1 y leerlas es una carga de L1; la unica que el RSP reescribe sin parar es
+  `rsp.cyclesRun`, y esa ES la barrera, hay que mirarla. La vuelta ya era barata y la rama que
+  se le anade cuesta mas. **No volver a adelgazar este bucle**: lo que se paga es la latencia
+  de ida y vuelta entre los dos relojes de invitado, no el ancho de la vuelta. Tablas en
+  `docs/STATUS.md`. Queda sin probar solo el retroceso exponencial.
 - **El RSP**, que es el palo largo medido (65,7 % ocupado). **Perfil propio del hilo del RSP,
   tomado el 2026-09-11** (`KESTREL_HOSTPROF_WHO=rsp`, build-prof-prdp con DWARF, SM64 /
   Parallel-RDP / threaded-jit / 400 intercambios, 926 muestras, `scripts/hostprof_sym.py`).

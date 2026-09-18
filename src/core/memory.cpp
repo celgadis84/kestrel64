@@ -2328,12 +2328,23 @@ static inline void spinPause();
 //                 32768 -> 3,45/3,46   131072 -> 3,49/3,47   1 M -> 3,48/3,48
 //   threaded-jit  0 -> 4,93/4,93 s   32768 -> 4,64/4,62   (SoftRDP)
 // Meseta desde 32768: -13 % de pared con Parallel-RDP y -6 % con SoftRDP.
+// RE-BARRIDO 2026-09-18, ya con los diarios (dpLog/spLog/dmaLog) y dpBarSync puestos: la meseta
+// sigue empezando en 32768 (8192 se hunde en los cuatro juegos) pero ya no es plana por arriba.
+// Min de 5 rondas intercaladas, Parallel-RDP, ms de pared, DOS tandas independientes:
+//   tanda 1   jr 7251 -> 7185, PD 11569 -> 11475, SM64 7483 -> 7516, DK64 11770 -> 11701
+//   tanda 2   jr 7266 -> 7105, PD 11501 -> 11475, SM64 7496 -> 7466, DK64 11761 -> 11716
+// 131072 gana los cuatro en la tanda 2 -- en jr (-2,2 %) y SM64 las cinco lecturas de cada lado
+// son DISJUNTAS -- y gana tres de cuatro en la tanda 1. 524288 ya cobra +1,4 % en jr a cambio de
+// rascar en SM64/DK64, asi que el sitio es 131072. Por que se movio: con los diarios el RSP
+// archiva el tramo y sigue en vez de citarse, asi que los tramos llegan mas seguidos y mas
+// pequenos, y el hueco entre dos ya no cabe en 32768 vueltas. Solo coste de anfitrion: el
+// horario del tramo lo fecha quien lo lanza (dpScheduleSpan).
 static auto rdpSpinLen() -> u32 {
   static const u32 v = []() -> u32 {
     const char* e = std::getenv("KESTREL_RDPSPIN");
     if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
                   if(end && !*end && n >= 0 && n <= 10'000'000) return (u32)n; }
-    return 32768u;
+    return 131072u;    // era 32768u
   }();
   return v;
 }

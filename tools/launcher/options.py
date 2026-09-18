@@ -86,10 +86,11 @@ CATEGORIES = [
     O("barspin", "KESTREL_BARSPIN", "Vueltas de la barrera del SP", "int", 0, adv=True,
       min=0, max=1000000,
       help="0 = por defecto (16384). Cuanto gira la CPU en la barrera del RSP antes de dormir."),
-    O("rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", "int", 32768, adv=True,
+    O("rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", "int", 131072, adv=True,
       min=0, max=10000000,
       help="Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. "
-      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo con Parallel-RDP."),
+      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo con Parallel-RDP. "
+      "De fabrica 131072 desde el re-barrido del 2026-09-18."),
     O("rspspin", "KESTREL_RSPSPIN", "Vueltas del RSP ocioso", "int", 0, adv=True,
       min=0, max=10000000,
       help="Cuanto gira el hilo del RSP entre tareas antes de dormir. Medido neutro; 0 = dormir enseguida."),

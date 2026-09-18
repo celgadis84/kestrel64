@@ -6817,3 +6817,121 @@ verdad y ya estaba puesto: no se toca.
 Cuando se cierre una via que quite citas entre hilos, **re-barrer las perillas de espera** antes
 de dar por buena ninguna. Dos de las tres se habian quedado desfasadas, y las dos por el mismo
 motivo: menos citas ⇒ esperas mas cortas ⇒ conviene girar mas y publicar menos fino.
+
+## 2026-09-18 -- KESTREL_DPSPIN re-barrido: sigue PLANO desde 262144, se queda
+
+Tercera perilla de espera del re-barrido post-diarios. A diferencia de `KESTREL_BARSPIN`, esta
+NO se ha movido: 262144 sigue siendo el sitio.
+
+Primer barrido (min de 5 rondas intercaladas, Parallel-RDP, ms de pared):
+
+| juego | 32768 | 262144 | 1048576 |
+|---|---|---|---|
+| junkrunner64 | 7294 | 7230 | 7230 |
+| Perfect Dark | 11678 | 11670 | **11594** |
+| SM64 | 7499 | 7563 | **7472** |
+| DK64 | 11799 | 11824 | 11823 |
+
+1 M no perdia en ninguno y ganaba 0,7 % en PD y 1,2 % en SM64, con las lecturas de SM64 casi sin
+solaparse ({7472,7512,7515,7553,7682} contra {7563,7563,7565,7707,7964}). Con eso solo habria
+bastado para subirlo. Pero el efecto era del tamano del ruido, asi que se pidio confirmacion --
+segundo barrido, 262144 contra 1 M contra 4 M, otras 5 rondas:
+
+| juego | 262144 | 1048576 | 4194304 |
+|---|---|---|---|
+| junkrunner64 | 7268 | 7264 | 7242 |
+| Perfect Dark | **11551** | 11604 | 11556 |
+| SM64 | **7479** | 7526 | 7494 |
+| DK64 | 11802 | 11800 | 11743 |
+
+**No reproduce.** En la segunda tanda 262144 gana PD y SM64, justo los dos juegos donde 1 M
+parecia ganar en la primera, y 4 M solo roza en jr y DK64. La curva es plana desde 262144 hacia
+arriba y lo que se vio antes era la maquina, no la perilla. **DPSPIN se queda en 262144.**
+
+Es exactamente el fallo que casi se cuela con el memo de `jitIdleSkip`: una ventaja del tamano
+del ruido en una sola tanda de 5 no es una ventaja. La regla de la casa: **si el margen cabe en
+el ruido, hace falta una SEGUNDA tanda intercalada, y si no reproduce, no existe.** Lo de
+`KESTREL_BARSPIN` paso el mismo filtro (distribuciones casi disjuntas y mecanismo claro: los
+diarios abren la barrera antes, asi que la espera cabe en el giro); esto no.
+
+Guest-neutro en las dos tandas: 15 volcados de framebuffer por juego, un solo md5 cada uno
+(jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`, DK64 `eca336ea`).
+
+## 2026-09-18 -- Abaratar la vuelta del giro del SP: medido DOS veces, PIERDE (descartado)
+
+La entrada del backlog decia "mirar si el giro hace falta tan largo". El re-barrido de
+`KESTREL_BARSPIN` contesto que hace falta MAS largo, asi que lo que quedaba de esa via era
+abaratar la VUELTA, no acortarla. El bucle de `Memory::spBarrierWait` lee seis lineas atomicas
+por vuelta: `rcpPend`, `rspLogWait` y las cuatro de `spBarrierEff()` (`rspPark`, `rspParkWake`,
+`rspRdvAt` y `rsp.cyclesRun`). Todas las escribe el hilo del RSP. La sospecha era que cada
+vuelta le pedia en exclusiva lineas que el necesita para avanzar -- y avanzar es justo lo que
+estabamos esperando.
+
+**Variante B (detector de cambio).** Vigilar solo `rsp.cyclesRun` y hacer el predicado entero
+cuando ese contador se mueva o una de cada 16 vueltas. Min de 5 rondas intercaladas, Threaded,
+Parallel-RDP: jr +0,4 %, PD +0,1 %, SM64 +0,4 %, DK64 +0,3 %. **Pierde en los cuatro.** Y el
+motivo deja claro que ni siquiera probaba la hipotesis: `cyclesRun` se mueve casi en cada vuelta
+del giro -- es el reloj del RSP corriendo --, asi que `cy != seen` era cierto casi siempre y la
+variante hacia el chequeo completo IGUAL, mas la carga y la comparacion de mas.
+
+**Variante C (prueba rapida sobre la condicion de verdad).** La vuelta rapida mira solo
+`spBarrierAt()`, o sea `rsp.cyclesRun` y nada mas, y nunca decide por su cuenta: solo abre la
+puerta al predicado entero, que ademas se comprueba una de cada 16 vueltas pase lo que pase.
+Asi los casos raros (aparcado, donde la barrera efectiva es el tope y esta POR DEBAJO de
+`spBarrierAt`) se siguen resolviendo igual, y como mucho nos enteramos 15 vueltas tarde de un
+cambio que no venga del reloj del RSP. Esta si ahorra las cinco cargas en las vueltas con la
+barrera cerrada. Min de 5 rondas intercaladas: jr -0,11 %, PD **+0,84 %**, SM64 **+0,59 %**,
+DK64 -0,07 %. **Tambien pierde.**
+
+**Hipotesis refutada, via cerrada.** Las cinco lineas de mas no cuestan: `rspPark`,
+`rspParkWake`, `rspRdvAt`, `rcpPend` y `rspLogWait` casi nunca se escriben, asi que viven en
+estado compartido dentro de la L1 del hilo de CPU y leerlas es una carga de L1. La unica linea
+que el RSP reescribe sin parar es `rsp.cyclesRun`, y esa hay que mirarla si o si porque ES la
+barrera. O sea que la vuelta del giro ya era barata y la rama que se le anade cuesta mas que lo
+que ahorra. **No volver a intentar adelgazar este bucle**: lo que se paga aqui no es el ancho de
+la vuelta, es la latencia de ida y vuelta entre los dos relojes de invitado.
+
+Guest-neutro las dos: `[statehash]` de jr a 400 M instrucciones `7f1b537e69aad3f4` en
+{HEAD, B, C} x {lockstep, threaded}, y 20 volcados de framebuffer por juego con un solo md5.
+
+## 2026-09-18 -- El giro del worker del RDP: 32768 -> 131072
+
+Cuarta perilla del re-barrido post-diarios, y la segunda que SE MUEVE. `rdpSpinLen()` en
+`src/core/memory.cpp` -- vueltas que gira el hilo del RDP sin trabajo antes de dormir en
+`rdpCv`. Solo coste de anfitrion: el horario del tramo ya lo fecha quien lo lanza
+(`dpScheduleSpan`), el invitado no ve cuando se pinta.
+
+Tanda 1 (min de 5 rondas intercaladas, Parallel-RDP, ms de pared):
+
+| juego | 8192 | 32768 | 131072 |
+|---|---|---|---|
+| junkrunner64 | 7664 | 7251 | **7185** |
+| Perfect Dark | 11657 | 11569 | **11475** |
+| SM64 | 7946 | **7483** | 7516 |
+| DK64 | 12301 | 11770 | **11701** |
+
+8192 se hunde en los cuatro, o sea que la meseta del 2026-09-16 sigue empezando en 32768. Lo
+nuevo es que ya no es plana por arriba. Tres de cuatro a favor de 131072 y SM64 en contra por
+0,4 %: margen de ruido, asi que segunda tanda obligatoria, y de paso 524288 para buscar el borde:
+
+| juego | 32768 | 131072 | 524288 |
+|---|---|---|---|
+| junkrunner64 | 7266 | **7105** | 7207 |
+| Perfect Dark | 11501 | **11475** | 11520 |
+| SM64 | 7496 | 7466 | **7446** |
+| DK64 | 11761 | 11716 | **11697** |
+
+**Reproduce y ademas SM64 se da la vuelta.** 131072 gana los cuatro, y en junkrunner64 (-2,2 %)
+y SM64 las cinco lecturas de cada lado son DISJUNTAS: jr {7105,7153,7191,7240,7249} contra
+{7266,7292,7294,7327,7781}, SM64 {7466,7467,7468,7474,7484} contra {7496,7518,7564,7566,7570}.
+524288 rasca en SM64 y DK64 pero cobra +1,4 % en junkrunner64, asi que el sitio es 131072.
+
+**Por que se movio.** Es el mismo mecanismo que subio `KESTREL_BARSPIN`: con los diarios
+(`dpLog`, `spLog`, `dmaLog`) el RSP archiva el tramo y sigue en vez de citarse con la CPU, asi
+que los tramos llegan mas seguidos y mas pequenos -- y el hueco entre dos ya no cabe en 32768
+vueltas, con lo que el worker se dormia y habia que pagarle un viaje al kernel para volver a
+levantarlo. Tercera vez que el mismo cambio de acoplamiento mueve una perilla de espera.
+
+Guest-neutro: `[statehash]` de junkrunner64 a 400 M instrucciones `7f1b537e69aad3f4` en
+{32768, 131072} x {lockstep, threaded}, y 15 volcados de framebuffer por juego con un solo md5
+en cada tanda (jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`, DK64 `eca336ea`).
