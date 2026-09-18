@@ -795,6 +795,38 @@ Por ahi va el orden nuevo:
   Ese 7 % es la lectura de `rspBusy` y `rsp.cyclesRun`, dos lineas que el worker del RSP
   reescribe sin parar -- fallo de cache compartida, inherente al acoplamiento CPU-RCP. `paceGrant`
   ya las lee una sola vez por vuelta y `kPaceGrain` ya evita la cola de permisos que encogen.
+  **PARTE COBRADA 2026-09-18**: no se puede abaratar la lectura, pero si hacerla menos veces. El camino del JIT preguntaba al freno tras CADA bloque mientras el del interprete lo hacia cada 64 instrucciones; con `KESTREL_PACEASK` puesto a 1024 (meseta medida) el barrido intercalado da PD -2,5 %, SM64 -1,4 %, jr -1,1 %, DK64 -0,3 %, mismo md5. Ver `docs/STATUS.md`.
+- **Coste de `rdpSubmit`, desglosado (2026-09-18).** Con `KESTREL_DPSUBPROF=1` el emulador saca
+  `[dpsnap]`, que parte la llamada en sus piezas. SM64 300 campos, Parallel-RDP + threaded-jit:
+  **519 603 envios para 518 473 comandos**, o sea el microcodigo escribe `DPC_END` una vez por
+  comando, y el tramo medio son 77 B. Descontando el coste del propio reloj (~50 ns por lectura
+  de `steady_clock::now()` en esta maquina, y el sondeo hace diez por llamada), el reparto real
+  de los 0,32 s que cuesta `rdpSubmit` sobre 7,9 s de pared -- **4,0 %** -- es:
+  | pieza | s | que es |
+  |---|---|---|
+  | paseo de coste (`rdpCostPass`) | 0,129 | modelo de ciclos del RDP: **exactitud, no se toca** |
+  | papeleo de `dpScheduleSpan` | 0,062 | anillo, `dpWrLo/dpWrHi`, plazos |
+  | cola + banderas | 0,123 | `rdpQueue`, `dpPending`, `rcpPend` |
+  | coger `rdpMx` | ~0 | **no hay contencion**, al contrario de lo que se suponia |
+  | copia a la sombra (77 B) | ~0 | el volumen es trivial |
+  | `notify_all` | 0,004 | solo 771 veces de 519 603: el giro del worker ya lo evita |
+  O sea el techo de esta via es ~0,19 s = 2,4 % de pared, y solo si se borrara TODO el papeleo.
+  Y ademas cae en el hilo del RSP, que tiene holgura (70 % de nucleo), no en el de CPU, que
+  esta al 99 %: recortar aqui puede no mover la pared en absoluto. **MEDIDO Y DESCARTADO en la
+  primera hipotesis:** se sospechaba falso compartir sobre `dpPending` -- el worker del RDP la
+  lee en cada vuelta de su giro y el RSP le hace un `fetch_add` en cada envio --, asi que se
+  metio `KESTREL_RDPSPINMASK` para espaciar esas lecturas (una de cada 16 o 64) sin cambiar el
+  largo del giro. El coste de `rdpSubmit` apenas se movio (0,597 -> 0,578 s, dentro del ruido)
+  y el barrido intercalado de pared no dio ganador en tres rondas. La perilla se retiro del arbol.
+- **Afinidad de hilos a nucleos fisicos: MEDIDA Y DESCARTADA (2026-09-18).** Con SMT el
+  planificador puede emparejar dos de los tres hilos calientes en los hermanos del mismo
+  nucleo. Se probo `KESTREL_AFFINITY=1` (un nucleo fisico entero por hilo). Barrido
+  intercalado de cuatro rondas, minimo de cuatro: jr +1,2 %, PD -0,5 %, SM64 +1,8 %,
+  DK64 +1,8 % -- tres perdidas y una ganancia dentro del ruido. Los hilos no estan calientes
+  a la vez (el del RDP solo trabaja el 11,8 % del tiempo), asi que una particion fija le
+  quita al hilo de CPU los hermanos que los otros dejan libres. Codigo retirado; los md5
+  salieron identicos en las dos ramas, o sea que era ajuste de anfitrion puro. Detalle en
+  `docs/STATUS.md`.
 - Presentacion sin copia (zero-copy).
 - Sombra de MXCSR — 0,7 %.
 - Coste de llamada de `runFifo`.

@@ -417,6 +417,13 @@ struct Memory {
   std::mutex dpLogMx;                            // un solo aplicador a la vez
   std::atomic<bool> rspLogWait{false};           // el RSP esta parado en dpLogWait
   std::atomic<u64> dpLogPushes{0}, dpLogWaits{0};
+  // Bytes copiados a la sombra del FIFO (Memory::rdpSnapshot) y cuantas copias. Es el volumen
+  // real de la unica copia grande que hace el hilo del RSP, o sea con que derecho se optimiza.
+  std::atomic<u64> rdpSnapBytes{0}, rdpSnapCopies{0};
+  // Pared DENTRO de rdpSubmit (KESTREL_DPSUBPROF=1). El volumen copiado es ridiculo -- 77 B de
+  // media en SM64 -- asi que lo que cuesta es la LLAMADA: el mutex del RDP, la planificacion
+  // del tramo y la cola. Sin esta cuenta no se sabe si vale la pena agrupar los envios.
+  std::atomic<u64> rdpSubNs{0}, rdpLockNs{0}, rdpSchedNs{0}, rdpCostNs{0}, rdpCostCmds{0}, rdpSnapNs{0}, rdpWakeNs{0}, rdpWakes{0}, rdpCoal{0};
   std::atomic<u32> dpLogWaives{0};
   // DMA SP -> RDRAM del RSP en el mismo diario (reg = 16). El motor lee la memoria del SP en el
   // instante del SP_WR_LEN, y ese instante es del RSP: los bytes se copian ahi a `dmaPay`. Lo que

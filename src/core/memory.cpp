@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <xmmintrin.h>   // _mm_pause: pista de espera activa
@@ -62,7 +63,7 @@ static auto selfThreadHandle() -> void* {
 auto Memory::sampleWorkerCpu() -> void {
   // Se llama SIEMPRE desde el hilo de CPU (heartbeat e informe final), asi que el handle
   // propio se toma aqui la primera vez y ya vale para todas.
-  if(!cpuThreadH) cpuThreadH = selfThreadHandle();
+  if(!cpuThreadH) { cpuThreadH = selfThreadHandle(); }
   rspCpuNs.store(threadCpuNs(rspThreadH), std::memory_order_relaxed);
   rdpCpuNs.store(threadCpuNs(rdpThreadH), std::memory_order_relaxed);
   cpuCpuNs.store(threadCpuNs(cpuThreadH), std::memory_order_relaxed);
@@ -2196,13 +2197,22 @@ auto Memory::rdpCostOn() -> bool {
   return on;
 }
 
+static const bool g_dpSubProf = std::getenv("KESTREL_DPSUBPROF") != nullptr;
+
 auto Memory::rdpCostPass(u32 current, u32 stop, bool xbus, const u8* cmdSrc) -> bool {
   if(!rdpCostOn() || stop == current) return false;
   softCost.costOnly = true;
   softCost.charge   = true;
   softCost.curOut   = nullptr;   // DPC_CURRENT lo publica quien pinta, no este paseo
   softCost.cmdSrc   = cmdSrc;
-  softCost.run(*this, current, stop, xbus);
+  const auto tC = g_dpSubProf ? std::chrono::steady_clock::now()
+                              : std::chrono::steady_clock::time_point{};
+  const u32 nc = softCost.run(*this, current, stop, xbus);
+  if(g_dpSubProf) {
+    rdpCostNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - tC).count(), std::memory_order_relaxed);
+    rdpCostCmds.fetch_add(nc, std::memory_order_relaxed);
+  }
   return true;
 }
 
@@ -2347,18 +2357,46 @@ auto Memory::rdpSnapshot(u32 current, u32 end) -> void {
   u32 a = current & 0x00ff'ffffu, b = end & 0x00ff'ffffu;
   if(b > (u32)rdram.size()) b = (u32)rdram.size();
   if(a >= b) return;
-  std::memcpy(sh.data() + a, rdram.data() + a, b - a);
+  const u32 n = b - a;
+  rdpSnapBytes.fetch_add(n, std::memory_order_relaxed);
+  rdpSnapCopies.fetch_add(1, std::memory_order_relaxed);
+  u8*       dst = sh.data() + a;
+  const u8* src = rdram.data() + a;
+  std::memcpy(dst, src, n);
 }
 
+
 auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
+  const auto tSub = g_dpSubProf ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+  struct SubProf {
+    Memory* m; std::chrono::steady_clock::time_point t0;
+    ~SubProf() { if(g_dpSubProf) m->rdpSubNs.fetch_add(
+        (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed); }
+  } subProf_{this, tSub};
   bool wake;
   {
+    // Desglose del coste de esta llamada: cuanto cuesta COGER el mutex (contencion con el
+    // worker del RDP) y cuanto planificar el tramo. Ver [dpsnap].
+    const auto tLk = g_dpSubProf ? std::chrono::steady_clock::now()
+                                 : std::chrono::steady_clock::time_point{};
     std::lock_guard<std::mutex> lk(rdpMx);
+    if(g_dpSubProf) rdpLockNs.fetch_add(
+        (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - tLk).count(), std::memory_order_relaxed);
     ev("dp.sub", current, end);
     // La copia se toma con el mutex cogido y ANTES de publicar el trabajo: el worker no
     // puede ver el tramo hasta que sus bytes estan a salvo. Solo el camino RDRAM; en xbus
     // los comandos viven en DMEM, que el RSP no reescribe mientras su tarea corre.
-    if(!xbus) rdpSnapshot(current, end);
+    {
+      const auto tSn = g_dpSubProf ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+      if(!xbus) rdpSnapshot(current, end);
+      if(g_dpSubProf) rdpSnapNs.fetch_add(
+          (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - tSn).count(), std::memory_order_relaxed);
+    }
     // EL HORARIO SE HACE AQUI, y fuera del if/else de mas abajo. El tramo [current, end) que
     // acaba de escribir el invitado se fecha entero -- coste, instante de arranque, instante
     // de cierre, plazo de MI_DP -- en el mismo hilo que escribio DPC_END y antes de que nadie
@@ -2368,8 +2406,13 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
     {
       const u8* costSrc = (!xbus && !rdpShadow[rdpGen].empty()) ? rdpShadow[rdpGen].data()
                                                                : rdram.data();
+      const auto tSch = g_dpSubProf ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
       dpScheduleSpan(current, end, xbus, costSrc,
                      tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow());
+      if(g_dpSubProf) rdpSchedNs.fetch_add(
+          (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - tSch).count(), std::memory_order_relaxed);
     }
     const bool sync = dpLastSpanSync;
     const u64 syncAt = dpSchedEnd.load(std::memory_order_relaxed);
@@ -2386,6 +2429,7 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
        && rdpQueue.back().gen == rdpGen) {
       rdpQueue.back().end = end;
       if(sync) { rdpQueue.back().sync = true; rdpQueue.back().syncAt = syncAt; }
+      if(g_dpSubProf) rdpCoal.fetch_add(1, std::memory_order_relaxed);
     }
     else {
       rdpQueue.push_back({current, end, xbus, rdpGen,
@@ -2407,7 +2451,16 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
   // distintos (el worker, "hay trabajo"; el drenador de la CPU, "cola vacia"). notify_one
   // puede despertar al drenador, cuyo predicado sigue falso, y el worker se queda dormido
   // con trabajo encolado -- wakeup perdido: la CPU espera un BREAK que nunca llega.
-  if(wake) rdpCv.notify_all();
+  if(wake) {
+    const auto tW = g_dpSubProf ? std::chrono::steady_clock::now()
+                                : std::chrono::steady_clock::time_point{};
+    rdpCv.notify_all();
+    if(g_dpSubProf) {
+      rdpWakes.fetch_add(1, std::memory_order_relaxed);
+      rdpWakeNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - tW).count(), std::memory_order_relaxed);
+    }
+  }
   // KESTREL_SYNCRDP=1: bisecar la corrupcion de RDRAM. Deja el RSP en su hilo pero
   // obliga a la CPU a esperar a que el RDP consuma el FIFO antes de seguir, o sea el
   // RDP pasa a ser efectivamente lockstep. No es fiel al hardware; solo diagnostico.

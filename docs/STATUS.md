@@ -7250,7 +7250,26 @@ campo, no un credito acumulado.
 
 Su unica razon de ser era esa: cuanto mas fino el subtramo, menos tarde llegaba `MI_VI`. Ya
 no. A partir de ahora es solo cada cuanto vuelve el bucle a mirar, o sea coste de anfitrion
-puro, y subirlo es gratis en exactitud. Queda como barrido aparte.
+puro, y subirlo es gratis en exactitud.
+
+Barrido hecho el mismo dia, y el resultado es el CONTRARIO del esperado: subirlo es una
+perdida pura. Minimo de 5 rondas intercaladas, Parallel-RDP, ms de pared:
+
+| `KESTREL_VITICKS` | 16 | 64 | 256 |
+|---|---|---|---|
+| junkrunner64 | 7766 | 8046 (+3,6 %) | 8299 (+6,9 %) |
+| Perfect Dark | 11981 | 11945 (-0,3 %) | 12166 (+1,5 %) |
+| SM64 | 7572 | 8516 (+12,5 %) | 10851 (+43,3 %) |
+| DK64 | 12082 | 12568 (+4,0 %) | 14878 (+23,1 %) |
+
+El subtramo no era peso muerto para el anfitrion: es tambien la CADENCIA DE SERVICIO de todo
+lo demas que hace el bucle exterior -- empuje de audio, presentacion, marcapasos -- y sobre
+todo de cuando los workers del RCP vuelven a encontrar a la CPU. Con subtramos largos la CPU
+corre tramos mas largos de un tiron y los hilos del RSP y del RDP esperan mas. Se queda en 16.
+
+De propina, la huella del framebuffer sale IDENTICA con los tres valores en los cuatro juegos
+(`75e331cb`, `817b7132`, `29a0e995`, `af650b0b`), que es evidencia extra de la invariancia de
+arriba: la perilla mueve pared, no invitado.
 
 ### Validacion
 
@@ -7261,3 +7280,147 @@ sm64 `b5521b24d8fc280fbf102df22d7d30cb` en prdp y prdp-jit -- o sea la huella de
 parallel-RDP tampoco se mueve --, krom prdp 371/371 89,27 / 92,56 regress=0. Perfect Dark
 con Parallel-RDP y threaded-jit, 15 arranques de 15 limpios. Las dos puertas recompilan
 `build/` y `build-prdp/` enteros porque cambia `memory.hpp`.
+
+## 2026-09-18 — De que esta hecho `rdpSubmit`: el sondeo `[dpsnap]`
+
+El hilo del RSP es el que patea el RDP, y el perfil de anfitrion del 2026-09-11 le ponia un
+10,6 % de sus muestras "fuera de imagen desde `Memory::rdpSubmit`". Eso no dice QUE cuesta.
+Ahora el emulador lo parte en piezas: `KESTREL_DPSUBPROF=1` mide con `steady_clock` el tramo
+entero, lo que cuesta COGER `rdpMx`, la copia a la sombra del FIFO, `dpScheduleSpan`, el paseo
+de coste de dentro y el `notify_all` de fuera, y `System::run` lo saca en `[dpsnap]` al final.
+Apagado no cuesta nada: un `bool` estatico por rama.
+
+Lo primero que dice es el TAMANO del problema, y no era el que se suponia:
+
+```
+[dpsnap] 519603 copias del FIFO, 38.6 MB (77 B de media), ... / 518473 cmds
+```
+
+**Un envio por comando.** El microcodigo escribe `DPC_END` 519 603 veces en 300 campos de SM64
+para 518 473 comandos de RDP, con 77 B de media por tramo (Perfect Dark: 464 639 envios, 75 B).
+O sea que aqui no hay ancho de banda que optimizar -- 38 MB en 8 s es nada --, lo que se paga
+es la LLAMADA. Eso ya mato por si solo la idea de copiar con almacenes no temporales
+(`_mm_stream_si128`): el umbral razonable son 4 KB y el tramo medio son 77 B, asi que la rama
+no llegaria a entrar nunca; y ademas obligaria al paseo de coste, que lee esa misma copia acto
+seguido, a traersela de vuelta de la DRAM.
+
+Descontando el coste del propio reloj --- medido de paso: subir el sondeo de 2 a 10 lecturas de
+`steady_clock::now()` por llamada sube la cuenta de 0,372 a 0,578 s, o sea **~50 ns por lectura**
+en esta maquina --- el reparto real de los 0,32 s (de 7,9 s de pared, **4,0 %**) es:
+
+| pieza | s | % del envio |
+|---|---|---|
+| paseo de coste (`rdpCostPass`) | 0,129 | 40 % |
+| cola y banderas (`rdpQueue`, `dpPending`, `rcpPend`) | 0,123 | 39 % |
+| papeleo de `dpScheduleSpan` (anillo, `dpWrLo/dpWrHi`, plazos) | 0,062 | 19 % |
+| `notify_all` | 0,004 | 1 % |
+| coger `rdpMx` | ~0 | ~0 |
+| copia a la sombra | ~0 | ~0 |
+
+Dos sorpresas. **El mutex no tiene contencion** y **la copia no se nota**: las dos sospechas
+"naturales" son falsas. Y el `notify_all` sale 771 veces de 519 603, que es la prueba de que el
+giro del worker del RDP (`KESTREL_RDPSPIN`) hace exactamente lo que se le pidio.
+
+Lo que queda es papeleo (0,185 s) y exactitud (0,129 s, el modelo de ciclos del RDP, intocable).
+El techo de esta via es por tanto 2,4 % de pared, y encima cae en el hilo del RSP, que va al
+70 % de nucleo mientras el de CPU va al 99 %: recortarlo puede no mover la pared.
+
+### Hipotesis de falso compartir: MEDIDA Y DESCARTADA
+
+El worker del RDP gira sobre `dpPending` leyendola en CADA vuelta, asi que su linea vive
+permanentemente en estado compartido en ese nucleo; el hilo del RSP le hace un `fetch_add` en
+cada envio, medio millon por corrida, y cada uno tiene que pedir la linea en exclusiva contra
+un nucleo que no para de leerla. Encaja con los ~237 ns por envio del bloque "cola y banderas".
+
+Se anadio `KESTREL_RDPSPINMASK=<n>`: leer `dpPending` una vuelta de cada `n+1` sin cambiar el
+numero de vueltas, o sea misma duracion del giro y 16 o 64 veces menos trafico de coherencia.
+Un solo binario, los dos brazos por entorno. Resultado en SM64, 300 campos:
+
+| mascara | `rdpSubmit` | pared |
+|---|---|---|
+| 0 (cada vuelta) | 0,597 s | 8,01 s |
+| 15 | 0,588 s | 8,01 s |
+| 63 | 0,578 s | 7,91 s |
+
+Un 3 % sobre el coste del envio, dentro del ruido, y el barrido intercalado de pared sobre los
+cuatro juegos no dio ganador en tres rondas (SM64 7749 contra 7942 ms de minimo, jr 8389 contra
+8241, PD 11528 contra 11926, DK64 12121 contra 12422 -- reparto, no tendencia). La perilla se retira del arbol
+(no se deja una perilla muerta). **El coste de la cola no es coherencia de cache.**
+
+## 2026-09-18 — Clavar los hilos a nucleos fisicos: MEDIDO Y DESCARTADO
+
+La telemetria `[bloque]` muestra tres hilos calientes muy desiguales en este anfitrion
+(i7-870, 4 nucleos / 8 hilos): CPU al 99 % de nucleo, RSP al ~70 %, RDP al ~53 % de reloj
+aunque solo este ocupado el 11,8 % del tiempo. Con SMT el planificador de Windows puede
+dejar dos de esos tres en los DOS HERMANOS del mismo nucleo fisico, donde comparten unidades
+de emision y L1: ahi uno le roba al otro de verdad, y el que suele perder es el hilo de CPU,
+que es el palo largo. Nunca se habia probado a clavarlos (cero coincidencias de
+`SetThreadAffinityMask` en el arbol).
+
+Se metio `KESTREL_AFFINITY=1`: `GetLogicalProcessorInformationEx(RelationProcessorCore)` da
+la mascara de cada nucleo fisico, y cada hilo se clava a un nucleo DISTINTO -- a los dos
+hermanos de ese nucleo, no a un procesador logico suelto, para que una interrupcion que se
+lleve a un hermano no deje al hilo sin sitio. Un solo binario, los dos brazos por entorno.
+
+Barrido intercalado de cuatro rondas, minimo de cuatro por juego:
+
+| juego | suelto | clavado | |
+|---|---|---|---|
+| junkrunner64 | 7579 ms | 7672 ms | +1,2 % |
+| Perfect Dark | 11571 ms | 11511 ms | −0,5 % |
+| SM64 | 7631 ms | 7768 ms | +1,8 % |
+| Donkey Kong 64 | 11424 ms | 11629 ms | +1,8 % |
+
+Tres perdidas y una ganancia que cabe en el ruido: **no hay ganador, y si tendencia a
+perder**. Tiene sentido a posteriori. Los tres hilos no estan calientes a la vez: el del RDP
+esta ocupado el 11,8 % del tiempo y el del RSP tiene holgura, asi que lo que el planificador
+hace por su cuenta -- mover el hilo que despierta al nucleo que en ese instante esta libre y
+con la cache aun templada -- es mejor que una particion fija, que ademas impide que el hilo
+de CPU use los dos hermanos de su nucleo cuando los otros dos duermen. Clavar solo ganaria
+si los tres estuvieran saturados de verdad.
+
+El codigo se quita del arbol (no se deja una perilla muerta). Lo que si queda anotado es que
+los md5 del framebuffer salieron **identicos en los cuatro juegos y en las dos ramas**: la
+afinidad es ajuste de anfitrion puro y no mueve ni un bit de invitado, que es lo que tenia
+que pasar.
+
+## 2026-09-18 — El freno del RCP se preguntaba demasiado: `KESTREL_PACEASK`
+
+Leyendo `System::stepCpu` salta una asimetria vieja. El camino del interprete pregunta al
+regulador **una vez cada 64 instrucciones** (`if(paced && (i & 0x3F) == 0)`); el camino del
+JIT lo hacia **tras cada bloque, sin filtro**. Como un bloque son unas pocas decenas de ops,
+el dynarec acababa preguntando mas veces por op que el interprete, justo al reves de lo que
+uno esperaria del camino rapido.
+
+Y preguntar no es gratis. `rcpPace` -> `rspPace`/`rdpPace` lee `rspBusy`, `rsp.cyclesRun` y
+`rdpBusy`: tres lineas que los workers reescriben sin parar. Cada consulta se las pide en
+exclusiva al nucleo que las esta escribiendo, o sea que el hilo de CPU frena precisamente al
+hilo que tiene que avanzar para que el freno se suelte. `docs/GAPS.md` ya atribuia ~7 % de
+las muestras del hilo de CPU a estas dos funciones.
+
+Tampoco hace falta esa cadencia. Quien acota el adelanto **en tiempo de invitado** es la
+barrera del SP (`spBarrierWait` en `spBarrierAt()`, en cada retiro); el regulador es un freno
+de ANFITRION con una holgura de 65536 ops, asi que mirar cada mil no mueve donde muerde. Y
+la cadena enlazada del JIT ya vuelve a preguntar por su cuenta cuando agota el permiso
+(`jitReenterProceed`), que es el camino que de verdad regula.
+
+`KESTREL_PACEASK=<ops>` pone el grano de esa pregunta; `=0` es el comportamiento de antes.
+
+Barrido intercalado con Parallel-RDP + threaded-jit, minimos por juego:
+
+| juego | preguntando cada bloque | cada 1024 ops | |
+|---|---|---|---|
+| Perfect Dark | 11734 ms | 11341 ms | **−2,5 %** |
+| SM64 | 7544 ms | 7453 ms | **−1,4 %** |
+| junkrunner64 | 7518 ms | 7437 ms | **−1,1 %** |
+| Donkey Kong 64 | 11403 ms | 11370 ms | −0,3 % |
+
+PD y SM64 se midieron **dos veces** por la regla de la casa (el margen rozaba el ruido en la
+primera tanda): −2,3 %/−3,0 % y −0,1 %/−1,0 %, y en la segunda las lecturas de los dos
+brazos ni se solapan. La calibracion del grano es monotona hasta 1024 y ahi hace **meseta**:
+64 → 1024 vale otro −2,2 % en PD y −1,4 % en SM64, pero 1024, 8192 y "casi nunca" (10^6)
+empatan dentro del ruido. Se queda **1024**, que es el primer punto de la meseta y el que
+deja el freno mas despierto.
+
+El md5 del framebuffer es identico en los cuatro juegos y en todos los granos, incluido el
+de "casi nunca": el regulador es ajuste de anfitrion y no mueve estado de invitado.

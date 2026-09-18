@@ -255,6 +255,13 @@ auto System::stepCpu(u64 n) -> u64 {
       memory.lockRspExec = false;
     }
   };
+  static const u64 paceGrain = [] () -> u64 {
+    const char* e = std::getenv("KESTREL_PACEASK");
+    if(e && *e) { char* end = nullptr; long long v = std::strtoll(e, &end, 0);
+                  if(end && !*end && v >= 0 && v <= 1'000'000) return (u64)v; }
+    return 1024u;
+  }();
+  u64 lastPaceOps = cpu.guestOps();
   u64 i = 0;
   while(i < n && !cpu.halted) {
     // Dynarec: intenta un bloque de ops seguras. Declina (0) cuando el RSP corre, cerca
@@ -277,7 +284,24 @@ auto System::stepCpu(u64 n) -> u64 {
               if(cpu.guestOps() >= memory.evNextAt) viFieldPend |= memory.viTick(cpu.guestOps());
               if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire();
               rspInterleave();
-              if(paced) memory.rcpPace(cpu.guestOps()); continue; }
+              // Cada cuantas ops de invitado se le PREGUNTA al regulador desde aqui. Antes se
+              // preguntaba tras CADA bloque, sin filtro; el camino del interprete de abajo ya
+              // lo hacia solo cada 64 instrucciones. No es una llamada barata: `rspPace` y
+              // `rdpPace` leen `rspBusy`, `rsp.cyclesRun` y `rdpBusy`, lineas que los workers
+              // reescriben sin parar, asi que cada pregunta se las quita en exclusiva al hilo
+              // que tiene que avanzar para que el freno se suelte -- se frena al que lleva la
+              // pelota. Y no hace falta preguntar tan seguido: quien acota el adelanto en
+              // tiempo de INVITADO es la barrera del SP, y la holgura del regulador es de
+              // decenas de miles de ops (`paceSlack`), asi que mirar cada mil no cambia donde
+              // muerde el freno. Ademas la cadena enlazada ya vuelve a preguntar por su cuenta
+              // al agotar el permiso (`jitReenterProceed`), que es el camino que de verdad
+              // regula. Barrido intercalado: la curva baja hasta 1024 y ahi hace meseta
+              // (8192 y "casi nunca" empatan con el). KESTREL_PACEASK=<ops>, 0 = cada bloque.
+              if(paced) {
+                const u64 g = cpu.guestOps();
+                if(g - lastPaceOps >= paceGrain) { lastPaceOps = g; memory.rcpPace(g); }
+              }
+              continue; }
     }
     // Inicio de la instruccion en el reloj de invitado, para rcpRetire (ver dpEndArmAt). Solo
     // lo usa el diario del RSP, que solo existe en Threaded; se toma siempre y no solo con
@@ -1025,6 +1049,20 @@ auto System::run() -> void {
       // una por borde cruzado; si suben al millon es que el grano se ha perdido.
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
+      std::fprintf(stderr, "[dpsnap] %llu copias del FIFO, %.1f MB (%.0f B de media), %.3f s dentro de rdpSubmit (mutex %.3f, horario %.3f, paseo %.3f / %llu cmds, copia %.3f, despertar %.3f x%llu, unidos %llu)\n",
+                   (unsigned long long)memory.rdpSnapCopies.load(),
+                   memory.rdpSnapBytes.load() / 1048576.0,
+                   memory.rdpSnapCopies.load()
+                     ? (double)memory.rdpSnapBytes.load() / (double)memory.rdpSnapCopies.load() : 0.0,
+                   memory.rdpSubNs.load() / 1e9,
+                   memory.rdpLockNs.load() / 1e9,
+                   memory.rdpSchedNs.load() / 1e9,
+                   memory.rdpCostNs.load() / 1e9,
+                   (unsigned long long)memory.rdpCostCmds.load(),
+                   memory.rdpSnapNs.load() / 1e9,
+                   memory.rdpWakeNs.load() / 1e9,
+                   (unsigned long long)memory.rdpWakes.load(),
+                   (unsigned long long)memory.rdpCoal.load());
       std::fprintf(stderr, "[dplog] %llu apuntadas (%llu DMA), %llu esperas, %u renuncias\n",
                    (unsigned long long)memory.dpLogPushes.load(), (unsigned long long)memory.dmaLogPushes.load(),
                    (unsigned long long)memory.dpLogWaits.load(), memory.dpLogWaives.load());
