@@ -167,6 +167,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # `gh` viene instalado en el runner de Windows, pero el shell de este job es el de
+          # MSYS2 y su PATH es el del entorno CLANG64: no lo ve, y el paso moria con
+          # "gh: command not found" (codigo 127) DESPUES de haber compilado y empaquetado
+          # todo. Se anade a mano el directorio donde lo pone la imagen.
+          export PATH="/c/Program Files/GitHub CLI:$PATH"
+          command -v gh >/dev/null || { echo "::error::no encuentro gh en el runner"; exit 1; }
           VER='${{ steps.ver.outputs.ver }}'
           ZIP="kestrel64-$VER-win64.zip"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
