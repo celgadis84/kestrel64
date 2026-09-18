@@ -6629,6 +6629,69 @@ El unico con mala tasa es SM64 (58,5 %), y es tambien el unico que agota las 16 
 estaba medido que subir a 32 no cambia nada (usa 17 y compila los mismos bloques), y el umbral
 `kJitNewWay` esta barrido: 4 y 64 son peores. Se queda.
 
+## 2026-09-18 -- El bug #2 de junkrunner64 vive en el ENLACE DE BLOQUES del dynarec de CPU
+
+Corte por brazos, ocho corridas de 800 campos por brazo, sonda `KESTREL_FIELDHASH=1` (FNV
+del estado de CPU al cierre de cada campo, mas fina que las columnas de `[ft]`). La
+divergencia de junkrunner64 es INTERMITENTE, asi que un brazo solo se declara limpio con
+las ocho corridas identicas entre si, no con una pareja.
+
+| brazo | corridas identicas | primera divergencia |
+|---|---|---|
+| base (threaded + JIT de CPU + JIT de RSP) | 3 de 8 | **715** |
+| `KESTREL_RSPJIT=0` | -- | 715 |
+| `KESTREL_JIT=0` | 8 de 8 | -- |
+| `KESTREL_JIT_NOLINK=1` | 8 de 8 | -- |
+| `KESTREL_JIT_NOITC=1` | 7 de 8 | una rara en el campo 2, NO el 715 |
+| `KESTREL_THREADS=0` (lockstep, el oraculo) | 8 de 8 | -- |
+
+Lecturas. El dynarec del RSP queda ABSUELTO: con el apagado la divergencia sale en el
+mismo campo 715. La cache de destinos indirectos tambien: apagarla no reproduce el 715
+(la corrida rara del campo 2 es otra cosa y esta sin explicar). Lo que hace falta para
+que aparezca es el ENLACE DE BLOQUES, porque es lo unico que separa `base` de `nolink`.
+
+Escotillas de pared a cero en las tres corridas del barrido largo anterior
+(`[pared] renuncias sp=0 dp=0 diario=0 barSP=0 barDP=0`, `[spvenc] 0 vencidos`, sin
+excepcion de anfitrion), o sea que no es un salvavidas disparando.
+
+CAVEAT QUE FALTA CERRAR, y es el que decide si esto vale. `JIT=0` y `NOLINK=1` frenan
+mucho el hilo de CPU, asi que podrian estar TAPANDO la carrera en vez de quitarla. El
+control limpio es `KESTREL_VITICKS=64`: frena el anfitrion un 43 % en SM64 y por diseno
+NO mueve el statehash del invitado (los plazos de `MI_VI`/`MI_AI` caen en la instruccion
+exacta). Si ese brazo tambien hace desaparecer el 715, los cortes de arriba no valen y lo
+que se ha medido es velocidad, no semantica. Barrido pendiente junto con
+`KESTREL_JIT_CHAIN=1` y `=8`, que acotan la PROFUNDIDAD de la cadena enlazada.
+
+## 2026-09-18 -- Auditoria de licencias antes de publicar binarios
+
+Pregunta del usuario: si hay algun problema de licencias, poner el repositorio privado.
+No lo hay, y el repositorio se queda publico. Toda la cadena es permisiva:
+
+| pieza | licencia |
+|---|---|
+| kestrel64 | MIT, (c) 2026 celgadis84 |
+| `third_party/parallel-rdp` | MIT, (c) 2020 Themaister |
+| volk (dentro de parallel-rdp) | MIT, (c) Arseny Kapoulkine |
+| Vulkan-Headers (dentro) | Apache-2.0, The Khronos Group |
+| libc++ / libc++abi / libunwind | Apache-2.0 WITH LLVM-exception |
+| GLFW | zlib |
+
+Ni una licencia viral. Ni una ROM ni BIOS en el arbol (`git ls-files` no tiene un solo
+`.z64/.n64/.v64/.rom/.bin`), y el README lo dice explicito.
+
+Las citas a ares, cen64, angrylion y Project64 que hay en los comentarios de `src/` se
+revisaron una a una: son referencias a como esos proyectos DOCUMENTAN un detalle de
+hardware -- un numero de ciclos de parada de cache, la expansion de 5 a 8 bits de un canal
+por replicacion de bits, la tabla de longitudes de comando del RDP, el estado de los
+registros tras el IPL3. Comportamiento de hardware es un HECHO, no una obra: no hay codigo
+copiado y ninguno de esos proyectos entra en el binario.
+
+EL HUECO QUE SI HABIA, y estaba en el paquete, no en el repositorio: el zip no llevaba
+ningun aviso de licencia. Los ejecutables que se reparten van enlazados ESTATICOS, o sea
+que parallel-rdp, volk, libc++ y GLFW estan literalmente dentro del binario, y MIT y zlib
+exigen que el aviso viaje con la copia. Arreglado: `THIRD-PARTY.txt` en la raiz con los
+avisos completos, y `scripts/dist.sh` lo copia al paquete junto con `LICENSE.txt`.
+
 ## 2026-09-18 -- Bajar la prioridad de los workers del RCP: medido, empate (descartado)
 
 Hipotesis del anfitrion, no del invitado: tres hilos calientes del RCP sobre cuatro nucleos
