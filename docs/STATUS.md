@@ -8082,7 +8082,10 @@ arranque lo tienen.
 
 **Por que hay vector de oro y no traza de juego.** Ninguno de los tres juegos de la mesa
 (PD, DK64, SM64) pide el desafio durante la intro -- `KESTREL_SILOG=1` da `desafios=0` en
-los tres --, asi que no hay ROM que sirva de oraculo aqui. La respuesta se fija contra una
+los tres, y **tampoco con el IPL3 real**: repetida la medida con `KESTREL_LLE_IPL3=1` en los
+dos cartuchos que SI llevan el chip (PD PAL = 7105, DK64 USA = 6105), siguen en `desafios=0`
+hasta el quinto intercambio de buffer, asi que no lo pide ni el codigo de arranque del propio
+cartucho --, asi que no hay ROM que sirva de oraculo aqui. La respuesta se fija contra una
 **transcripcion independiente** del algoritmo publicado: los mismos 30 nibbles pasados por
 las dos implementaciones dan la misma salida, asi que una errata en la tabla o en la maquina
 de estados hace fallar el test en vez de producir una respuesta con buena pinta.
