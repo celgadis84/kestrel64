@@ -6935,3 +6935,47 @@ levantarlo. Tercera vez que el mismo cambio de acoplamiento mueve una perilla de
 Guest-neutro: `[statehash]` de junkrunner64 a 400 M instrucciones `7f1b537e69aad3f4` en
 {32768, 131072} x {lockstep, threaded}, y 15 volcados de framebuffer por juego con un solo md5
 en cada tanda (jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`, DK64 `eca336ea`).
+
+## 2026-09-18 -- KESTREL_RSPSPIN re-barrido: sigue NEUTRO en 0, se queda
+
+Quinta y ultima perilla de espera del re-barrido post-diarios. El giro del worker del RSP entre
+tareas estaba en 0 con la nota "medido neutro", y esa nota es de antes de los diarios, asi que
+tocaba mirarla igual que las otras.
+
+Tanda 1 (min de 5 rondas intercaladas, Parallel-RDP, ms de pared):
+
+| juego | 0 | 8192 | 131072 |
+|---|---|---|---|
+| junkrunner64 | **7150** | 7186 | 7161 |
+| Perfect Dark | 11501 | **11429** | 11561 |
+| SM64 | 7478 | **7425** | 7482 |
+| DK64 | **11729** | 11734 | 11733 |
+
+8192 rascaba 0,6 % en PD y 0,7 % en SM64 y cobraba 0,5 % en jr, todo con las distribuciones muy
+solapadas. Margen de ruido, o sea segunda tanda:
+
+| juego | 0 | 8192 | 32768 |
+|---|---|---|---|
+| junkrunner64 | 7162 | **7151** | 7164 |
+| Perfect Dark | **11359** | 11473 | 11425 |
+| SM64 | 7517 | **7477** | 7502 |
+| DK64 | 11725 | 11767 | **11720** |
+
+**No reproduce.** En PD se da la vuelta entera (0 gana por 114 ms, justo donde 8192 ganaba por 72
+en la primera) y en DK64 tambien. Lo unico que sobrevive a las dos tandas es SM64 por medio
+punto, que es menos que el ruido de esta maquina. **RSPSPIN se queda en 0.**
+
+Tiene sentido con lo que dice el perfil: aqui no hay decenas de miles de lanzamientos por
+segundo como en el RDP sino unos cientos, asi que el viaje al kernel por despertar al worker se
+reparte entre muchisimo mas trabajo. Es la misma razon por la que el giro del RDP SI importa y
+este no.
+
+**Con esto se cierra el re-barrido de las perillas de espera**: `KESTREL_RSPTANDA` 512 -> 1024,
+`KESTREL_BARSPIN` 2048 -> 16384 y `KESTREL_RDPSPIN` 32768 -> 131072 se movieron;
+`KESTREL_RDVPOLL` (64), `KESTREL_DPSPIN` (262144) y `KESTREL_RSPSPIN` (0) quedan confirmadas
+donde estaban. Tres de seis. La regla que deja: **cuando se cierre una via que quite citas entre
+hilos, re-barrer TODAS las perillas de espera antes de dar por buena ninguna**, porque una
+perilla de espera es constante del acoplamiento y no del emulador.
+
+Guest-neutro: 15 volcados de framebuffer por juego y tanda, un solo md5 cada uno
+(jr `75e331cb`, PD `0f0adee7`, SM64 `29a0e995`, DK64 `eca336ea`).
