@@ -932,14 +932,30 @@ auto System::run() -> void {
       if((fieldDump || fieldHash) && fieldClosed) {
         static u64 nField = 0; nField++;
         if(nField == fieldDump) {
-          for(int r = 0; r < 32; r++) std::fprintf(stderr, "[fd] gpr%02d=%016llx\n", r, (unsigned long long)cpu.gpr[r]);
-          for(int r = 0; r < 32; r++) std::fprintf(stderr, "[fd] cop0_%02d=%016llx\n", r, (unsigned long long)cpu.cop0[r]);
-          std::fprintf(stderr, "[fd] pc=%016llx next=%016llx retired=%llu\n", (unsigned long long)cpu.pc,
-                       (unsigned long long)cpu.nextPc, (unsigned long long)cpu.retired);
-          std::fprintf(stderr, "[fd] stallOps=%llu rem=%u stall=%u frac=%u ilk=%016llx dcbR=%u ilkHits=%llu dcbHits=%llu\n",
-                       (unsigned long long)cpu.stallOps, cpu.stallOpsRem, cpu.stallCycles, cpu.countFrac,
-                       (unsigned long long)cpu.ilk, (unsigned)cpu.dcbR,
-                       (unsigned long long)cpu.ilkHits, (unsigned long long)cpu.dcbHits);
+          // UNA sola escritura. Con setenta `fprintf` sueltos el volcado sale ENTRELAZADO y
+          // truncado: los hilos del RCP escriben en el mismo stderr y cada linea corta se
+          // mete entre medias, asi que al comparar dos corridas salian diferencias falsas
+          // por desplazamiento de lineas. Se arma en memoria y se suelta de un golpe, que es
+          // lo unico que el runtime garantiza como indivisible para un FILE* compartido.
+          std::string d; d.reserve(4096);
+          char ln[160];
+          for(int r = 0; r < 32; r++) {
+            std::snprintf(ln, sizeof ln, "[fd] gpr%02d=%016llx\n", r, (unsigned long long)cpu.gpr[r]);
+            d += ln;
+          }
+          for(int r = 0; r < 32; r++) {
+            std::snprintf(ln, sizeof ln, "[fd] cop0_%02d=%016llx\n", r, (unsigned long long)cpu.cop0[r]);
+            d += ln;
+          }
+          std::snprintf(ln, sizeof ln, "[fd] pc=%016llx next=%016llx retired=%llu\n", (unsigned long long)cpu.pc,
+                        (unsigned long long)cpu.nextPc, (unsigned long long)cpu.retired);
+          d += ln;
+          std::snprintf(ln, sizeof ln, "[fd] stallOps=%llu rem=%u stall=%u frac=%u ilk=%016llx dcbR=%u ilkHits=%llu dcbHits=%llu\n",
+                        (unsigned long long)cpu.stallOps, cpu.stallOpsRem, cpu.stallCycles, cpu.countFrac,
+                        (unsigned long long)cpu.ilk, (unsigned)cpu.dcbR,
+                        (unsigned long long)cpu.ilkHits, (unsigned long long)cpu.dcbHits);
+          d += ln;
+          std::fwrite(d.data(), 1, d.size(), stderr);
         }
         if(fieldHash) {
           u64 h = 1469598103934665603ull;
@@ -1076,6 +1092,15 @@ auto System::run() -> void {
                    memory.rdpWakeNs.load() / 1e9,
                    (unsigned long long)memory.rdpWakes.load(),
                    (unsigned long long)memory.rdpCoal.load());
+      // Conflicto de generacion de la sombra del FIFO: al instalar un START fresco, la
+      // generacion que tocaba reciclar todavia tenia trabajo sin pintar. Con mas de dos
+      // generaciones se resuelve drenando (lento pero CORRECTO: el rasterizador nunca lee
+      // comandos reescritos), asi que el contador son drenados forzosos. Con KESTREL_RDPGENS=2
+      // no hay adonde huir y son reutilizaciones SUCIAS: divergencia posible, que es el bug #2
+      // de junkrunner64. Ver Memory::rdpShadow y docs/STATUS.md.
+      std::fprintf(stderr, "[dpgen] %u generaciones, %llu conflictos de generacion\n",
+                   (unsigned)Memory::rdpGenCount(),
+                   (unsigned long long)memory.rdpGenClash.load());
       std::fprintf(stderr, "[dplog] %llu apuntadas (%llu DMA), %llu esperas, %u renuncias\n",
                    (unsigned long long)memory.dpLogPushes.load(), (unsigned long long)memory.dmaLogPushes.load(),
                    (unsigned long long)memory.dpLogWaits.load(), memory.dpLogWaives.load());

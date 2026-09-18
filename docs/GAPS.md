@@ -1248,7 +1248,18 @@ Por donde empezar: `[ds]` (`KESTREL_DPSCHED=1`) de las dos corridas, primer tram
 difiera. El horario es todo tiempo de invitado en los dos modos, asi que la diferencia tiene que
 estar en el instante en que la CPU llega a la escritura de `DPC_END`, no en el coste.
 
-## junkrunner64 no es determinista en Threaded a 3e9 instrucciones (2026-09-18, ABIERTO)
+## junkrunner64 no es determinista en Threaded a 3e9 instrucciones (2026-09-18, RESUELTO)
+
+**RESUELTO el 2026-09-18: la sombra del FIFO del RDP se reutilizaba SUCIA.** Solo tenia DOS
+generaciones alternas y, cuando el ANFITRION va suelto, el productor se adelanta dos buffers
+de comandos: el tercer START fresco vuelve a la generacion 0, que todavia tiene tramos sin
+pintar, y la copia nueva les reescribe los comandos debajo del rasterizador. El invitado
+acaba ejecutando datos (`EPC` = `3c0239e0`, que es `lui $2,0x39e0`, una INSTRUCCION, no una
+direccion). Arreglo: ocho generaciones y coger la LIBRE mas baja, drenando si no quedara
+ninguna (`KESTREL_RDPGENS`, `[dpgen]`). Ocho corridas identicas bit a bit contra 2 de 8 que
+divergian. Detalle completo en `docs/STATUS.md` (2026-09-18). Se deja debajo el rastro de la
+investigacion porque los descartes siguen valiendo.
+
 
 Salio buscando otra cosa (el `#DE` de `aiArm`, ya arreglado) y sobrevive al arreglo.
 

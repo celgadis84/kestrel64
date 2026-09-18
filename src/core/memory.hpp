@@ -257,6 +257,13 @@ struct Memory {
   // sync: el trabajo trae un SYNC_FULL (o no se sabe); syncAt = fin de invitado del ultimo tramo
   // con SYNC_FULL que se le haya unido. Ver dpBarrierAt.
   struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; bool sync; u64 syncAt; };
+  // Trabajos vivos (encolados + el que se esta pintando) que leen de CADA generacion de la
+  // sombra. Con el solo se puede contestar la pregunta que importa: al instalar un START
+  // fresco, la generacion que se va a REUTILIZAR, esta libre? Si no lo esta, la copia nueva
+  // pisa comandos que el rasterizador todavia no ha leido -- justo la corrupcion que la
+  // sombra venia a evitar, solo que una vuelta mas alla. Ver rdpShadow.
+  std::atomic<u32>        rdpGenBusy[8] = {};
+  std::atomic<u64>        rdpGenClash{0};   // veces que se reutilizo una generacion ocupada
   std::deque<RdpJob>      rdpQueue;
   u64                     dpJobOps = 0;   // instante de invitado del job en vuelo
   // Ocupacion del command DMA del RDP, en trabajos: los encolados mas el que el worker
@@ -275,10 +282,15 @@ struct Memory {
   // comandos que el microcodigo ya habia reescrito (ver docs/PD-DERAIL.md). Al encolar
   // copiamos los bytes del tramo -- que el productor YA escribio antes del kick, asi que es
   // un instante de lectura legal para el hardware -- y el rasterizador consume la copia.
-  // Dos generaciones alternas bastan: dentro de una, el flow-control del propio juego
-  // (DPC_CURRENT, que publicamos honesto) impide que se pise lo no consumido; entre una y
-  // la siguiente, la copia vive en el otro buffer. Se reservan al vuelo (tamano RDRAM).
-  std::vector<u8>         rdpShadow[2];
+  // Dentro de una generacion, el flow-control del propio juego (DPC_CURRENT, que publicamos
+  // honesto) impide que se pise lo no consumido; entre una y la siguiente, la copia vive en
+  // otro buffer. DOS alternas bastan SOLO si el worker nunca queda dos START frescos por
+  // detras del productor; cuando la CPU corre suelta puede quedarse mas atras, y entonces la
+  // generacion que se reutiliza sigue teniendo trabajo vivo. El numero de generaciones es
+  // ajustable (`KESTREL_RDPGENS`, 2..8) y `rdpGenClash` cuenta las reutilizaciones sucias.
+  // Se reservan al vuelo (tamano RDRAM cada una), asi que solo se paga lo que se usa.
+  static constexpr u8     kRdpGens = 8;
+  std::vector<u8>         rdpShadow[kRdpGens];
   u8                      rdpGen = 0;          // solo lo toca el productor
   std::mutex              rdpMx;
   std::condition_variable rdpCv;
@@ -379,6 +391,7 @@ struct Memory {
   // hilo que lo lanzo (dpScheduleSpan). Entonces aqui SOLO se pinta.
   auto rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool preCosted = false) -> void;
   auto rdpSnapshot(u32 current, u32 end) -> void;   // copia el tramo a rdpShadow[rdpGen]
+  static auto rdpGenCount() -> u8;                 // generaciones de la sombra (KESTREL_RDPGENS)
   auto rdpPublishCurrent(u32 fallback) -> void;  // rasterize + DP bookkeeping
   auto rspAwaitIdle() -> void;      // block until the RSP worker has published its task result
   // Parte periodico mientras una de esas esperas se alarga (ver awaitReporting en el .cpp).

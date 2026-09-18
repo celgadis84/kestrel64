@@ -6629,7 +6629,7 @@ El unico con mala tasa es SM64 (58,5 %), y es tambien el unico que agota las 16 
 estaba medido que subir a 32 no cambia nada (usa 17 y compila los mismos bloques), y el umbral
 `kJitNewWay` esta barrido: 4 y 64 son peores. Se queda.
 
-## 2026-09-18 -- El bug #2 de junkrunner64 vive en el ENLACE DE BLOQUES del dynarec de CPU
+## 2026-09-18 -- El bug #2 de junkrunner64 NO es el enlace de bloques: es una carrera de ANFITRION
 
 Corte por brazos, ocho corridas de 800 campos por brazo, sonda `KESTREL_FIELDHASH=1` (FNV
 del estado de CPU al cierre de cada campo, mas fina que las columnas de `[ft]`). La
@@ -6642,25 +6642,97 @@ las ocho corridas identicas entre si, no con una pareja.
 | `KESTREL_RSPJIT=0` | -- | 715 |
 | `KESTREL_JIT=0` | 8 de 8 | -- |
 | `KESTREL_JIT_NOLINK=1` | 8 de 8 | -- |
-| `KESTREL_JIT_NOITC=1` | 7 de 8 | una rara en el campo 2, NO el 715 |
+| `KESTREL_JIT_NOITC=1` | 8 de 8 | -- |
+| `KESTREL_JIT_CHAIN=1` | 7 de 8 | 715 |
+| `KESTREL_JIT_CHAIN=8` | 6 de 8 | 715 y 716 |
+| **`KESTREL_VITICKS=64` (control de velocidad)** | 8 de 8 | -- |
 | `KESTREL_THREADS=0` (lockstep, el oraculo) | 8 de 8 | -- |
 
-Lecturas. El dynarec del RSP queda ABSUELTO: con el apagado la divergencia sale en el
-mismo campo 715. La cache de destinos indirectos tambien: apagarla no reproduce el 715
-(la corrida rara del campo 2 es otra cosa y esta sin explicar). Lo que hace falta para
-que aparezca es el ENLACE DE BLOQUES, porque es lo unico que separa `base` de `nolink`.
+EL CONTROL MATA LA HIPOTESIS DEL ENLACE. `KESTREL_VITICKS=64` no toca NI UNA semantica del
+invitado -- los plazos de `MI_VI` y `MI_AI` caen en la instruccion exacta y por eso subirlo
+no mueve el `[statehash]`, cosa que ya estaba comprobada con `KESTREL_IRQTRACE` --, solo
+frena el anfitrion. Y hace desaparecer el 715 con la misma fuerza que `NOLINK` (0 de 8
+frente a 3 de 8 del brazo base, p ~ 0,02). O sea que lo que quitan `JIT=0` y `NOLINK=1` no
+es el enlace de bloques: es VELOCIDAD. Frenar suprime el 715 se frene como se frene.
+
+Lo que queda indicado, entonces, es una carrera sensible al tiempo de ANFITRION, no una
+semantica del dynarec. El dynarec del RSP sigue absuelto por su lado (con el apagado la
+divergencia sale en el mismo campo).
+
+CORRECCION DE METODO, dos veces. Primera: comparar todas las corridas contra la corrida 1
+esta MAL cuando el fallo es intermitente, porque la 1 puede ser ella la rara; hay que
+agrupar en clases de equivalencia y buscar donde se separa la minoria. Segunda: comparar
+los ficheros LINEA A LINEA tambien esta mal. Las "divergencias del campo 2" que aparecian
+en varios brazos eran ARTEFACTO DEL LOG -- una linea `[fh]` comida o pegada a la anterior
+por el volcado `[fd]`, que hasta ahora salia en unos setenta `fprintf` sueltos y se
+entrelazaba con lo que escriben los hilos del RCP en el mismo stderr. Al reparsear con
+expresion regular `\[fh\] <campo> <hash>` y comparar POR CAMPO, esas divergencias
+desaparecen: 48 corridas con `VITICKS=64` dan el mismo hash en todos los campos. El
+volcado esta arreglado (una sola `fwrite`, `src/core/system.cpp`), y la regla nueva es que
+una sonda de divergencia se compara por CLAVE, nunca por posicion de linea.
 
 Escotillas de pared a cero en las tres corridas del barrido largo anterior
 (`[pared] renuncias sp=0 dp=0 diario=0 barSP=0 barDP=0`, `[spvenc] 0 vencidos`, sin
 excepcion de anfitrion), o sea que no es un salvavidas disparando.
 
-CAVEAT QUE FALTA CERRAR, y es el que decide si esto vale. `JIT=0` y `NOLINK=1` frenan
-mucho el hilo de CPU, asi que podrian estar TAPANDO la carrera en vez de quitarla. El
-control limpio es `KESTREL_VITICKS=64`: frena el anfitrion un 43 % en SM64 y por diseno
-NO mueve el statehash del invitado (los plazos de `MI_VI`/`MI_AI` caen en la instruccion
-exacta). Si ese brazo tambien hace desaparecer el 715, los cortes de arriba no valen y lo
-que se ha medido es velocidad, no semantica. Barrido pendiente junto con
-`KESTREL_JIT_CHAIN=1` y `=8`, que acotan la PROFUNDIDAD de la cadena enlazada.
+Siguiente paso: dejar de barrer perillas y VOLCAR ESTADO en el campo 715 del brazo base,
+muchas corridas, para poder decir que registro o que contador se separa primero.
+
+## 2026-09-18 -- RESUELTO el bug #2: la sombra del FIFO del RDP se reutilizaba SUCIA
+
+Volcando el estado entero en el campo 715 (`KESTREL_FIELDDUMP=715`, 24 corridas del brazo
+base) la divergencia deja de ser un hash y se lee de un vistazo: las corridas minoritarias
+**CASCAN**. Dos clases distintas, y las dos con la misma pinta.
+
+| | clase mayoritaria (12/22) | minoria A (5) | minoria B (3) |
+|---|---|---|---|
+| `pc` | `80059128` (codigo normal) | `800007dc` | `800041c4` |
+| `cop0_13` Cause | 0 | `0x408` = IP2 + TLBL | `0x28` = instruccion reservada |
+| `cop0_08` BadVAddr | 0 | `3c0239e0` | `80003767` |
+| `cop0_14` EPC | `80031df0` | `3c0239e0` | `80006be8` |
+
+`3c0239e0` no es una direccion: es la palabra de una instruccion (`lui $2,0x39e0`). O sea
+que el invitado esta ejecutando datos, y salta al manejador de excepciones. Eso no es un
+desfase de temporizacion, es MEMORIA PISADA -- la misma firma que `docs/PD-DERAIL.md`.
+
+Quien la pisa: el rasterizador leyendo comandos reescritos por debajo. La sombra del FIFO
+(`Memory::rdpShadow`) tenia DOS generaciones alternas, y el razonamiento era que con dos
+basta porque entre un buffer y el siguiente la copia vive en el otro. Falso en cuanto el
+productor se adelanta DOS buffers: al tercer START fresco vuelve a la generacion 0, que
+todavia tiene tramos sin pintar, y la copia nueva les reescribe los comandos. Como el
+adelanto depende de lo rapido que vaya el ANFITRION, encaja exactamente con lo que decia el
+barrido de perillas: frenar como sea (`JIT=0`, `NOLINK=1`, `VITICKS=64`) lo hace
+desaparecer, y ninguna de esas perillas era la causa.
+
+Medido con un contador nuevo (`[dpgen]`, reutilizaciones sucias por corrida):
+
+| generaciones | reutilizaciones sucias | corridas identicas (800 campos) |
+|---|---|---|
+| 2 (historico) | 842 -- 1036 en CADA corrida | **6 de 8** (divergen en 715 y en 775) |
+| 8, por turno | 0 -- 7 | **8 de 8** |
+| 8, cogiendo la libre mas baja | 0 -- 2 | **8 de 8** |
+
+Arreglo: `kRdpGens = 8` sombras y, al instalar un START fresco, se coge la generacion LIBRE
+mas baja distinta de la actual (`rdpGenBusy[]` = trabajos vivos que leen de cada una,
+encolados mas el que se esta pintando). La mas baja a proposito: en regimen normal el
+worker va al dia y siempre queda libre la 0 o la 1, asi que las de arriba ni se reservan --
+cada sombra ocupa una RDRAM entera y se pide al vuelo. Si no hubiera ninguna libre se drena
+el RDP, que es lento pero correcto. Ojo al leer `[dpgen]` tras el arreglo: con mas de dos
+generaciones el contador ya no son lecturas sucias sino DRENADOS forzosos, seguros por
+definicion -- salen 0-2 por corrida de junkrunner64 y las ocho corridas siguen siendo
+identicas bit a bit. Con `KESTREL_RDPGENS=2` no hay adonde huir y vuelve a contar
+reutilizaciones sucias de verdad; esa perilla recupera el comportamiento viejo para bisecar.
+`[dpgen]` sale en el cierre.
+
+Coste en pared: CERO. Min-de-4 intercalado con el MISMO exe, cambiando solo la perilla:
+jr 7.738 -> 7.785 (+0,61 %), PD 10.976 -> 10.981 (+0,05 %), SM64 7.532 -> 7.531 (-0,01 %),
+DK64 11.702 -> 11.720 (+0,15 %), con md5 del framebuffer identico en los cuatro juegos. Las
+sombras de arriba solo se reservan cuando el rasterizador se queda atras de verdad, y la
+copia es la misma que ya se hacia.
+
+Lo que NO era, y queda documentado para no volver: el enlace de bloques del dynarec de CPU,
+la cache de destinos indirectos, el dynarec del RSP, los salvavidas de pared (`[pared]` y
+`[spvenc]` a cero en todas las corridas) y el diario de DPC.
 
 ## 2026-09-18 -- Auditoria de licencias antes de publicar binarios
 

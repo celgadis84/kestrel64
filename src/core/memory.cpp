@@ -1216,7 +1216,37 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // de generacion para que la copia del buffer nuevo no pise la del viejo aun sin consumir.
         // KESTREL_RDPDRAIN=1 recupera el drenado, solo para bisecar.
         static const bool drainOnStart = std::getenv("KESTREL_RDPDRAIN") != nullptr;
-        if(rcpMode == RcpMode::Threaded) { if(drainOnStart) rdpDrain(); else rdpGen ^= 1; }
+        if(rcpMode == RcpMode::Threaded) {
+          if(drainOnStart) rdpDrain();
+          else if(rdpGenCount() > 2) {
+            // Coger la generacion LIBRE mas baja distinta de la actual. Baja a proposito: en
+            // regimen normal el worker va al dia y siempre queda libre la 0 o la 1, asi que
+            // no se reservan buffers de mas; los de arriba solo se tocan cuando el
+            // rasterizador se queda atras de verdad. Si no hubiera ninguna libre -- no visto
+            // con ocho -- se drena, que es lento pero correcto: el hardware nunca lee
+            // comandos reescritos.
+            u8 nxt = 0xff;
+            for(u8 g = 0; g < rdpGenCount(); g++)
+              if(g != rdpGen && !rdpGenBusy[g].load(std::memory_order_acquire)) { nxt = g; break; }
+            if(nxt == 0xff) { rdpGenClash.fetch_add(1, std::memory_order_relaxed); rdpDrain(); nxt = (u8)((rdpGen + 1) % rdpGenCount()); }
+            rdpGen = nxt;
+          }
+          else {
+            // Pasar a la siguiente generacion. Con dos alternas esto vuelve a la de hace un
+            // START, y si el worker sigue teniendo trabajo vivo de ESA generacion la copia
+            // que venga a continuacion le reescribe los comandos por debajo: la misma
+            // corrupcion que la sombra evita entre generaciones contiguas, solo que una
+            // vuelta mas alla. Pasa cuando el productor se adelanta dos buffers, o sea
+            // cuando el anfitrion va rapido, que es exactamente la firma del bug #2 de
+            // junkrunner64 (frenar el anfitrion como sea lo hace desaparecer). Se cuenta
+            // siempre -- una lectura atomica por START fresco, nada -- y el numero de
+            // generaciones es ajustable para poder medir el A/B.
+            const u8 nxt = (u8)((rdpGen + 1) % rdpGenCount());
+            if(rdpGenBusy[nxt].load(std::memory_order_acquire))
+              rdpGenClash.fetch_add(1, std::memory_order_relaxed);
+            rdpGen = nxt;
+          }
+        }
         rcp.dpc_submitted = rcp.dpc_start; rcp.dpc_status &= ~0x400u;
         ev("rdpst", rcp.dpc_start, rcp.dpc_end);
         // HW recarga CURRENT desde START en el propio kick y la CPU lo ve al momento
@@ -2365,6 +2395,20 @@ auto Memory::evDump(u32 n) -> void {
   std::fflush(stderr);
 }
 
+// Generaciones de la sombra del FIFO. 2 = comportamiento historico. Ver rdpShadow.
+auto Memory::rdpGenCount() -> u8 {
+  static const u8 v = []() -> u8 {
+    const char* e = std::getenv("KESTREL_RDPGENS");
+    if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
+                  if(end && !*end && n >= 2 && n <= Memory::kRdpGens) return (u8)n; }
+    // OCHO de fabrica, y 2 = comportamiento historico para bisecar. Con dos, junkrunner64
+    // reutiliza sucia la sombra ~900 veces por corrida y 2 de cada 8 corridas divergen; con
+    // ocho y eligiendo la libre mas baja, cero y cero. Ver docs/STATUS.md.
+    return 8;
+  }();
+  return v;
+}
+
 auto Memory::rdpSnapshot(u32 current, u32 end) -> void {
   // Copia [current, end) de RDRAM al buffer de la generacion en curso. Se reserva al vuelo
   // (una vez, del tamano de la RDRAM) para no pagar la memoria en lockstep ni en las pruebas.
@@ -2451,6 +2495,10 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
       rdpQueue.push_back({current, end, xbus, rdpGen,
                           tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow(),
                           sync, syncAt});
+      // Un lector vivo mas para esta generacion de la sombra: no se puede reutilizar hasta
+      // que el worker termine de LEER sus comandos. El tramo unido (rama de arriba) no
+      // cuenta: alarga un trabajo ya contado.
+      if(!xbus) rdpGenBusy[rdpGen].fetch_add(1, std::memory_order_release);
       // Hay trabajo por pintar: la CPU queda acotada por dpBarrierAt(), que es el instante en
       // que el motor termina TODO lo mandado.
       if(dpBarrierOn() && rcpMode == RcpMode::Threaded)
@@ -2589,6 +2637,7 @@ auto Memory::rdpWorkerLoop() -> void {
       // El motor suelta el trabajo cuando ha terminado de LEER sus comandos, no antes: solo
       // aqui puede el productor reescribir ese buffer sin pisar al rasterizador.
       dpPending.fetch_sub(1, std::memory_order_release);
+      if(!job.xbus) rdpGenBusy[job.gen].fetch_sub(1, std::memory_order_release);
       if(rdpQueue.empty()) rdpBusy.store(false, std::memory_order_relaxed);
       // dpCompSeq NO es tiempo de invitado: es cuantos trabajos lleva pintados el anfitrion.
       // Solo sirve para que los que esperan sepan que algo se ha movido de verdad.

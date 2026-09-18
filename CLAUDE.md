@@ -260,15 +260,19 @@ el primero del PATH cuando se exporta clang64) NO lo tiene. Usar siempre el de W
 
 **RCP enhebrado, semantica y biseccion**: el consumidor del FIFO del RDP NO lee los
 comandos de la RDRAM viva sino de una **instantanea** que el productor copia al encolar el
-tramo (`Memory::rdpSnapshot`, dos buffers alternos indexados por generacion de buffer de
-comandos). El productor ya habia escrito esos bytes antes del kick, o sea que leerlos en el
+tramo (`Memory::rdpSnapshot`, OCHO buffers indexados por generacion de buffer de
+comandos; `KESTREL_RDPGENS=<2..8>`, 2 = los dos alternos historicos). El productor ya habia escrito esos bytes antes del kick, o sea que leerlos en el
 kick es un instante de lectura que el hardware tambien puede elegir; dentro de una generacion
 protege el control de flujo del propio juego (DPC_CURRENT) y entre generaciones el buffer
 alterno. Solo se redirigen los COMANDOS: pixeles, texturas y TLUT siguen leyendo RDRAM viva.
 Sin esto Perfect Dark descarrila 3 de cada 4 tandas (ver `docs/PD-DERAIL.md`).
-`KESTREL_RDPDRAIN=1` recupera el drenado del RDP en cada START fresco, que fue la primera
-cura -- SOLO para bisecar: medido cuesta 13-15 % de pared y aleja la fidelidad del oraculo
-lockstep · `KESTREL_SYNCRDP=1` / `KESTREL_SYNCRSP=1` dejan uno de los dos
+Dos generaciones NO bastan: si el productor se adelanta dos buffers, la tercera copia
+reescribe comandos que el rasterizador aun no ha leido y el invitado acaba ejecutando datos
+(bug #2 de junkrunner64, ver `docs/STATUS.md` 2026-09-18). Al instalar un START fresco se
+coge la generacion LIBRE mas baja; si no hubiera ninguna se drena (lento pero correcto) y
+`[dpgen]` cuenta esos drenados forzosos, que en junkrunner64 son 0-2 por corrida. `KESTREL_RDPDRAIN=1` recupera el drenado del RDP en cada START fresco, que fue
+la primera cura -- SOLO para bisecar: medido cuesta 13-15 % de pared y aleja la fidelidad del
+oraculo lockstep · `KESTREL_SYNCRDP=1` / `KESTREL_SYNCRSP=1` dejan uno de los dos
 workers en su hilo y el otro sincrono, para bisecar de quien es una corrupcion ·
 `KESTREL_PRDP_SYNCALL=1` espera a la GPU tras cada primitiva (solo `build-prdp`).
 
