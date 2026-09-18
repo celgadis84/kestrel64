@@ -121,7 +121,11 @@ struct System {
   std::atomic<u64>    retiredInsns{0};    // lifetime CPU instructions (=cycles)
   u64                 rspCycles = 0;      // lifetime RSP steps (=cycles), run-thread only
 
-  static constexpr const char* kVersion = "0.0.1-M1";
+  // Fuente UNICA de la version: de aqui la leen `scripts/dist.sh`, `scripts/pack.sh`,
+  // `scripts/publish.py` y el workflow `.github/workflows/release.yml`, que ademas exige
+  // que la etiqueta `vX.Y.Z` coincida con esta cadena y aborta si no. Subir de version =
+  // tocar ESTA linea y etiquetar igual; no hay un segundo sitio que puedan separarse.
+  static constexpr const char* kVersion = "0.0.2";
 
   // Load a ROM, build memory, HLE-boot the CPU. Returns false with `error` set.
   auto init(const std::string& romPath, std::string& error) -> bool;

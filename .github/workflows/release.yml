@@ -1,0 +1,181 @@
+# Fabrica de EJECUTABLES con version. Complementa a `build.yml`, que solo comprueba que el
+# arbol compila.
+#
+# QUE SALE DE AQUI Y QUE NO
+# -------------------------
+# Un runner de GitHub puede compilar pero NO puede validar: las puertas (`gate_all.sh`,
+# `gate_prdp.sh`, systemtest, la suite krom) necesitan ROMs, y en este repositorio no entra
+# ni entrara una sola ROM. Por eso lo que sale de aqui va marcado como tal en el VERSION.txt
+# del propio paquete, y la regla del proyecto sigue en pie: una version que se anuncia como
+# buena es la que paso las puertas en la maquina de desarrollo. Este workflow existe para que
+# cualquiera pueda reproducir el binario desde el codigo, y para que una etiqueta deje
+# siempre un .zip descargable aunque la maquina de desarrollo no este delante.
+#
+# VERSIONADO
+# ----------
+# La fuente unica de la version es `kVersion` en `src/core/system.hpp`. Al empujar una
+# etiqueta `vX.Y.Z` el workflow EXIGE que coincida con ella y aborta si no: asi la version
+# que imprime el emulador, la del nombre del zip y la de la etiqueta no pueden separarse.
+# Sin etiqueta (ejecucion a mano) el paquete se marca con el commit y no se publica nada.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write     # crear la Release y subirle los ficheros
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # el manifiesto quiere el commit corto de verdad
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-vulkan-devel
+            mingw-w64-clang-x86_64-glfw
+
+      # El lanzador grafico se congela con PyInstaller sobre el Python NATIVO de Windows,
+      # no sobre el de MSYS2: es el mismo reparto que en la maquina de desarrollo, y
+      # `scripts/gui.sh` ya acepta la ruta por la variable PY.
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.11'
+      - name: PyInstaller
+        shell: pwsh
+        run: python -m pip install --upgrade pip pyinstaller
+
+      # La version sale del codigo. Con etiqueta, tiene que casar con ella.
+      - name: version
+        id: ver
+        run: |
+          VER=$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' src/core/system.hpp | head -1)
+          [ -n "$VER" ] || { echo "no encuentro kVersion en src/core/system.hpp"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAGVER="${GITHUB_REF_NAME#v}"
+            if [ "$TAGVER" != "$VER" ]; then
+              echo "::error::la etiqueta $GITHUB_REF_NAME dice $TAGVER y kVersion dice $VER."
+              echo "::error::Sube kVersion en src/core/system.hpp y vuelve a etiquetar."
+              exit 1
+            fi
+          fi
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "version = $VER"
+
+      # Los DOS rasterizadores, los dos estaticos: el paquete lleva parallel-RDP como
+      # recomendado y SoftRDP al lado para maquinas sin Vulkan y como oraculo determinista.
+      - name: build (parallel-RDP, estatico)
+        run: |
+          cmake -S . -B build-prdp-static -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
+          cmake --build build-prdp-static -j4
+
+      - name: build (SoftRDP, estatico)
+        run: |
+          cmake -S . -B build-static -G Ninja -DCMAKE_BUILD_TYPE=Release \
+                -DKESTREL_STATIC=ON
+          cmake --build build-static -j4
+
+      # Lo unico que el runner PUEDE validar: las seis pruebas que no cargan ninguna ROM.
+      - name: unit tests
+        run: |
+          cmake --build build-prdp-static -j4 --target rsp_test save_test wildmem_test cheat_test archive_test rewind_test
+          for t in rsp_test save_test wildmem_test cheat_test archive_test rewind_test; do
+            echo "== $t =="
+            ./build-prdp-static/$t.exe || exit 1
+          done
+
+      # Mismo empaquetador que en desarrollo, para que el zip tenga la misma forma.
+      - name: package
+        env:
+          PY_WIN: ${{ steps.py.outputs.python-path }}
+        run: |
+          export PY="$(cygpath -u "$PY_WIN")"
+          sh scripts/dist.sh build-prdp-static dist
+          # Aviso honesto DENTRO del paquete: esto no ha pasado las puertas.
+          {
+            echo ""
+            echo "origen:  GitHub Actions (workflow release.yml), ejecucion $GITHUB_RUN_ID"
+            echo "puertas: NO EJECUTADAS -- gate_all.sh y gate_prdp.sh necesitan ROMs y en"
+            echo "         este repositorio no hay ninguna. Compilacion reproducible desde"
+            echo "         el codigo; la validacion de exactitud se hace en la maquina de"
+            echo "         desarrollo."
+          } >> dist/VERSION.txt
+          cat dist/VERSION.txt
+
+      - name: sha256
+        run: |
+          VER='${{ steps.ver.outputs.ver }}'
+          sha256sum "kestrel64-$VER-win64.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # La nota se escribe AQUI, en sh, y no en el paso de pwsh: dentro de una cadena de
+      # PowerShell el acento grave es el caracter de escape, o sea que el markdown con
+      # `codigo` se rompia solo. Con un fichero y --notes-file no hay nada que escapar.
+      - name: release notes
+        if: github.ref_type == 'tag'
+        run: |
+          VER='${{ steps.ver.outputs.ver }}'
+          cat > RELEASE_NOTES.md <<NOTES
+          Compilado por GitHub Actions desde el codigo de la etiqueta \`$GITHUB_REF_NAME\`.
+
+          **Que hay dentro** (\`kestrel64-$VER-win64.zip\`)
+
+          - \`kestrel64.exe\` -- parallel-RDP (GPU, Vulkan). El recomendado.
+          - \`kestrel64-soft.exe\` -- SoftRDP. Para maquinas sin Vulkan, y rasterizador de referencia.
+          - \`kestrel64-gui.exe\` -- lanzador grafico.
+          - \`VERSION.txt\` -- version, commit y md5 de cada ejecutable.
+          - \`LICENSE.txt\` y \`THIRD-PARTY.txt\` -- MIT, y los avisos de lo que va
+            enlazado estatico dentro del binario (parallel-rdp, volk, libc++, GLFW).
+            Todo permisivo; ni una ROM en el paquete.
+
+          **Alcance de la validacion.** El runner compila y pasa las seis pruebas unitarias
+          que no cargan ROMs. Las puertas de exactitud (systemtest, suite krom, contraste
+          lockstep contra threaded) necesitan ROMs y no se pueden ejecutar aqui: se ejecutan
+          en la maquina de desarrollo antes de etiquetar.
+          NOTES
+          cat RELEASE_NOTES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kestrel64-${{ steps.ver.outputs.ver }}-win64
+          path: |
+            kestrel64-${{ steps.ver.outputs.ver }}-win64.zip
+            SHA256SUMS.txt
+          if-no-files-found: error
+
+      # Solo con etiqueta. Si la Release ya existe (la creo `scripts/publish.py` desde la
+      # maquina de desarrollo, que es la que SI paso las puertas) no se machaca: se le
+      # adjunta el zip de CI con otro nombre y se deja constancia de las dos procedencias.
+      - name: release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER='${{ steps.ver.outputs.ver }}'
+          ZIP="kestrel64-$VER-win64.zip"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "la Release ya existe: adjunto el paquete de CI aparte"
+            cp "$ZIP" "kestrel64-$VER-win64-ci.zip"
+            sha256sum "kestrel64-$VER-win64-ci.zip" > SHA256SUMS-ci.txt
+            gh release upload "$GITHUB_REF_NAME" \
+              "kestrel64-$VER-win64-ci.zip" "SHA256SUMS-ci.txt" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$ZIP" "SHA256SUMS.txt" \
+              --title "kestrel64 $VER" --notes-file RELEASE_NOTES.md --verify-tag
+          fi

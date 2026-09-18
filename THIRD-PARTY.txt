@@ -1,0 +1,111 @@
+kestrel64 -- avisos de terceros
+================================
+
+kestrel64 esta bajo licencia MIT, Copyright (c) 2026 celgadis84; el texto completo
+esta en el fichero LICENSE junto a este.
+
+Los ejecutables que se distribuyen (`kestrel64.exe`, `kestrel64-soft.exe`) se enlazan
+de forma ESTATICA, o sea que el binario contiene codigo de los proyectos de abajo.
+Sus licencias son todas permisivas y exigen que este aviso viaje con las copias; eso
+es exactamente lo que hace este fichero. No hay ninguna licencia viral en la cadena.
+
+Este paquete NO contiene imagenes de ROM, de BIOS ni ningun otro dato de juego con
+derechos de autor, y no hacen falta para compilarlo. Para jugar hace falta una ROM
+que seas duenno.
+
+
+1. parallel-rdp -- rasterizador RDP sobre Vulkan
+   Copyright (c) 2020 Themaister (Hans-Kristian Arntzen)
+   https://github.com/Themaister/parallel-rdp
+   Licencia MIT (SPDX: MIT). Texto completo en la seccion A.
+
+2. volk -- cargador de Vulkan, distribuido dentro de parallel-rdp
+   Copyright (c) 2018-2023 Arseny Kapoulkine
+   https://github.com/zeux/volk
+   Licencia MIT (SPDX: MIT). Texto completo en la seccion A; es el mismo texto,
+   cambiando el titular.
+
+3. Vulkan-Headers -- cabeceras de la API de Vulkan, dentro de parallel-rdp
+   Copyright 2015-2024 The Khronos Group Inc.
+   https://github.com/KhronosGroup/Vulkan-Headers
+   Licencia Apache-2.0 (SPDX: Apache-2.0). Texto completo en:
+   https://www.apache.org/licenses/LICENSE-2.0
+
+4. libc++, libc++abi y libunwind -- biblioteca estandar de C++ del proyecto LLVM,
+   enlazadas estaticamente en las compilaciones con -DKESTREL_STATIC=ON
+   Copyright (c) The LLVM Project contributors
+   https://llvm.org
+   Licencia Apache-2.0 WITH LLVM-exception (SPDX: Apache-2.0 WITH LLVM-exception).
+   La excepcion de LLVM releva explicitamente de la obligacion de reproducir el
+   aviso al distribuir SOLO la forma binaria compilada; aun asi queda aqui.
+   Texto completo en: https://llvm.org/LICENSE.txt
+
+5. GLFW -- ventana y entrada, enlazada estaticamente en esas mismas compilaciones
+   Copyright (c) 2002-2006 Marcus Geelnard, Copyright (c) 2006-2019 Camilla Lowy
+   https://www.glfw.org
+   Licencia zlib/libpng (SPDX: Zlib). Texto completo en la seccion B.
+
+
+Nota sobre las FUENTES de documentacion. El emulador esta escrito contra la
+documentacion publica de hardware de n64brew, n64.dev, la wiki de libdragon y el
+nucleo N64 de MiSTer, y se valida contra n64-systemtest (Lemmy), las demos de
+krom / PeterLemon y RDP-Timing-Tests (Thar0). Algunos comentarios del codigo citan
+como otros emuladores (ares, cen64, angrylion, Project64) documentan un detalle
+concreto -- un numero de ciclos, la expansion de 5 a 8 bits de un canal, la tabla
+de longitudes de comando del RDP. Son CITAS de comportamiento de hardware, que es
+un hecho y no una obra: no se ha copiado codigo de esos proyectos, y ninguno de
+ellos entra en el binario.
+
+
+================================================================================
+Seccion A -- Licencia MIT (parallel-rdp, volk)
+================================================================================
+
+Copyright (c) 2020 Themaister
+Copyright (c) 2018-2023 Arseny Kapoulkine
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+================================================================================
+Seccion B -- Licencia zlib/libpng (GLFW)
+================================================================================
+
+Copyright (c) 2002-2006 Marcus Geelnard
+Copyright (c) 2006-2019 Camilla Lowy
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would
+   be appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not
+   be misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source
+   distribution.

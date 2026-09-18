@@ -27,6 +27,13 @@ echo "empaquetando desde $BUILD/"
 rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$EXE" "$OUT/"
 
+# Avisos de licencia. NO es un adorno: los ejecutables que se reparten van enlazados
+# estaticamente, o sea que dentro del binario hay codigo de parallel-rdp, volk, libc++ y
+# GLFW, y sus licencias (MIT, zlib) exigen que el aviso viaje con la copia. Sin estos dos
+# ficheros el zip incumple, aunque todas sean permisivas.
+cp LICENSE "$OUT/LICENSE.txt"
+cp THIRD-PARTY.txt "$OUT/"
+
 # Segundo ejecutable: el MISMO emulador compilado con el rasterizador por software. El que
 # se distribuye lleva parallel-RDP y cae solo a SoftRDP si Vulkan no arranca, pero esa caida
 # es en caliente: quien tenga una GPU vieja, un driver roto o una maquina virtual paga el

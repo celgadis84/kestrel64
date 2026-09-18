@@ -29,6 +29,7 @@ desktop.ini
 # scratch de depuración en la raíz (volcados de log de sesiones)
 /*.txt
 !requirements*.txt
+!THIRD-PARTY.txt
 build-prof/
 build-prof-prdp/
 

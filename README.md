@@ -171,8 +171,23 @@ test/         unit and subsystem tests
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Bundled third-party code keeps its own license:
-`third_party/parallel-rdp/` is MIT, Copyright (c) 2020 Themaister.
+MIT, see [LICENSE](LICENSE). Bundled and statically linked third-party code keeps its own
+license, all of them permissive; [THIRD-PARTY.txt](THIRD-PARTY.txt) carries the notices and
+ships inside the release zip, because the released executables are statically linked and the
+code is therefore *in* the binary:
+
+| Component | License |
+|---|---|
+| `third_party/parallel-rdp/` — Themaister | MIT |
+| volk (inside it) — Arseny Kapoulkine | MIT |
+| Vulkan-Headers (inside it) — The Khronos Group | Apache-2.0 |
+| libc++ / libc++abi / libunwind — the LLVM project | Apache-2.0 WITH LLVM-exception |
+| GLFW — Marcus Geelnard, Camilla Löwy | zlib |
+
+Some source comments cite how other emulators (ares, cen64, angrylion, Project64) document a
+specific hardware detail — a cycle count, the 5-to-8-bit channel expansion, the RDP command
+length table. Those are citations of hardware behaviour, not copied code: none of those
+projects is vendored and none ends up in the binary.
 
 This repository contains no ROM images, BIOS images or other copyrighted game data, and
 none are needed to build it. Running a game requires a ROM image you own.
