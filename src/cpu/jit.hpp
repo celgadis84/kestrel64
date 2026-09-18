@@ -376,7 +376,10 @@ struct LinkSite {
   // re-sondear la VA una vez y marcar los que ya no casan; si el mapeo vuelve, vuelven.
   bool tlbOk = true;
 };
-// VA imposible (impar: toda PC de N64 está alineada a 4) → la guarda nunca casa.
+// VA con la que la guarda de enlace nace DESACTIVADA, y etiqueta de una entrada vacia de la
+// ITC. Es impar a proposito: una PC alineada nunca casa. OJO, no es una VA "imposible" --
+// un JR a un registro impar la produce, y entonces lo que toca es AdEL en el fetch, no un
+// salto. Por eso la ruta indirecta descarta los destinos desalineados antes de comparar.
 static constexpr u64 kNoLink = 1;
 
 struct Block {

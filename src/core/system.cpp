@@ -1049,6 +1049,19 @@ auto System::run() -> void {
       // una por borde cruzado; si suben al millon es que el grano se ha perdido.
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
+      // TODOS los puntos donde manda el ANFITRION y no el invitado, juntos. Si alguno sale
+      // != 0 la corrida no es reproducible y el statehash que salga de ella vale lo que valga
+      // el reloj de esta maquina. Estaban contados pero no se imprimian, asi que no habia
+      // forma de descartarlos al perseguir una divergencia.
+      std::fprintf(stderr, "[pared] renuncias sp=%u dp=%u diario=%u barSP=%u barDP=%u aparcado=%u/%u\n",
+                   memory.spRdvWaives.load(), memory.dpRdvWaives.load(), memory.dpLogWaives.load(),
+                   memory.spBarWaives.load(), memory.dpBarWaives.load(),
+                   memory.rspParkWv.load(), memory.rspParks.load());
+      // Reparto de los plazos de fin de SP nacidos vencidos. Uno vencido = MI_SP cae donde el
+      // anfitrion haya llegado, que es divergencia directa.
+      std::fprintf(stderr, "[spvenc] %u vencidos: adelanto=%u aparcado=%u otro=%u, rebase max=%llu ops\n",
+                   memory.spLate.load(), memory.spLateLead.load(), memory.spLatePark.load(),
+                   memory.spLateOther.load(), (unsigned long long)memory.spLateOverMax.load());
       std::fprintf(stderr, "[dpsnap] %llu copias del FIFO, %.1f MB (%.0f B de media), %.3f s dentro de rdpSubmit (mutex %.3f, horario %.3f, paseo %.3f / %llu cmds, copia %.3f, despertar %.3f x%llu, unidos %llu)\n",
                    (unsigned long long)memory.rdpSnapCopies.load(),
                    memory.rdpSnapBytes.load() / 1048576.0,

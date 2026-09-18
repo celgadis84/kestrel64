@@ -3941,7 +3941,20 @@ auto Memory::rcpDeadlineOn() -> bool {
 auto Memory::spEndArm(u64 cyclesUsed) -> void {
   spDoneAt = spCycleAt(cyclesUsed);
   spArms.fetch_add(1, std::memory_order_relaxed);
-  if(spDoneAt < cartNow()) spLate.fetch_add(1, std::memory_order_relaxed);
+  if(spDoneAt < cartNow()) {
+    const u64 nowOps = cartNow();
+    spLate.fetch_add(1, std::memory_order_relaxed);
+    // Cual de las tres escotillas dejo pasar a la CPU. `rspRdvAt` != 0 = estabamos dentro
+    // de una cita y la CPU tenia concedido el adelanto kRdvLead; `rspPark` != 0 = el RSP
+    // estaba aparcado y la barrera valia el tope del aparcamiento; si no es ninguna de las
+    // dos, la barrera solto por pared (spBarWaives) o no estaba puesta.
+    if(rspRdvAt.load(std::memory_order_acquire))    spLateLead.fetch_add(1, std::memory_order_relaxed);
+    else if(rspPark.load(std::memory_order_acquire)) spLatePark.fetch_add(1, std::memory_order_relaxed);
+    else                                            spLateOther.fetch_add(1, std::memory_order_relaxed);
+    const u64 over = nowOps - spDoneAt;
+    u64 prev = spLateOverMax.load(std::memory_order_relaxed);
+    while(over > prev && !spLateOverMax.compare_exchange_weak(prev, over, std::memory_order_relaxed)) {}
+  }
   // El plazo sustituye a la barrera: a partir de aqui el fin ya tiene instante propio y la
   // CPU solo tiene que esperar a que ese instante llegue.
   rcpPend.fetch_or(1u, std::memory_order_release);

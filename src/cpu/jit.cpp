@@ -1558,9 +1558,19 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // del enlace estatico, que re-chequea interrupciones, borde de timer y presupuesto de
     // cadena, o sea no se salta ninguna comprobacion, solo el viaje.
     if(nc == 0 && useItc) {
+      // Un destino NO alineado no es un destino: el VR4300 levanta AdEL en el propio fetch,
+      // y eso lo vectoriza el interprete. Aqui ademas era una caida del anfitrion: `kNoLink`
+      // vale 1 -- se eligio impar justamente por "imposible" -- y un JR a la VA 1, que
+      // junkrunner64 hace a proposito, casaba con la etiqueta de TODA entrada vacia de la
+      // ITC; el salto se iba entonces al `code` de una entrada sin rellenar, que es 0.
+      // Mandando fuera los desalineados el centinela vuelve a ser inalcanzable por
+      // construccion. Solo hace falta en la ruta INDIRECTA: el destino de un J o de un
+      // branch sale de la codificacion de la instruccion y siempre esta alineado.
       constexpr s32 kEntSize = (s32)sizeof(CodeCache::ItcEnt);
       e.mov_r_imm64(RDX, (u64)(std::uintptr_t)c.jitCache->itc.data());
       e.mov_r_r(RAX, RCX);
+      e.test_al_imm8(3);                               // 2 bits bajos del destino
+      const usize mis = e.jne_rel32_placeholder();
       e.shift64_imm(5, RAX, 12);                       // shr rax, 12
       e.xor_r_r(RAX, RCX);                             // rax = va ^ (va>>12)
       e.shift64_imm(5, RAX, 2);                        // shr rax, 2  (ops alineadas)
@@ -1577,6 +1587,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       e.add_m32_imm32(RBX, pendOff, nops);             // ops de ESTE bloque, al diferido
       e.jmp_m(RDX, 8);                                 // salta al linkEntry guardado
       e.patchRel32(miss);
+      e.patchRel32(mis);                               // desalineado: por la salida lenta
       static_assert(kEntSize == 16, "el shl de arriba asume entradas de 16 bytes");
     }
     if(havePrev) e.patchRel32(prevJne);

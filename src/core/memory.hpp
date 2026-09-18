@@ -868,6 +868,11 @@ struct Memory {
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
   u64  spBarWaivedAt = ~0ull;
   std::atomic<u32> spArms{0}, dpArms{0}, spLate{0}, dpLate{0};  // diagnostico del plazo
+  // Por que se paso la CPU cuando un plazo nace vencido. Son TRES escotillas distintas y
+  // cada una se arregla de otra forma, asi que el contador agregado no basta: el adelanto
+  // de la cita (kRdvLead), la renuncia de la barrera por pared, y el tope del aparcamiento.
+  std::atomic<u32> spLateLead{0}, spLatePark{0}, spLateOther{0};
+  std::atomic<u64> spLateOverMax{0};   // mayor rebase, en ops de invitado
   // Retiros: veces que el fin de SP/DP se ha hecho VISIBLE al invitado. spArms/dpArms cuentan
   // el ARMADO del plazo, y en Threaded lo arma el hilo del RSP/RDP cuando termina el trabajo
   // en tiempo de PARED: dos corridas del mismo binario suben ese contador en campos distintos

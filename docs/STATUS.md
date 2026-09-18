@@ -7700,3 +7700,55 @@ Por que esta no paga y la de los cinco campos del reloj si: alli lo que se junto
 lee `cartNow()`, que el hilo del RSP pregunta en CADA vuelta de sondeo. Aqui el diario DPC se
 toca una vez por tramo, no por vuelta, asi que el trafico de coherencia que se ahorra es de
 otro orden de magnitud.
+
+## 2026-09-18 -- El centinela de "no enlazado" del JIT era una direccion que el invitado SI puede pedir
+
+junkrunner64 tumbaba el anfitrion, otra vez, y esta vez dentro del codigo emitido:
+
+```
+==== HOST EXCEPTION 0xc0000005 at host RIP 0000000000000000 ====
+  RIP FUERA de toda imagen -> codigo emitido por el dynarec
+  access violation: EXEC at host addr 0x0
+  guest pc=0x0000000000000001 nextPc=0x0000000000000005 halted=0
+```
+
+`jit::kNoLink` vale **1**, y su comentario decia "VA imposible (impar: toda PC de N64 esta
+alineada a 4)". La premisa es falsa: un `JR`/`JALR` con un registro impar produce una PC impar
+-- lo que toca entonces es AdEL en el fetch, no que la direccion no exista. Y ese mismo 1 es:
+
+- el valor con el que nace DESACTIVADA la guarda de cada sitio de enlace, y
+- la etiqueta de cada entrada VACIA de la cache de destinos indirectos (ITC).
+
+O sea que un salto indirecto a la VA 1 -- junkrunner64 los hace a proposito -- casaba con TODAS
+las entradas vacias de la ITC, y el `jmp qword [rdx+8]` se iba al `code` de una entrada sin
+rellenar, que es 0. Salto a RIP 0.
+
+Arreglo (`src/cpu/jit.cpp`, cola de salida de control): antes de comparar nada, la ruta
+INDIRECTA descarta los destinos desalineados y los manda a la salida lenta, donde el interprete
+levanta el AdEL que el hardware levanta (`src/cpu/cpu.cpp:1212`). Con eso el centinela vuelve a
+ser inalcanzable por construccion. Son tres instrucciones (`mov rax,rcx` / `test al,3` / `jne`) y
+solo en `JR`/`JALR`: el destino de un `J` o de un branch sale de la codificacion de la
+instruccion y siempre esta alineado, asi que en esa ruta no se emite nada.
+
+La guarda del enlace ESTATICO comparte el centinela pero no comparte el agujero, y por la misma
+razon: alli el `RCX` de tiempo de ejecucion tambien viene de la codificacion.
+
+## 2026-09-18 -- Telemetria: todos los salvavidas de PARED, juntos y en una linea
+
+Perseguir una divergencia obligaba a descartar uno por uno los puntos donde decide el anfitrion
+y no el invitado, y varios de sus contadores existian pero **no se imprimian en ningun sitio**
+(`dpRdvWaives`, `rspParkWv`, `spBarWaives`, `dpBarWaives`). Ahora el bloque de cierre saca dos
+lineas mas:
+
+```
+[pared]  renuncias sp=.. dp=.. diario=.. barSP=.. barDP=.. aparcado=../..
+[spvenc] N vencidos: adelanto=.. aparcado=.. otro=.., rebase max=.. ops
+```
+
+`[spvenc]` reparte los plazos de fin de SP nacidos vencidos por la escotilla que dejo pasar a la
+CPU -- el adelanto `kRdvLead` de la cita, el tope del aparcamiento, o ninguno de los dos -- y da
+el mayor rebase en ops. Un plazo vencido significa que `MI_SP` cae donde haya llegado el
+anfitrion, que es divergencia directa; hasta ahora solo se sabia CUANTOS, no POR QUE.
+
+OJO: estas lineas solo salen si la corrida para por `KESTREL_MAXFLIPS`, `KESTREL_MAXSYNCS` o
+`KESTREL_MAXFIELDS`. Con `KESTREL_MAXINSN` el bloque de cierre no se ejecuta.

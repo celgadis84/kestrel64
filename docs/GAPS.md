@@ -1278,6 +1278,48 @@ Por donde empezar, en este orden (son las perillas que deciden el orden entre hi
 camino por el que se cuela un instante de invitado que no se esta clavando. Despues,
 `KESTREL_FIELDHASH=1` para acotar el campo exacto en que las dos corridas se separan.
 
+### Descartado: los salvavidas de PARED no son la causa (2026-09-18)
+
+La sospecha mas gorda era `Memory::rdvWaiveDue` (memory.cpp): cuando una cita se alarga, la
+suelta por reloj de ANFITRION -- 20 ms si la CPU esta esperando al RCP, 2000 ms si no --, y una
+sola renuncia basta para que las dos corridas se separen. **Medido y descartado.** Tres corridas
+a `KESTREL_MAXFIELDS=2600` y tres a 1200, con la telemetria nueva `[pared]` puesta:
+
+```
+[pared] renuncias sp=0 dp=0 diario=0 barSP=0 barDP=0 aparcado=0/...
+```
+
+Cero en las seis, en los seis contadores, y aun asi divergen. Que divergen de verdad y no es
+la huella lo dice `[dplog] apuntadas`, que es cuenta de INVITADO: 2403074 / 2041802 / 2401940.
+
+Con `KESTREL_FIELDTRACE=1` la primera linea distinta sale en el campo 715 de 1200:
+
+```
+A: [ft] f=715 ret=799741361 ops=799741361 sp=315 dp=334 flips=330 syncs=334 org=0a1480 mi=1c
+B: [ft] f=715 ret=799748782 ops=799748782 sp=315 dp=334 flips=331 syncs=334 org=0c6cc0 mi=10
+```
+
+Mismo campo de video, distinto numero de instrucciones retiradas, distinto `vi_origin` y
+distinta mascara de MI. Las tareas de SP y DP van igualadas (315/334 en las dos), asi que **no
+es que el RCP haya hecho mas o menos trabajo: es que el invitado tomo otro camino**. Otro par
+de corridas se separo en el campo 836.
+
+Aparecio de paso un defecto REAL pero distinto: una corrida de la tanda de 2600 dio
+`[det] spArm=329/1 tarde`, o sea un plazo de fin de tarea del SP **nacido ya vencido**, que es
+exactamente lo que avisa el comentario de `kRdvLead`. Cuando eso pasa, `MI_SP` cae donde haya
+llegado el anfitrion. No es la causa unica -- las otras dos corridas dieron `0 tarde` y tambien
+divergieron -- pero hay que cerrarlo igual. Para eso esta ahora `[spvenc]`, que reparte los
+vencidos por escotilla (adelanto de la cita / tope del aparcamiento / otro) y da el mayor
+rebase en ops.
+
+Siguiente corte, ya escrito: cuatro brazos `prdp` / `prdp+SYNCRDP` / `soft` / `soft+SYNCRDP`.
+La hipotesis viva es el RDP: con Parallel-RDP el motor lee pixeles, texturas y TLUT de la RDRAM
+**viva** y escribe color/z desde la GPU en tiempo de ANFITRION, y junkrunner64 programa
+`SET_COLOR_IMAGE` a direcciones arbitrarias a proposito -- o sea que el RDP pinta encima de los
+datos del propio invitado, y cuando eso aterriza respecto a las lecturas de la CPU lo decide el
+reloj del anfitrion. Si con `SYNCRDP=1` (RDP sincrono) deja de divergir en los dos backends,
+es eso.
+
 ## Crecimiento de memoria con el invitado descarrilado (2026-09-18, SIN REPRODUCIR)
 
 Durante la caceria de arriba quedo un `kestrel64.exe` huerfano con **5,2 GB** de conjunto de
