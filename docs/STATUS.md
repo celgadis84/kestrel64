@@ -7424,3 +7424,123 @@ deja el freno mas despierto.
 
 El md5 del framebuffer es identico en los cuatro juegos y en todos los granos, incluido el
 de "casi nunca": el regulador es ajuste de anfitrion y no mueve estado de invitado.
+
+## 2026-09-18 -- Perfil fresco del hilo de CPU, y por que el 15 % de `div` NO se cobra
+
+El perfil de `docs/GAPS.md` era del 2026-09-11 y ya no valia. Tomado uno nuevo con
+`build-prof-prdp` (Perfect Dark, 600 campos, Parallel-RDP + threaded-jit, 1243 muestras,
+89 % dentro de imagen):
+
+| % | funcion | donde |
+|---|---------|-------|
+| 15,1 | `PaceDiv::div` | dentro de `spBarrierWait` |
+| 9,3 | `atomic_load<u64>` | idem (`rsp.cyclesRun`) |
+| 6,5 | `spBarrierWait` | |
+| 6,0 | `jitTryBlock` | compilador del dynarec |
+| 5,9 | `dpLogApply` | + 1,9 % fuera de imagen en su `notify_all` |
+| 3,9 | `rcpRetire` | |
+| 3,8 | `spCycleAt` | |
+| 2,3 + 1,6 | `rspPace` + `rdpPace` | el 7,0 % viejo sigue ahi, ya cobrado en parte |
+
+Sumando lo que cae dentro de `spBarrierWait` y sus inlinees salen ~44 % del hilo de CPU, y
+de eso la mitad es ARITMETICA: `spBarrierAt()` convierte ciclos de RCP a ops en cada retiro
+con un multiplicar de 64 bits mas el reciproco de 128 de `PaceDiv`.
+
+### MEDIDO Y DESCARTADO: memoizar `spBarrierAt()`
+
+`spBarrierAt()` es funcion pura de `spKickEdge`, `spKickCycles` (que solo escribe el hilo de
+CPU al lanzar) y `rsp.cyclesRun` (que el worker publica cada pocos miles de instrucciones de
+RSP). Se pregunta en CADA retiro, o sea que la inmensa mayoria de las llamadas repiten la
+misma cuenta. Se probo un memo exacto -- si el contador no se ha movido, se devuelve el valor
+de antes; si se ha movido, se recalcula entero -- en una entrada aparte (`spBarrierAtCpu`),
+porque `spBarrierAt()` la llama TAMBIEN el hilo del RSP por `rspGuestNow()` y un memo en
+miembros planos ahi seria una carrera.
+
+md5 de framebuffer identico en los cuatro juegos y en los cuatro cruces memo-si/no x
+Lockstep/Threaded. O sea que la cuenta sale bit a bit igual. Pero la pared no se mueve:
+
+| juego | tanda 1 (min de 5) | tanda 2 (min de 6) |
+|-------|--------------------|--------------------|
+| jr | -0,70 % | -- |
+| PD | +0,03 % | -0,26 % |
+| SM64 | +1,47 % | +0,52 % |
+| DK64 | +0,38 % | -- |
+
+Dos tandas, ninguna reproduce nada y SM64 sale peor en las dos. Codigo retirado del arbol.
+
+### La leccion, que vale mas que la perilla
+
+**Quitarle ARITMETICA al hilo de CPU no se cobra: ese hilo esta bloqueado en la barrera
+esperando al RSP, asi que su trabajo local es gratis.** Un 15 % de muestras no es un 15 % de
+pared cuando el hilo se pasa la vida esperando -- ahorrarle ciclos solo le hace llegar antes
+al mismo `wait_for`.
+
+Lo que SI se cobro (`KESTREL_PACEASK`, -2,5 % en PD el mismo dia) no quitaba aritmetica:
+quitaba LECTURAS de lineas que los workers reescriben. Esa es la regla para el proximo
+candidato del hilo de CPU: se mide en trafico de coherencia y en bloqueos, no en muestras.
+
+Y por eso mismo el memo no se puede llevar mas lejos. La variante fuerte seria saltarse
+tambien la lectura de `cyclesRun` cuando el valor memorizado ya prueba que la barrera no
+muerde, pero no vale: `spBarrierEff()` puede BAJAR sin que `cyclesRun` se mueva (el RSP se
+aparca y manda `rspParkCap`, o se cierra una cita y cae el `kRdvLead`), asi que la lectura es
+inherente. No hay version de esta idea que ahorre coherencia.
+
+
+## 2026-09-18 -- El palo largo es el hilo del RSP, y ceder el nucleo 256 veces menos
+
+Con el perfil del hilo de CPU ya explicado (la seccion de arriba), perfilo el OTRO lado:
+`KESTREL_HOSTPROF=1 KESTREL_HOSTPROF_WHO=rsp`, Perfect Dark, 600 campos, `build-prof-prdp`,
+Parallel-RDP + threaded-jit.
+
+| | |
+|---|---|
+| hilo del RSP ocupado | **63,4 %** del tiempo de pared |
+| `cpuWait` | 7,5 % |
+| `dpLogWait` | ~38 % de sus muestras (17,9 % dentro de imagen + **20,3 % fuera**) |
+| `spReadSync` | ~15,6 % |
+
+El 20,3 % que cae fuera de la imagen con `dpLogWait` de llamante es `std::this_thread::yield()`.
+En Windows eso es `SwitchToThread()`: una llamada al kernel que solo hace algo si hay otro hilo
+listo en ESTE nucleo. Aqui hay 4 nucleos / 8 hilos y tres hilos calientes que ya viven cada uno
+en el suyo, asi que la inmensa mayoria de las veces entra al kernel, mira, y vuelve sin haber
+hecho nada.
+
+Las esperas no sobran: `[dplog] ... 1 807 544 esperas` es, una a una, cada lectura de DPC que
+hace el microcodigo, y cada lectura es una cita de orden de invitado con el hilo de CPU
+(`Rsp::mfc0`, `rsp.cpp:494-498`). Eso es SEMANTICA, no se toca. Lo que se toca es el precio de
+cada vuelta de la cita.
+
+### `KESTREL_RDVYIELD`
+
+Los tres bucles de cita (`dpLogWait`, la fase obligatoria de `rspParkWait`, `spReadSync`) cedian
+el nucleo una de cada 256 vueltas. Ahora una de cada **65536**, con la constante sacada a un
+`KESTREL_RDVYIELD` (potencia de dos; 256 = comportamiento viejo).
+
+Barrido intercalado, minimo de 4, ms de pared, Parallel-RDP. **Dos tandas independientes**, que
+es lo que pide la casa cuando el margen cabe en el ruido:
+
+| juego | tanda A (256 -> 4096 -> 65536) | tanda B (256 -> 65536 -> 262144 -> 1 M) |
+|---|---|---|
+| junkrunner64 | 8041 -> 8014 (-0,34) -> 8000 (**-0,51**) | 8023 -> 7985 (**-0,47**) -> 7947 (-0,95) -> 7993 (-0,37) |
+| Perfect Dark | 11456 -> 11428 (-0,24) -> 11382 (**-0,65**) | 11418 -> 11422 (**+0,04**) -> 11403 (-0,13) -> 11471 (+0,46) |
+| SM64 | 7930 -> 7900 (-0,38) -> 7851 (**-1,00**) | 7867 -> 7820 (**-0,60**) -> 7811 (-0,71) -> 7838 (-0,37) |
+| DK64 | 11909 -> 11873 (-0,30) -> 11865 (**-0,37**) | 11905 -> 11870 (**-0,29**) -> 11907 (+0,02) -> 11836 (-0,58) |
+
+Siete de ocho lecturas a favor, y md5 del framebuffer IDENTICO en las 4 x 7 corridas (el pomo no
+toca estado de invitado, solo cuando se entra al kernel). Lo que separa esto del ruido es que la
+tanda A sale **monotona en los cuatro juegos**.
+
+Por que 65536 y no 262144, que en tanda B sale un pelin mejor en jr y SM64: porque detras del
+mismo `if` van tambien el aviso al hilo de CPU (`rspCv.notify_all`) y el salvavidas de pared
+(`rdvWaiveDue`), asi que espaciarlo mas los retrasa a los dos. Y se nota: a 1 M, PD ya es PEOR
+(+0,46 %) y DK64 no reproduce su ganancia. 65536 es el primer punto de la meseta -- el que deja
+el aviso y el salvavidas mas despiertos -- y es el que reproduce en tanda A y tanda B.
+
+Comprobado ademas lo que este pomo pone en riesgo:
+
+- `scratchpad/pdboot.sh`: **ok=15 bad=0**.
+- `[sprdv] 93762 citas, 0 renuncias, 0 relanzados` y `[dplog] 1182524 apuntadas, 1134580 esperas,
+  0 renuncias` -- el salvavidas de 20 ms no llega a dispararse ni una vez. Tiene sentido: 65536
+  vueltas de unos pocos ns siguen cayendo muy por debajo de 20 ms.
+
+Que queda: el OTRO 17,9 % de `dpLogWait`, el que si esta dentro de la imagen.

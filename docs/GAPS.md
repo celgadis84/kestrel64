@@ -690,6 +690,27 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 ### Rendimiento (ordenado por perfil de anfitrion, 2026-09-11)
 
+> **REMEDIDO el 2026-09-18.** El perfil de abajo es de antes de las dos barreras de invitado y
+> de `KESTREL_PACEASK`, y ya no describe la maquina: `cpuWait` bajo del 20,2 % a ~5 %. El
+> reparto nuevo (Perfect Dark, 600 campos, `build-prof-prdp`, 1243 muestras, 89 % dentro de
+> imagen) es `PaceDiv::div` 15,1 % · `atomic_load<u64>` 9,3 % · `spBarrierWait` 6,5 % ·
+> `jitTryBlock` 6,0 % · `dpLogApply` 5,9 % · `rcpRetire` 3,9 % · `spCycleAt` 3,8 % ·
+> `rspPace` 2,3 % · `rdpPace` 1,6 %. `dpBarrierWait` ha DESAPARECIDO de la cabeza.
+> Las tres primeras son `spBarrierWait` y sus inlinees: ~44 % del hilo, la mitad aritmetica.
+> **Y esa aritmetica no se cobra** -- memoizarla entera salio en nada medible en dos tandas
+> (ver `docs/STATUS.md`, 2026-09-18). El hilo de CPU esta bloqueado esperando al RSP, asi que
+> su trabajo local es gratis: en este hilo solo paga quitar TRAFICO DE COHERENCIA (que es lo
+> que hizo `KESTREL_PACEASK`, -2,5 % en PD) o quitar BLOQUEO. Las muestras, por si solas,
+> enganan.
+> **Y EL PALO LARGO NO ES ESE HILO.** Perfilado el mismo dia el hilo del RSP (`KESTREL_HOSTPROF_WHO=rsp`,
+> Perfect Dark, 600 campos): esta ocupado el 63,4 % del tiempo, contra un `cpuWait` del 7,5 %. De sus
+> muestras ~38 % caen en `dpLogWait` (17,9 % dentro de imagen + 20,3 % FUERA, que es
+> `std::this_thread::yield()`) y ~15,6 % en `spReadSync`. Las `1 807 544 esperas` del `[dplog]` son las
+> ~1,81 M lecturas de DPC que hace el microcodigo, y cada una es una cita de orden de invitado con la CPU
+> (`Rsp::mfc0`): la cita es SEMANTICA, no se puede quitar. Lo que si se puede es abaratarla -- ver
+> `KESTREL_RDVYIELD` abajo.
+
+
 La lista de antes (`dcFill`/`dcFlush` 4,5 %, `rcpPace` 2 %) venia de un perfil viejo, de cuando
 el interprete mandaba y el RCP iba en el mismo hilo. **Ya no es cierta**: medido de nuevo con
 `KESTREL_HOSTPROF=1` sobre SM64 en `build-prdp` (threaded-jit, Parallel-RDP, 400 intercambios,
@@ -827,6 +848,23 @@ Por ahi va el orden nuevo:
   quita al hilo de CPU los hermanos que los otros dejan libres. Codigo retirado; los md5
   salieron identicos en las dos ramas, o sea que era ajuste de anfitrion puro. Detalle en
   `docs/STATUS.md`.
+- **Memoizar `spBarrierAt()` en el hilo de CPU: MEDIDO Y DESCARTADO (2026-09-18).** Es funcion
+  pura de `spKickEdge`/`spKickCycles` (que solo escribe el hilo de CPU) y de `rsp.cyclesRun`
+  (que el worker publica cada pocos miles de instrucciones), y se pregunta en cada retiro: el
+  memo acertaba casi siempre y daba el mismo numero bit a bit (md5 identico en los 4 juegos y
+  en los 4 cruces memo x Lockstep/Threaded). Pared: jr -0,70, PD +0,03 / -0,26, SM64 +1,47 /
+  +0,52, DK64 +0,38. Dos tandas, nada reproduce. Tampoco tiene version fuerte: saltarse ademas
+  la LECTURA de `cyclesRun` no vale, porque `spBarrierEff()` puede bajar sin que ese contador
+  se mueva (aparcamiento del RSP, cierre de cita).
+- **Ceder el nucleo menos veces en las citas del hilo del RSP: COBRADO (2026-09-18).**
+  `KESTREL_RDVYIELD`, 256 -> 65536. El `std::this_thread::yield()` de los tres bucles de cita
+  es `SwitchToThread()` en Windows, o sea una llamada al kernel que en esta maquina casi nunca
+  encuentra a quien cederle nada. Dos tandas intercaladas de min-de-4: jr -0,51 / -0,47,
+  PD -0,65 / +0,04, SM64 -1,00 / -0,60, DK64 -0,37 / -0,29; siete de ocho a favor, md5
+  identico, y la primera tanda monotona en los cuatro juegos. La meseta acaba ahi: 262144
+  empata y 1 M es peor en PD, porque detras del yield van el aviso al hilo de CPU y el
+  salvavidas de pared. Queda pendiente el OTRO 17,9 % de `dpLogWait` que si esta dentro de
+  imagen.
 - Presentacion sin copia (zero-copy).
 - Sombra de MXCSR — 0,7 %.
 - Coste de llamada de `runFifo`.

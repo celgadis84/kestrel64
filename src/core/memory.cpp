@@ -3042,6 +3042,36 @@ static auto rdvTightTurns() -> u32 {
   return v;
 }
 
+// Una de cada cuantas vueltas la cita CEDE EL NUCLEO (std::this_thread::yield). En Windows es
+// SwitchToThread, o sea una llamada al kernel, y en esta maquina (4 nucleos / 8 hilos, tres
+// hilos calientes) casi siempre no hay a quien cederselo: vuelve enseguida sin haber hecho
+// nada. En el perfil del hilo del RSP del 2026-09-18 (Perfect Dark, 600 campos, Parallel-RDP
+// + threaded-jit) el 20,3 % de las muestras cae FUERA de la imagen con `dpLogWait` de
+// llamante, y ese es justo este yield: el microcodigo sondea DPC 1,81 M de veces por corrida
+// y cada sondeo es una cita con la CPU.
+// Ojo con subirlo mucho: detras del yield van tambien el aviso al hilo de CPU
+// (`rspCv.notify_all`) y el salvavidas de pared (`rdvWaiveDue`), asi que espaciarlo retrasa
+// las dos cosas. A 65536 vueltas de unos pocos ns la comprobacion sigue cayendo muy por
+// debajo de los 20 ms del salvavidas.
+// Barrido intercalado, min de 4, Parallel-RDP, ms de pared, DOS tandas independientes
+// (256 -> 65536): jr -0,51 / -0,47, PD -0,65 / +0,04, SM64 -1,00 / -0,60, DK64 -0,37 / -0,29.
+// Siete de ocho lecturas a favor y md5 de framebuffer identico en las 4 x 7 corridas. La
+// primera tanda ademas sale MONOTONA en los cuatro juegos (256 -> 4096 -> 65536), que es lo
+// que separa esto del ruido. Por arriba se acaba: 262144 empata con 65536 (jr y SM64 un pelo
+// mejor, DK64 un pelo peor) y 1 M ya es PEOR en PD (+0,46 %), justo como se esperaba de
+// retrasar el aviso al hilo de CPU. Se queda 65536, el primer punto de la meseta, que es el
+// que deja el aviso y el salvavidas mas despiertos.
+// KESTREL_RDVYIELD=<n>, potencia de dos; 256 es el comportamiento viejo.
+static auto rdvYieldMask() -> u32 {
+  static const u32 v = [] {
+    const char* e = std::getenv("KESTREL_RDVYIELD");
+    if(e && *e) { char* end = nullptr; unsigned long n = std::strtoul(e, &end, 0);
+                  if(end && !*end && n >= 1 && n <= 1'048'576ul && (n & (n - 1)) == 0) return (u32)n - 1u; }
+    return 65535u;
+  }();
+  return v;
+}
+
 // Una de cada cuantas vueltas se mira el reloj de la CPU, pasadas las apretadas.
 static auto rdvPollMask() -> u32 {
   static const u32 v = [] {
@@ -3344,7 +3374,7 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
   rspLogWait.store(true, std::memory_order_release);
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
-  const u32 tight = rdvTightTurns(), pm = rdvPollMask();
+  const u32 tight = rdvTightTurns(), pm = rdvPollMask(), ym = rdvYieldMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
   for(u32 k = 0;; ++k) {
     // Espaciado como en spReadSync: `ready()` lee el reloj y el diario de la CPU.
@@ -3352,7 +3382,7 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
     if(dpLogFlush.load(std::memory_order_acquire)) dpLogApply(~0ull);
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
     if((k & 15u) == 15u) spinPause();
-    if((k & 255u) != 255u) continue;
+    if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(ready()) break;
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
@@ -3555,13 +3585,14 @@ auto Memory::dpReadSync(u64 now) -> void {
   // La CPU puede estar dormida en la barrera del SP con el valor viejo: hay que sacarla.
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
+  const u32 ym = rdvYieldMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
   // Fase obligatoria: hasta `now`, con salvavidas.
   for(u32 k = 0;; ++k) {
     if(cartNow() >= now) break;
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
     if((k & 15u) == 15u) spinPause();
-    if((k & 255u) != 255u) continue;
+    if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
     // El reloj de pared no se toca hasta la primera tanda: son millones de citas por corrida
@@ -3660,13 +3691,13 @@ auto Memory::spReadSync(u64 now) -> void {
   RcpWaitMark sw_{rspSyncWait};   // antes de mirar rspWaiters: el regulador suelta a la CPU
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
-  const u32 tight = rdvTightTurns(), pm = rdvPollMask();
+  const u32 tight = rdvTightTurns(), pm = rdvPollMask(), ym = rdvYieldMask();
   std::chrono::steady_clock::time_point t0{}, t1{};
   for(u32 k = 0;; ++k) {
     if(k < tight || (k & pm) == pm) { if(cartNow() >= now) break; }
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
     if((k & 15u) == 15u) spinPause();
-    if((k & 255u) != 255u) continue;
+    if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
     if(!rdvWaiveDue(timing, t0, t1)) continue;
