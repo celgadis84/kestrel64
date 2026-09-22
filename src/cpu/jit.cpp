@@ -480,7 +480,11 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   // cargas enteras 64=resto de stores enteros 128=LDC1/SDC1, y 4 = los stores hacen todas las
   // comprobaciones pero se van igual al helper sin escribir (separa "una comprobacion deja
   // pasar algo" de "la escritura esta mal"). =255 lo apaga entero.
-  static const int g_noFastMem = std::getenv("KESTREL_JIT_NOFASTMEM")
+  // KESTREL_CACHESTAT cuenta accesos a la D-cache en dcRead/dcWrite, y el camino rapido no
+  // pasa por ahi: con el puesto se apaga entero, o la tasa de acierto saldria de una muestra
+  // sesgada (solo lo que ya era lento). Mide, no corre.
+  static const int g_noFastMem = CPU::cacheStatFromEnv() ? 255
+                               : std::getenv("KESTREL_JIT_NOFASTMEM")
                                ? (int)std::strtol(std::getenv("KESTREL_JIT_NOFASTMEM"), nullptr, 0) : 0;
   usize fastDone = 0; bool hasFast = false;
   usize fastFail[12]; int nFail = 0;
@@ -2348,6 +2352,7 @@ auto CPU::jitPeekWord(u32 phys) -> u32 {
   const ICacheLine& l = icache[(phys >> 5) & 0x1ff];
   if(!l.valid || l.ptag != (phys & ~0x1fu)) {
     if((usize)phys + 4 > mem->rdram.size()) return 0;
+    mem->dmaSettle(phys, (u64)phys + 4);   // el compilador mira RDRAM: ver Memory::dmaSettle
     const u8* b = &mem->rdram[phys];
     return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3];
   }

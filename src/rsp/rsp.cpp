@@ -494,7 +494,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // borde de grano, igual que las senales de SP_STATUS: espera solo si la CPU va mas de
       // un grano por detras. Ver docs/ARCH-SYNC.md.
       const u64 wq = now & ~(Memory::spSigQuant() - 1);
-      if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq); }
+      if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq, 0); }
       mem->dpcMbRsp(now);   // escrituras de la CPU ya visibles (ver Memory::dpcMbPost)
       // Sin esperar al worker del RDP: CURRENT y STATUS salen del horario de invitado que fijo
       // dpScheduleSpan al lanzar el tramo, no de por donde vaya el anfitrion. Lo unico del RDP
@@ -519,7 +519,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     // Solo son visibles las escrituras de CPU fechadas hasta el ultimo borde de grano.
     const u64 vis = now & ~(Memory::spSigQuant() - 1);
     if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < vis) {
-      publishExact(); mem->spReadSync(vis);
+      publishExact(); mem->spReadSync(vis, 1);
     }
     // Sus propias escrituras aun en el diario: tiene que verlas ya.
     if(mem->spLogPend.load(std::memory_order_acquire)) { publishExact(); mem->dpLogWait(0, false); }
@@ -530,7 +530,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     // Resto de DPC (START/END/contadores): mismo borde de grano para ver lo de la CPU.
     const u64 now = mem->rspGuestNowAt(exactCycles());
     const u64 wq = now & ~(Memory::spSigQuant() - 1);
-    if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq); }
+    if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq, 2); }
     mem->dpcMbRsp(now);
   }
   u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
@@ -563,7 +563,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     // lo mismo que al leer: hasta el ultimo borde de grano.
     const u64 now = mem->rspGuestNowAt(exactCycles());
     const u64 wq = now & ~(Memory::spSigQuant() - 1);
-    if(mem->dpReadAhead(wq)) mem->spReadSync(wq);
+    if(mem->dpReadAhead(wq)) mem->spReadSync(wq, 3);
     mem->dpcMbRsp(now);
     mem->rspDpcWrite(now, rd & 7, v);
     return;
@@ -598,7 +598,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   // distinto de Lockstep; con la cita, igual. KESTREL_DMARDV=0 la quita (para bisecar).
   if(((rd & 7) == 2 || (rd & 7) == 3) && (dmaRdv & (1u << ((rd & 7) - 2))) && mem->rcpMode == Memory::RcpMode::Threaded) {
     const u64 now = mem->rspGuestNowAt(exactCycles());
-    if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now); }
+    if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now, 4); }
   }
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
@@ -632,7 +632,7 @@ auto Rsp::exec(u32 op) -> void {
         // Senales de la CPU aun aplazadas por el grano: ver Memory::spLateClearHalt.
         const u64 now = mem->rspGuestNowAt(exactCycles());
         if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < now) {
-          publishExact(); mem->spReadSync(now);
+          publishExact(); mem->spReadSync(now, 5);
         }
         if(u32 f = mem->spLateClearHalt(now)) {
           if(!(f & 2u)) mem->rcp.sp_status.fetch_or(2u, std::memory_order_acq_rel);   // BROKE

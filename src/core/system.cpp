@@ -1068,6 +1068,15 @@ auto System::run() -> void {
       // una por borde cruzado; si suben al millon es que el grano se ha perdido.
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
+      // Reparto por sitio: citas / vueltas de giro. Dice cual de las esperas del RSP es la cara.
+      std::fprintf(stderr, "[sprdv sitios] dpcCur=%llu/%llu spStatus=%llu/%llu dpcOtros=%llu/%llu "
+                           "wDpc=%llu/%llu dma=%llu/%llu break=%llu/%llu\n",
+                   (unsigned long long)memory.spRdvSiteN[0].load(), (unsigned long long)memory.spRdvSiteK[0].load(),
+                   (unsigned long long)memory.spRdvSiteN[1].load(), (unsigned long long)memory.spRdvSiteK[1].load(),
+                   (unsigned long long)memory.spRdvSiteN[2].load(), (unsigned long long)memory.spRdvSiteK[2].load(),
+                   (unsigned long long)memory.spRdvSiteN[3].load(), (unsigned long long)memory.spRdvSiteK[3].load(),
+                   (unsigned long long)memory.spRdvSiteN[4].load(), (unsigned long long)memory.spRdvSiteK[4].load(),
+                   (unsigned long long)memory.spRdvSiteN[5].load(), (unsigned long long)memory.spRdvSiteK[5].load());
       // TODOS los puntos donde manda el ANFITRION y no el invitado, juntos. Si alguno sale
       // != 0 la corrida no es reproducible y el statehash que salga de ella vale lo que valga
       // el reloj de esta maquina. Estaban contados pero no se imprimian, asi que no habia
@@ -1115,6 +1124,16 @@ auto System::run() -> void {
                    cpu.retired ? 100.0 * (double)cpu.dcMisses / (double)cpu.retired : 0.0,
                    (unsigned long long)cpu.icMisses,
                    cpu.retired ? 100.0 * (double)cpu.icMisses / (double)cpu.retired : 0.0);
+      // Con KESTREL_CACHESTAT tambien se han contado los ACCESOS, y entonces se puede dar la
+      // tasa de acierto de verdad en vez de fallos por instruccion. La de I$ solo cuenta lo que
+      // pasa por icFetch: el JIT no busca instruccion por instruccion, asi que fuera del
+      // interprete esa cifra habla del tramo interpretado, no del juego entero.
+      if(cpu.cacheStat)
+        std::fprintf(stderr, "[cache] aciertos D$ %.3f%% (%llu accesos), I$ %.3f%% (%llu accesos)\n",
+                     cpu.dcAccess ? 100.0 * (double)(cpu.dcAccess - cpu.dcMisses) / (double)cpu.dcAccess : 0.0,
+                     (unsigned long long)cpu.dcAccess,
+                     cpu.icAccess ? 100.0 * (double)(cpu.icAccess - cpu.icMisses) / (double)cpu.icAccess : 0.0,
+                     (unsigned long long)cpu.icAccess);
       // Y el CPI que sale de ahi. cpiBase = el factor plano configurado (KESTREL_CPI);
       // cpiReal = cpiBase + ciclos de parada por instruccion. Con KESTREL_CACHECOST=0 los dos
       // coinciden y la linea dice justo eso: el modelo es plano. Con el coste encendido, la
@@ -1343,6 +1362,15 @@ auto System::run() -> void {
       std::fprintf(stderr, "[hb] jobs/s: rsp=%.0f rdp=%.0f\n",
                    memory.rspJobsRun.load(std::memory_order_relaxed) / s,
                    memory.rdpJobsRun.load(std::memory_order_relaxed) / s);
+      // Citas del RSP por sitio (citas/vueltas de giro acumuladas): cual de las esperas paga.
+      std::fprintf(stderr, "[hb] citas rsp: dpcCur=%llu/%llu spSt=%llu/%llu dpcOtr=%llu/%llu "
+                           "wDpc=%llu/%llu dma=%llu/%llu brk=%llu/%llu\n",
+                   (unsigned long long)memory.spRdvSiteN[0].load(), (unsigned long long)memory.spRdvSiteK[0].load(),
+                   (unsigned long long)memory.spRdvSiteN[1].load(), (unsigned long long)memory.spRdvSiteK[1].load(),
+                   (unsigned long long)memory.spRdvSiteN[2].load(), (unsigned long long)memory.spRdvSiteK[2].load(),
+                   (unsigned long long)memory.spRdvSiteN[3].load(), (unsigned long long)memory.spRdvSiteK[3].load(),
+                   (unsigned long long)memory.spRdvSiteN[4].load(), (unsigned long long)memory.spRdvSiteK[4].load(),
+                   (unsigned long long)memory.spRdvSiteN[5].load(), (unsigned long long)memory.spRdvSiteK[5].load());
       // Reparto del bus de RDRAM entre los siete maestros, en MB por segundo de INVITADO y
       // como porcentaje del pico de la consola. Es la unica vista que dice si el palo largo
       // de un juego es un chip o el bus: el RDP pinta a 562,5 MB/s como mucho, y con el VI
@@ -1364,6 +1392,22 @@ auto System::run() -> void {
                        mb(memory.ramBytesAi .load(std::memory_order_relaxed)),
                        mb(memory.ramBytesSi .load(std::memory_order_relaxed)));
         }
+      }
+      // Caches primarias EN VIVO. Hasta ahora solo hablaban al cerrar, y con ventana el
+      // emulador no cierra solo: un juego que empieza a fallar la D$ (estructuras que dejan de
+      // caber, un bucle que barre un buffer mas grande que 8 KB) no se veia mientras pasaba.
+      // "por kop" = fallos por cada mil instrucciones retiradas, que es la forma en que el
+      // fallo se traduce en CPI: cada uno son dcMissCycles/icMissCycles de parada.
+      if(ri > 0.0) {
+        const double dm = (double)cpu.dcMisses, im = (double)cpu.icMisses;
+        std::fprintf(stderr, "[hb] cache: D$ %.2f fallos/kop I$ %.2f fallos/kop"
+                             " | parada %.2f ciclos/op",
+                     dm * 1000.0 / ri, im * 1000.0 / ri, (double)cpu.stallTotal / ri);
+        if(cpu.cacheStat)
+          std::fprintf(stderr, " | aciertos D$ %.2f%% I$ %.2f%%",
+                       cpu.dcAccess ? 100.0 * (double)(cpu.dcAccess - cpu.dcMisses) / (double)cpu.dcAccess : 0.0,
+                       cpu.icAccess ? 100.0 * (double)(cpu.icAccess - cpu.icMisses) / (double)cpu.icAccess : 0.0);
+        std::fprintf(stderr, "\n");
       }
       // Hambre del sumidero de audio EN VIVO. `KESTREL_AUDIOSTAT` solo habla al cerrar, y
       // con ventana el emulador no cierra solo: sin esta linea un "se oye entrecortado" no

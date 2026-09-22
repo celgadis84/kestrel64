@@ -8176,3 +8176,51 @@ anotado, no hecho.
 lo fija a 0 para que las puertas sigan comparando threaded contra lockstep bit a bit.
 Medido PD en juego: libre 37,9 fps (CPU 78 % de N64), hw 19,7. junkrunner64 400 M con
 `SPEEDMODE=hw`: `dc07d7ac23fef2e1` 3 de 3 threaded, igual que lockstep.
+
+## 2026-09-22 (d) -- El diario del RCP deja de cortar el bloque del JIT: PD 25,5 -> 37,3 fps
+
+Rediseno de `docs/ARCH-SYNC.md` puntos 1-2, segunda mitad. El plazo del JIT acotaba cada bloque
+al instante de la primera entrada del diario sin aplicar: 21,0 M de cortes por corrida de
+Perfect Dark en juego. Ninguna de esas dos clases de entrada manda de verdad ahi.
+
+1. **Vistas de DPC (reg = 32)** -- solo las mira la CPU al leer o escribir DPC, y los dos
+   caminos aplican el diario hasta su instante antes de mirar (la escritura no lo hacia; se
+   anadio en `mmioWrite32`, caso `BASE_DPC`). Cortes 21,0 M -> 14,1 M, PD 25,5 -> 28,5 fps.
+   Commit `f8f41fc`.
+2. **DMA del SP (reg = 16)** -- sus bytes solo se notan MIRANDO RDRAM. Se cambia el corte por
+   un asiento perezoso: contador por pagina de 4 KB de entradas sin aplicar (`Memory::dmaPg`,
+   `dmaPgPend`) y `Memory::dmaSettle(lo, hi)` en cada sitio del hilo de CPU que mira RDRAM
+   -- fallo/volcado de linea de D, relleno de linea de I y `CACHE Hit_Writeback`, accesos no
+   cacheados, `jitPeekWord`, PI, SI, AI y la difusion de `MI_MODE` repeat. Con nada pendiente
+   la pregunta es una lectura. El instante que usa `dpLogApply` es exacto en todos ellos: el
+   camino rapido de RDRAM del JIT nunca llega (un fallo de linea sale por el CALL lento, que
+   ajusta `jitPending` antes de entrar) y el interprete lleva el reloj al dia.
+   Un ACIERTO de D-cache no pregunta a proposito: el VR4300 no tiene coherencia con el RCP.
+
+Medido: PD en juego (ranura 5, Parallel-RDP) **28,4 -> 37,3 fps (+31 %)**. `statehash`
+`dc07d7ac23fef2e1` threaded x4 == lockstep. La cita de DMA del RSP (`spReadSync` sitio 4), que
+era el 93 % de las vueltas de giro del hilo del RSP (705 360 citas / 4,59e9 vueltas frente a
+11 784 / 1,9e8 de la siguiente), deja de pagarse.
+
+Telemetria nueva: `[hb] citas rsp` da citas y vueltas de giro del hilo del RSP por SITIO, que es
+como se localizo que el palo largo era el DMA y no las lecturas de DPC.
+
+### Caches primarias: revision y telemetria
+
+Repaso del modelo a peticion del usuario. Esta bien puesto y no habia nada que arreglar:
+D$ 8 KB / lineas de 16 B / directa / write-back con bit sucio, I$ 16 KB / lineas de 32 B con
+sello de relleno (`seq`) que el JIT usa para validar bloques, instruccion CACHE con sus
+variantes, coste de fallo configurable (`KESTREL_ICACHECOST`/`DCACHECOST`/`CACHECOST`, 0 de
+fabrica y encendido en los modos `phys`) cobrado a `stallCycles` y convertido a ops retiradas
+equivalentes, y las dos caches en el savestate.
+
+Lo que faltaba era la medida: habia `dcMisses`/`icMisses` pero NINGUN contador de accesos, asi
+que la unica tasa posible era "fallos por instruccion retirada", no una tasa de acierto.
+(`dcbHits` no vale: es el enclavamiento store -> acceso, no un muestreo de aciertos.) Anadido:
+
+- `[hb] cache` en el latido: fallos/kop de D$ e I$ y ciclos de parada por op, en vivo.
+- `KESTREL_CACHESTAT=1` cuenta los accesos en `dcRead`/`dcWrite`/`icFetch` y saca la tasa de
+  acierto al cerrar. Apagado de fabrica: el camino rapido de RDRAM del JIT no pasa por
+  `dcRead`, asi que la variable lo apaga entero para que la muestra no salga sesgada. Mide, no
+  corre. SM64 60 campos: **D$ 93,97 % (32,0 M accesos), I$ 98,18 %** (I$ solo el tramo
+  interpretado; el JIT no busca instruccion por instruccion).

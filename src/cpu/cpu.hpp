@@ -258,6 +258,9 @@ struct CPU {
   // Fuera de linea: aqui Memory es todavia un tipo incompleto, y de todas formas este
   // camino ya es el lento (MMIO/cartucho), donde una llamada no se nota.
   auto ramUncached(u32 pe, u32 size) -> void;
+  // Un acceso no cacheado a RDRAM la mira DIRECTAMENTE, asi que antes hay que asentar el
+  // diario de DMA del RSP sobre ese tramo (Memory::dmaSettle).
+  auto ramSettle(u32 pe, u32 size) -> void;
   // Lectura no cacheada: primero el acceso, DESPUES la parada. El registro o la RDRAM se
   // muestrean en el instante en que la instruccion llega a MEM, y los ciclos de latencia son lo
   // que tarda el dato en volver; no hay nada del RCP que la CPU pueda ver "al final" de esa
@@ -267,6 +270,7 @@ struct CPU {
   // instante al que el RSP de Lockstep todavia no habia llegado (junkrunner64 con
   // KESTREL_UNCACHEDCOST, MI_DP una op antes y segun el anfitrion).
   template<typename F> auto uncachedRead(u32 pe, u32 size, F&& rd) -> decltype(rd()) {
+    ramSettle(pe, size);
     auto v = rd();
     chargeUncached(); ramUncached(pe, size);
     return v;
@@ -561,6 +565,19 @@ struct CPU {
   // contar esto sin inventarselo, y ya existia y es frio.
   u64   dcMisses = 0;
   u64   icMisses = 0;
+  // Accesos (no fallos) a cada cache. Contarlos es lo unico que convierte "fallos por
+  // instruccion retirada" en una tasa de acierto de verdad, pero el sitio donde habria que
+  // contarlos es el camino mas caliente que hay, y el camino rapido de RDRAM del JIT ni
+  // siquiera pasa por aqui: contar a medias saldria MENTIRA. Por eso van tras KESTREL_CACHESTAT,
+  // que ademas apaga ese camino rapido (ver g_noFastMem) para que la cuenta sea completa.
+  // Apagado -- lo normal -- no se paga nada mas que una rama sobre un campo ya caliente.
+  u64   dcAccess = 0;
+  u64   icAccess = 0;
+  bool  cacheStat = cacheStatFromEnv();
+  static auto cacheStatFromEnv() -> bool {
+    const char* e = std::getenv("KESTREL_CACHESTAT");
+    return e && e[0] && e[0] != '0';
+  }
   // Bytes que la CPU mueve por el bus de RDRAM: rellenos de linea (16 B de datos, 32 B de
   // instrucciones), volcados de linea sucia (16 B) y accesos NO cacheados que caen dentro
   // de la RDRAM. Contador liso, no atomico: solo lo escribe el hilo de CPU y solo lo lee
@@ -758,6 +775,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
+    if(__builtin_expect(cacheStat, 0)) dcAccess++;
     if(__builtin_expect(dcbR & 2, 0)) dcbTouch(l.tagv == (base | 1u));
     if(__builtin_expect(l.tagv != (base | 1u), 0)) dcMiss(idx, base);
     u32 off = phys & 0xf;
@@ -778,6 +796,7 @@ private:
     u32 idx  = (phys >> 4) & 0x1ff;
     u32 base = phys & ~0xfu;
     DCacheLine& l = dcache[idx];
+    if(__builtin_expect(cacheStat, 0)) dcAccess++;
     if(__builtin_expect(dcbR & 2, 0)) dcbTouch(l.tagv == (base | 1u));
     if(__builtin_expect(ilkMode != 0, 0)) dcbR |= 1;
     if(__builtin_expect(l.tagv != (base | 1u), 0)) dcMiss(idx, base);

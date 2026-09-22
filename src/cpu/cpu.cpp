@@ -641,8 +641,13 @@ auto CPU::ramUncached(u32 pe, u32 size) -> void {
   if(mem && pe < (u32)mem->rdram.size()) ramCpuBytes += size;
 }
 
+auto CPU::ramSettle(u32 pe, u32 size) -> void {
+  if(mem && pe < (u32)mem->rdram.size()) mem->dmaSettle(pe, (u64)pe + size);
+}
+
 auto CPU::dcFill(u32 idx, u32 base) -> void {
   DCacheLine& l = dcache[idx];
+  mem->dmaSettle(base, (u64)base + 16);
   ramCpuBytes += 16;
   l.tagv = base | 1u; l.dirty = 0;
   // Camino normal: la línea entera cae dentro de RDRAM → una copia de 16 B en vez de 16
@@ -657,6 +662,7 @@ auto CPU::dcFlush(u32 idx) -> void {
   if(!l.valid() || !l.dirty) return;
   ramCpuBytes += 16;
   u32 tag = l.ptag();
+  mem->dmaSettle(tag, (u64)tag + 16);
   // El volcado de una linea sucia es la unica forma en que un store CACHEADO de la CPU
   // llega a RDRAM, asi que sin esto KESTREL_WATCH no ve el 99% de lo que escribe el juego.
   wrtag::mark(tag, wrtag::kDcache, (u32)pc);
@@ -678,9 +684,11 @@ auto CPU::dcMiss(u32 idx, u32 base) -> void {
   u8* const ram = mem->rdram.data();
   const u32  sz = (u32)mem->rdram.size();
   ramCpuBytes += 16;                 // relleno de la linea nueva
+  mem->dmaSettle(base, (u64)base + 16);
   if(l.dirty && l.valid()) {
     ramCpuBytes += 16;               // ... mas el volcado de la vieja
     u32 tag = l.ptag();
+    mem->dmaSettle(tag, (u64)tag + 16);
     wrtag::mark(tag, wrtag::kDcache, (u32)pc);
     if(mem->watchAddr) mem->watchHit(tag, 16, 0, false);
     if(tag + 16 <= sz) std::memcpy(ram + tag, l.data, 16);
@@ -724,6 +732,7 @@ auto CPU::pokePhysCoherent(u32 phys, u32 size, u64 val) -> void {
 
 auto CPU::icFill(u32 idx, u32 base) -> void {
   icMisses++;
+  mem->dmaSettle(base, (u64)base + 32);
   ramCpuBytes += 32;
   chargeIcMiss();   // idem, con su propio coste: la linea de I son 8 palabras
   ICacheLine& l = icache[idx];
@@ -733,6 +742,7 @@ auto CPU::icFill(u32 idx, u32 base) -> void {
 }
 
 auto CPU::icFetch(u32 phys) -> u32 {
+  if(__builtin_expect(cacheStat, 0)) icAccess++;
   u32 idx  = (phys >> 5) & 0x1ff;
   u32 base = phys & ~0x1fu;
   ICacheLine& l = icache[idx];
@@ -797,8 +807,10 @@ auto CPU::cacheOp(u32 op, u64 vaddr) -> void {
       case 4: /*Hit_Invalidate*/ if(l.valid && l.ptag == base) l.valid = false; break;
       case 5: /*Fill*/ icFill(idx, base); break;
       case 6: /*Hit_Writeback*/
-        if(l.valid && l.ptag == base)
+        if(l.valid && l.ptag == base) {
+          mem->dmaSettle(l.ptag, (u64)l.ptag + 32);
           for(u32 i = 0; i < 32; i++) if(l.ptag + i < mem->rdram.size()) mem->rdram[l.ptag + i] = l.data[i];
+        }
         break;
       default: break;
     }

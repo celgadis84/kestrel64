@@ -142,3 +142,46 @@ el RSP no espera nunca por lo suyo.
     viva (medido), asi que para ellos no cambia nada.
 - Resultado: junkrunner64 `dc07d7ac23fef2e1` threaded x3 == lockstep. PD en juego (ranura 5)
   vuelve a correr: 25,9 fps con `DPLOGLEAD` de fabrica.
+
+## Implementado: el diario deja de cortar el bloque del JIT (2026-09-22)
+
+El plazo del JIT (`Memory::rcpDueIn`) acotaba cada bloque al instante de la PRIMERA entrada del
+diario sin aplicar. Medido con `KESTREL_JIT_STATS`, eso eran 21,0 M de cortes por corrida de PD
+en juego: la mayor parte del trabajo del dynarec se iba en volver al despachador. Pero no todas
+las entradas mandan lo mismo.
+
+**Vistas de DPC (reg = 32) -- ya no cortan.** Solo las mira la CPU cuando lee o escribe DPC, y
+los dos caminos aplican el diario hasta su instante antes de mirar (la lectura ya lo hacia;
+la escritura se anadio en `mmioWrite32`, caso `BASE_DPC`, justo despues del intento de buzon).
+El fin de tramo tiene su propio plazo (`rcpPend & 2`) y `rcpRetire` aplica el diario antes.
+Aplicarlas mas tarde, pero siempre antes de que nadie las mire y en orden, da el mismo estado
+de invitado. `dpLogDueAt()` devuelve el primer instante que SI manda. Cortes 21,0 M -> 14,1 M,
+PD 25,5 -> 28,5 fps, mismo `statehash`.
+
+**DMA del SP (reg = 16) -- tampoco, con asiento perezoso.** Quedaban 19,7 M de cortes, todos de
+DMA SP -> RDRAM apuntados en el diario. Sus bytes ya estan copiados a `dmaPay`; lo que falta es
+ponerlos en RDRAM, y eso solo lo puede notar la CPU MIRANDO RDRAM. Asi que el corte se
+sustituye por una pregunta en cada sitio del hilo de CPU que mira RDRAM:
+
+- `Memory::dmaPg[]`, un contador por pagina de 4 KB de cuantas entradas sin aplicar la tocan
+  (lo sube `spDmaLogPush` ANTES de publicar la entrada, lo baja `dpLogApply`), y `dmaPgPend`
+  con el total. Con `dmaPgPend == 0` -- el caso normal -- preguntar es una lectura y ninguna
+  llamada.
+- `Memory::dmaSettle(lo, hi)`: si alguna pagina del tramo esta marcada, `dpLogApply(cartNow())`.
+  Hasta `cartNow()`, no el diario entero: una entrada fechada en el futuro tiene que seguir
+  invisible.
+- Sitios enganchados: `CPU::dcMiss` / `dcFill` / `dcFlush` (relleno y volcado de linea de D),
+  `CPU::icFill` y `CACHE Hit_Writeback` de I, `CPU::uncachedRead` / `ramSettle` (KSEG1 y paginas
+  con C=2), `CPU::jitPeekWord` (el compilador lee RDRAM), y los motores del hilo de CPU que
+  tocan RDRAM: `piDma`, el SI en los dos sentidos, la lectura del AI y la difusion de
+  `MI_MODE` repeat. Un ACIERTO de la D-cache no pregunta a proposito: el VR4300 no tiene
+  coherencia con el RCP, y una linea ya residente ensombrece a la RDRAM tambien en hardware.
+- El instante es EXACTO en todos ellos. El camino rapido de RDRAM del JIT nunca llega aqui (un
+  fallo de linea sale por el CALL lento, que ajusta `jitPending` con las ops de su bloque antes
+  de entrar), y el interprete lleva el reloj al dia por instruccion. Por eso la CPU ve los bytes
+  del DMA igual que en Lockstep: antes de su instante los viejos, despues los nuevos.
+- El anillo del diario sigue siendo el freno: si se llena, `spDmaLogPush` vuelve a `dpLogWait`.
+
+Resultado: `statehash` `dc07d7ac23fef2e1` threaded x4 == lockstep, y **Perfect Dark en juego
+28,4 -> 37,3 fps (+31 %)**. La cita de DMA del RSP (`spReadSync` sitio 4), que era el 93 % de
+las vueltas de giro del hilo del RSP, deja de pagarse en el lado de la CPU.

@@ -767,6 +767,7 @@ auto Memory::miRepeatStore(u32 phys, u64 value, u32 sz) -> void {
   for(u32 p = 0; p < unit; p++) pat[p] = (u8)(word >> (8 * (unit - 1 - p)));  // big-endian lanes
   u32 end  = (phys & ~7u) + rcp.mi_repeat_len;    // span counts from the start of the 8-byte column
   u32 page = phys & ~0x7ffu;                       // 2 KiB wrap region
+  dmaSettle(page, (u64)page + 0x800);
   for(u32 j = phys; j < end; j++) {
     u32 a = page | (j & 0x7ff);
     if(a < rdram.size()) rdram[a] = pat[j & (unit - 1)];
@@ -1397,6 +1398,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // Fan the accepted buffer out to the host speakers. Read-only on RDRAM, so
         // this cannot perturb determinism (systemtest / lockstep md5 unaffected).
         u32 rate = rcp.ai_dacrate ? (aiVidClock / (rcp.ai_dacrate + 1)) : 32'000u;
+        dmaSettle(rcp.ai_dram, (u64)rcp.ai_dram + len);
         audio::pushRdram(rdram.data(), (u32)rdram.size(), rcp.ai_dram, len, rate);
       }
       break;
@@ -1469,6 +1471,12 @@ static auto dmaVectorWarn() -> bool {
 }
 
 auto Memory::piDma(bool toCart) -> void {
+  // El DMA del cartucho lee o escribe RDRAM directamente: diario de DMA del RSP asentado antes.
+  {
+    const u32 d = rcp.pi_dram_addr & 0xff'ffff;
+    const u32 n = (rcp.pi_wr_len > rcp.pi_rd_len ? rcp.pi_wr_len : rcp.pi_rd_len) + 1;
+    dmaSettle(d, (u64)d + n);
+  }
   // Arrancar una DMA con otra en vuelo no le pasa a un juego sano (el SDK espera a la
   // interrupcion), pero si ocurre se cierra la anterior en vez de dejar un plazo huerfano.
   if(piBusy) piFinish();
@@ -1777,6 +1785,10 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   const u32 t = dpLogTail.load(std::memory_order_relaxed);
   dpLogDma[t & kDpLogM] = {dram, length, count, skip, pay};
   dmaLogPushes.fetch_add(1, std::memory_order_relaxed);
+  // Las paginas se apuntan ANTES de publicar la entrada (dpLogPush suelta la cola con release):
+  // asi el hilo de CPU no puede ver la entrada sin ver a que paginas afecta.
+  dmaPgPend.fetch_add(1, std::memory_order_relaxed);
+  dmaPgMark(dram, (u64)(length + skip) * count, +1);
   dpLogPush(at, 16u, 0);
   return true;
 }
@@ -1873,6 +1885,7 @@ auto Memory::siDma(bool toPif) -> void {
   siDram = dram;
   u64 us = kSiXferUs;   // el traslado de los 64 B entre RDRAM y PIF RAM
   ramBytesSi.fetch_add(64, std::memory_order_relaxed);
+  dmaSettle(dram, (u64)dram + 64);
   if(toPif) {
     // RDRAM -> PIF RAM: solo deja el bloque de ordenes en la PIF. El PIF NO lo ejecuta
     // aqui (ver el comentario del DMA de lectura).
@@ -1929,6 +1942,7 @@ auto Memory::siFinish() -> void {
   if(!siToPif) {
     u32 dram = siDram;
     if(watchAddr) std::fprintf(stderr, "[siDma] PIF->RDRAM dram=0x%06x by pc=0x%08x\n", dram, (u32)storePc);
+    dmaSettle(dram, (u64)dram + 64);
     for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) { wrtag::mark(dram + i, wrtag::kSiDma, 0); watchHit(dram + i, 1, pifram[i], true); rdram[dram + i] = pifram[i]; }
   }
   rcp.si_status = 0;
@@ -3613,6 +3627,24 @@ auto Memory::dpcMbCpu(u64 now) -> void {
   }
 }
 
+// Ver dmaSettle en la cabecera: el hilo de CPU va a mirar [lo, hi) de RDRAM, asi que si algun
+// DMA del diario aun sin aplicar toca esas paginas hay que vaciarlo hasta el reloj de invitado
+// de ESTE acceso. Aplicar el diario entero seria mas simple y esta mal: una entrada fechada
+// despues de ahora tiene que seguir invisible.
+auto Memory::dmaSettleSlow(u32 lo, u64 hi) -> void {
+  if(tlDpLogApply) return;                       // ya estamos dentro del propio vaciado
+  dmaSettles.fetch_add(1, std::memory_order_relaxed);
+  if(hi <= lo) hi = (u64)lo + 1;
+  u32 p = lo >> kDmaPgShift;
+  const u32 e = (u32)((hi - 1) >> kDmaPgShift);
+  for(; p <= e && p < kDmaPgN; p++)
+    if(dmaPg[p].load(std::memory_order_acquire)) {
+      dmaSettleHits.fetch_add(1, std::memory_order_relaxed);
+      dpLogApply(cartNow());
+      return;
+    }
+}
+
 auto Memory::dpLogApply(u64 upTo) -> void {
   {
     const u32 h = dpLogHead.load(std::memory_order_acquire);
@@ -3634,7 +3666,10 @@ auto Memory::dpLogApply(u64 upTo) -> void {
       dpEndArmAt(dpLogArm[h & kDpLogM]);
       if(jitGuardPtr) *jitGuardPtr = 0;
     } else if(e.reg & 16u) {
-      spDmaLogApply(dpLogDma[h & kDpLogM]);
+      const DpLogDma& d = dpLogDma[h & kDpLogM];
+      spDmaLogApply(d);
+      dmaPgMark(d.dram, (u64)(d.length + d.skip) * d.count, -1);
+      dmaPgPend.fetch_sub(1, std::memory_order_release);
     } else if(e.reg & 8u) {
       rcpRegWrite32(BASE_SP + ((e.reg & 7u) << 2), e.v);
       spLogPend.fetch_sub(1, std::memory_order_release);
@@ -3788,7 +3823,9 @@ auto Memory::rcpSchedReset() -> void {
   // armados (bits 0-1 y sus plazos) SI son de esta partida: vienen en el estado.
   rcpPend.store(rcpPend.load(std::memory_order_relaxed) & 3u, std::memory_order_relaxed);
   { std::lock_guard<std::mutex> lk(dpLogMx); dpLogHead.store(0); dpLogTail.store(0); spLogPend.store(0); spLogCrit.store(0);
-    dpcViewPend.store(0); cpuDpcView = dpcViewLive(); }
+    dpcViewPend.store(0); cpuDpcView = dpcViewLive();
+    dmaPgPend.store(0);
+    for(u32 i = 0; i < kDmaPgN; i++) dmaPg[i].store(0, std::memory_order_relaxed); }
   spMarkKick();
   rspRdvAt.store(0, std::memory_order_relaxed);
   dpRdv.store(0, std::memory_order_relaxed);
@@ -4017,9 +4054,14 @@ auto Memory::spStatusForRsp(u64 now) -> u32 {
 // podria caer en un instante ya rebasado y el plazo de SP naceria tarde. La barrera del SP deja
 // llegar a la CPU justo hasta el reloj publicado, que el llamador ya ha publicado exacto.
 // No depende de KESTREL_DPRDV: sin ella el ciclo en que el microcodigo ve SIG0 es de anfitrion.
-auto Memory::spReadSync(u64 now) -> void {
+auto Memory::spReadSync(u64 now, u32 site) -> void {
   if(cartNow() >= now) return;
   spRdv.fetch_add(1, std::memory_order_relaxed);
+  if(site < kRdvSites) spRdvSiteN[site].fetch_add(1, std::memory_order_relaxed);
+  struct SiteK {                              // vueltas del giro, para saber cual CUESTA
+    std::atomic<u64>* c; u32 k = 0;
+    ~SiteK() { if(c) c->fetch_add(k, std::memory_order_relaxed); }
+  } sk_{site < kRdvSites ? &spRdvSiteK[site] : nullptr};
   RcpWaitMark sw_{rspSyncWait};   // antes de mirar rspWaiters: el regulador suelta a la CPU
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
@@ -4027,6 +4069,7 @@ auto Memory::spReadSync(u64 now) -> void {
   std::chrono::steady_clock::time_point t0{}, t1{};
   const bool cheap = rdvCheapTurn();
   for(u32 k = 0;; ++k) {
+    sk_.k = k;
     const bool look = (k < tight || (k & pm) == pm);
     if(look) { if(cartNow() >= now) break; }
     if((look || !cheap) && (rspStop || rsp.hostStop.load(std::memory_order_relaxed))) break;

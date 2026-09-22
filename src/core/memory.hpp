@@ -518,13 +518,46 @@ struct Memory {
   // el diario hasta su instante; el fin de tramo (pend & 2) tiene su propio plazo y rcpRetire
   // aplica el diario antes de el. Aplicarlas mas tarde, pero siempre antes de que nadie las mire
   // y en orden, da el mismo estado de invitado. Cortar el bloque del JIT en cada una no.
+  // Las de DMA (reg = 16) tampoco: sus bytes solo los ve la CPU mirando RDRAM, y todos los
+  // sitios por donde el hilo de CPU mira RDRAM pasan antes por dmaSettle(), que vacia el
+  // diario hasta el reloj de invitado EXACTO de ese acceso. Ver dmaSettle.
   auto dpLogDueAt() const -> u64 {
     u32 h = dpLogHead.load(std::memory_order_acquire);
     const u32 t = dpLogTail.load(std::memory_order_acquire);
     for(u32 n = 0; h != t; ++h, ++n)
-      if(!(dpLog[h & kDpLogM].reg & 32u) || n == 32) return dpLog[h & kDpLogM].at;
+      if(!(dpLog[h & kDpLogM].reg & (32u | 16u)) || n == 32) return dpLog[h & kDpLogM].at;
     return ~0ull;
   }
+  // --- Diario de DMA perezoso -------------------------------------------------------------
+  // Un DMA SP -> RDRAM apuntado en el diario ya tiene sus bytes copiados a dmaPay, pero aun no
+  // estan en RDRAM: los pone dpLogApply al llegar la CPU a su instante. Como ya no corta el
+  // bloque del JIT, cualquier sitio del hilo de CPU que mire RDRAM tiene que preguntar antes.
+  // Para que preguntar sea gratis se lleva la cuenta de entradas sin aplicar por pagina de
+  // 4 KB: si la pagina esta a cero, ningun DMA pendiente la toca y no hay nada que vaciar.
+  //
+  // El instante que usa dpLogApply es cartNow(), y es EXACTO en todos los llamantes: el camino
+  // rapido de RDRAM del JIT nunca llega aqui (un fallo de linea de D sale por el CALL lento,
+  // que ajusta jitPending con las ops de su bloque antes de entrar), y el interprete lleva el
+  // reloj al dia por instruccion. Asi la CPU ve los bytes del DMA exactamente igual que en
+  // Lockstep: antes de su instante los viejos, despues los nuevos.
+  static constexpr u32 kDmaPgShift = 12, kDmaPgN = (8u << 20) >> kDmaPgShift;
+  std::atomic<u32> dmaPgPend{0};           // entradas de DMA sin aplicar (0 = nada que mirar)
+  std::atomic<u16> dmaPg[kDmaPgN]{};       // ... y cuantas tocan cada pagina
+  std::atomic<u64> dmaSettles{0}, dmaSettleHits{0};
+  auto dmaPgMark(u32 dram, u64 span, int s) -> void {
+    const u64 end = (u64)dram + span;
+    u32 p = dram >> kDmaPgShift;
+    const u32 e = (u32)((end - 1) >> kDmaPgShift);
+    for(; p <= e && p < kDmaPgN; p++)
+      dmaPg[p].fetch_add((u16)(s > 0 ? 1 : -1), std::memory_order_release);
+  }
+  // SOLO hilo de CPU (o RSP en linea en Lockstep, donde el diario no se usa). El caso normal
+  // -- nada pendiente -- se resuelve con una lectura y sin llamada.
+  auto dmaSettle(u32 lo, u64 hi) -> void {
+    if(!dmaPgPend.load(std::memory_order_acquire)) return;
+    dmaSettleSlow(lo, hi);
+  }
+  auto dmaSettleSlow(u32 lo, u64 hi) -> void;
   auto dpLogApply(u64 upTo) -> void;                // aplica lo fechado hasta upTo
   auto dpLogWait(u64 now, bool clock) -> void;      // SOLO hilo del RSP
   auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
@@ -659,8 +692,13 @@ struct Memory {
   static auto spSigQuant() -> u64;
   auto spSigAtKick() -> void;              // lanzamiento: lo pendiente pasa a su instante real
   auto spLateClearHalt(u64 now) -> u32;    // SOLO quien ejecuta el RSP, en BREAK (ver rsp.cpp)
-  auto spReadSync(u64 now) -> void;        // SOLO hilo del RSP: la CPU llega a `now`, sin adelanto
+  auto spReadSync(u64 now, u32 site = 0) -> void;        // SOLO hilo del RSP: la CPU llega a `now`, sin adelanto
   std::atomic<u32> spRdv{0}, spRdvWaives{0}, spLateHalts{0};
+  // Reparto de las citas del RSP por sitio de llamada: 0 mfc0 DPC CURRENT/STATUS, 1 mfc0
+  // SP_STATUS, 2 mfc0 resto de DPC, 3 mtc0 DPC, 4 mtc0 DMA (SP_RD_LEN / SP_WR_LEN), 5 BREAK.
+  // Solo se tocan cuando la cita ESPERA de verdad, que es lo que cuesta.
+  static constexpr u32 kRdvSites = 6;
+  std::atomic<u64> spRdvSiteN[kRdvSites]{}, spRdvSiteK[kRdvSites]{};
   // La CPU esta dentro de dpBarrierWait: la retiene el RDP (trabajo del anfitrion, p. ej. la GPU
   // compilando pipelines), no el RSP. Una cita del RSP que espera a la CPU no puede soltarse
   // por reloj de pared mientras dure: el RDP no depende del RSP, asi que no hay bloqueo mutuo
