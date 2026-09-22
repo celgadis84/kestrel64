@@ -1169,6 +1169,9 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
   case BASE_DPC & 0x1ff0'0000: {
     // CPU con tarea de RSP en marcha: al buzon, visible en el borde de grano (ver dpcMbPost).
     if(!tlIsRspThread && !tlDpLogApply && !lockRspExec && dpcMbPost(a, v)) break;
+    // Vistas del RSP aun sin aplicar (ver dpLogDueAt): antes de que esta escritura pise cpuDpcView.
+    if(!tlIsRspThread && !tlDpLogApply && (rcpPend.load(std::memory_order_relaxed) & 16u))
+      dpLogApply(cartNow());
     static const bool dpwr = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
     if(dpwr) std::fprintf(stderr, "[dpwr] reg=%02x v=%08x st=%08x start=%06x cur=%06x end=%06x sub=%06x\n",
                           off & 0xff, v, rcp.dpc_status.load(), rcp.dpc_start, rcp.dpc_current.load(), rcp.dpc_end, rcp.dpc_submitted);

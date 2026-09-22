@@ -2286,7 +2286,7 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
       // DIAG: que termino del plazo del RCP ata el permiso (0 spDone 1 dpDone 2 dpBar 3 spBar 4 dpLog)
       u32 pend = mem->rcpPend.load(std::memory_order_relaxed); int w = 5;
       auto chk = [&](int i, u64 at){ if((at > now ? at - now : 0) == rcpDue) w = i; };
-      if(pend & 16u) { u32 h = mem->dpLogHead.load(); if(h != mem->dpLogTail.load()) chk(4, mem->dpLog[h & Memory::kDpLogM].at); }
+      if(pend & 16u) { u64 at = mem->dpLogDueAt(); if(at != ~0ull) chk(4, at); }
       if(pend & 8u) chk(3, mem->spBarrierEff());
       if(pend & 4u) chk(2, mem->dpBarrierAt());
       if(pend & 2u) chk(1, mem->dpDoneAt);

@@ -513,6 +513,18 @@ struct Memory {
     return dpLogHead.load(std::memory_order_acquire) != dpLogTail.load(std::memory_order_acquire);
   }
   auto dpLogPush(u64 at, u32 reg, u32 v) -> void;   // SOLO hilo del RSP
+  // Primer instante del diario que la CPU no puede saltarse. Las entradas de vista (reg = 32) no
+  // cuentan: solo las observa una lectura o escritura de DPC por la CPU, y las dos aplican antes
+  // el diario hasta su instante; el fin de tramo (pend & 2) tiene su propio plazo y rcpRetire
+  // aplica el diario antes de el. Aplicarlas mas tarde, pero siempre antes de que nadie las mire
+  // y en orden, da el mismo estado de invitado. Cortar el bloque del JIT en cada una no.
+  auto dpLogDueAt() const -> u64 {
+    u32 h = dpLogHead.load(std::memory_order_acquire);
+    const u32 t = dpLogTail.load(std::memory_order_acquire);
+    for(u32 n = 0; h != t; ++h, ++n)
+      if(!(dpLog[h & kDpLogM].reg & 32u) || n == 32) return dpLog[h & kDpLogM].at;
+    return ~0ull;
+  }
   auto dpLogApply(u64 upTo) -> void;                // aplica lo fechado hasta upTo
   auto dpLogWait(u64 now, bool clock) -> void;      // SOLO hilo del RSP
   auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
@@ -1004,9 +1016,8 @@ struct Memory {
       if(e < d) d = e;
     }
     if(pend & 16u) {
-      const u32 h = dpLogHead.load(std::memory_order_acquire);
-      if(h != dpLogTail.load(std::memory_order_acquire)) {
-        const u64 at = dpLog[h & kDpLogM].at;
+      const u64 at = dpLogDueAt();
+      if(at != ~0ull) {
         u64 e = at > now ? at - now : 0;
         if(e < d) d = e;
       }
