@@ -86,3 +86,30 @@ quita la cita que tapaba.
    junkrunner64 threaded xN == lockstep, las puertas y fps de PD.
 3. Punto 2 (latencia L en CPU -> RSP), barrido de L.
 4. Quitar `KESTREL_DPLOGLEAD` y las citas que queden sin uso.
+
+## Revision contra el hardware (2026-09-22)
+
+Hechos del HW en `docs/HW-RCP-COMM.md`. Cruce con el codigo (`src/rsp/rsp.cpp` mfc0/mtc0/BREAK,
+`src/core/memory.cpp`):
+
+| # | sitio en kestrel | que hace hoy | HW | veredicto |
+|---|------------------|--------------|----|-----------|
+| 1 | `Rsp::mfc0` DPC_CURRENT/STATUS -> `dpLogWait(now, true)` | espera a que la CPU llegue a `now` en CADA sondeo | la CPU no escribe DPC con tarea en marcha (medido 0) | espera inutil, 72 % del RSP. Punto 1 |
+| 2 | `Rsp::mfc0` DPC con `dpLogPending()` | el RSP espera a que la CPU aplique SUS escrituras DPC | el RSP ve lo suyo al instante | espera inutil. Punto 1 |
+| 3 | `Rsp::mfc0` SP_STATUS con `spLogPend` -> `dpLogWait(0, false)` | el RSP espera a que la CPU aplique SUS senales | el RSP ve lo suyo al instante | espera inutil. Basta superponer lo pendiente propio al leer |
+| 4 | BREAK con `spLogCrit` -> `dpLogWait(0, false)` | idem, para INTR_ON_BREAK escrito por el propio RSP | idem | espera inutil, misma superposicion |
+| 5 | `Rsp::mfc0` resto de SP/DPC con `dpLogPending()` | idem | idem | espera inutil |
+| 6 | `Rsp::mfc0` SP_STATUS -> `spReadSync(vis)` | cita con grano `KESTREL_SPSIGQ` | sin latencia definida | ya es el modelo de latencia L. Se queda (y se generaliza) |
+| 7 | `Rsp::mtc0` SP_RD_LEN -> `spReadSync(now)` | cita exacta antes de cada DMA desde RDRAM | datos entregados antes por el protocolo (writeback + lanzamiento, o escritura + SIG en rspq) | necesaria para ser deterministas sin versionar la RDRAM. Contar primero |
+| 8 | `Rsp::mtc0` DPC fuera del diario (XBUS o FREEZE) -> `dpLogWait(now, true)` | cita | raro | se queda, es poco frecuente |
+| 9 | `rcp.sp_semaphore` (`memory.hpp:55`) | `u32` normal; leer-y-poner a 1 no atomico entre hilos | el HW lo hace atomico | CARRERA en Threaded si CPU y RSP lo usan a la vez (medido 0 usos de CPU con tarea). Hacerlo `std::atomic` con `exchange(1)` |
+| 10 | `rcpReg32` 0x14 SP_DMA_FULL | devuelve el bit de DMA_BUSY | DMA_FULL es el bit 3 de SP_STATUS (hay cola); baja antes que BUSY | detalle de fidelidad, sin coste. Revisar cuando se toque el DMA |
+| 11 | DPC START/END doble buffer (`memory.cpp` 1165-1250) | modela START_PENDING (0x400) | coincide | bien |
+
+Nada del HW obliga a la CPU a esperar al RSP fuera de BREAK/MI_SP, SIG, semaforo y DMA. Nada
+obliga al RSP a esperar a la CPU fuera de SIG, semaforo y DMA desde RDRAM. Las citas 1 a 5
+son artefactos de que el estado DPC y SP_STATUS tenga como unico dueno al hilo de CPU.
+
+Arreglo comun de 2 a 5: el RSP guarda sus propias escrituras pendientes (DPC y SP_STATUS)
+y, al leer, las superpone al valor aplicado. La CPU sigue aplicando el diario a su hora, y
+el RSP no espera nunca por lo suyo.
