@@ -8153,3 +8153,26 @@ de espera puro sino trabajo + sondeo, y la firma de `idleSkip` (misma lectura qu
 compara STATUS contra CURRENT y nunca casa. Si la visibilidad de la CPU se cuantizara a 16 k
 ciclos (estilo SPSIGQ) las citas bajarian de 1,003 M a ~364 k -- pero eso cambia semantica y
 hay que hacerlo igual en lockstep; pendiente de decidir si es defendible como latencia de bus.
+
+## 2026-09-22 (c) -- El adelanto de `dpLogWait` sigue al modo de velocidad
+
+**Hipotesis del usuario, probada primero.** "No habras metido esperas de SYNC_FULL en comandos
+que no lo necesitan". A/B con el estado de PD en juego (ranura 5, 8 s, exe estatico):
+base 22,9 fps; `KESTREL_DPBARRIER=0` 20,8 (la barrera del RDP, la de SYNC_FULL, NO es);
+`KESTREL_SPBARRIER=0` 26,8; las dos fuera 35,9. Perfil de anfitrion: hilo del RSP 92 % esperando
+(`dpLogWait` 72 %, `spReadSync` 21 %, microcodigo real ~6 %), hilo de CPU 40 % en `rcpRetire`.
+El coste es la cita CPU<->RSP en cada sondeo de DPC del bucle de PD, no SYNC_FULL.
+`KESTREL_RSPTANDA` 32/128 no cambia nada (21,7 / 20,9).
+
+**Por que no hay arreglo fiel barato.** La lectura de DPC del RSP en el instante `r` depende de
+lo que la CPU escriba en DPC antes de `r`, y la barrera del SP deja a la CPU siempre detras del
+RSP: o se espera (fiel, lento) o se deja adelantarse a la CPU (rapido, eventos del RSP tarde).
+Lo fiel y rapido pide especulacion del RSP con vuelta atras (foto de DMEM/IMEM/registros y
+recorte del diario si la CPU escribe DPC por detras de una lectura ya hecha). Trabajo grande,
+anotado, no hecho.
+
+**Ahora.** `KESTREL_DPLOGLEAD` acepta `auto` (defecto): puesto en velocidad libre, quitado en
+"Fiel a consola" (`KESTREL_SPEEDMODE=hw`). Menu RCP con las tres opciones. `scripts/validate.py`
+lo fija a 0 para que las puertas sigan comparando threaded contra lockstep bit a bit.
+Medido PD en juego: libre 37,9 fps (CPU 78 % de N64), hw 19,7. junkrunner64 400 M con
+`SPEEDMODE=hw`: `dc07d7ac23fef2e1` 3 de 3 threaded, igual que lockstep.

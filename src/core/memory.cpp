@@ -3586,9 +3586,13 @@ auto Memory::rdvWaiveDue(bool& timing, std::chrono::steady_clock::time_point& t0
 // (junkrunner64 a 400M instrucciones da un statehash distinto en cada corrida). A cambio,
 // Perfect Dark en juego pasa de ~15 a ~39 fps. Modo rapido, no fiel.
 auto Memory::dpLogLeadOn() -> bool {
+  // Sin la variable (o con "auto") manda el modo de velocidad: en "libre", el de jugar, va
+  // puesto; en "Fiel a consola" (KESTREL_SPEEDMODE=hw) va quitado y threaded == lockstep.
+  // Las puertas (scripts/validate.py) lo fijan a 0: son el oraculo determinista.
   static const bool v = []{
     const char* e = std::getenv("KESTREL_DPLOGLEAD");
-    return e && *e && std::strcmp(e, "0") && std::strcmp(e, "off");
+    if(!e || !*e || !std::strcmp(e, "auto")) return !rt::speedModeHw();
+    return std::strcmp(e, "0") && std::strcmp(e, "off");
   }();
   return v;
 }

@@ -131,6 +131,9 @@ def preflight():
 
 def env_for(mode, extra=None):
     e = dict(os.environ)
+    # Las puertas son el oraculo determinista: sin el adelanto de dpLogWait, que de fabrica
+    # va puesto en velocidad libre y hace que multihilo deje de coincidir con lockstep.
+    e.setdefault("KESTREL_DPLOGLEAD", "0")
     e.update(MODES[mode])
     if extra:
         e.update(extra)

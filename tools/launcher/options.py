@@ -78,6 +78,15 @@ CATEGORIES = [
       "Con el motor del RDP drenado, el sondeo del microcodigo sobre DPC_CURRENT no puede "
       "cambiar de respuesta: se aparca el RSP hasta que la CPU archiva el siguiente tramo. "
       "Apagarlo tiene que dar el mismo resultado.", tri=True),
+    O("dploglead", "KESTREL_DPLOGLEAD", "Adelanto de la CPU en la espera del FIFO", "choice", "auto",
+      values=[["auto", "Automatico - puesto en velocidad libre, quitado en fiel a consola"],
+              ["1", "Puesto - rapido, NO fiel"],
+              ["0", "Quitado - fiel, multihilo == lockstep"]],
+      help="Cuando el microcodigo sondea DPC_CURRENT/STATUS esperando al RDP, deja que la CPU "
+           "se adelante un grano al RSP en vez de avanzar los dos clavados en el mismo instante. "
+           "Perfect Dark en juego pasa de ~23 a ~35 fps, pero los eventos del RSP nacen tarde y "
+           "el resultado depende del anfitrion: multihilo deja de coincidir con lockstep. Para "
+           "comparar contra hardware o reproducir demos, modo de velocidad fiel a consola."),
     O("spinpause", "KESTREL_SPINPAUSE", "Pista PAUSE en las esperas activas", "bool", True,
       "La CPU y el RSP se vigilan girando sobre contadores que escribe el otro. PAUSE le dice "
       "al nucleo que eso es una espera, para que no le robe la linea de cache ni las ranuras "

@@ -4,6 +4,11 @@
 
 namespace kestrel::ui {
 
+static const Choice kCh_dploglead[] = {
+  {"auto", "Automatico - puesto en velocidad libre, quitado en fiel a consola"},
+  {"1", "Puesto - rapido, NO fiel"},
+  {"0", "Quitado - fiel, multihilo == lockstep"},
+};
 static const Choice kCh_speedmode[] = {
   {"libre", "Libre - manda lo que se elija aqui debajo"},
   {"hw", "Fiel a consola - relojes N64 exactos y 59.94 campos/s"},
@@ -83,7 +88,7 @@ static const Option kOpt_rcp[] = {
   {"rspsse", "KESTREL_NORSPSSE", "VU por SSE", OType::Bool, "1", "Unidad vectorial del RSP con instrucciones SSE del anfitrion en vez de escalar.", false, true, false, 0, 0, 0, nullptr, 0, false},
   {"vecfast", "KESTREL_NOVECFAST", "Cargas vectoriales rapidas", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, false},
   {"rspidle", "KESTREL_RSPIDLE", "Aparcar el RSP en la espera del FIFO", OType::Bool, "1", "Con el motor del RDP drenado, el sondeo del microcodigo sobre DPC_CURRENT no puede cambiar de respuesta: se aparca el RSP hasta que la CPU archiva el siguiente tramo. Apagarlo tiene que dar el mismo resultado.", false, false, true, 0, 0, 0, nullptr, 0, false},
-  {"dploglead", "KESTREL_DPLOGLEAD", "Adelanto de la CPU en la espera del FIFO (rapido, NO fiel)", OType::Bool, "0", "Cuando el microcodigo sondea DPC_CURRENT/STATUS esperando al RDP, deja que la CPU se adelante un grano al RSP en vez de avanzar los dos clavados en el mismo instante. Perfect Dark en juego pasa de ~15 a ~39 fps, pero los eventos del RSP nacen tarde y el resultado depende del anfitrion: multihilo deja de coincidir con lockstep. Solo para jugar; nunca para comparar contra hardware.", false, false, false, 0, 0, 0, nullptr, 0, false},
+  {"dploglead", "KESTREL_DPLOGLEAD", "Adelanto de la CPU en la espera del FIFO", OType::Choice, "auto", "Cuando el microcodigo sondea DPC_CURRENT/STATUS esperando al RDP, deja que la CPU se adelante un grano al RSP en vez de avanzar los dos clavados en el mismo instante. Perfect Dark en juego pasa de ~23 a ~35 fps, pero los eventos del RSP nacen tarde y el resultado depende del anfitrion: multihilo deja de coincidir con lockstep. Para comparar contra hardware o reproducir demos, modo de velocidad fiel a consola.", false, false, false, 0, 0, 0, kCh_dploglead, 3, false},
   {"spinpause", "KESTREL_SPINPAUSE", "Pista PAUSE en las esperas activas", OType::Bool, "1", "La CPU y el RSP se vigilan girando sobre contadores que escribe el otro. PAUSE le dice al nucleo que eso es una espera, para que no le robe la linea de cache ni las ranuras de emision al hermano. Es solo una pista de anfitrion: el resultado sale identico.", true, false, true, 0, 0, 0, nullptr, 0, false},
   {"barspin", "KESTREL_BARSPIN", "Vueltas de la barrera del SP", OType::Int, "0", "0 = por defecto (16384). Cuanto gira la CPU en la barrera del RSP antes de dormir.", true, false, false, 0, 1e+06, 0, nullptr, 0, false},
   {"rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", OType::Int, "131072", "Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo con Parallel-RDP. De fabrica 131072 desde el re-barrido del 2026-09-18.", true, false, false, 0, 1e+07, 0, nullptr, 0, false},
