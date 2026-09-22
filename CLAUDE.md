@@ -172,7 +172,7 @@ correctitud, no configuraciones de uso. Las cifras viejas (33.9%/11.0%) salian d
 un intercambio de buffer como un campo de video, cuando SM64 gasta tres; ver
 `docs/PERF-CPU.md` §12-bis;
 block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` to bisect,
-`KESTREL_JIT_TRACE=1` superblocks = measured negative; `KESTREL_JIT_NOITC=1` apaga la cache de
+`KESTREL_JIT_TRACE=1` superblocks = measured negative; `KESTREL_JIT_BUFMB=<1..1024>` / `KESTREL_JIT_SLOTBITS=<12..22>` (cache de codigo del JIT: por defecto 64 MB y 2^17 ranuras; a 16 MB Perfect Dark en juego la vaciaba entera sin parar, 248 k compilaciones -> 35 k) · `KESTREL_JIT_NOITC=1` apaga la cache de
 destinos indirectos JR/JALR -- A/B medido ~2,5 % de pared en SM64, `KESTREL_JIT_ITCBITS=<8..20>`
 su tamano (por defecto 14 = 16384 entradas = 256 KB, elegido por A/B; 16 pierde), ver
 `docs/PERF-CPU.md` §20) ·

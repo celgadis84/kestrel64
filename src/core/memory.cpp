@@ -3516,6 +3516,12 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
   if(dpLogFlush.load(std::memory_order_acquire)) { dpLogApply(~0ull); if(ready()) return; }
   if(ready()) return;
   dpLogWaits.fetch_add(1, std::memory_order_relaxed);
+  // Cita de reloj (lectura de DPC): se abre el adelanto de la CPU igual que en dpReadSync.
+  // Sin el, la barrera del SP deja a la CPU exactamente en `now` y cada vuelta del bucle de
+  // espera del FIFO del microcodigo era otra cita de unas pocas instrucciones con un cambio
+  // de hilo en medio: Perfect Dark en juego iba a 15 fps con el RSP un 75 % del tiempo aqui.
+  const bool lead = clock && rcpMode == RcpMode::Threaded;
+  if(lead) rspRdvAt.store(now, std::memory_order_release);
   rspLogWait.store(true, std::memory_order_release);
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
@@ -3543,6 +3549,18 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
     }
   }
   rspLogWait.store(false, std::memory_order_release);
+  if(lead) {
+    // Fase de holgura, la misma de dpReadSync: no es de correccion (el instante leido sigue
+    // siendo `now` y la condicion es `now <= cartNow()`, que pasarse cumple mejor), solo de
+    // coste. Deja que la CPU se adelante un grano entero para que las vueltas siguientes del
+    // bucle de espera se respondan sin volver a citarse.
+    const u64 tgt = now + kRdvGrain;
+    for(u32 k = 0; k < 8192 && cartNow() < tgt; ++k) {
+      if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
+      if((k & 15u) == 15u) spinPause();
+    }
+    rspRdvAt.store(0, std::memory_order_release);
+  }
 }
 
 // Salvavidas de las citas del RSP con la CPU (spReadSync, dpReadSync, dpLogWait). Soltar una

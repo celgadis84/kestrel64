@@ -160,8 +160,18 @@ auto callBailSelfTest() -> bool {
 // ============================ CodeCache =====================================
 
 auto CodeCache::init() -> bool {
-  if(!buf.init(16 * 1024 * 1024)) return false;   // 16 MB de código emitido
-  u32 cap = 1u << 16;                              // 65536 ranuras
+  // Tamano de la cache de codigo. Con 16 MB y 65536 ranuras el codigo de juego de Perfect Dark
+  // (pagina por TLB desde 0x7F000000, ~35 k bloques) no cabia: el buffer se desbordaba cada
+  // ~1,5 s, clear() tiraba TODO y la CPU recompilaba el conjunto de trabajo entero en bucle
+  // (248 k compilaciones en 25 s, ~10 % del hilo de CPU en el emisor). 64 MB y 2^17 ranuras
+  // lo dejan en una compilacion por bloque. KESTREL_JIT_BUFMB / KESTREL_JIT_SLOTBITS para medir.
+  usize mb = 64; u32 cb = 17;
+  if(const char* e = std::getenv("KESTREL_JIT_BUFMB")) mb = (usize)std::strtoul(e, nullptr, 0);
+  if(const char* e = std::getenv("KESTREL_JIT_SLOTBITS")) cb = (u32)std::strtoul(e, nullptr, 0);
+  if(mb < 1 || mb > 1024) mb = 64;
+  if(cb < 12 || cb > 22) cb = 17;
+  if(!buf.init(mb * 1024 * 1024)) return false;
+  u32 cap = 1u << cb;
   index.assign(cap, 0xFFFF'FFFFu);
   slot.assign(cap, -1);
   mask = cap - 1;
@@ -2172,6 +2182,8 @@ extern u64 g_trampBail;
 // Diagnostico: QUIEN acota el permiso de cadena. Los tres candidatos se arreglan de forma
 // distinta (el borde de timer no se toca, la ventana del bucle de sistema es politica de
 // campo, el regulador es calibracion), asi que saber cual manda es lo unico accionable.
+static u64 g_dueWhy[6][2] = {};
+static u64 g_compiles = 0, g_compClears = 0, g_compDead = 0, g_deadProceed = 0;   // bloques compilados / vaciados de buffer (solo con STATS)
 static u64 g_guardWhy[4] = {};   // 0=borde de timer 1=ventana de campo 2=regulador 3=tope
 namespace jit { extern u64 g_compFailDelay[64], g_compFailDelaySpec[64]; }
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
@@ -2270,6 +2282,17 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
     // traga, MI_SP / MI_DP caen en una instruccion distinta a la del interprete. Se mete en
     // el mismo cupo, que ya esta en unidades de cartNow().
     u64 rcpDue = mem->rcpDueIn(now);
+    if(g_jitStats && rcpDue < 4096) {
+      // DIAG: que termino del plazo del RCP ata el permiso (0 spDone 1 dpDone 2 dpBar 3 spBar 4 dpLog)
+      u32 pend = mem->rcpPend.load(std::memory_order_relaxed); int w = 5;
+      auto chk = [&](int i, u64 at){ if((at > now ? at - now : 0) == rcpDue) w = i; };
+      if(pend & 16u) { u32 h = mem->dpLogHead.load(); if(h != mem->dpLogTail.load()) chk(4, mem->dpLog[h & Memory::kDpLogM].at); }
+      if(pend & 8u) chk(3, mem->spBarrierEff());
+      if(pend & 4u) chk(2, mem->dpBarrierAt());
+      if(pend & 2u) chk(1, mem->dpDoneAt);
+      if(pend & 1u) chk(0, mem->spDoneAt);
+      g_dueWhy[w][rcpDue < 64 ? 0 : 1]++;
+    }
     if(rcpDue < siDue) siDue = rcpDue;
   }
   // El plazo esta en el reloj de invitado (cartNow = retiradas + pendientes + paradas), no en
@@ -2345,7 +2368,7 @@ auto CPU::jitIcRefill(u32 entry, u32 base) -> u8 {
   for(u32 pa = lo; pa < hi; pa += 4) {
     u32 off = pa & 0x1c;
     u32 w = ((u32)l.data[off] << 24) | ((u32)l.data[off + 1] << 16) | ((u32)l.data[off + 2] << 8) | l.data[off + 3];
-    if(w != b.src[(pa - entry) >> 2]) { b.dead = true; jitCache->unlinkTo(entry); return 0; }
+    if(w != b.src[(pa - entry) >> 2]) { b.dead = true; if(g_jitStats) g_deadProceed++; jitCache->unlinkTo(entry); return 0; }
   }
   u32 li = ((base - (entry & ~0x1fu)) >> 5);
   if(li < sizeof(b.lineSeq) / sizeof(b.lineSeq[0])) b.lineSeq[li] = l.seq;
@@ -2485,6 +2508,8 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)g_decl[DR_INT], (unsigned long long)g_decl[DR_UNCACHED],
                    (unsigned long long)g_decl[DR_COMPILE], (unsigned long long)g_decl[DR_TIMER],
                    (unsigned long long)g_decl[DR_SMC], (unsigned long long)g_decl[DR_MISC]);
+      std::fprintf(stderr, "[plazo] spDone=%llu/%llu dpDone=%llu/%llu dpBar=%llu/%llu spBar=%llu/%llu dpLog=%llu/%llu otro=%llu/%llu\n", (unsigned long long)g_dueWhy[0][0], (unsigned long long)g_dueWhy[0][1], (unsigned long long)g_dueWhy[1][0], (unsigned long long)g_dueWhy[1][1], (unsigned long long)g_dueWhy[2][0], (unsigned long long)g_dueWhy[2][1], (unsigned long long)g_dueWhy[3][0], (unsigned long long)g_dueWhy[3][1], (unsigned long long)g_dueWhy[4][0], (unsigned long long)g_dueWhy[4][1], (unsigned long long)g_dueWhy[5][0], (unsigned long long)g_dueWhy[5][1]);
+      std::fprintf(stderr, "[compila] bloques=%llu vaciados=%llu sobreMuerto=%llu muertosProceed=%llu\n", (unsigned long long)g_compiles, (unsigned long long)g_compClears, (unsigned long long)g_compDead, (unsigned long long)g_deadProceed);
       std::fprintf(stderr, "[regcache] reg=%llu mem=%llu spill=%llu hit=%.1f%%\n",
                    (unsigned long long)jit::g_rcReg, (unsigned long long)jit::g_rcMem,
                    (unsigned long long)jit::g_rcSpill,
@@ -2667,7 +2692,7 @@ auto CPU::jitTryBlock() -> u32 {
   }
 
   s32 bi = cc->find(phys);
-  if(bi >= 0 && cc->blocks[bi].dead) bi = -1;
+  if(bi >= 0 && cc->blocks[bi].dead) { bi = -1; if(g_jitStats) g_compDead++; }
   // Un bloque que se pasa de su pagina de entrada asume contiguidad VA->phys: solo es
   // valido por la ruta directa con la que se compilo. Alcanzado el mismo phys por TLB,
   // la pagina siguiente puede mapear a otro sitio -> lo ejecuta el interprete.
@@ -2691,7 +2716,8 @@ auto CPU::jitTryBlock() -> u32 {
     }
     // Reclamo de buffer: si el buf ejecutable desbordó (fugas por dead-mark en SMC pesado),
     // clear global recupera memoria antes de recompilar. Sin esto el JIT quedaría muerto.
-    if(cc->buf.overflowed()) cc->clear();
+    if(cc->buf.overflowed()) { cc->clear(); if(g_jitStats) g_compClears++; }
+    if(g_jitStats) g_compiles++;
     jit::Block b = jit::compileBlock(*this, phys);
     if(b.nOps == 0) { nc.phys = phys; nc.word = jitIcExact() ? jitPeekWord(phys) : jitFetchWord(phys); nc.ck0 = (u8)ck0Route; JDECL(DR_COMPILE); return 0; }
     bi = cc->insert(phys, std::move(b));

@@ -8096,3 +8096,32 @@ registro tambien salte: desafio contra el vector de oro; el desafio apaga su bit
 bloque queda intacto; el desafio NO sondea el joybus (zona de respuesta envenenada con 0xAA
 que sigue en 0xAA); el bit 0 se consume en el DMA de escritura; estado del mando 1
 (`0x05 0x00 0x00`); y solo se apaga el bit 0 (`0x31` -> `0x30`). ALL PASS 7/7.
+
+## 2026-09-22 -- Perfect Dark en juego 15 -> 32 fps: cita CPU<->RSP en `dpLogWait`
+
+**Hipotesis del usuario, probada primero.** "Todo lo de tiempos exactos ha ralentizado el
+emulador; un modo sin esperas". Medido con su estado guardado de PD en juego (ranura 5):
+apagar las perillas de tiempo (`KESTREL_DPRDV=0`, `KESTREL_SPSIGQ=20`, `KESTREL_DPLOG=0`,
+`KESTREL_RSPTANDA` 256/4096/16384) deja 15-16 fps en todos los casos; lockstep da 6-7.
+`KESTREL_DPRDV=1` da 32,4. O sea el coste no era el modelo de tiempos, era la FORMA de la
+cita del RSP con la CPU al leer DPC.
+
+**Mecanismo.** El microcodigo de PD sondea DPC en bucle esperando hueco en el FIFO. Cada
+lectura acaba en `dpLogWait(now, clock=true)`, que espera a `cartNow() >= now` pero no abria
+el adelanto de la barrera del SP (`rspRdvAt`). Con la barrera clavando a la CPU en el reloj
+del RSP, la CPU llegaba justo a `now`, paraba, y la siguiente vuelta del bucle del RSP pedia
+otro `now` unas pocas instrucciones mas alla: ping-pong de hilos a grano de decenas de ops.
+Telemetria `[plazo]` (nueva, `KESTREL_JIT_STATS`): el permiso del JIT quedaba atado por
+`spBar` 5,1 M veces y por el diario 4,1 M, por debajo de 64 ops.
+
+**Arreglo.** Igual que `dpReadSync`: en Threaded, las citas de reloj de `dpLogWait` ponen
+`rspRdvAt = now` (la barrera suma `kRdvLead`) y, cumplida la espera, giran hasta que la CPU
+avance `kRdvGrain` (tope 8192 vueltas) antes de cerrar. El instante leido sigue siendo `now`;
+solo cambia cuantas citas hacen falta. Resultado: **31,8 fps, CPU 64 %** (antes 15-16, 33 %).
+
+**Cache de codigo del JIT.** A 16 MB PD en juego vaciaba la cache entera sin parar (248 k
+compilaciones). Ahora 64 MB y 2^17 ranuras por defecto: 35 k compilaciones, cero vaciados.
+`KESTREL_JIT_BUFMB` / `KESTREL_JIT_SLOTBITS` para bisecar. Telemetria `[compila]`.
+
+**Pendiente.** `spReadSync` (lectura de SP_STATUS) sigue siendo cita exacta sin adelanto;
+es el siguiente candidato. La demo de las lianas de DK64 sigue divergiendo (DK cae al agua).
