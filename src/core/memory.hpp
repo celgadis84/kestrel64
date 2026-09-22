@@ -736,6 +736,7 @@ struct Memory {
   // instrucciones de CPU; dormirse ahi convertiria cada cita en un viaje de milisegundos.
   // KESTREL_DPRDV=0 la apaga para bisecar.
   static auto dpRdvOn() -> bool;
+  static auto dpLogLeadOn() -> bool;
   auto dpReadAhead(u64 now) const -> bool {
     return rcpMode == RcpMode::Threaded && cartNow() < now;
   }

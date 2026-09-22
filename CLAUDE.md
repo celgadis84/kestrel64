@@ -176,6 +176,7 @@ block linking is ON inside it, `KESTREL_JIT_NOLINK=1` / `KESTREL_JIT_CHAIN=<n>` 
 destinos indirectos JR/JALR -- A/B medido ~2,5 % de pared en SM64, `KESTREL_JIT_ITCBITS=<8..20>`
 su tamano (por defecto 14 = 16384 entradas = 256 KB, elegido por A/B; 16 pierde), ver
 `docs/PERF-CPU.md` §20) ·
+`KESTREL_DPLOGLEAD=1` (adelanto de la CPU en las citas de lectura de DPC de `dpLogWait`: PD en juego ~15 -> ~39 fps pero threaded deja de coincidir con lockstep; NO fiel, apagado de fabrica, ver STATUS 2026-09-22 (b)) ·
 `KESTREL_HEARTBEAT=1` (cada 5 s: Mips, % de velocidad N64, ocupacion de los workers, trabajos/s y **hambre de audio en vivo** -- silencio acumulado, descartes y colchon minimo DE ESA VENTANA; `KESTREL_AUDIOSTAT` solo habla al cerrar y con ventana el emulador no cierra solo) · `KESTREL_HOSTPROF=<ms>` (host sampler) · `KESTREL_JIT_STATS=<n>`
 (volcado cada n despachos, por defecto 4 M; con enlace+ITC una tanda entera de SM64 no llega
 a 4 M, asi que hay que bajarlo para ver nada; ademas de los contadores de siempre saca

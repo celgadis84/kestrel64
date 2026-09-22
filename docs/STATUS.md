@@ -8125,3 +8125,31 @@ compilaciones). Ahora 64 MB y 2^17 ranuras por defecto: 35 k compilaciones, cero
 
 **Pendiente.** `spReadSync` (lectura de SP_STATUS) sigue siendo cita exacta sin adelanto;
 es el siguiente candidato. La demo de las lianas de DK64 sigue divergiendo (DK cae al agua).
+
+## 2026-09-22 (b) -- CORRECCION: el adelanto de `dpLogWait` rompia el determinismo
+
+**Lo de arriba estaba mal en una cosa: "no toca correccion" era falso.** junkrunner64 a
+400 M instrucciones (`KESTREL_MAXINSN=400000000`) daba un `statehash` distinto en cada
+corrida threaded con el adelanto puesto; sin el, `dc07d7ac23fef2e1` en lockstep y en 3 de 3
+corridas threaded. El md5 de SM64 de las puertas no lo cazo: SM64 no vive en ese bucle.
+Motivo, el mismo que avisa `spReadSync`: con la CPU por delante del RSP (`kRdvLead`), los
+eventos y plazos que NACEN del RSP llegan con la CPU ya pasada de su instante, y el reajuste
+depende de cuanto se haya adelantado el anfitrion.
+
+**Ahora.** Adelanto opcional y apagado de fabrica: `KESTREL_DPLOGLEAD=1` (menu RCP, "Adelanto
+de la CPU en la espera del FIFO", marcado NO fiel). Con el: PD en juego ~39 fps en anfitrion
+libre. Sin el: ~15 fps, determinista. La regla sigue: threaded == lockstep bit a bit.
+
+**Metodo que falto.** Tras tocar cualquier cita CPU<->RSP, comprobar el `statehash` de
+junkrunner64 threaded varias veces contra lockstep, no solo el md5 de SM64.
+
+**Diagnostico del bucle de PD (para la version determinista).** Con el adelanto apagado,
+1,003 M de 1,010 M lecturas de DPC del RSP piden cita (`cartNow() < now`). De ellas 363 k
+tienen ademas el diario de DPC pendiente. `Rsp::idleSkip` casi nunca salta (55 k de 1,01 M):
+955 k fallan por la longitud del periodo. El bucle esta en el pc 0x1b8 del microcodigo: lee
+DPC_STATUS y un ciclo despues DPC_CURRENT, con un contador en algun registro que cambia cada
+vuelta (el hash de r1..r31 nunca repite) y periodos de 61 a 347 ciclos. O sea NO es un bucle
+de espera puro sino trabajo + sondeo, y la firma de `idleSkip` (misma lectura que la ANTERIOR)
+compara STATUS contra CURRENT y nunca casa. Si la visibilidad de la CPU se cuantizara a 16 k
+ciclos (estilo SPSIGQ) las citas bajarian de 1,003 M a ~364 k -- pero eso cambia semantica y
+hay que hacerlo igual en lockstep; pendiente de decidir si es defendible como latencia de bus.

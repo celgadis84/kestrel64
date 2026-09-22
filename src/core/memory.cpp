@@ -3516,11 +3516,12 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
   if(dpLogFlush.load(std::memory_order_acquire)) { dpLogApply(~0ull); if(ready()) return; }
   if(ready()) return;
   dpLogWaits.fetch_add(1, std::memory_order_relaxed);
-  // Cita de reloj (lectura de DPC): se abre el adelanto de la CPU igual que en dpReadSync.
-  // Sin el, la barrera del SP deja a la CPU exactamente en `now` y cada vuelta del bucle de
-  // espera del FIFO del microcodigo era otra cita de unas pocas instrucciones con un cambio
-  // de hilo en medio: Perfect Dark en juego iba a 15 fps con el RSP un 75 % del tiempo aqui.
-  const bool lead = clock && rcpMode == RcpMode::Threaded;
+  // Cita de reloj (lectura de DPC). Sin adelanto, la barrera del SP deja a la CPU exactamente
+  // en `now` y cada vuelta del bucle de espera del FIFO del microcodigo es otra cita de unas
+  // pocas instrucciones con un cambio de hilo en medio: Perfect Dark en juego va a ~15 fps con
+  // el RSP un 75 % del tiempo aqui. Con KESTREL_DPLOGLEAD=1 se abre el adelanto como en
+  // dpReadSync (~39 fps) a costa del determinismo: ver dpLogLeadOn.
+  const bool lead = clock && rcpMode == RcpMode::Threaded && dpLogLeadOn();
   if(lead) rspRdvAt.store(now, std::memory_order_release);
   rspLogWait.store(true, std::memory_order_release);
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
@@ -3577,6 +3578,19 @@ auto Memory::rdvWaiveDue(bool& timing, std::chrono::steady_clock::time_point& t0
   if(!timing || cpuDpBarWait.load(std::memory_order_acquire)) { timing = true; t0 = t1 = t; return false; }
   if(!cpuRcpWait.load(std::memory_order_acquire)) { t1 = t; return t - t0 > std::chrono::milliseconds(2000); }
   return t - t1 > std::chrono::milliseconds(20);
+}
+
+// Adelanto de la CPU en la cita de lectura de DPC (ver dpLogWait). Opcional y APAGADO de
+// fabrica: con la CPU por delante del RSP los eventos y plazos que nacen del RSP llegan tarde
+// y su reajuste depende del anfitrion, asi que threaded deja de coincidir con lockstep
+// (junkrunner64 a 400M instrucciones da un statehash distinto en cada corrida). A cambio,
+// Perfect Dark en juego pasa de ~15 a ~39 fps. Modo rapido, no fiel.
+auto Memory::dpLogLeadOn() -> bool {
+  static const bool v = []{
+    const char* e = std::getenv("KESTREL_DPLOGLEAD");
+    return e && *e && std::strcmp(e, "0") && std::strcmp(e, "off");
+  }();
+  return v;
 }
 
 auto Memory::dpRdvOn() -> bool {
