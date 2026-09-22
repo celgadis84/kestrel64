@@ -185,3 +185,39 @@ sustituye por una pregunta en cada sitio del hilo de CPU que mira RDRAM:
 Resultado: `statehash` `dc07d7ac23fef2e1` threaded x4 == lockstep, y **Perfect Dark en juego
 28,4 -> 37,3 fps (+31 %)**. La cita de DMA del RSP (`spReadSync` sitio 4), que era el 93 % de
 las vueltas de giro del hilo del RSP, deja de pagarse en el lado de la CPU.
+
+## Descartado: DMA de lectura del SP asincrono (2026-09-22)
+
+En hardware el motor de DMA del SP no para al nucleo: el `MTC0` a `SP_RD_LEN` solo lo
+arranca y el microcodigo tiene que sondear `DMA_BUSY` antes de tocar el buffer. Medido en
+Perfect Dark, el RSP ejecuta de media **313,5 ciclos** (max 3093, n=460169) entre lanzar el
+DMA y el primer sondeo, asi que parecia que aplazar la copia hasta ese sondeo regalaba esa
+ventana de solape.
+
+Se implemento entero: la transferencia se apuntaba con su instante de invitado `at`, el
+reloj publicado del RSP (`cyclesRun`) se congelaba en `at` -- para que la barrera del SP
+no dejase a la CPU rebasarlo y la RDRAM copiada al asentar fuese EXACTAMENTE la de `at` --
+y se asentaba en el primer punto observable (cualquier COP0, BREAK, frontera de tanda).
+Dos variantes: asentar en todo COP0, y asentar solo cuando el acceso mira el estado del
+motor o trae una cita mas alla de `at`.
+
+**Resultado: neutral.** PD ranura 5, 40 s por corrida, dos pasadas alternadas:
+
+| | corrida 1 | corrida 2 |
+|---|---|---|
+| asincrono | 35,7 fps | 36,4 fps |
+| cita de siempre | 36,6 fps | 36,5 fps |
+
+**Por que no hay premio, y por que `KESTREL_DMARDV=0` (45,7 fps) enganaba.** La cita no es
+sobrecoste de protocolo: es trabajo real de la CPU. El invariante es doble --
+`CPU <= RSP` (barrera del SP, para que el aviso de fin de tarea no nazca tarde) y
+`RSP <= CPU` en cada DMA (para leer la RDRAM del instante correcto) --, o sea que los dos
+hilos se igualan en CADA transferencia. Con ~1200 DMA de lectura por campo en PD, el
+trabajo que queda entre dos citas consecutivas es minusculo: **no hay solape que ganar**,
+y aplazar 313 ciclos no mueve la aguja.
+
+Y un diario de deshacer (undo log) de las escrituras de la CPU tampoco sirve: la CPU va por
+DETRAS de `at`, no por delante, asi que lo que falta no son escrituras pasadas que recuperar
+sino escrituras FUTURAS que todavia no ha hecho. Mientras la barrera del SP siga (y tiene que
+seguir), ese 45,7 fps es inalcanzable siendo exacto. No volver a intentarlo por esta via.
+
