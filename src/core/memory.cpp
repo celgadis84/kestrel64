@@ -27,6 +27,7 @@ static thread_local bool tlIsRspThread = false;
 // Aplicando una entrada del diario DPC del RSP (ver Memory::dpLogApply): la escritura es del
 // RSP y se sella con SU instante, aunque la ejecute otro hilo.
 static thread_local bool tlDpLogApply = false;
+static thread_local bool tlDpcKick = false;      // dpcAdvance lanzo un tramo (ver rspDpcWrite)
 static thread_local kestrel::u64 tlDpLogAt = 0;
 static thread_local bool tlInRetire = false, tlRetireArmed = false;   // ver rcpRetire
 
@@ -896,20 +897,30 @@ auto Memory::mmioRead32(u32 a) -> u32 {
   case BASE_DPC & 0x1ff0'0000:
     if(!tlIsRspThread && !tlDpLogApply && (rcpPend.load(std::memory_order_relaxed) & 16u))
       dpLogApply(cartNow());
+    {
+    // La CPU con escrituras DPC del RSP aun en su futuro: la vista fechada (ver cpuDpcView).
+    // El RSP sube dpcViewPend ANTES de tocar el registro vivo, asi que si sigue a 0 despues de
+    // leerlo, lo leido es del pasado de la CPU.
+    DpcView vw = dpcViewLive();
+    if(!tlIsRspThread && (dpcViewPend.load(std::memory_order_acquire)
+                          || (vw = dpcViewLive(), dpcViewPend.load(std::memory_order_acquire))))
+      vw = cpuDpcView;
     switch(off & 0xff) {
-    case 0x00: return rcp.dpc_start;
-    case 0x04: return rcp.dpc_end;
+    case 0x00: return vw.start;
+    case 0x04: return vw.end;
     // Las dos se evaluan en el reloj de invitado del lector (ver dpcCurrentFor). En
     // Lockstep el trabajo se ejecuta dentro del propio DPC_END y dpBusyAt() ya vale false
     // antes de que nadie pueda leer: se lee idle, como en HW.
     case 0x08: return dpcCurrentFor(cartNow(), 0);
-    case 0x0c: return dpcStatusFor(cartNow(), 0);
+    case 0x0c:
+      return (dpcStatusFor(cartNow(), 0) & ~(kDpcViewSt | kDpcRunSt)) | vw.st;
     // Performance counters, 24-bit each. The RDP accumulates them per rasterized
     // span (see SoftRdp::accountPixels); games time the RDP with these.
     case 0x10: return rcp.dpc_clock.load(std::memory_order_relaxed)    & 0xff'ffff;
     case 0x14: return rcp.dpc_bufbusy.load(std::memory_order_relaxed)  & 0xff'ffff;
     case 0x18: return rcp.dpc_pipebusy.load(std::memory_order_relaxed) & 0xff'ffff;
     case 0x1c: return rcp.dpc_tmem.load(std::memory_order_relaxed)     & 0xff'ffff;
+    }
     }
     return 0;
   case BASE_DPS & 0x1ff0'0000:
@@ -1156,6 +1167,8 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     }
     return;
   case BASE_DPC & 0x1ff0'0000: {
+    // CPU con tarea de RSP en marcha: al buzon, visible en el borde de grano (ver dpcMbPost).
+    if(!tlIsRspThread && !tlDpLogApply && !lockRspExec && dpcMbPost(a, v)) break;
     static const bool dpwr = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
     if(dpwr) std::fprintf(stderr, "[dpwr] reg=%02x v=%08x st=%08x start=%06x cur=%06x end=%06x sub=%06x\n",
                           off & 0xff, v, rcp.dpc_status.load(), rcp.dpc_start, rcp.dpc_current.load(), rcp.dpc_end, rcp.dpc_submitted);
@@ -1289,6 +1302,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       break;
     }
     }
+    if(!tlIsRspThread) cpuDpcView = dpcViewLive();
     return; }
   case BASE_DPS & 0x1ff0'0000:
     switch(off & 0xff) {
@@ -1807,6 +1821,7 @@ auto Memory::dpcAdvance() -> void {
   // Kicking the FIFO starts the graphics clock and marks the pipe busy; both
   // stay set until a SYNC_FULL drains the pipe (DP_STATUS "flags during a run").
   rcp.dpc_status |= 0x8u | 0x20u;      // START_GCLK | PIPE_BUSY
+  tlDpcKick = true;
   // Se encola desde donde quedo el ULTIMO encolado, no desde CURRENT: CURRENT es
   // ahora el avance real del rasterizador y puede ir por detras si el RDP sigue
   // ocupado con el trabajo anterior.
@@ -2483,9 +2498,36 @@ auto Memory::rdpSnapshot(u32 current, u32 end) -> void {
   const u32 n = b - a;
   rdpSnapBytes.fetch_add(n, std::memory_order_relaxed);
   rdpSnapCopies.fetch_add(1, std::memory_order_relaxed);
+  // Desde el hilo del RSP la CPU puede no haber aplicado aun DMA suyos a RDRAM (diario, reg 16)
+  // fechados ANTES de este DPC_END: el microcodigo baja los comandos por DMA y enseguida lanza
+  // el tramo. La cabeza se lee ANTES de copiar; lo que la CPU aplique mientras se copia vuelve a
+  // escribirse igual desde el diario, en orden. Solo el RSP apunta, asi que la cola esta quieta.
+  const bool ov = tlIsRspThread && rcpMode == RcpMode::Threaded;
+  const u32 h0 = ov ? dpLogHead.load(std::memory_order_acquire) : 0;
+  const u32 t0 = ov ? dpLogTail.load(std::memory_order_relaxed) : 0;
   u8*       dst = sh.data() + a;
   const u8* src = rdram.data() + a;
   std::memcpy(dst, src, n);
+  for(u32 i = h0; i != t0; ++i)
+    if(dpLog[i & kDpLogM].reg & 16u) spDmaOverlay(dpLogDma[i & kDpLogM], sh.data(), a, b);
+}
+
+// Los bytes de un DMA del diario que caen en [a, b), escritos en `base` (indexado por direccion).
+auto Memory::spDmaOverlay(const DpLogDma& d, u8* base, u32 a, u32 b) const -> void {
+  u64 r = d.pay;
+  u32 dram = d.dram;
+  for(u32 c = 0; c < d.count; c++) {
+    for(u32 i = 0; i < d.length; ) {
+      const u64 ro = r & kDmaPayM;
+      u32 n = d.length - i;
+      if(n > kDmaPayN - ro) n = (u32)(kDmaPayN - ro);
+      const u32 dd = dram + i;
+      const u32 lo = dd > a ? dd : a, hi = dd + n < b ? dd + n : b;
+      if(lo < hi) std::memcpy(base + lo, &dmaPay[ro + (lo - dd)], hi - lo);
+      r += n; i += n;
+    }
+    dram += d.length + d.skip;
+  }
 }
 
 
@@ -3406,7 +3448,15 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
                    current, end, (unsigned long long)cost);
   }
   if(costed && softCost.sawSyncFull && rcpDeadlineOn()) {
-    dpEndArmAt(t1);
+    // Lanzado por el RSP en Threaded: el plazo lo arma la CPU al llegar al instante del
+    // lanzamiento, por el diario. MI_DP es estado de la CPU (rcpRetire), y armarlo desde aqui
+    // lo adelantaba una op frente a Lockstep y pisaba un plazo anterior aun sin entregar.
+    if(tlIsRspThread && rcpMode == RcpMode::Threaded) {
+      dpLogArm[dpLogTail.load(std::memory_order_relaxed) & kDpLogM] = t1;
+      dpLogPush(kick, 64u, 0);
+    } else {
+      dpEndArmAt(t1);
+    }
     // Plazo nuevo armado desde el hilo de CPU (un store a DPC_END, que con el JIT puede ir en
     // mitad de una cadena): el permiso de la cadena no lo conocia. Igual que siDma.
     if(!tlIsRspThread && jitGuardPtr) *jitGuardPtr = 0;
@@ -3475,6 +3525,91 @@ auto Memory::dpLogPush(u64 at, u32 reg, u32 v) -> void {
   dpLogPushes.fetch_add(1, std::memory_order_relaxed);
 }
 
+// Escritura del microcodigo a DPC: en el acto y en su instante (ver cpuDpcView en memory.hpp).
+auto Memory::rspDpcWrite(u64 now, u32 reg, u32 v) -> void {
+  const bool view = rcpMode == RcpMode::Threaded;
+  if(view) {
+    // Diario lleno: esperar ANTES de ocupar la ranura de la cola (ver spDmaLogPush).
+    // Dos ranuras: la vista y, si lanza un tramo con SYNC_FULL, el plazo de MI_DP.
+    if(dpLogTail.load(std::memory_order_relaxed) - dpLogHead.load(std::memory_order_acquire) >= kDpLogN - 1)
+      dpLogWait(now, false);
+    dpcViewPend.fetch_add(1, std::memory_order_acq_rel);
+  }
+  // Sellado con el instante exacto de la instruccion, igual que cuando la CPU aplicaba el diario.
+  tlDpLogApply = true; tlDpLogAt = now; tlDpcKick = false;
+  rcpRegWrite32(BASE_DPC + (reg << 2), v);
+  tlDpLogApply = false;
+  if(view) {
+    DpcView vw = dpcViewLive();
+    vw.st = (vw.st & kDpcViewSt) | (tlDpcKick ? kDpcRunSt : 0u);
+    dpLogView[dpLogTail.load(std::memory_order_relaxed) & kDpLogM] = vw;
+    dpLogPush(now, 32u, 0);
+  }
+}
+
+// Buzon CPU -> DPC (ver memory.hpp). Con tarea viva -- HALT a 0 tal como lo ve la CPU, que en
+// los dos modos es estado de su hilo -- la escritura no se aplica: se apunta con el borde de grano
+// siguiente a su instante, el mismo convenio que las senales de SP_STATUS (spSigQuant). Si ya
+// hay algo en el buzon tambien se apunta aunque la tarea haya acabado, para no adelantar lo viejo.
+auto Memory::dpcMbPost(u32 phys, u32 v) -> bool {
+  if((rcp.sp_status.load(std::memory_order_acquire) & 1u) && !dpcMbN.load(std::memory_order_acquire))
+    return false;
+  std::lock_guard<std::mutex> lk(dpcMbMx);
+  if(dpcMbCount == kDpcMbN) {
+    static bool warned = false;
+    if(!warned) { warned = true; std::fprintf(stderr, "[dpcmb] buzon lleno, escritura directa\n"); }
+    return false;
+  }
+  const u64 q = spSigQuant(), raw = cartNow() + 1;
+  dpcMb[(dpcMbHead + dpcMbCount) % kDpcMbN] = {(raw + q - 1) & ~(q - 1), phys, v};
+  ++dpcMbCount;
+  dpcMbN.fetch_add(1, std::memory_order_release);
+  dpcMbPosts.fetch_add(1, std::memory_order_relaxed);
+  rcpPend.fetch_or(32u, std::memory_order_release);
+  return true;
+}
+
+// El RSP en un acceso a DPC en `now`, con la CPU ya en el borde de grano de `now`: todo lo que
+// la CPU escribio antes de ese borde esta en el buzon. Lo visible se aplica como escritura suya
+// en `now`, con vista fechada para la CPU (rspDpcWrite). Se saca bajo el mutex y se aplica
+// fuera: rspDpcWrite puede esperar a la CPU, y la CPU puede estar apuntando.
+auto Memory::dpcMbRsp(u64 now) -> void {
+  if(!dpcMbN.load(std::memory_order_acquire)) return;
+  DpcMbEnt take[kDpcMbN]; u32 n = 0;
+  {
+    std::lock_guard<std::mutex> lk(dpcMbMx);
+    while(dpcMbCount && dpcMb[dpcMbHead].eff <= now) {
+      take[n++] = dpcMb[dpcMbHead]; dpcMbHead = (dpcMbHead + 1) % kDpcMbN; --dpcMbCount;
+    }
+  }
+  for(u32 i = 0; i < n; i++) {
+    rspDpcWrite(now, (take[i].phys >> 2) & 7u, take[i].v);
+    dpcMbN.fetch_sub(1, std::memory_order_release);
+  }
+}
+
+// La CPU en su retiro: si la tarea ya termino (HALT visible) el RSP no va a volver a mirar, y
+// lo que haya vencido se aplica en su borde de grano.
+auto Memory::dpcMbCpu(u64 now) -> void {
+  if(!(rcp.sp_status.load(std::memory_order_acquire) & 1u)) return;
+  for(;;) {
+    DpcMbEnt e;
+    {
+      std::lock_guard<std::mutex> lk(dpcMbMx);
+      if(!dpcMbCount || dpcMb[dpcMbHead].eff > now) break;
+      e = dpcMb[dpcMbHead]; dpcMbHead = (dpcMbHead + 1) % kDpcMbN; --dpcMbCount;
+    }
+    tlDpLogApply = true; tlDpLogAt = e.eff;
+    mmioWrite32(e.phys, e.v);
+    tlDpLogApply = false;
+    dpcMbN.fetch_sub(1, std::memory_order_release);
+  }
+  if(!dpcMbN.load(std::memory_order_acquire)) {
+    rcpPend.fetch_and(~32u, std::memory_order_release);
+    if(dpcMbN.load(std::memory_order_acquire)) rcpPend.fetch_or(32u, std::memory_order_release);
+  }
+}
+
 auto Memory::dpLogApply(u64 upTo) -> void {
   {
     const u32 h = dpLogHead.load(std::memory_order_acquire);
@@ -3487,7 +3622,15 @@ auto Memory::dpLogApply(u64 upTo) -> void {
     const DpLogEnt e = dpLog[h & kDpLogM];
     if(e.at > upTo) break;
     tlDpLogApply = true; tlDpLogAt = e.at;
-    if(e.reg & 16u) {
+    if(e.reg & 32u) {
+      const u32 run = cpuDpcView.st & kDpcRunSt;
+      cpuDpcView = dpLogView[h & kDpLogM];
+      cpuDpcView.st |= run;
+      dpcViewPend.fetch_sub(1, std::memory_order_release);
+    } else if(e.reg & 64u) {
+      dpEndArmAt(dpLogArm[h & kDpLogM]);
+      if(jitGuardPtr) *jitGuardPtr = 0;
+    } else if(e.reg & 16u) {
       spDmaLogApply(dpLogDma[h & kDpLogM]);
     } else if(e.reg & 8u) {
       rcpRegWrite32(BASE_SP + ((e.reg & 7u) << 2), e.v);
@@ -3641,7 +3784,8 @@ auto Memory::rcpSchedReset() -> void {
   // Dejarla en el ancla vieja daria un spBarrierAt() de otra partida. Los fines de tarea
   // armados (bits 0-1 y sus plazos) SI son de esta partida: vienen en el estado.
   rcpPend.store(rcpPend.load(std::memory_order_relaxed) & 3u, std::memory_order_relaxed);
-  { std::lock_guard<std::mutex> lk(dpLogMx); dpLogHead.store(0); dpLogTail.store(0); spLogPend.store(0); spLogCrit.store(0); }
+  { std::lock_guard<std::mutex> lk(dpLogMx); dpLogHead.store(0); dpLogTail.store(0); spLogPend.store(0); spLogCrit.store(0);
+    dpcViewPend.store(0); cpuDpcView = dpcViewLive(); }
   spMarkKick();
   rspRdvAt.store(0, std::memory_order_relaxed);
   dpRdv.store(0, std::memory_order_relaxed);
@@ -4162,6 +4306,7 @@ auto Memory::rcpFlushPending(u32 bits) -> void {
   if(pend & 2u) {
     rcpPend.fetch_and(~2u, std::memory_order_relaxed);
     rcp.dpc_status &= ~(0x8u | 0x20u);   // pipe drained: clear START_GCLK | PIPE_BUSY
+    if(!tlIsRspThread) cpuDpcView.st &= ~kDpcRunSt;
     rcp.dpSyncs++;                       // misma contabilidad que los dos caminos del RDP
     dpRets.fetch_add(1, std::memory_order_relaxed);
     raiseIntr(MI_DP);
@@ -4182,6 +4327,7 @@ auto Memory::rcpRetire(u64 opStart) -> void {
   // retiro de t+1. Vencerlo aqui adelantaba MI_DP una op en Threaded (junkrunner64).
   tlRetireArmed = false; tlInRetire = true;
   if(pend & 16u) dpLogApply(now);
+  if(pend & 32u) dpcMbCpu(now);
   if(pend & 4u) dpBarrierWait(now);
   if(pend & 8u) spBarrierWait(now);
   pend = rcpPend.load(std::memory_order_acquire);

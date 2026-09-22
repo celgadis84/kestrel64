@@ -113,3 +113,32 @@ son artefactos de que el estado DPC y SP_STATUS tenga como unico dueno al hilo d
 Arreglo comun de 2 a 5: el RSP guarda sus propias escrituras pendientes (DPC y SP_STATUS)
 y, al leer, las superpone al valor aplicado. La CPU sigue aplicando el diario a su hora, y
 el RSP no espera nunca por lo suyo.
+
+## Implementado: punto 1 + buzon CPU -> DPC (2026-09-22)
+
+- **DPC es del RSP con tarea.** `Rsp::mtc0` DPC -> `Memory::rspDpcWrite`: escribe en el acto con
+  sello `now` y lanza el tramo el mismo. Solo espera a que la CPU llegue al borde de grano
+  `floor_Q(now)` (Q = `spSigQuant()`, el mismo grano que las senales). Las lecturas de DPC del
+  RSP igual: sin `dpLogWait`.
+- **Vista fechada para la CPU.** Cada escritura del RSP deja en el diario (reg = 32) la vista
+  START/END/bits fijos de STATUS (`kDpcViewSt`) y si lanzo tramo (`kDpcRunSt` = START_GCLK |
+  PIPE_BUSY, que luego baja MI_DP en el hilo de CPU). La CPU lee `cpuDpcView` mientras
+  `dpcViewPend > 0`.
+- **MI_DP armado por el RSP va por el diario (reg = 64).** Armarlo desde el hilo del RSP lo
+  entregaba una op antes que Lockstep (alli el plazo armado en el RSP en linea vence en el
+  retiro SIGUIENTE, `tlRetireArmed`) y podia pisar un plazo anterior aun sin entregar.
+  Encontrado con `KESTREL_IRQTRACE`: DP #1 en 4549598 threaded frente a 4549599 lockstep.
+- **Buzon CPU -> DPC** (`Memory::dpcMbPost/dpcMbRsp/dpcMbCpu`). Perfect Dark escribe DPC_STATUS
+  desde la CPU con tarea viva (SET_FREEZE / CLR_FREEZE por campo). Con el RSP por delante esa
+  escritura caia en su pasado y la vista del RSP podia llevar un FREEZE ya quitado: PD se
+  quedaba congelado en threaded (fps 0). Ahora es el canal CPU -> RSP con latencia del punto 2:
+  - con HALT a 0 tal como lo ve la CPU (estado de su hilo en los dos modos), o con el buzon no
+    vacio, la escritura se apunta con `eff = ceil_Q(t + 1)`, igual que las senales;
+  - el RSP la aplica en su siguiente acceso a DPC (lectura o escritura) con `eff <= now`, como
+    escritura suya en `now`. La cita a `floor_Q(now)` garantiza que ya esta apuntada;
+  - si la tarea termino (HALT visible), la aplica la CPU en su retiro al llegar a `eff`
+    (bit 5 de `rcpPend`).
+  - Mismas reglas en Lockstep y Threaded. SM64, DK64 y junkrunner64 no escriben DPC con tarea
+    viva (medido), asi que para ellos no cambia nada.
+- Resultado: junkrunner64 `dc07d7ac23fef2e1` threaded x3 == lockstep. PD en juego (ranura 5)
+  vuelve a correr: 25,9 fps con `DPLOGLEAD` de fabrica.

@@ -422,6 +422,7 @@ struct Memory {
                                  // bit2 = trabajo de RDP en vuelo (ver dpBarrierAt),
                                  // bit3 = barrera del RSP activa (ver spBarrierAt)
                                  // bit4 = escrituras DPC del RSP por aplicar (ver dpLogPush)
+                                 // bit5 = escrituras DPC de la CPU en el buzon (ver dpcMbPost)
   // DIARIO DE ESCRITURAS DPC DEL RSP (solo Threaded). Una escritura del microcodigo a DPC
   // es estado compartido con la CPU, que puede ir por detras en tiempo de invitado y aun
   // tener escrituras DPC suyas anteriores. Antes el RSP se paraba en cada una hasta que la
@@ -463,6 +464,7 @@ struct Memory {
   std::atomic<u64> dmaLogPushes{0};
   auto spDmaLogPush(u64 at, u32 len) -> bool;    // true = apuntado (ver memory.cpp)
   auto spDmaLogApply(const DpLogDma& d) -> void;
+  auto spDmaOverlay(const DpLogDma& d, u8* base, u32 a, u32 b) const -> void;
   // Escrituras del RSP a SP_STATUS en el mismo diario (reg = 8|4). El microcodigo cambia
   // SIG0..SIG7 con la CPU por detras en tiempo de invitado; aplicadas al registro en el acto,
   // la vuelta en que el bucle de sondeo de la CPU las veia la decidia el anfitrion (junkrunner64:
@@ -470,6 +472,42 @@ struct Memory {
   // spLogPend = entradas SP aun sin aplicar (el RSP no puede leer SP_STATUS con ellas dentro);
   // spLogCrit = las que tocan INTR_ON_BREAK, que el RSP consulta en su BREAK.
   std::atomic<u32> spLogPend{0}, spLogCrit{0};
+  // DPC ES DEL RSP MIENTRAS TIENE TAREA (ver docs/ARCH-SYNC.md). El microcodigo escribe DPC en
+  // el acto, en su instante, y lanza el tramo del RDP el mismo; ya no espera a que la CPU
+  // aplique nada suyo. La CPU va por detras en tiempo de invitado, asi que lo que ELLA lee de
+  // START/END y de los bits fijos de STATUS sale de una vista fechada: cada escritura del RSP
+  // apunta en el diario (reg = 32) el estado que deja, y la CPU lo copia a `cpuDpcView` al
+  // llegar a ese instante. Mientras quede alguna sin aplicar (`dpcViewPend`) la CPU lee la
+  // vista; si no, el registro vivo. Los bits de ocupado ya iban fechados (dpcStatusFor).
+  struct DpcView { u32 start, end, st; };
+  static constexpr u32 kDpcViewSt = 0x407u;      // XBUS, FREEZE, FLUSH, START_PENDING
+  // START_GCLK|PIPE_BUSY: los pone el lanzamiento (hilo del RSP, en su instante) y los quita
+  // MI_DP (hilo de CPU, en el suyo). La vista los lleva aparte: la entrada marca si lanzo.
+  static constexpr u32 kDpcRunSt = 0x28u;
+  DpcView dpLogView[kDpLogN]{};
+  u64 dpLogArm[kDpLogN]{};                       // reg = 64: plazo de MI_DP armado por el RSP
+  DpcView cpuDpcView{};                          // solo hilo de CPU
+  std::atomic<u32> dpcViewPend{0};
+  auto rspDpcWrite(u64 now, u32 reg, u32 v) -> void;   // SOLO hilo del RSP
+  // Escrituras de la CPU a DPC con tarea en marcha (Perfect Dark congela/descongela el RDP asi).
+  // El RSP va por delante en tiempo de invitado, asi que aplicarlas en el acto las metia en su
+  // pasado. Canal CPU -> RSP con latencia de grano, igual que las senales de SP_STATUS: la
+  // escritura en `t` es visible desde el borde de grano siguiente. La aplica el RSP en su
+  // siguiente acceso a DPC con ese borde ya pasado, o la CPU a su hora si la tarea termino.
+  // Mismas reglas en Lockstep y Threaded. Ver docs/ARCH-SYNC.md.
+  struct DpcMbEnt { u64 eff; u32 phys, v; };
+  static constexpr u32 kDpcMbN = 64;
+  std::mutex dpcMbMx;
+  DpcMbEnt dpcMb[kDpcMbN]{};
+  u32 dpcMbHead = 0, dpcMbCount = 0;              // bajo dpcMbMx
+  std::atomic<u32> dpcMbN{0};
+  std::atomic<u64> dpcMbPosts{0};
+  auto dpcMbPost(u32 phys, u32 v) -> bool;        // SOLO hilo de CPU
+  auto dpcMbRsp(u64 now) -> void;                 // SOLO hilo del RSP (o RSP en linea)
+  auto dpcMbCpu(u64 now) -> void;                 // SOLO hilo de CPU
+  auto dpcViewLive() const -> DpcView {
+    return {rcp.dpc_start, rcp.dpc_end, rcp.dpc_status.load(std::memory_order_acquire) & (kDpcViewSt | kDpcRunSt)};
+  }
   static auto dpLogOn() -> bool;
   auto dpLogPending() const -> bool {
     return dpLogHead.load(std::memory_order_acquire) != dpLogTail.load(std::memory_order_acquire);

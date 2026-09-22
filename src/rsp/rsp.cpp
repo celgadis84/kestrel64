@@ -489,14 +489,13 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // ese instante tiene que ser el de ESTA instruccion, no el de la ultima frontera de
       // tanda: cuantas vueltas da el bucle de espera es justo lo que cambiaba entre corridas.
       const u64 now = mem->rspGuestNowAt(exactCycles());
-      // El RSP no puede leer el FIFO en un instante al que la CPU aun no ha llegado: es
-      // la otra escritora del FIFO. Publicar primero el reloj exacto es lo que permite que
-      // la barrera del SP la deje llegar hasta aqui. Ver Memory::dpReadSync.
-      // Y tampoco con escrituras suyas propias aun en el diario (ver Memory::dpLogPush).
-      if(mem->dpReadAhead(now) || mem->dpLogPending()) {
-        publishExact();
-        if(Memory::dpRdvOn()) mem->dpReadSync(now); else mem->dpLogWait(now, true);
-      }
+      // DPC es del RSP mientras tiene tarea (ver Memory::rspDpcWrite): lo suyo lo ve al
+      // instante. De la CPU, la otra escritora posible, solo ve lo escrito hasta el ultimo
+      // borde de grano, igual que las senales de SP_STATUS: espera solo si la CPU va mas de
+      // un grano por detras. Ver docs/ARCH-SYNC.md.
+      const u64 wq = now & ~(Memory::spSigQuant() - 1);
+      if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq); }
+      mem->dpcMbRsp(now);   // escrituras de la CPU ya visibles (ver Memory::dpcMbPost)
       // Sin esperar al worker del RDP: CURRENT y STATUS salen del horario de invitado que fijo
       // dpScheduleSpan al lanzar el tramo, no de por donde vaya el anfitrion. Lo unico del RDP
       // que el RSP podria ver a medias son pixeles, y a la RDRAM solo llega por DMA: esa
@@ -527,7 +526,13 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     setR(rt, mem->spStatusForRsp(now));
     return;
   }
-  if((rd & 8) && mem->dpLogPending()) { publishExact(); mem->dpLogWait(0, false); }
+  if(rd & 8) {
+    // Resto de DPC (START/END/contadores): mismo borde de grano para ver lo de la CPU.
+    const u64 now = mem->rspGuestNowAt(exactCycles());
+    const u64 wq = now & ~(Memory::spSigQuant() - 1);
+    if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq); }
+    mem->dpcMbRsp(now);
+  }
   u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
                                       : PHYS_SP  + ((rd & 7) << 2));
   setR(rt, data);
@@ -553,23 +558,21 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     // Con el diario (Memory::dpLogPush) no hace falta ni la cita: se apunta con su instante y
     // la CPU la aplica al llegar ahi. Los cambios de XBUS van por la cita: con el FIFO en DMEM
     // los comandos los reescribe el propio microcodigo y la copia tiene que ser la de AHORA.
+    // Ahora DPC es del RSP mientras tiene tarea: escribe en el acto y lanza el tramo el mismo;
+    // la CPU lo ve a su hora por la vista fechada (Memory::rspDpcWrite). Con la CPU solo espera
+    // lo mismo que al leer: hasta el ultimo borde de grano.
     const u64 now = mem->rspGuestNowAt(exactCycles());
-    const u32 reg = rd & 7;
-    if(mem->rcpMode == Memory::RcpMode::Threaded && Memory::dpLogOn() && !Memory::dpRdvOn()
-       && (mem->rcpPend.load(std::memory_order_acquire) & 8u)
-       && !(mem->rcp.dpc_status.load(std::memory_order_acquire) & 1u) && !(reg == 3 && (v & 3u))) {
-      mem->dpLogPush(now, reg, v);
-      return;
-    }
-    if(mem->dpReadAhead(now) || mem->dpLogPending()) { mem->dpLogWait(now, true); }
-    mem->rcpRegWrite32(PHYS_DPC + (reg << 2), v);
+    const u64 wq = now & ~(Memory::spSigQuant() - 1);
+    if(mem->dpReadAhead(wq)) mem->spReadSync(wq);
+    mem->dpcMbRsp(now);
+    mem->rspDpcWrite(now, rd & 7, v);
     return;
   }
   // SP_STATUS sin HALT: al diario, como DPC (ver Memory::spLogPend). SET_HALT y CLEAR_HALT
   // siguen en el acto: paran o lanzan el nucleo, y eso lo decide este hilo ahora.
   // KESTREL_SPLOG=0 las vuelve a aplicar en el acto (para bisecar).
   static const bool spLog = []{ const char* e = std::getenv("KESTREL_SPLOG"); return !e || std::strcmp(e, "0"); }();
-  if((rd & 7) == 4 && !(v & 3u) && spLog && mem->rcpMode == Memory::RcpMode::Threaded && Memory::dpLogOn()
+  if((rd & 7) == 4 && !(v & 3u) && spLog && mem->rcpMode == Memory::RcpMode::Threaded
      && !Memory::dpRdvOn() && (mem->rcpPend.load(std::memory_order_acquire) & 8u)) {
     mem->spLogPend.fetch_add(1, std::memory_order_release);
     if(v & 0x180u) mem->spLogCrit.fetch_add(1, std::memory_order_release);
@@ -583,7 +586,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   // libdragon (rspq) lanza uno por tramo de comandos del RDP: 287k citas menos en junkrunner64.
   // KESTREL_DMALOG=0 lo vuelve a la cita (para bisecar).
   static const bool dmaLog = []{ const char* e = std::getenv("KESTREL_DMALOG"); return !e || std::strcmp(e, "0"); }();
-  if((rd & 7) == 3 && dmaLog && (dmaRdv & 2u) && mem->rcpMode == Memory::RcpMode::Threaded && Memory::dpLogOn()
+  if((rd & 7) == 3 && dmaLog && (dmaRdv & 2u) && mem->rcpMode == Memory::RcpMode::Threaded
      && !Memory::dpRdvOn() && (mem->rcpPend.load(std::memory_order_acquire) & 8u)
      && mem->spDmaLogPush(mem->rspGuestNowAt(exactCycles()), v))
     return;
