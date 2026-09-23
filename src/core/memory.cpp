@@ -3718,6 +3718,10 @@ auto Memory::dmaSettleSlow(u32 lo, u64 hi) -> void {
   if(hi <= lo) hi = (u64)lo + 1;
   u32 p = lo >> kDmaPgShift;
   const u32 e = (u32)((hi - 1) >> kDmaPgShift);
+  // Un DMA del cartucho puede abarcar cientos de paginas; recorrerlas una a una cuesta mas
+  // que vaciar el diario, y vaciar de mas es legal (dpLogApply solo aplica lo fechado hasta
+  // ahora, y sale enseguida si no hay nada). Se mira pagina a pagina solo en tramos cortos.
+  if(e >= p + 8) { bumpOwned(dmaSettleHits); dpLogApply(cartNow()); return; }
   for(; p <= e && p < kDmaPgN; p++)
     if(dmaPg[p].load(std::memory_order_acquire)) {
       bumpOwned(dmaSettleHits);
