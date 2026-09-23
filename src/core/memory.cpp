@@ -4351,10 +4351,15 @@ auto Memory::spBarrierOn() -> bool {
 // Politica igual que dpLogLeadOn(): sin variable (o "auto") manda el modo de velocidad --
 // puesto en "libre", el de jugar, y quitado en "Fiel a consola" (KESTREL_SPEEDMODE=hw), donde
 // threaded vuelve a coincidir con lockstep. Las puertas lo fijan a 0.
+// Barrido en Perfect Dark (PAL, F993->F1082, threaded+JIT+Parallel-RDP, minimo de tres):
+// 1024 -> 2887 ms, 4096 -> 2728, 8192 -> 2689, 16384 -> 2676. Cada valor da su propio
+// statehash, reproducible, con [frames] identico y 0 vencidos. De fabrica 8192: es donde se
+// acaba la bajada, y en este juego el statehash que sale es ADEMAS el de lockstep
+// (8654851006521c62) -- con 1024 y con 16384 no. SM64 da el mismo md5 con 1024 y con 8192.
 auto Memory::spLeadOps() -> u64 {
   static const u64 v = []() -> u64 {
     const char* e = std::getenv("KESTREL_SPLEAD");
-    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 1024ull;
+    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 8192ull;
     return (u64)std::strtoull(e, nullptr, 0);
   }();
   return v;
