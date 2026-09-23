@@ -666,6 +666,8 @@ struct Memory {
   // divergia en el campo 192, justo donde arranca el 3D). Ahora cada escritura de DPC_END
   // anota su tramo pase lo que pase, y unir o no unir es solo reparto de trabajo interno.
   static constexpr u32 kDpRingN = 256;
+  static auto tlDpVisCur() -> u64&;
+  static auto tlDpCompCur() -> u64&;
   static constexpr u32 kDpRingM = kDpRingN - 1;
   // Tramos lanzados FUERA DE ORDEN DE INVITADO: su instante de lanzamiento cae antes del
   // arranque del tramo anterior. Solo puede pasar cuando la CPU y el RSP lanzan a la vez y
@@ -724,6 +726,17 @@ struct Memory {
     explicit RcpWaitMark(std::atomic<u32>& c) : n(c) { n.fetch_add(1, std::memory_order_release); }
     ~RcpWaitMark() { n.fetch_sub(1, std::memory_order_release); }
   };
+  // Igual, pero PEREZOSA: solo cuenta si de verdad se llega a esperar. El contador vive en una
+  // linea que leen los workers del RSP/RDP en su giro de cita (rdvWaiveDue), asi que cada
+  // fetch_add/fetch_sub del camino rapido es un rebote de linea entre nucleos. rspPace y
+  // rdpPace se llaman una vez por entrada al driver del JIT (millones por corrida) y casi
+  // siempre salen por el camino corto sin esperar nada: marcarlas ahi es pagar el rebote por
+  // nada. Se arma justo antes de bloquear/girar, que es lo unico que mira el salvavidas.
+  struct LazyWaitMark {
+    std::atomic<u32>* n = nullptr;
+    auto arm(std::atomic<u32>& c) -> void { if(!n) { n = &c; c.fetch_add(1, std::memory_order_release); } }
+    ~LazyWaitMark() { if(n) n->fetch_sub(1, std::memory_order_release); }
+  };
   auto rdvWaiveDue(bool& timing, std::chrono::steady_clock::time_point& t0,
                    std::chrono::steady_clock::time_point& t1) -> bool;
   std::atomic<bool> dpLogFlush{false};   // System::quiesceRcp: aplicar el diario sin esperar
@@ -748,21 +761,27 @@ struct Memory {
   // una escritura que en la consola todavia no ha ocurrido y no puede verse en DPC_STATUS ni
   // en DPC_CURRENT. Contando dpSubSeq a pelo, el RSP de Threaded veia el FIFO ocupado unas
   // instrucciones antes que en Lockstep y la tarea de DK64 acababa 6 ciclos antes.
+  // Las dos cuentas son BARRIDOS HACIA DELANTE desde un cursor por hilo, no hacia atras desde
+  // dpSubSeq. El anillo tiene 256 ranuras y el microcodigo grafico de F3DEX2 sondea DPC en
+  // bucle: el barrido hacia atras costaba hasta 256 lecturas de un array que escribe el OTRO
+  // hilo, y salia el 15% del hilo del RSP (perfil de anfitrion, ~300 ns por lectura de DPC).
+  // La respuesta es monotona no decreciente en `now` y en dpSubSeq, y `now` no retrocede en
+  // ningun hilo, asi que la respuesta anterior es siempre una cota INFERIOR valida: se
+  // reanuda desde ahi. El cursor se recorta a dpSubSeq - kDpRingN porque lo de mas atras ya
+  // esta sobrescrito. Mismo valor exacto que el barrido hacia atras, solo que sin recorrerlo.
+  // El cursor es thread_local: lo usan el hilo de CPU y el del RSP con relojes distintos.
+  static auto dpScanFwd(const u64* stamp, u64 sub, u64 now, u64& cur) -> u64 {
+    if(sub < kDpRingN)              { if(cur > sub) cur = 0; }
+    else if(cur < sub - kDpRingN)   cur = sub - kDpRingN;
+    if(cur > sub) cur = sub;
+    while(cur < sub && stamp[cur & kDpRingM] <= now) ++cur;
+    return cur;
+  }
   auto dpVisibleAt(u64 now) const -> u64 {
-    u64 c = dpSubSeq.load(std::memory_order_acquire);
-    for(u32 i = 0; i < kDpRingN && c > 0; ++i) {
-      if(dpJobKickG[(c - 1) & kDpRingM] <= now) break;
-      --c;
-    }
-    return c;
+    return dpScanFwd(dpJobKickG, dpSubSeq.load(std::memory_order_acquire), now, tlDpVisCur());
   }
   auto dpCompletedAt(u64 now) const -> u64 {
-    u64 c = dpSubSeq.load(std::memory_order_acquire);
-    for(u32 i = 0; i < kDpRingN && c > 0; ++i) {
-      if(dpJobEndG[(c - 1) & kDpRingM] <= now) break;
-      --c;
-    }
-    return c;
+    return dpScanFwd(dpJobEndG, dpSubSeq.load(std::memory_order_acquire), now, tlDpCompCur());
   }
   // Hasta que instante de invitado tiene trabajo el motor. Es un valor FIJO desde que se
   // lanza el tramo: ya no hay nada que "esperar a que se publique", porque el coste se cobra
@@ -1005,6 +1024,14 @@ struct Memory {
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
   auto spBarThreshold(u64 now) const -> u64;   // barrera en ciclos crudos del RSP
   u64  spBarWaivedAt = ~0ull;
+  // Hasta que instante de invitado se sabe que la barrera NO muerde. La barrera solo puede
+  // avanzar mientras dura una tarea (el reloj del RSP es monotono), asi que una vez leida
+  // basta con mirar el reloj propio hasta llegar a ella: no hace falta volver a preguntar por
+  // el reloj del otro hilo en cada entrada al driver del JIT (millones por corrida). Se anula
+  // en el lanzamiento (rspSubmitKick), que es lo unico que la puede mover hacia ATRAS, y el
+  // aparcamiento queda fuera del camino corto porque su tope lo fija el hilo del RSP.
+  // Solo hilo de CPU. Quedarse corto cuesta una comprobacion de mas, nunca correccion.
+  u64  spBarSafe = 0;
   std::atomic<u32> spArms{0}, dpArms{0}, spLate{0}, dpLate{0};  // diagnostico del plazo
   // Por que se paso la CPU cuando un plazo nace vencido. Son TRES escotillas distintas y
   // cada una se arregla de otra forma, asi que el contador agregado no basta: el adelanto

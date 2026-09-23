@@ -3103,7 +3103,7 @@ auto Memory::rcpPace(u64 cpuOps) -> u32 {
   return a < b ? a : b;
 }
 
-auto Memory::rspPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
+auto Memory::rspPace(u64 cpuOps) -> u32 { LazyWaitMark rwm_;
   if(!rspBusy.load(std::memory_order_acquire)) { pacePrimed = false; return 0xFFFF'FFFFu; }
   const u64 slack = paceSlack();
   u64 rspNow = rsp.cyclesRun.load(std::memory_order_relaxed);
@@ -3138,6 +3138,7 @@ auto Memory::rspPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
        !rspParkWake.load(std::memory_order_acquire))
       return paceGrant(ahead, ahead + slack);
     paceHolds.fetch_add(1, std::memory_order_relaxed);
+    rwm_.arm(cpuRcpWait);
     auto t0 = std::chrono::steady_clock::now();
     {
       // El worker publica ciclos y notifica cada pocos miles de instrucciones (ver
@@ -3226,7 +3227,7 @@ auto Memory::paceGrant(u64 ahead, u64 allow) -> u32 {
 // Salvavidas identico al del RSP: si el contador de GCLK deja de avanzar mas de kPaceMaxWait
 // sin que el trabajo termine, se suelta el freno de este episodio. El regulador es una
 // cuestion de fidelidad, nunca puede ser una via de bloqueo.
-auto Memory::rdpPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
+auto Memory::rdpPace(u64 cpuOps) -> u32 { LazyWaitMark rwm_;
   if(!rdpBusy.load(std::memory_order_acquire)) { dpacePrimed = false; return 0xFFFF'FFFFu; }
   const u64 slack = paceSlack();
   u64 gclkNow = rcp.rdpGclk.load(std::memory_order_acquire);
@@ -3242,6 +3243,7 @@ auto Memory::rdpPace(u64 cpuOps) -> u32 { RcpWaitMark rwm_{cpuRcpWait};
     u64 allow = paceDivDen.div((gclkNow - dpaceGclk0) * paceCpuNum) + slack;
     if(ahead <= allow) return paceGrant(ahead, allow);
     dpaceHolds.fetch_add(1, std::memory_order_relaxed);
+    rwm_.arm(cpuRcpWait);
     auto t0 = std::chrono::steady_clock::now();
     {
       // El worker solo avisa por rdpCv al TERMINAR el trabajo, no por cada pixel, asi que
@@ -4151,6 +4153,11 @@ auto Memory::spReadSync(u64 now, u32 site) -> void {
     ~SiteK() { if(c) c->fetch_add(k, std::memory_order_relaxed); }
   } sk_{site < kRdvSites ? &spRdvSiteK[site] : nullptr};
   RcpWaitMark sw_{rspSyncWait};   // antes de mirar rspWaiters: el regulador suelta a la CPU
+  // PROBADO Y DESCARTADO: darle aqui el adelanto de la cita (rspRdvAt = now, o sea kRdvLead)
+  // para que la CPU pueda cubrir de una vez la tanda de publicacion del RSP. No ahorra pared
+  // (2923/3024/3158 ms contra 2925/2965/2935) porque las vueltas del giro apenas bajan
+  // (102 M contra 111 M), y ROMPE el determinismo: el plazo de fin de tarea no conoce ese
+  // adelanto, salen 9-12 plazos vencidos y statehash distinto entre corridas.
   if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
   bool timing = false;
   const u32 tight = rdvTightTurns(), pm = rdvPollMask(), ym = rdvYieldMask();
@@ -4172,6 +4179,9 @@ auto Memory::spReadSync(u64 now, u32 site) -> void {
     }
   }
 }
+
+auto Memory::tlDpVisCur() -> u64& { static thread_local u64 v = 0; return v; }
+auto Memory::tlDpCompCur() -> u64& { static thread_local u64 v = 0; return v; }
 
 auto Memory::dpcCurrentFor(u64 now, u32 who) -> u32 {
   bumpOwned(dpcRdCur[who]);
@@ -4355,13 +4365,15 @@ auto Memory::spBarThreshold(u64 now) const -> u64 {
   return t > spKickEdge ? t - spKickEdge : 0;
 }
 
-auto Memory::spBarrierWait(u64 now) -> void { RcpWaitMark rwm_{cpuRcpWait};
+auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
   u64 bar = spBarrierEff();
+  spBarSafe = bar;   // ver la nota de spBarSafe en memory.hpp
   if(now < bar || bar == spBarWaivedAt) return;
   // Los dos umbrales del giro: el de siempre y el de la cita, que deja al invitado adelantarse
   // kRdvLead. Cual manda lo decide rspRdvAt, que el RSP puede mover en mitad del giro; por eso
   // se precalculan los dos y dentro solo se elige. spKickEdge/spKickCycles no se mueven: los
   // escribe rspKick, que corre en ESTE hilo.
+  rwm_.arm(cpuRcpWait);
   const u64 ldPlain  = spLeadOps();
   const u64 ldRdv    = kRdvLead > ldPlain ? kRdvLead : ldPlain;
   const u64 thrPlain = now >= ldPlain ? spBarThreshold(now - ldPlain) : 0;
@@ -4505,8 +4517,12 @@ auto Memory::rcpFlushPending(u32 bits) -> void {
 auto Memory::rcpRetire(u64 opStart) -> void {
   u32 pend = rcpPend.load(std::memory_order_acquire);
   if(!pend) return;
-  retireOpStart = opStart;
   u64 now = cartNow();
+  // Camino corto: con SOLO la barrera del SP armada y el reloj propio todavia por detras de
+  // ella no hay nada que hacer, y preguntarlo cuesta leer el reloj del hilo del RSP. Ver la
+  // nota de spBarSafe. El aparcamiento se queda fuera: su tope lo mueve el otro hilo.
+  if(pend == 8u && now < spBarSafe && !rspPark.load(std::memory_order_relaxed)) return;
+  retireOpStart = opStart;
   // Las barreras PRIMERO. El plazo de MI_DP se arma ahora al lanzar el tramo, o sea que puede
   // vencer antes de que el anfitrion haya pintado un pixel de el; publicar la interrupcion ahi
   // le ensenaria al invitado un fotograma que todavia no existe en RDRAM. La barrera es justo
@@ -4553,6 +4569,9 @@ auto Memory::rspSubmitKick() -> void {
     rspBusy.store(true, std::memory_order_release);
     if(spBarrierOn() && rcpMode == RcpMode::Threaded && rcpDeadlineOn())
       rcpPend.fetch_or(8u, std::memory_order_release);
+    // La barrera de la tarea NUEVA puede nacer POR DETRAS de la vieja (la vieja llevaba el
+    // adelanto sumado), asi que el atajo de spBarSafe no vale ya.
+    spBarSafe = 0;
     // La barrera nueva es un plazo que el permiso de la cadena del JIT en curso no conocia (el
     // lanzamiento es un store en mitad de ella). Antes lo cubria la guarda `rsp.brake` del
     // prologo; en Threaded con plazos esa guarda ya no se emite (ver jit.cpp), asi que se
