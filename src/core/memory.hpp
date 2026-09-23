@@ -52,8 +52,17 @@ struct Rcp {
   // leaves the CPU polling forever, a lost clear relaunches nothing. Atomic RMW is the
   // only faithful model of a single register seen by both sides.
   std::atomic<u32> sp_status{1};   // start halted (bit0 = HALT)
-  u32 sp_semaphore = 0, sp_pc = 0;
-  bool sp_intr_on_break = false;  // SP_STATUS interrupt-on-break latch
+  // SP_SEMAPHORE es el UNICO registro del RCP cuya LECTURA tiene efecto: devuelve el valor
+  // y lo deja a 1 en el mismo acceso (escribirlo lo pone a 0). Es el cerrojo con el que el
+  // microcodigo y la CPU se reparten DMEM, y su sentido entero esta en que ese leer-y-poner
+  // sea INDIVISIBLE: como u32 plano, dos lectores a la vez podian llevarse los dos el 0 y
+  // creerse los dos duenos. exchange(1) es exactamente lo que hace el chip.
+  std::atomic<u32> sp_semaphore{0};
+  u32 sp_pc = 0;
+  // Latch de INTR_ON_BREAK (SP_STATUS bit 6): lo escribe la CPU y lo lee el worker del RSP al
+  // llegar al BREAK para decidir si avisa. Como bool plano era una carrera de datos y el
+  // compilador podia guardarselo en registro dentro del bucle del worker.
+  std::atomic<bool> sp_intr_on_break{false};
   // DPC (RDP command buffer). dpc_status is read by the CPU while the RDP worker
   // thread clears GCLK/PIPE_BUSY on SYNC_FULL → atomic.
   u32 dpc_start = 0, dpc_end = 0;
@@ -583,6 +592,7 @@ struct Memory {
   auto spEndArm(u64 cyclesUsed) -> void;             // desde el worker del RSP
   auto dpEndArm(u64 kickOps, u64 gclkUsed) -> void;
   auto dpEndArmAt(u64 at) -> void;   // plazo de fin de tarea del RDP en instante absoluto
+  static auto pinCpuThread() -> void;   // fija el hilo de CPU a un nucleo fisico propio
   auto rcpRetire(u64 opStart = ~0ull) -> void;   // publica lo vencido (SOLO hilo de CPU)
   // Instante de invitado en que empezo la instruccion que acaba de retirar el hilo de CPU (lo
   // pasa System al retiro tras un paso del interprete; ~0 tras un bloque). Ver dpEndArmAt.
@@ -843,6 +853,16 @@ struct Memory {
   // estropear es que el plazo de fin de tarea del SP nazca vencido, y eso se ve en `spArm`
   // (segunda cifra) de [det]: tiene que seguir siendo 0.
   static constexpr u64 kRdvLead = 49152;
+  // ADELANTO PERMANENTE. Mismo argumento que el de la cita, pero sin esperar a que el RSP
+  // pida una: la barrera del SP clava a la CPU en el instante EXACTO al que el RSP ha
+  // trabajado, y junto con la cita de SP_RD_LEN (que exige `cartNow() >= now`) las dos
+  // condiciones fuerzan reloj de CPU == reloj de RSP, o sea alternancia estricta y CERO
+  // solape entre los dos hilos. Lo que la correccion pide es que la CPU no vaya DETRAS
+  // (`instante leido <= cartNow()`), y adelantarse lo cumple con MAS holgura. Lo unico que
+  // puede romper es que el plazo de fin de tarea del SP nazca vencido: se vigila con
+  // [spvenc] y con la segunda cifra de spArm en [det], que tienen que seguir en 0.
+  // KESTREL_SPLEAD=<ops de invitado>, 0 = comportamiento viejo.
+  static auto spLeadOps() -> u64;
   // Grano de la cita. Lo OBLIGATORIO es llegar a `now`; pedir un poco mas es gratis (la
   // condicion de correccion es `instante leido <= cartNow()`, y pasarse la cumple mejor) y
   // ahorra las ~200 vueltas siguientes del bucle de espera. Tiene que caber en kRdvLead,
@@ -866,13 +886,16 @@ struct Memory {
     // justo la forma que tenia la divergencia que quedaba.
     if(u64 pk = rspPark.load(std::memory_order_acquire))
       if(!rspParkWake.load(std::memory_order_acquire)) return rspParkCap.load(std::memory_order_acquire);
-    return spBarrierAt() + (rspRdvAt.load(std::memory_order_acquire) ? kRdvLead : 0);
+    u64 lead = rspRdvAt.load(std::memory_order_acquire) ? kRdvLead : 0;
+    if(u64 al = spLeadOps(); lead < al) lead = al;
+    return spBarrierAt() + lead;
   }
   // Aparcamiento del RSP en la espera del FIFO. Ver Memory::rspParkWait.
   std::atomic<u64> rspPark{0};       // instante de invitado en que quedo aparcado (0 = no)
   std::atomic<u64> rspParkWake{0};   // lanzamiento que lo despierta (0 = aun ninguno)
   std::atomic<u64> rspParkCap{0};    // hasta donde puede correr la CPU con el RSP aparcado
   std::atomic<u32> rspParks{0}, rspParkWv{0}, rspParkMiss{0};
+  std::atomic<u32> rspParkCapN{0};   // aparcamientos que salieron por el tope del regulador
   static constexpr u64 kParkLead = 1ull << 24;   // cuanto puede adelantarse la CPU con el RSP aparcado
   std::mutex parkMx;
   std::condition_variable parkCv;
@@ -881,6 +904,7 @@ struct Memory {
   // `until` != 0: el motor NO esta drenado y el valor leido solo vale hasta ese instante
   // (proximo cierre o lanzamiento de tramo), asi que la CPU no puede pasar de ahi.
   auto rspParkWait(u64 now, u64 seq0, u64 until = 0) -> u64;
+  auto rspParkMissed(u64 seq0) -> u64;
   // Primer instante de invitado posterior a `now` en que DPC_STATUS puede cambiar por el
   // horario ya fechado: cierre del primer tramo abierto o lanzamiento del primero aun no
   // visible. 0 si no hay ninguno.
@@ -979,6 +1003,7 @@ struct Memory {
     return spCycleAt(rsp.cyclesRun.load(std::memory_order_acquire) - spKickCycles);
   }
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
+  auto spBarThreshold(u64 now) const -> u64;   // barrera en ciclos crudos del RSP
   u64  spBarWaivedAt = ~0ull;
   std::atomic<u32> spArms{0}, dpArms{0}, spLate{0}, dpLate{0};  // diagnostico del plazo
   // Por que se paso la CPU cuando un plazo nace vencido. Son TRES escotillas distintas y

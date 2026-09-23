@@ -144,7 +144,34 @@ auto createSwapchain(Vk& v, bool quiet = false) -> bool {
   ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
   ci.preTransform = caps.currentTransform;
   ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-  ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;   // vsync, always supported
+  // FIFO bloquea DENTRO del driver hasta el vblank, y el present corre bajo el candado de la
+  // cola que parallel-rdp usa para TODOS sus envios (ver vrdp::queueLock). O sea que con vsync
+  // duro el hilo del RDP se queda fuera del candado hasta 16,7 ms por campo, y detras de el se
+  // para el invitado entero. Sin ventana ese candado no se coge nunca: esa es exactamente la
+  // diferencia entre 9,9 s (sin ventana) y >120 s (con ventana) por el mismo trabajo de PD.
+  // MAILBOX presenta sin bloquear y sin rasgar; IMMEDIATE tampoco bloquea. FIFO queda de
+  // ultimo recurso (lo unico que el estandar garantiza) y como opcion con KESTREL_VSYNC=1.
+  static const bool forceFifo = []{ const char* e = std::getenv("KESTREL_VSYNC"); return e && e[0] == '1'; }();
+  ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+  if(!forceFifo) {
+    u32 nmodes = 0;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(v.phys, v.surface, &nmodes, nullptr);
+    std::vector<VkPresentModeKHR> modes(nmodes);
+    if(nmodes) vkGetPhysicalDeviceSurfacePresentModesKHR(v.phys, v.surface, &nmodes, modes.data());
+    auto has = [&](VkPresentModeKHR m) {
+      for(auto x : modes) if(x == m) return true;
+      return false;
+    };
+    if(has(VK_PRESENT_MODE_MAILBOX_KHR)) ci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    else if(has(VK_PRESENT_MODE_IMMEDIATE_KHR)) ci.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+  }
+  // MAILBOX necesita al menos tres imagenes para no degradarse a FIFO.
+  if(ci.presentMode == VK_PRESENT_MODE_MAILBOX_KHR && ci.minImageCount < 3) {
+    ci.minImageCount = caps.maxImageCount && caps.maxImageCount < 3 ? caps.maxImageCount : 3;
+  }
+  if(!quiet) std::fprintf(stderr, "[video] presentMode=%d (FIFO=%d MAILBOX=%d IMMEDIATE=%d)\n",
+                          (int)ci.presentMode, (int)VK_PRESENT_MODE_FIFO_KHR,
+                          (int)VK_PRESENT_MODE_MAILBOX_KHR, (int)VK_PRESENT_MODE_IMMEDIATE_KHR);
   ci.clipped = VK_TRUE;
   VkResult sc = vkCreateSwapchainKHR(v.dev, &ci, nullptr, &v.swap);
   if(!quiet)
@@ -1142,6 +1169,20 @@ auto Presenter::pumpFrame() -> bool {
   u32 origin = mem->rcp.vi_origin & 0x1fff'ffff;
   u32 width  = mem->rcp.vi_width ? mem->rcp.vi_width : kSrcW;
   u32 type   = mem->rcp.vi_ctrl & 3;   // 0 blank, 2 = 16bpp, 3 = 32bpp
+  // VI_WIDTH es el PASO de linea del framebuffer, no el ancho visible. Lo visible es la
+  // ventana activa de VI_H_VIDEO escalada por X_SCALE, que es lo que barre el VI de la
+  // consola. Casi siempre coinciden (H_VIDEO estandar = 640 relojes activos: X_SCALE 0x200
+  // -> 320, 0x400 -> 640). En ENTRELAZADO no: Donkey Kong 64 arranca en 640x480 con serrate
+  // y pone VI_WIDTH=1280 para que cada campo lea lineas alternas del mismo framebuffer. Con
+  // el paso usado tambien como ancho la imagen salia cizallada (y capada a kMaxSrcW ademas,
+  // con lo que el paso quedaba mal y cada fila se desplazaba): pantalla ilegible en toda la
+  // intro del juego. Solo se recorta, nunca se agranda.
+  u32 stride = width;
+  { const u32 hv = mem->rcp.vi_hstart;
+    const u32 hs = (hv >> 16) & 0x3ff, he = hv & 0x3ff;
+    const u32 xsc = mem->rcp.vi_xscale & 0xfff;
+    if(he > hs && xsc) { const u32 visW = ((he - hs) * xsc) >> 10;
+                         if(visW && visW < width) width = visW; } }
   if(width > kMaxSrcW) width = kMaxSrcW;
   // La altura del framebuffer NO es 240 fija: la fija Y_SCALE (2.10, lineas de origen por
   // linea de pantalla) sobre las lineas activas del campo (NTSC 240, PAL 288, que se sacan
@@ -1190,7 +1231,7 @@ auto Presenter::pumpFrame() -> bool {
   if(!vrdpFrame && type != 99 && vi::active(viCtrl)) {
     filt.resize((usize)width * height);
     vi::fetchFiltered(ram.data(), ram.size(), mem->rdramHidden.data(), mem->rdramHidden.size(),
-                      origin, width, width, height, viCtrl, filt.data());
+                      origin, stride, width, height, viCtrl, filt.data());
     for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
       u32 c = filt[(usize)y * width + x];
       frame[y * width + x] = 0xff000000u | ((c & 0xff) << 16) | (c & 0xff00u) | ((c >> 16) & 0xff);
@@ -1201,7 +1242,7 @@ auto Presenter::pumpFrame() -> bool {
     // ya hay pixeles (barrido de la GPU, o el camino filtrado del VI de arriba)
   } else if(type == 2) {  // RGBA5551, 2 bytes/pixel, big-endian
     for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
-      u32 p = origin + (y * width + x) * 2;
+      u32 p = origin + (y * stride + x) * 2;
       if(p + 1 >= ram.size()) continue;
       u32 px = ((u32)ram[p] << 8) | ram[p + 1];
       u32 R = expand5((px >> 11) & 0x1f), G = expand5((px >> 6) & 0x1f), B = expand5((px >> 1) & 0x1f);
@@ -1209,7 +1250,7 @@ auto Presenter::pumpFrame() -> bool {
     }
   } else if(type == 3) {  // RGBA8888, big-endian bytes R,G,B,A
     for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
-      u32 p = origin + (y * width + x) * 4;
+      u32 p = origin + (y * stride + x) * 4;
       if(p + 3 >= ram.size()) continue;
       frame[y * width + x] = 0xff000000u | ((u32)ram[p + 2] << 16) | ((u32)ram[p + 1] << 8) | ram[p];
     }
@@ -1226,7 +1267,30 @@ auto Presenter::pumpFrame() -> bool {
   if(const char* path = std::getenv("KESTREL_VIDEO_DUMP")) {
     dumpBmp(path, width, height, frame.data());   // every frame; last one = latest state
   }
-  if(v.presentable) presentFrame(v, frame.data(), width, height);
+  // KESTREL_NOPRESENT=1: ventana abierta y cuadro construido, pero sin tocar la cola de Vulkan.
+  // Es la biseccion del coste de presentar: si con esto va rapido, el freno esta en el present
+  // (candado de cola compartido con parallel-rdp), no en construir el cuadro ni en el barrido.
+  static const bool noPresent = []{ const char* e = std::getenv("KESTREL_NOPRESENT"); return e && e[0] == '1'; }();
+  auto tPres = std::chrono::steady_clock::now();
+  if(v.presentable && !noPresent) presentFrame(v, frame.data(), width, height);
+
+  // Cuantos cuadros llegan DE VERDAD a la pantalla y cuanto cuesta cada present. El invitado
+  // puede ir al 100% y verse a tirones igual si el bucle de ventana no sigue el ritmo, asi
+  // que el ritmo de presentacion se mide aparte del de emulacion.
+  static const bool hbPres = std::getenv("KESTREL_HEARTBEAT") != nullptr;
+  if(hbPres) {
+    static u64 nPres = 0, nsPres = 0;
+    static auto t0 = std::chrono::steady_clock::now();
+    nPres++;
+    nsPres += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::steady_clock::now() - tPres).count();
+    auto el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if(el >= 5.0) {
+      std::fprintf(stderr, "[hb] present: %.1f cuadros/s (%.2f ms de media en present) %ux%u\n",
+                   nPres / el, nsPres / 1e6 / (double)nPres, width, height);
+      nPres = 0; nsPres = 0; t0 = std::chrono::steady_clock::now();
+    }
+  }
   return true;
 }
 

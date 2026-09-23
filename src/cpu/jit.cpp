@@ -1137,7 +1137,16 @@ static const int g_jitTlbLink = std::getenv("KESTREL_JIT_NOTLBLINK") ? 0 : 1;
 // pagina obliga a traducir el destino con una sonda del TLB en tiempo de compilacion, y
 // esa traduccion es independiente de la que valida el driver para la entrada. Dentro de
 // la pagina, en cambio, la phys del destino sale de la MISMA traduccion que ya trajo aqui.
-static const int g_jitTlbXPage = std::getenv("KESTREL_JIT_TLBXPAGE") ? 1 : 0;
+// Enlace entre bloques cuyo destino cae en OTRO marco de 4 KB mapeado por TLB. Por defecto SI
+// desde 2026-09-23. Perfect Dark ejecuta su codigo desde 0x70000000, o sea todo TLB, y la
+// restriccion de "mismo marco" dejaba sin enlazar cualquier JAL a otra funcion: 1,28 M de
+// salidas lentas directas por corrida, el 41 % de las entradas al driver. Es sano por la
+// misma razon que el enlace TLB de mismo marco: la traduccion queda congelada en el sitio,
+// y cualquier remapeo (TLBWI/TLBWR/ASID) sube cpu.tlbGen, que desenlaza TODO y re-sondea la
+// VA de cada sitio TLB antes del siguiente despacho. Medido en PD (F993->F1082, 3 tandas
+// intercaladas): 4590/4656 ms -> 4042/4122 ms, -12 % de pared, mismo [statehash] y mismos
+// campos. KESTREL_JIT_NOTLBXPAGE=1 vuelve al comportamiento viejo para bisecar.
+static const int g_jitTlbXPage = std::getenv("KESTREL_JIT_NOTLBXPAGE") ? 0 : 1;
 // DIAGNOSTICO: deja el ITC por ruta TLB pero desactiva el enlace ESTATICO TLB.
 static const int g_noTlbStatic = std::getenv("KESTREL_JIT_NOTLBSTATIC") ? 1 : 0;
 // Camino rápido en línea del prólogo re-validable (ver más abajo). KESTREL_JIT_NOFAST=1 lo
@@ -2188,7 +2197,9 @@ extern u64 g_trampBail;
 // campo, el regulador es calibracion), asi que saber cual manda es lo unico accionable.
 static u64 g_dueWhy[6][2] = {};
 static u64 g_compiles = 0, g_compClears = 0, g_compDead = 0, g_deadProceed = 0;   // bloques compilados / vaciados de buffer (solo con STATS)
-static u64 g_guardWhy[4] = {};   // 0=borde de timer 1=ventana de campo 2=regulador 3=tope
+static u64 g_guardWhy[4] = {};
+static u64 g_guardOps[4] = {};   // ops concedidas, para ver el GRANO del permiso
+static u64 g_guardHist[16] = {};  // histograma log2 del permiso concedido   // 0=borde de timer 1=ventana de campo 2=regulador 3=tope
 namespace jit { extern u64 g_compFailDelay[64], g_compFailDelaySpec[64]; }
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
                 extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32];
@@ -2330,10 +2341,12 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
       if(g_jitStats && pa <= g) g_guardWhy[2]++;
     }
     if(g_jitStats) {
-      if(g >= kGuardMaxOps)   g_guardWhy[3]++;
-      else if(g == slack)     g_guardWhy[0]++;
-      else if(g == budg)      g_guardWhy[1]++;
+      if(g >= kGuardMaxOps)   { g_guardWhy[3]++; g_guardOps[3] += g; }
+      else if(g == slack)     { g_guardWhy[0]++; g_guardOps[0] += g; }
+      else if(g == budg)      { g_guardWhy[1]++; g_guardOps[1] += g; }
+      else                    { g_guardOps[2] += g; }
     }
+    if(g_jitStats) { u32 b = 0, v = g; while(v >>= 1) b++; if(b > 15) b = 15; g_guardHist[b]++; }
     jitGuard  = g < kGuardMaxOps ? g : kGuardMaxOps;
   }
   return 1;
@@ -2421,15 +2434,25 @@ static const bool g_idleCpuOn = [] {
   return !e || !*e || std::strcmp(e, "0") != 0;
 }();
 static u64 g_idleSkips = 0, g_idleOps = 0;
+// Por que NO se salta el bucle ocioso: 0 cadena, 1 icache, 2 no es b., 3 ranura,
+// 4 IE/EXL, 5 sin plazos, 6 permiso 0, 7 saltado. Ver jitIdleSkip.
+namespace jit { u64 g_idleWhy[8] = {}; }
+// Quien fija el permiso del salto ocioso: 0 Compare, 1 evento/RCP, 2 presupuesto,
+// 3 regulador, 4 tope kGuardMaxOps.
+namespace jit { u64 g_idleLim[5] = {}, g_idleLimOps[5] = {}; }
+// Reparto del tiempo OCIOSO del invitado segun quien estuviera trabajando en ese instante:
+// 0 = nadie, 1 = solo RSP, 2 = solo RDP, 3 = los dos. Con esto se separa "el juego espera al
+// RCP" de "el juego espera a un plazo" (VI, timer), que son problemas distintos.
+static u64 g_idleWho[4] = {0,0,0,0};
 
 auto CPU::jitIdleSkip(u32 phys) -> u32 {
-  if(jitPending) return 0;                       // el driver siempre entra con la cadena vacia
+  if(jitPending) { jit::g_idleWhy[0]++; return 0; }   // el driver siempre entra con la cadena vacia
   if((usize)phys + 8 > mem->rdram.size()) return 0;
   // I-cache exacta: el salto no pasa por el fetch, asi que solo vale con las dos lineas ya
   // cargadas (todas las vueltas aciertan); si no, la primera vuelta la da el camino normal.
   if(jitIcExact()) {
     for(u32 pa : {phys, phys + 4}) { const ICacheLine& l = icache[(pa >> 5) & 0x1ff];
-      if(!l.valid || l.ptag != (pa & ~0x1fu)) return 0; }
+      if(!l.valid || l.ptag != (pa & ~0x1fu)) { jit::g_idleWhy[1]++; return 0; } }
   }
   u32 w0 = jitFetchWord(phys), op = w0 >> 26;
   bool self = false;
@@ -2437,42 +2460,128 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
     self = ((w0 >> 21) & 31) == ((w0 >> 16) & 31) && (w0 & 0xffff) == 0xffff;
   else if(op == 0x01)                            // REGIMM BGEZ $0,-1
     self = ((w0 >> 21) & 31) == 0 && ((w0 >> 16) & 31) == 0x01 && (w0 & 0xffff) == 0xffff;
-  if(!self) return 0;
-  if(jitFetchWord(phys + 4) != 0u) return 0;     // ranura de retardo != NOP: el bucle hace algo
+  if(!self) { jit::g_idleWhy[2]++; return 0; }
+  if(jitFetchWord(phys + 4) != 0u) { jit::g_idleWhy[3]++; return 0; }   // ranura != NOP: el bucle hace algo
   // Con IE=0 o dentro de una excepcion ninguna interrupcion puede sacar de aqui: el invitado
   // esta colgado de verdad y saltarle el reloj lo esconderia en vez de arreglarlo. Que lo
   // ejecute el camino normal, que es donde estan los vigilantes.
-  if(((u32)cop0[C0_Status] & 0x7) != 0x1) return 0;
+  if(((u32)cop0[C0_Status] & 0x7) != 0x1) { jit::g_idleWhy[4]++; return 0; }
   // Threaded SIN plazos (KESTREL_RCPDEADLINE=0) es el unico modo en el que un worker publica
   // MI_SP/MI_DP por su cuenta en tiempo de pared: ahi no hay plazo que acote el salto y la
   // interrupcion se veria hasta 4096 ops tarde. Se queda fuera.
-  if(mem->rcpMode == Memory::RcpMode::Threaded && !Memory::rcpDeadlineOn()) return 0;
+  if(mem->rcpMode == Memory::RcpMode::Threaded && !Memory::rcpDeadlineOn()) { jit::g_idleWhy[5]++; return 0; }
 
   // Limite = el permiso de una cadena, calculado igual que en jitReenterProceed.
   u32 cnt = (u32)cop0[C0_Count], cmp = (u32)cop0[C0_Compare];
   u64 lim = opsForTicks((u64)(u32)(cmp - cnt));
+  u32 who = 0;
   u64 now = mem->cartNow();
   u64 due = mem->eventDueIn(now);
   { u64 r = mem->rcpDueIn(now); if(r < due) due = r; }
-  if(due != ~0ull) { u64 d = opsForGuest(due); if(d < lim) lim = d; }
-  if((u64)jitOpsBudget < lim) lim = jitOpsBudget;
+  if(due != ~0ull) { u64 d = opsForGuest(due); if(d < lim) { lim = d; who = 1; } }
+  if((u64)jitOpsBudget < lim) { lim = jitOpsBudget; who = 2; }
   if(mem->rcpMode == Memory::RcpMode::Threaded) {
     u32 pa = mem->rcpPace(guestOps());
-    if((u64)pa < lim) lim = pa;
+    if((u64)pa < lim) { lim = pa; who = 3; }
   }
-  if(lim > kGuardMaxOps) lim = kGuardMaxOps;
+  if(lim > kGuardMaxOps) { lim = kGuardMaxOps; who = 4; }
+  jit::g_idleLim[who]++; jit::g_idleLimOps[who] += lim;
   u32 k = (u32)lim & ~1u;                        // iteraciones enteras: el pc no se mueve
-  if(!k) return 0;
+  if(!k) { jit::g_idleWhy[6]++; return 0; }
+  jit::g_idleWhy[7] += k;
 
   retired += k;
   if(countAdd(countTicks(k))) timerIntr = true;
   cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], k);
   if(jitCache) jitCache->hits += k;
-  if(g_jitStats) { g_idleSkips++; g_idleOps += k; }
+  if(g_jitStats) { g_idleSkips++; g_idleOps += k;
+    u32 who = (mem->rspBusy.load(std::memory_order_relaxed) ? 1u : 0u)
+            | (mem->rdpBusy.load(std::memory_order_relaxed) ? 2u : 0u);
+    g_idleWho[who] += k; }
   return k;
 }
 
+// Perfil de PC de invitado bajo dynarec (KESTREL_GPCPROF=<topN>, 0=apagado). Cuenta
+// visitas por PC de ENTRADA al driver del JIT, que es donde el guest pasa el control.
+// Tabla abierta de 64 k ranuras, sondeo lineal; al cerrar saca el top N. Es diagnostico
+// puro: no toca el codigo generado ni el estado del invitado.
+namespace {
+struct GpcProf {
+  static constexpr u32 kSlots = 1u << 16;
+  u64* key = nullptr; u64* cnt = nullptr; u32 top = 0; u64 total = 0;
+  GpcProf() {
+    const char* e = std::getenv("KESTREL_GPCPROF");
+    if(!e) return;
+    top = (u32)std::strtoul(e, nullptr, 0);
+    if(!top) return;
+    key = (u64*)std::calloc(kSlots, sizeof(u64));
+    cnt = (u64*)std::calloc(kSlots, sizeof(u64));
+    phy = (u32*)std::calloc(kSlots, sizeof(u32));
+    wrd = (u32*)std::calloc((usize)kSlots * 12, sizeof(u32));
+    if(!key || !cnt || !phy || !wrd) top = 0;
+  }
+  u32* phy = nullptr; u32* wrd = nullptr;   // wrd: 12 palabras copiadas del sitio
+  inline auto slot(u64 pc) -> u32 {
+    u64 h = pc * 0x9E3779B97F4A7C15ull; u32 i = (u32)(h >> 48) & (kSlots - 1);
+    for(u32 n = 0; n < 64; n++, i = (i + 1) & (kSlots - 1)) {
+      if(cnt[i] && key[i] != pc) continue;
+      return i;
+    }
+    return ~0u;   // tabla saturada en esa cadena
+  }
+  u64 lastBkt = 0;
+  // Muestreo PROPORCIONAL AL TIEMPO DE INVITADO: una muestra por cada 1024 instrucciones
+  // retiradas, no por entrada al driver. Contar entradas sesga hacia los bloques cortos.
+  inline auto hit(u64 pc, u64 ret) -> void {
+    // Una muestra por CADA bucket cruzado, no una por entrada que cruce alguno: un bloque que
+    // retira 20 k ops de una vez pesa 20 veces mas que uno que retira 1 k, que es justo lo que
+    // significa "proporcional al tiempo de invitado". Contando una sola, el perfil se iba
+    // detras de los sitios que se visitan mucho y retiran poco -- el bucle ocioso salia al
+    // 37% siendo el 1,9% de las instrucciones.
+    u64 b = ret >> 10; if(b == lastBkt) return;
+    if(!lastBkt) { lastBkt = b; return; }   // primera: `retired` ya viene de un savestate
+    u64 n = b - lastBkt; lastBkt = b;
+    total += n;
+    u32 i = slot(pc); if(i == ~0u) return;
+    key[i] = pc; cnt[i] += n;
+  }
+  inline auto note(u64 pc, u32 ph, const u8* r, usize sz) -> void {
+    u32 i = slot(pc); if(i == ~0u || phy[i]) return;
+    phy[i] = ph;
+    if((usize)ph + 48 > sz) return;
+    for(u32 k = 0; k < 12; k++) {
+      u32 a = ph + k * 4;
+      wrd[(usize)i * 12 + k] = ((u32)r[a] << 24) | ((u32)r[a+1] << 16) | ((u32)r[a+2] << 8) | r[a+3];
+    }
+  }
+  ~GpcProf() {
+    if(!top || !cnt) return;
+    std::vector<u32> idx;
+    for(u32 i = 0; i < kSlots; i++) if(cnt[i]) idx.push_back(i);
+    std::sort(idx.begin(), idx.end(), [&](u32 a, u32 b){ return cnt[a] > cnt[b]; });
+    std::fprintf(stderr, "[gpcprof] muestras=%llu sitios=%zu\n",
+                 (unsigned long long)total, idx.size());
+    for(u32 r = 0; r < top && r < idx.size(); r++) {
+      u32 i = idx[r];
+      std::fprintf(stderr, "[gpcprof] %2u va=%016llx ph=%08x %10llu %6.2f%%\n", r,
+                   (unsigned long long)key[i], phy[i], (unsigned long long)cnt[i],
+                   100.0 * (double)cnt[i] / (double)total);
+      if(r < 8 && phy[i])
+        for(u32 k = 0; k < 12; k++) {
+          u32 w = wrd[(usize)i * 12 + k];
+          std::fprintf(stderr, "[gpcprof]      %016llx  %08x  %s\n",
+                       (unsigned long long)(key[i] + k * 4), w,
+                       CPU::disasm(w, key[i] + k * 4).c_str());
+        }
+    }
+    std::fflush(stderr);
+  }
+};
+GpcProf g_gpcProf;
+}
+
 auto CPU::jitTryBlock() -> u32 {
+  if(g_gpcProf.top) g_gpcProf.hit(pc, retired);
   // DIAGNOSTICO (KESTREL_JIT_PCCHK): en modo de 32 bits toda direccion virtual valida es la
   // extension de signo de sus 32 bits bajos. Mirarlo en CADA despacho caza el primer momento
   // en que el pc se descarrila, venga de donde venga (salida de control, JR con registro
@@ -2519,9 +2628,14 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)jit::g_rcReg, (unsigned long long)jit::g_rcMem,
                    (unsigned long long)jit::g_rcSpill,
                    100.0 * jit::g_rcReg / (double)(jit::g_rcReg + jit::g_rcMem + 1));
-      std::fprintf(stderr, "[permiso] timer=%llu campo=%llu pace=%llu tope=%llu\n",
-                   (unsigned long long)g_guardWhy[0], (unsigned long long)g_guardWhy[1],
-                   (unsigned long long)g_guardWhy[2], (unsigned long long)g_guardWhy[3]);
+      std::fprintf(stderr, "[permiso] timer=%llu(%.0f) campo=%llu(%.0f) pace=%llu(%.0f) tope=%llu(%.0f)\n",
+                   (unsigned long long)g_guardWhy[0], (double)g_guardOps[0]/(g_guardWhy[0]+1.0),
+                   (unsigned long long)g_guardWhy[1], (double)g_guardOps[1]/(g_guardWhy[1]+1.0),
+                   (unsigned long long)g_guardWhy[2], (double)g_guardOps[2]/(g_guardWhy[2]+1.0),
+                   (unsigned long long)g_guardWhy[3], (double)g_guardOps[3]/(g_guardWhy[3]+1.0));
+      { std::fprintf(stderr, "[permisohist]");
+        for(int i = 0; i < 16; i++) std::fprintf(stderr, " %d:%llu", 1 << i, (unsigned long long)g_guardHist[i]);
+        std::fprintf(stderr, "\n"); }
       std::fprintf(stderr, "[tramp] guard=%lluM mi=%lluM timer=%lluM rsp=%lluM otro=%lluM\n",
                    (unsigned long long)(g_trampWhy[0]/1000000), (unsigned long long)(g_trampWhy[1]/1000000),
                    (unsigned long long)(g_trampWhy[2]/1000000), (unsigned long long)(g_trampWhy[3]/1000000),
@@ -2531,6 +2645,9 @@ auto CPU::jitTryBlock() -> u32 {
                    (unsigned long long)jit::g_retShort);
       std::fprintf(stderr, "[salidas] enlace=%u itc=%u lentaDirecta=%u lentaIndirecta=%u\n",
                    jit::g_xLink, jit::g_xItc, jit::g_xSlowDir, jit::g_xSlowInd);
+      { u64 it = g_idleWho[0]+g_idleWho[1]+g_idleWho[2]+g_idleWho[3]; if(!it) it = 1;
+        std::fprintf(stderr, "[ociosoquien] nadie=%.1f%% soloRSP=%.1f%% soloRDP=%.1f%% ambos=%.1f%%\n",
+                     100.0*g_idleWho[0]/it, 100.0*g_idleWho[1]/it, 100.0*g_idleWho[2]/it, 100.0*g_idleWho[3]/it); }
       std::fprintf(stderr, "[ocioso] saltos=%llu ops=%lluM (%.1f%% de las retiradas)\n",
                    (unsigned long long)g_idleSkips, (unsigned long long)(g_idleOps / 1000000),
                    retired ? 100.0 * (double)g_idleOps / (double)retired : 0.0);
@@ -2640,6 +2757,7 @@ auto CPU::jitTryBlock() -> u32 {
     }
   }
   if((usize)phys + 4 > mem->rdram.size()) { JDECL(DR_MISC); return 0; }
+  if(g_gpcProf.top) g_gpcProf.note(pc, phys, mem->rdram.data(), mem->rdram.size());
 
   // Hilo ocioso del invitado: se cobra entero sin emitir ni ejecutar nada. Ver jitIdleSkip.
   if(g_idleCpuOn) { if(u32 kIdle = jitIdleSkip(phys)) return kIdle; }
@@ -2960,7 +3078,18 @@ auto CPU::jitTryBlock() -> u32 {
   // op R para vectorizar la excepción exacta, así que aquí solo avanzamos el estado por R.
   jitChain = 0;                       // presupuesto de cadena fresco por entrada del driver
   jitChainOps = 0;                    // ops que la cadena commitee por su cuenta (las sumamos al salir)
-  jitGuard = 0;                       // el primer bloque siempre pasa por el trampolín (chequeo completo)
+  // El primer bloque de la cadena necesita el chequeo completo, pero NO hace falta llegar a el
+  // por el trampolin: el camino rapido en linea veia jitGuard==0, saltaba a
+  // kestrel_jitProceedTramp y este llamaba a jitReenterProceed. Eso era una llamada Win64 y una
+  // rama fallada por CADA entrada al driver (3,1 M por corrida de PD, 3,85 % del hilo de CPU en
+  // el perfil de anfitrion). Se llama aqui directamente: es la MISMA funcion con la MISMA K y
+  // con jitChain recien puesto a 0, o sea el mismo jitChain==1 que veia el trampolin, asi que
+  // no cambia ni un bit del estado del invitado. Si dice que no, se devuelve el control igual
+  // que hacia el bail del prologo, con pc intacto.
+  // KESTREL_JIT_NOPREARM=1 vuelve al viaje por el trampolin, para bisecar.
+  static const bool noPreArm = std::getenv("KESTREL_JIT_NOPREARM") != nullptr;
+  jitGuard = 0;
+  if(!noPreArm && !jitReenterProceed(K)) { jitChain = 0; return 0; }
   const u64 entryVAdbg = pc;          // solo para el chequeo de pc canonico de abajo
   // `memAbort` es un pestillo POR INSTRUCCION: lo pone translate() cuando el acceso falla y
   // significa "esta instruccion abort�". step() lo limpia al empezar cada instruccion; el

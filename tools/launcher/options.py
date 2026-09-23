@@ -87,6 +87,17 @@ CATEGORIES = [
            "Perfect Dark en juego pasa de ~23 a ~35 fps, pero los eventos del RSP nacen tarde y "
            "el resultado depende del anfitrion: multihilo deja de coincidir con lockstep. Para "
            "comparar contra hardware o reproducir demos, modo de velocidad fiel a consola."),
+    O("splead", "KESTREL_SPLEAD", "Adelanto de la CPU sobre la barrera del SP", "choice", "auto",
+      values=[["auto", "Automatico - puesto en velocidad libre, quitado en fiel a consola"],
+              ["1024", "1024 ops - rapido, NO fiel"],
+              ["4096", "4096 ops - mas rapido, menos fiel"],
+              ["0", "Quitado - fiel, multihilo == lockstep"]],
+      help="La barrera del SP clava a la CPU en el instante exacto al que el RSP ha trabajado, "
+           "y la cita del DMA obliga al RSP a no adelantar a la CPU: juntas fuerzan alternancia "
+           "estricta, sin solape entre los dos hilos. Dejar a la CPU unos miles de instrucciones "
+           "de margen quita ese ping-pong (Perfect Dark, -25 % de pared) a cambio de que la "
+           "interrupcion de fin de tarea del RSP suba ese mismo margen mas tarde. Es un retraso "
+           "fijo y reproducible, pero multihilo deja de coincidir con lockstep."),
     O("spinpause", "KESTREL_SPINPAUSE", "Pista PAUSE en las esperas activas", "bool", True,
       "La CPU y el RSP se vigilan girando sobre contadores que escribe el otro. PAUSE le dice "
       "al nucleo que eso es una espera, para que no le robe la linea de cache ni las ranuras "

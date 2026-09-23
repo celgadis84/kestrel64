@@ -14,6 +14,7 @@
 #pragma STDC FENV_ACCESS ON
 
 namespace kestrel {
+namespace jit { extern u64 g_idleWhy[8]; extern u64 g_idleLim[5], g_idleLimOps[5]; }   // motivos del bucle ocioso, ver jitIdleSkip
 
 // --- Entorno de coma flotante del host, sin <cfenv> --------------------------
 // Cada op COP1 fija el modo de redondeo y limpia el estado IEEE antes de calcular. En
@@ -74,7 +75,10 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   u32 origin = mem->rcp.vi_origin & 0x00ff'ffff;
   u32 type   = mem->rcp.vi_ctrl & 3;                 // 2=16bpp, 3=32bpp
   u32 srcW = mem->rcp.vi_width ? mem->rcp.vi_width : 320;   // framebuffer line stride (source pixels)
-  if(srcW == 0 || srcW > 640) srcW = 320;
+  // Tope = los 12 bits del registro. Capar el PASO a 320 partia el entrelazado (VI_WIDTH
+  // 1280 en Donkey Kong 64): el paso no es el ancho, y recortarlo desplaza cada fila. El
+  // ancho visible se recorta aparte, mas abajo; las lecturas ya van acotadas por ram.size().
+  if(srcW == 0 || srcW > 4095) srcW = 320;
   // This dump is the SOURCE framebuffer exactly as the RDP wrote it: w = VI_WIDTH,
   // one output pixel per stored pixel, no X_SCALE resample.
   //
@@ -87,7 +91,21 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   // disagreed on size with the dump for that reason alone, which makes every
   // accuracy number computed from them meaningless. The references are captures
   // of the framebuffer, so the dump has to be the framebuffer.
+  // ...salvo que VI_WIDTH sea un PASO mayor que lo que el VI barre de verdad. VI_WIDTH es
+  // el paso de linea del framebuffer en pixeles, no el ancho visible: lo visible sale de la
+  // ventana activa de VI_H_VIDEO por X_SCALE, igual que en la consola. Coinciden en casi
+  // todo (H_VIDEO estandar = 640 relojes activos: X_SCALE 0x200 -> 320, 0x400 -> 640), y
+  // por eso el volcado podia usar el paso como ancho. No coinciden en ENTRELAZADO: Donkey
+  // Kong 64 arranca en 640x480 con serrate y pone VI_WIDTH=1280 para que cada campo lea
+  // lineas alternas del mismo framebuffer; ahi lo visible siguen siendo 640 y el resto del
+  // paso es la linea del OTRO campo. Solo se recorta (visW < paso): barrer mas pixeles de
+  // los que hay en la linea no pasa nunca, asi que ninguna ROM donde ambos coinciden cambia.
   u32 w = srcW;
+  { const u32 hv = mem->rcp.vi_hstart;
+    const u32 hs = (hv >> 16) & 0x3ff, he = hv & 0x3ff;
+    const u32 xsc = mem->rcp.vi_xscale & 0xfff;
+    if(he > hs && xsc) { const u32 visW = ((he - hs) * xsc) >> 10;
+                         if(visW && visW < w) w = visW; } }
   // Framebuffer height is NOT fixed at 240 — the VI Y_SCALE register (2.10 fixed,
   // source lines per display line) sets it. Krom's low-res demos use YSCALE 0x200
   // (half → 120 source lines) etc. The native source height the RDP renders into is
@@ -976,7 +994,7 @@ auto CPU::unimplemented(u32 op) -> void {
                    mem->rcp.dpc_status.load(), (unsigned)mem->rsp.running);
     if(mem)
       std::fprintf(stderr, "[det] rspCycles=%llu rdpGclk=%llu spArm=%u/%u tarde dpArm=%u/%u tarde"
-                           " dpcRd=%u/%u rsp=%u open=%u busy=%u endv=%u await=%u dmaW=%llu lateMax=%llu waiv=%u/%u wv=%u/%u/%u ooo=%u(C%u/R%u) stale=%u(C%u/R%u) rdv=%llu/%u idle=%llu/%llu(sig%llu/drn%llu/room%llu) park=%u/%u/%u\n",
+                           " dpcRd=%u/%u rsp=%u open=%u busy=%u endv=%u await=%u dmaW=%llu lateMax=%llu waiv=%u/%u wv=%u/%u/%u ooo=%u(C%u/R%u) stale=%u(C%u/R%u) rdv=%llu/%u idle=%llu/%llu ciclos=%lluM(rdp%lluM/cpu%lluM sig%llu/drn%llu/room%llu) park=%u/%u/%u ocioso=%llu/%llu/%llu/%llu/%llu/%llu/%lluM limite=%llu:%llu/%llu:%llu/%llu:%llu/%llu:%llu/%llu:%llu\n",
                    (unsigned long long)mem->rsp.cyclesRun.load(),
                    (unsigned long long)mem->rcp.rdpGclk.load(),
                    mem->spArms.load(), mem->spLate.load(),
@@ -995,10 +1013,22 @@ auto CPU::unimplemented(u32 op) -> void {
                   (unsigned long long)mem->dpRdv.load(), mem->dpRdvWaives.load(),
             (unsigned long long)mem->rsp.idleSkips.load(),
             (unsigned long long)mem->rsp.idleIters.load(),
+            (unsigned long long)(mem->rsp.idleCyc.load() / 1000000),
+            (unsigned long long)(mem->rsp.idleCycRdp / 1000000),
+            (unsigned long long)(mem->rsp.idleCycCpu / 1000000),
             (unsigned long long)mem->rsp.idleNoSig,
             (unsigned long long)mem->rsp.idleNoDrain,
             (unsigned long long)mem->rsp.idleNoRoom,
-            mem->rspParks.load(), mem->rspParkWv.load(), mem->rspParkMiss.load());
+            mem->rspParks.load(), mem->rspParkWv.load(), mem->rspParkMiss.load(),
+            (unsigned long long)jit::g_idleWhy[0], (unsigned long long)jit::g_idleWhy[1],
+            (unsigned long long)jit::g_idleWhy[2], (unsigned long long)jit::g_idleWhy[3],
+            (unsigned long long)jit::g_idleWhy[4], (unsigned long long)jit::g_idleWhy[6],
+            (unsigned long long)(jit::g_idleWhy[7] / 1000000),
+            (unsigned long long)jit::g_idleLim[0], (unsigned long long)(jit::g_idleLimOps[0]/(jit::g_idleLim[0]?jit::g_idleLim[0]:1)),
+            (unsigned long long)jit::g_idleLim[1], (unsigned long long)(jit::g_idleLimOps[1]/(jit::g_idleLim[1]?jit::g_idleLim[1]:1)),
+            (unsigned long long)jit::g_idleLim[2], (unsigned long long)(jit::g_idleLimOps[2]/(jit::g_idleLim[2]?jit::g_idleLim[2]:1)),
+            (unsigned long long)jit::g_idleLim[3], (unsigned long long)(jit::g_idleLimOps[3]/(jit::g_idleLim[3]?jit::g_idleLim[3]:1)),
+            (unsigned long long)jit::g_idleLim[4], (unsigned long long)(jit::g_idleLimOps[4]/(jit::g_idleLim[4]?jit::g_idleLim[4]:1)));
     // Antes de mirar el framebuffer hay que dejar quieto al RCP. En modo threaded el
     // hilo del RDP puede tener la lista de comandos todavia sin consumir cuando la CPU
     // llega al tope de instrucciones: el volcado saldria de un frame a medio pintar, o

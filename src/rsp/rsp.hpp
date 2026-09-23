@@ -180,10 +180,14 @@ struct Rsp {
   u64 idleAt = 0;             // reloj exacto del RSP en esa lectura
   u64 idleLen = 0;            // ciclos entre esa lectura y la anterior = cuerpo del bucle
   bool idleOn = true;
-  std::atomic<u64> idleSkips{0}, idleIters{0};
+  std::atomic<u64> idleSkips{0}, idleIters{0}, idleCyc{0};
   // Por que NO se aparca. Solo los toca el hilo del RSP (por eso no son atomicos); los lee
   // el volcado final, con el RCP ya parado. Sin esto, un `idle=0/0` no dice si es que la
   // firma no se repite, si el motor no esta drenado o si es que no cabe ni una vuelta.
+  u64 idleCycRdp = 0, idleCycCpu = 0;
+  u64 idlePcHist[16] = {}, idlePcKey[16] = {};   // donde gira: PC de IMEM | bit31 = leia STATUS
+  u64 idleCycCur = 0, idleCycSt = 0;
+  u32 idleShow = 0;   // ciclos de giro esperando al RDP vs a la CPU
   u64 idleNoSig = 0;     // firma distinta de la lectura anterior (o longitud fuera de [2,64])
   u64 idleNoDrain = 0;   // motor del RDP sin drenar en `now`
   u64 idleNoRoom = 0;    // aparcamiento sin hueco: destino <= now, o no cabe una vuelta entera
@@ -404,6 +408,9 @@ public:
   // un contador u32 por ranura de 4 bytes, lo que senala la rutina de microcodigo exacta.
   u32  profPc[1024] = {};
   u64  profTotal = 0;
+  u64 taskN[8] = {}, taskCyc[8] = {};   // reparto por OSTask.type (KESTREL_RSPTASKS)
+  auto taskDump() -> void;
+  auto profDump() -> void;
   auto profClear() -> void { for(auto& c : profPc) c = 0; profTotal = 0; }
 };
 

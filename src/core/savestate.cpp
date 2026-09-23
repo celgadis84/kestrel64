@@ -71,6 +71,11 @@ struct StateIO {
     u64 v = a.load(std::memory_order_relaxed); pod(v);
     if(!writing) a.store(v, std::memory_order_relaxed);
   }
+  // Mismo byte que el `bool` plano de antes: el formato del estado no cambia.
+  auto atom(std::atomic<bool>& a) -> void {
+    bool v = a.load(std::memory_order_relaxed); pod(v);
+    if(!writing) a.store(v, std::memory_order_relaxed);
+  }
   // Marca de seccion. No hace falta para leer, hace falta para NO leer: si las dos
   // direcciones se desincronizan, la carga se para aqui en vez de repartir bytes
   // desplazados por todo el estado de la maquina.
@@ -184,7 +189,7 @@ auto visitRcp(StateIO& io, Rcp& p) -> void {
   io.pod(p.mi_mode); io.pod(p.mi_mask); io.atom(p.mi_intr);
   io.pod(p.mi_repeat_on); io.pod(p.mi_repeat_len);
   io.pod(p.sp_mem_addr); io.pod(p.sp_dram_addr); io.pod(p.sp_rd_len); io.pod(p.sp_wr_len);
-  io.atom(p.sp_status); io.pod(p.sp_semaphore); io.pod(p.sp_pc); io.pod(p.sp_intr_on_break);
+  io.atom(p.sp_status); io.atom(p.sp_semaphore); io.pod(p.sp_pc); io.atom(p.sp_intr_on_break);
   io.pod(p.dpc_start); io.pod(p.dpc_end);
   io.atom(p.dpc_current); io.atom(p.dpcCurReads);
   io.pod(p.dpc_submitted); io.atom(p.dpc_status);

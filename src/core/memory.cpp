@@ -61,6 +61,63 @@ static auto selfThreadHandle() -> void* {
 #endif
 }
 
+// Reparte los tres hilos calientes (CPU, RSP, RDP) en nucleos FISICOS distintos.
+//
+// Por que hace falta: en una maquina con SMT dos hilos logicos del mismo nucleo comparten las
+// unidades de emision. El planificador de Windows no sabe que estos tres se pelean por el mismo
+// recurso ni que uno de ellos (el de CPU) es el palo largo, y emparejarlo con el del RSP -- que
+// se pasa el 61 % del tiempo girando en una cita (perfil de anfitrion, Perfect Dark PAL) -- le
+// quita la mitad del nucleo al que manda. Con 4 nucleos fisicos sobran sitios para no compartir.
+//
+// `slot` es el indice logico del nucleo fisico que le toca a cada hilo (0, 1, 2...); se traduce
+// a procesador logico multiplicando por la cantidad de hilos por nucleo. Si la maquina no tiene
+// SMT el factor es 1 y sigue saliendo un nucleo por hilo. Si hay menos nucleos que hilos se da
+// la vuelta con el modulo y quedan compartidos, que es lo que habria pasado igualmente.
+//
+// Solo coste de anfitrion: ni una fecha del invitado depende de en que nucleo corre nadie.
+//
+// MEDIDO Y DESCARTADO (Perfect Dark PAL, 89 cuadros, media de 3, i7-870 4c/8h): fijado 4779 ms,
+// suelto 4496. Fijar es un 6 % PEOR. El planificador de Windows ya evita emparejar los hilos
+// calientes, y ademas mueve el de CPU cuando otro proceso le pisa el nucleo, cosa que la
+// mascara dura impide. Se queda APAGADO; sigue aqui porque en otra topologia puede cambiar el
+// signo y asi no hay que volver a escribirlo.
+// KESTREL_AFFINITY=1 lo enciende.
+static auto pinToPhysicalCore(u32 slot) -> void {
+#ifdef _WIN32
+  static const bool on = [] {
+    const char* e = std::getenv("KESTREL_AFFINITY");
+    return e && *e && std::strcmp(e, "0") && std::strcmp(e, "off");
+  }();
+  if(!on) return;
+  SYSTEM_INFO si{}; GetSystemInfo(&si);
+  const u32 logical = si.dwNumberOfProcessors ? si.dwNumberOfProcessors : 1u;
+  if(logical < 2) return;
+  // Hilos por nucleo: la relacion entre procesadores logicos y nucleos fisicos de verdad.
+  u32 perCore = 1;
+  {
+    DWORD len = 0;
+    GetLogicalProcessorInformation(nullptr, &len);
+    if(len) {
+      std::vector<SYSTEM_LOGICAL_PROCESSOR_INFORMATION> v(len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) + 1);
+      len = (DWORD)(v.size() * sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION));
+      if(GetLogicalProcessorInformation(v.data(), &len)) {
+        u32 cores = 0;
+        for(u32 i = 0; i < len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION); i++)
+          if(v[i].Relationship == RelationProcessorCore) cores++;
+        if(cores) perCore = logical / cores ? logical / cores : 1u;
+      }
+    }
+  }
+  const u32 cores = logical / perCore ? logical / perCore : 1u;
+  const u32 cpu   = ((slot % cores) * perCore) % logical;
+  SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR)1 << cpu);
+#else
+  (void)slot;
+#endif
+}
+
+auto Memory::pinCpuThread() -> void { pinToPhysicalCore(0); }
+
 auto Memory::sampleWorkerCpu() -> void {
   // Se llama SIEMPRE desde el hilo de CPU (heartbeat e informe final), asi que el handle
   // propio se toma aqui la primera vez y ya vale para todas.
@@ -889,10 +946,10 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     case 0x08: return rcp.sp_rd_len;
     case 0x0c: return rcp.sp_wr_len;
     case 0x10: return rcp.sp_status.load(std::memory_order_acquire)
-                    | (rcp.sp_intr_on_break ? 0x40u : 0u);  // bit6 = INTR_ON_BREAK
+                    | (rcp.sp_intr_on_break.load(std::memory_order_acquire) ? 0x40u : 0u);  // bit6 = INTR_ON_BREAK
     case 0x14: return (rcp.sp_status.load(std::memory_order_relaxed) >> 2) & 1;   // SP_DMA_FULL
     case 0x18: return (rcp.sp_status.load(std::memory_order_relaxed) >> 2) & 1;   // SP_DMA_BUSY
-    case 0x1c: { u32 s = rcp.sp_semaphore; rcp.sp_semaphore = 1; return s; }  // read sets
+    case 0x1c: return rcp.sp_semaphore.exchange(1, std::memory_order_acq_rel);  // leer devuelve y deja 1
     }
     return 0;
   case BASE_DPC & 0x1ff0'0000:
@@ -1072,7 +1129,8 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       pair(0, 1, [&]{ clr(1u); }, [&]{ set(1u); });   // HALT
       if(v & (1 << 2)) clr(2u);                      // clear BROKE (no paired set bit)
       pair(3, 4, [&]{ clearIntr(MI_SP); }, [&]{ raiseIntr(MI_SP); });         // SP interrupt
-      pair(7, 8, [&]{ rcp.sp_intr_on_break = false; }, [&]{ rcp.sp_intr_on_break = true; }); // intr-on-break
+      pair(7, 8, [&]{ rcp.sp_intr_on_break.store(false, std::memory_order_release); },
+                 [&]{ rcp.sp_intr_on_break.store(true,  std::memory_order_release); }); // intr-on-break
       // SIGNAL bits: pairs at bits 9..24 map to SP_STATUS read bits 7..14 (SIG0..SIG7).
       // Microcode sets these at task end (SIG2 = task done) so the OS routes the SP
       // interrupt to OS_EVENT_SP (scheduler) rather than OS_EVENT_SP_BREAK.
@@ -1164,7 +1222,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       if((v & (1 << 1)) && !(v & (1 << 0))) { rsp.running = false; rsp.brake = false; }
       break;
     }
-    case 0x1c: rcp.sp_semaphore = 0; break;          // write clears
+    case 0x1c: rcp.sp_semaphore.store(0, std::memory_order_release); break;   // escribir lo suelta
     }
     return;
   case BASE_DPC & 0x1ff0'0000: {
@@ -2656,6 +2714,26 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
 
 static inline void spinPause();
 
+// Vueltas entre PAUSE en los giros de espera del ANFITRION (citas del RSP, worker del RDP).
+// Ninguno de esos giros es tiempo de invitado: son hilos esperando a que otro llegue a un
+// instante. Lo que si cuesta es que, en un nucleo con SMT, un hilo girando sin PAUSE se lleva
+// la mitad de los recursos de emision del nucleo, y el hermano suele ser el hilo de CPU, que
+// es el palo largo. Perfil de anfitrion (Perfect Dark PAL, 2026-09-23): spReadSync 60,9 % del
+// hilo del RSP, hilo de CPU al 100 %, hilo del RDP 47 % de nucleo estando ocupado el 9 %.
+// PAUSE cede esos recursos sin soltar el nucleo ni pagar una llamada al kernel, asi que es
+// gratis en tiempo de invitado por construccion: no cambia ni una fecha.
+// Medido (Perfect Dark PAL, 89 cuadros, media de 3): 15 -> 4818 ms, 3 -> 4521, 0 -> 4489.
+// Monotono y con los contadores de invitado identicos (1082 intercambios / 2924 campos), que es
+// lo esperado: el cambio solo toca como espera el anfitrion. Se queda en 0, PAUSE cada vuelta.
+// KESTREL_RDVPAUSE=<n>, mascara (potencia de dos menos uno); 15 es el comportamiento viejo.
+static const u32 kSpinPauseMask = [] {
+  const char* e = std::getenv("KESTREL_RDVPAUSE");
+  if(e && *e) { char* end = nullptr; long n = std::strtol(e, &end, 0);
+                if(end && !*end && n >= 0 && n < 65536) return (u32)n; }
+  return 0u;
+}();
+
+
 // Vueltas que gira el worker del RDP, ocioso, antes de dormirse en el condvar. Con el motor
 // en la GPU cada tramo se despacha en microsegundos y el worker se duerme entre DPC_END y
 // DPC_END: el siguiente productor (sobre todo el HILO DEL RSP, a decenas de miles de DPC_END
@@ -2692,6 +2770,7 @@ static auto rdpSpinLen() -> u32 {
 }
 
 auto Memory::rdpWorkerLoop() -> void {
+  pinToPhysicalCore(1);
   hostprof::start("rdp");   // opt-in: KESTREL_HOSTPROF_WHO=rdp
   rdpThreadH = selfThreadHandle();
   // Levantar parallel-rdp AQUI, antes de esperar el primer trabajo. Traer arriba
@@ -2726,7 +2805,7 @@ auto Memory::rdpWorkerLoop() -> void {
     bool spun = false;
     for(u32 k = 0, n = rdpSpinLen(); k < n; k++) {
       if(dpPending.load(std::memory_order_acquire)) { spun = true; break; }
-      if((k & 15u) == 15u) spinPause();
+      if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     }
     // Sin trabajo tras el giro: el hilo se va a dormir. Lo acumulado en el renderer sale a la
     // GPU (ver vrdp::idle). Fuera de rdpMx: puede costar un submit de Vulkan.
@@ -3291,7 +3370,7 @@ auto Memory::dpSpinUntil(u64 bar, u64 comp) -> bool {
   for(u32 k = 0, lim = dpSpinLen(); k < lim; ++k) {
     if(!(rcpPend.load(std::memory_order_acquire) & 4u) || dpBarrierAt() != bar
        || dpCompSeq.load(std::memory_order_acquire) != comp) return true;
-    if((k & 15u) == 15u) spinPause();
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
   }
   return false;
 }
@@ -3633,13 +3712,13 @@ auto Memory::dpcMbCpu(u64 now) -> void {
 // despues de ahora tiene que seguir invisible.
 auto Memory::dmaSettleSlow(u32 lo, u64 hi) -> void {
   if(tlDpLogApply) return;                       // ya estamos dentro del propio vaciado
-  dmaSettles.fetch_add(1, std::memory_order_relaxed);
+  bumpOwned(dmaSettles);   // solo escribe el hilo de CPU
   if(hi <= lo) hi = (u64)lo + 1;
   u32 p = lo >> kDmaPgShift;
   const u32 e = (u32)((hi - 1) >> kDmaPgShift);
   for(; p <= e && p < kDmaPgN; p++)
     if(dmaPg[p].load(std::memory_order_acquire)) {
-      dmaSettleHits.fetch_add(1, std::memory_order_relaxed);
+      bumpOwned(dmaSettleHits);
       dpLogApply(cartNow());
       return;
     }
@@ -3718,7 +3797,7 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
       if(dpLogFlush.load(std::memory_order_acquire)) dpLogApply(~0ull);
       if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
     }
-    if((k & 15u) == 15u) spinPause();
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(ready()) break;
@@ -3739,7 +3818,7 @@ auto Memory::dpLogWait(u64 now, bool clock) -> void {
     const u64 tgt = now + kRdvGrain;
     for(u32 k = 0; k < 8192 && cartNow() < tgt; ++k) {
       if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
-      if((k & 15u) == 15u) spinPause();
+      if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     }
     rspRdvAt.store(0, std::memory_order_release);
   }
@@ -3839,6 +3918,15 @@ auto Memory::rcpSchedReset() -> void {
   rsp.idleNoSig = rsp.idleNoDrain = rsp.idleNoRoom = 0;
 }
 
+// Carrera de publicacion, sin esperar: un tramo lanzado entre que el RSP miro el horario y
+// ahora. Es lo unico que rspParkWait podia aportar con el motor drenado que sea un instante de
+// invitado de verdad; lo demas era el tope del regulador. Ver rspParkWait y Rsp::idleSkip.
+auto Memory::rspParkMissed(u64 seq0) -> u64 {
+  if(dpSubSeq.load(std::memory_order_acquire) == seq0) return 0;
+  const u64 st = dpJobStartG[seq0 & kDpRingM], kk = dpJobKickG[seq0 & kDpRingM];
+  return kk < st ? kk : st;
+}
+
 auto Memory::rspParkWait(u64 now, u64 seq0, u64 until) -> u64 {
   // Tope de adelanto de la CPU. Es tambien el destino de reserva: si la CPU llega hasta el sin
   // haber lanzado nada, el RSP salta ahi -- instante de invitado exacto -- y se vuelve a aparcar.
@@ -3884,7 +3972,7 @@ auto Memory::rspParkWait(u64 now, u64 seq0, u64 until) -> u64 {
       if(rspParkWake.load(std::memory_order_acquire)) break;
       if(k < tight || (k & pm) == pm) { if(cartNow() >= cap || missed()) break; }
       if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
-      if((k & 15u) == 15u) spinPause();
+      if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     }
   }
   u64 wake = 0, miss = 0;
@@ -3935,7 +4023,7 @@ auto Memory::rspParkWait(u64 now, u64 seq0, u64 until) -> u64 {
   // no habria llegado a aparcarse), asi que de haber varios candidatos gana el mas temprano.
   if(wake) return wake;
   if(miss) { rspParkMiss.fetch_add(1, std::memory_order_relaxed); return miss; }
-  if(capped) return cap;
+  if(capped) { rspParkCapN.fetch_add(1, std::memory_order_relaxed); return cap; }
   // Salvavidas de anfitrion: aqui el instante ya no seria de invitado, asi que no se salta nada.
   rspParkWv.fetch_add(1, std::memory_order_relaxed);
   if(std::getenv("KESTREL_DPSYNCLOG"))
@@ -3960,7 +4048,7 @@ auto Memory::dpReadSync(u64 now) -> void {
   for(u32 k = 0;; ++k) {
     if(cartNow() >= now) break;
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
-    if((k & 15u) == 15u) spinPause();
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
@@ -3981,7 +4069,7 @@ auto Memory::dpReadSync(u64 now) -> void {
   const u64 tgt = now + kRdvGrain;
   for(u32 k = 0; k < 8192 && cartNow() < tgt; ++k) {
     if(rspStop || rsp.hostStop.load(std::memory_order_relaxed)) break;
-    if((k & 15u) == 15u) spinPause();
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
   }
   rspRdvAt.store(0, std::memory_order_release);
 }
@@ -4045,7 +4133,7 @@ auto Memory::spStatusForRsp(u64 now) -> u32 {
     const SpSigWr& w = spSigRing[(spSigHead + k) % kSpSigN];
     v = (v & ~w.mask) | (w.prev & w.mask);
   }
-  return v | (rcp.sp_intr_on_break ? 0x40u : 0u);
+  return v | (rcp.sp_intr_on_break.load(std::memory_order_acquire) ? 0x40u : 0u);
 }
 
 // Cita del sondeo de SP_STATUS. Es la fase obligatoria de dpReadSync y nada mas: la CPU tiene
@@ -4073,7 +4161,7 @@ auto Memory::spReadSync(u64 now, u32 site) -> void {
     const bool look = (k < tight || (k & pm) == pm);
     if(look) { if(cartNow() >= now) break; }
     if((look || !cheap) && (rspStop || rsp.hostStop.load(std::memory_order_relaxed))) break;
-    if((k & 15u) == 15u) spinPause();
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();
@@ -4208,7 +4296,7 @@ auto Memory::rspDmaRdpWait(u32 lo, u32 hi) -> void {
     bool done = false;
     for(u32 k = 0, lim = dpSpinLen(); k < lim; ++k) {
       if(!(rcpPend.load(std::memory_order_acquire) & bits)) { done = true; break; }
-      if((k & 15u) == 15u) spinPause();
+      if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     }
     if(!done) {
       std::unique_lock<std::mutex> lk(rdpMx);
@@ -4233,19 +4321,65 @@ auto Memory::spBarrierOn() -> bool {
 
 // Parar el reloj del invitado en la barrera del RSP. Dormir aqui NO cuesta tiempo de invitado:
 // el hilo de CPU no retira instrucciones mientras espera, igual que en rspPace.
+// Umbral de la barrera del SP en CICLOS CRUDOS del RSP. spBarrierWait giraba llamando a
+// spBarrierEff() en cada vuelta, y esa cuenta no es barata: convierte ciclos de RCP a
+// instrucciones de invitado con una multiplicacion de 64 bits y una division por el
+// denominador del regulador, que solo se libra con el reciproco magico mientras el producto
+// cabe en su limite -- pasado ese limite es un DIVQ, ~90 ciclos en Nehalem, DENTRO de un giro
+// de 16384 vueltas. Y no hacia falta ninguna: en el giro lo unico que se mueve es el contador
+// de ciclos que publica el RSP, y la conversion es monotona, asi que la comparacion se puede
+// invertir una sola vez a la entrada y el giro queda en leer el contador y compararlo.
+//
+//   salir  <=>  now < spBarrierAt()
+//          <=>  now < ops(spKickEdge + cyclesRun - spKickCycles)
+// con ops(x) = techo(x*num/den):
+//          <=>  techo(x*num/den) > now  <=>  x*num > now*den  <=>  x >= suelo(now*den/num) + 1
+// y suelo(now*den/num) es exactamente rcpOpsToCycles(now), la inversa que ya existia.
+// Queda un umbral fijo sobre cyclesRun. Es la MISMA condicion, ni una vuelta antes ni despues:
+// no cambia el estado del invitado, solo deja de recalcular lo que no cambia.
+// Adelanto permanente de la CPU sobre la barrera del SP. Ver kRdvLead y spEndArm en memory.hpp.
+// Politica igual que dpLogLeadOn(): sin variable (o "auto") manda el modo de velocidad --
+// puesto en "libre", el de jugar, y quitado en "Fiel a consola" (KESTREL_SPEEDMODE=hw), donde
+// threaded vuelve a coincidir con lockstep. Las puertas lo fijan a 0.
+auto Memory::spLeadOps() -> u64 {
+  static const u64 v = []() -> u64 {
+    const char* e = std::getenv("KESTREL_SPLEAD");
+    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 1024ull;
+    return (u64)std::strtoull(e, nullptr, 0);
+  }();
+  return v;
+}
+
+auto Memory::spBarThreshold(u64 now) const -> u64 {
+  const u64 t = rcpOpsToCycles(now) + 1 + spKickCycles;
+  return t > spKickEdge ? t - spKickEdge : 0;
+}
+
 auto Memory::spBarrierWait(u64 now) -> void { RcpWaitMark rwm_{cpuRcpWait};
   u64 bar = spBarrierEff();
   if(now < bar || bar == spBarWaivedAt) return;
+  // Los dos umbrales del giro: el de siempre y el de la cita, que deja al invitado adelantarse
+  // kRdvLead. Cual manda lo decide rspRdvAt, que el RSP puede mover en mitad del giro; por eso
+  // se precalculan los dos y dentro solo se elige. spKickEdge/spKickCycles no se mueven: los
+  // escribe rspKick, que corre en ESTE hilo.
+  const u64 ldPlain  = spLeadOps();
+  const u64 ldRdv    = kRdvLead > ldPlain ? kRdvLead : ldPlain;
+  const u64 thrPlain = now >= ldPlain ? spBarThreshold(now - ldPlain) : 0;
+  const u64 thrLead  = now >= ldRdv ? spBarThreshold(now - ldRdv) : 0;
   // Espera activa corta antes de dormir. Quien levanta esta barrera es el RSP publicando
   // su reloj, y cuando lo publica para pedir una cita de lectura del FIFO (dpReadSync) lo
   // que falta son decenas de instrucciones de CPU. Dormir 200 us para eso convierte cada
   // cita en un viaje de ida y vuelta de milisegundos, y hay millones de citas por corrida.
   for(u32 k = 0, lim = barSpinLen(); k < lim; ++k) {
     if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;
-    if(now < spBarrierEff()) return;
+    // Camino raro (RSP aparcado): la barrera no sale de la conversion sino del tope del
+    // aparcamiento, asi que ahi se pregunta entero.
+    if(rspPark.load(std::memory_order_acquire)) { if(now < spBarrierEff()) return; }
+    else if(rsp.cyclesRun.load(std::memory_order_acquire)
+            >= (rspRdvAt.load(std::memory_order_acquire) ? thrLead : thrPlain)) return;
     // El RSP esperando a que apliquemos su diario no va a mover el reloj: aplicar aqui.
     if(rspLogWait.load(std::memory_order_acquire)) dpLogApply(now);
-    if((k & 15u) == 15u) spinPause();
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
   }
   // RSP aparcado con tope: llegar a la barrera ES llegar al tope, que es lo que espera el RSP
   // para despertar. Sin este aviso dormia hasta el vencimiento de su condvar.
@@ -4288,7 +4422,16 @@ auto Memory::rcpDeadlineOn() -> bool {
 }
 
 auto Memory::spEndArm(u64 cyclesUsed) -> void {
-  spDoneAt = spCycleAt(cyclesUsed);
+  // RETRASO FIJO DEL FIN DE TAREA CON ADELANTO PERMANENTE. Con kSpLeadAlways puesto la CPU
+  // puede estar hasta L ops por delante del reloj del RSP, asi que el instante crudo del BREAK
+  // puede nacer YA VENCIDO y habria que reencajarlo en cartNow() -- y cartNow() ahi es hora de
+  // ANFITRION, o sea adios determinismo (medido: 193 plazos vencidos por corrida y statehash
+  // distinto entre corridas del mismo binario). Sumando la MISMA L al instante del fin, el plazo
+  // es funcion pura del instante del RSP y NUNCA puede nacer vencido: la barrera garantiza
+  // cartNow() <= spBarrierAt() + L <= T + L. El precio es que MI_SP sube L ops de invitado mas
+  // tarde, un retraso fijo y conocido, del mismo orden que la latencia real de la interrupcion
+  // del SP en la consola. Con L=0 (defecto) no cambia nada.
+  spDoneAt = spCycleAt(cyclesUsed) + spLeadOps();
   spArms.fetch_add(1, std::memory_order_relaxed);
   if(spDoneAt < cartNow()) {
     const u64 nowOps = cartNow();
@@ -4347,7 +4490,7 @@ auto Memory::rcpFlushPending(u32 bits) -> void {
     rcpPend.fetch_and(~1u, std::memory_order_relaxed);
     rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
     spRets.fetch_add(1, std::memory_order_relaxed);
-    if(rcp.sp_intr_on_break) raiseIntr(MI_SP);
+    if(rcp.sp_intr_on_break.load(std::memory_order_acquire)) raiseIntr(MI_SP);
   }
   if(pend & 2u) {
     rcpPend.fetch_and(~2u, std::memory_order_relaxed);
@@ -4448,6 +4591,7 @@ static auto rspSpinLen() -> u32 {
 
 auto Memory::rspWorkerLoop() -> void {
   tlIsRspThread = true;
+  pinToPhysicalCore(2);
   hostprof::start("rsp");   // opt-in: KESTREL_HOSTPROF_WHO=rsp
   hostprof::gate(&rspBusy);   // no contar el sueno entre tareas: solo el coste de emular
   rspThreadH = selfThreadHandle();
@@ -4457,7 +4601,7 @@ auto Memory::rspWorkerLoop() -> void {
     // el lanzador ve rspIdleWaiting (mismo mutex) y notifica.
     for(u32 k = 0, n = rspSpinLen(); k < n; k++) {
       if(rspBusy.load(std::memory_order_acquire)) break;
-      if((k & 15u) == 15u) spinPause();
+      if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     }
     {
       std::unique_lock<std::mutex> lk(rspMx);

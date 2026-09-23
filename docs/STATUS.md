@@ -8224,3 +8224,264 @@ que la unica tasa posible era "fallos por instruccion retirada", no una tasa de 
   `dcRead`, asi que la variable lo apaga entero para que la muestra no salga sesgada. Mide, no
   corre. SM64 60 campos: **D$ 93,97 % (32,0 M accesos), I$ 98,18 %** (I$ solo el tramo
   interpretado; el JIT no busca instruccion por instruccion).
+
+## 2026-09-23 -- La lentitud "con ventana" no existia: la causaban mis propias pruebas
+
+Reporte del usuario: "va horrible, un pase de diapositivas, ni la intro se salva", y que
+empeoraba con cada cambio. Medido antes con `--run` (lote, SIN ventana) todo salia bien, asi
+que la sospecha era que el camino de ventana -- el unico que el usuario usa -- costaba algo
+que el lote no paga. Habia un candidato concreto y creible: `presentFrame` toma
+`vrdp::queueLock()` alrededor de `vkQueueSubmit` + `vkQueuePresentKHR`, y ese candado es el
+MISMO que Granite usa para todos los envios de parallel-rdp (`set_queue_lock`,
+`src/vrdp/vrdp.cpp:203`). Con `VK_PRESENT_MODE_FIFO_KHR` el present puede bloquear dentro del
+driver hasta el vblank, y bloquearia con el candado cogido: el worker del RDP no podria
+mandar nada a la GPU durante ese rato.
+
+**Medido: el candidato es falso y la lentitud tambien.** Perfect Dark (PAL), 300 intercambios
+de buffer, mismo exe, cuatro configuraciones:
+
+| configuracion | pared |
+|---|---|
+| ventana, MAILBOX (nuevo) | 14,28 s |
+| ventana, FIFO (`KESTREL_VSYNC=1`) | 14,28 s |
+| ventana, sin presentar (`KESTREL_NOPRESENT=1`) | 14,28 s |
+| ventana, regulador apagado | **4,90 s** |
+| sin ventana, regulador apagado | **4,80 s** |
+
+Los tres primeros son 14,28 s CLAVADOS porque 714 campos PAL / 50 Hz = 14,28 s: el emulador
+estaba **regulado a tiempo real exacto**, y con el regulador puesto la pared no puede medir
+capacidad. Con el regulador quitado, ventana 4,90 s contra lote 4,80 s: la ventana cuesta
+**2 %**, no 6x. Corrida larga de 75 s con ventana: `CPU 100,0 %` sostenido, present 45-48
+cuadros/s (PAL emite 50 campos/s), audio `silencio 0,00 % descartadas=0`. O sea PD va a
+tiempo real con casi 3x de margen (14,28 / 4,90).
+
+**De donde salia entonces el pase de diapositivas.** De mi: lance hasta tres instancias de PD
+a la vez en un anfitrion de 4 nucleos mientras el usuario probaba. Las cifras "29,3 s con
+ventana" y ">120 s en arbol limpio" que motivaron toda esta caza estaban contaminadas por eso;
+no son reproducibles en cuanto la maquina esta libre. Leccion operativa, no tecnica: **no
+medir ni lanzar nada mientras el usuario tiene el emulador delante**, y desconfiar de un numero
+de pared que no se repite en una maquina ociosa.
+
+Leccion tecnica que si vale: **con el regulador puesto la pared mide el reloj del invitado, no
+el emulador.** Cualquier medida de velocidad con ventana tiene que llevar `KESTREL_THROTTLE=0`
+o no mide nada. El `bench` de `validate.py` ya lo hace; las pruebas a mano no lo hacian.
+
+### Lo que si se queda del barrido
+- **Modo de presentacion elegido, no fijo** (`src/video/present.cpp`, `createSwapchain`). Se
+  consulta `vkGetPhysicalDeviceSurfacePresentModesKHR` y se prefiere `MAILBOX` (con
+  `minImageCount >= 3`, que si no degrada a FIFO), luego `IMMEDIATE`, y FIFO de ultimo recurso.
+  `KESTREL_VSYNC=1` fuerza FIFO. Medido NEUTRO en pared en este anfitrion; se queda porque
+  quita la latencia de un vblank en el camino que sostiene el candado de cola compartido, y
+  porque deja de depender de que el driver decida no bloquear en `vkQueuePresentKHR`.
+- **Telemetria de presentacion** en el latido: `[hb] present: N cuadros/s (M ms de media en
+  present) WxH`. El invitado puede ir al 100 % y verse a tirones igual si el bucle de ventana
+  no sigue el ritmo; hasta ahora no habia forma de distinguir los dos casos.
+- `KESTREL_NOPRESENT=1`: ventana abierta y cuadro construido, sin tocar la cola de Vulkan. Es
+  la biseccion que separa "construir el cuadro" de "presentarlo".
+
+### Descartado: quitar la cita de DMA del SP (`KESTREL_DMARDV=0`)
+Tentador -- PD 300 intercambios, tres corridas por brazo y lecturas disjuntas: 4,78/4,89/4,90 s
+con cita contra 4,11/4,14/4,17 s sin ella, **-15 %**, y en PD el statehash no se mueve
+(`0ce0913c17abf0db` en los seis). Pero junkrunner64 lo caza en el acto: `be43cd2ed3a10522` con
+cita, `efbb2460c5a1f9f6` sin ella. Es exactamente lo que `docs/ARCH-SYNC.md` ya habia
+dictaminado ("ese 45,7 fps es inalcanzable siendo exacto, no volver a intentarlo por esta
+via"): el DMA del SP lee RDRAM en el instante de invitado del RSP, y sin la cita lee un buffer
+que la CPU todavia no ha escrito. No es sobrecoste de protocolo, es trabajo real. Queda como
+estaba.
+
+## 2026-09-23 (b) -- El RSP se cobraba 637 M de ops inventadas esperando a la CPU
+
+Perfect Dark rendia 15,7 fps de juego (1082 intercambios / 3436 campos VI en PAL) con el
+emulador corriendo a 10,7x tiempo real. O sea: el anfitrion sobraba y el cuello estaba en el
+TIEMPO DE INVITADO -- el modelo le daba al juego menos presupuesto del que tiene la consola.
+
+### Como se encontro
+
+Primero se descarto el dynarec: interprete lockstep y JIT threaded salen **bit a bit iguales**
+(1022 intercambios, 2983 campos, 3999 M insns, `rspCycles=1065583603`, `rdpGclk=33544459`).
+Solo cambia la pared. El numero de operaciones lo fija el modelo del RCP.
+
+Luego, tres sondas nuevas (ver "Telemetria" abajo):
+
+- `[ociosoquien]`: el 65,6 % del tiempo de invitado la CPU esta en el hilo ocioso de libultra
+  (`0x70001938`), y el **98,2 % de ese ocio tiene `rspBusy` puesto**. La CPU espera al RSP,
+  casi nunca al RDP.
+- `idleCyc` en `[det]`: el **45 % de los ciclos del RSP eran giro puro** (159 M de 350 M).
+- `[rspgiro]`: todo ese giro cae en UNA instruccion de IMEM, `pc=0x1A4`, leyendo DPC_CURRENT:
+
+  ```
+  1A4: 40175000   mfc0 $s7, DPC_CURRENT
+  1A8: 8FB30040   lw   $s3, 0x40($29)
+  1AC: 12F3FFFD   beq  $s7, $s3, 0x1A4     <- gira mientras CURRENT == $s3
+  1B4: 40934000   mtc0 $s3, DPC_START
+  ```
+
+- El desglose `rdp/cpu` de ese giro: **`rdp0M / cpu159M`**. Ni un ciclo esperaba a un evento
+  fechado del RDP. El motor estaba drenado el 100 % de las veces.
+- `KESTREL_PARKLOG`: **38 de 38 aparcamientos salian por el tope**, ninguno por evento.
+
+  ```
+  [pk] now=3762080136 until=0 cap=3778857352 sched=3760962671 via=cap salto=16777216 cart=3778857352
+  ```
+
+### La raiz
+
+`Rsp::idleSkip` detecta el bucle de espera del FIFO por firma y cobra las vueltas en bloque
+hasta el siguiente instante YA FECHADO. Con el motor del RDP drenado no hay ninguno, asi que
+`Memory::rspParkWait` aparcaba el RSP y acababa devolviendo `cap = now + kParkLead` (16,7 M de
+ops). Eso **no es un instante que produzca el chip**: es el tope del regulador. Y se
+realimentaba, porque `spBarrierAt()` para a la CPU justo en ese tope mientras el RSP esta
+aparcado (`rspPark + kParkLead`), de modo que la CPU corria hasta el tope, se paraba, y el RSP
+saltaba exactamente a donde ella se habia parado. Abrazo mortal en tiempo de invitado roto por
+un numero nuestro.
+
+38 saltos x 16,7 M = **637 M de ops de 4606 M, el 13,8 % del tiempo del juego, inventadas**.
+Y ademas ese giro infla `cyclesUsed` de la tarea, lo que retrasa el plazo de fin de SP, lo que
+deja a la CPU mas tiempo en el hilo ocioso: se retroalimenta.
+
+### El arreglo
+
+`Rsp::idleSkip` solo se aparca cuando hay un cambio FECHADO por delante (`until`). Sin el, el
+unico que puede sacar al RSP del bucle es la CPU y su escritura no tiene instante conocido: no
+hay nada que saltar. Queda la carrera de publicacion -- un tramo lanzado entre que el RSP miro
+el horario y ahora --, que si es un instante de invitado, y que se comprueba sin esperar con el
+nuevo `Memory::rspParkMissed`. El salto con motor ocupado (`until` fechado), que es el que
+existe por libdragon/DK64, no cambia.
+
+### Medido (Perfect Dark PAL, savestate 0, 1082 intercambios de buffer)
+
+| | campos VI | fps de juego | pared |
+|---|---|---|---|
+| antes | 3436 | 15,7 | 5,6-6,2 s |
+| despues | **2924** | **18,5** | **4,6-5,2 s** |
+
++17,5 % de fotogramas de juego y -17 % de pared a la vez. Los ciclos de giro inventados pasan
+de 159 M a 0; los saltos legitimos siguen ahi (`idle=7446/68929`).
+
+### Telemetria nueva
+
+- `KESTREL_GPCPROF=<topN>` -- perfil por PC de INVITADO del dynarec, muestreado por tiempo (una
+  muestra cada 1024 ops retiradas, no por entrada al bloque, que sesga hacia los bloques cortos)
+  y con las 12 instrucciones de cada sitio desensambladas.
+- `[ociosoquien]` dentro de `KESTREL_JIT_STATS` -- reparto del ocio del invitado segun quien
+  trabajaba: nadie / solo RSP / solo RDP / los dos.
+- `KESTREL_RSPPROF=<topN>` -- perfil de ranura de IMEM (solo camino interprete, o sea que pide
+  `KESTREL_RSPJIT=0`), mas `[rspgiro]`: donde gira el microcodigo, cuantos ciclos y el volcado
+  de IMEM alrededor.
+- `KESTREL_RSPSHOW=<n>` -- las n primeras vueltas saltadas con PC, valor leido y registros.
+- `KESTREL_RSPTASKS=1` -- reparto de tareas y ciclos del RSP por `OSTask.type`.
+- `[det]` lleva ahora `ciclos=<giro>M(rdp<n>M/cpu<n>M ...)`: ciclos de giro cobrados en bloque y
+  a quien esperaban.
+
+## 2026-09-23 (c) -- VI_WIDTH es el PASO de linea, no el ancho: DK64 arrancaba en negro
+
+Donkey Kong 64 no ensenaba NADA durante los ~300 primeros intercambios de buffer: ni el
+logo de Nintendo ni el de Rare. El juego SI pintaba (77 tareas de grafico del RSP y 76
+SYNC_FULL en 90 intercambios), y con SoftRDP salia igual de negro, o sea que no era el
+backend.
+
+Causa: DK64 arranca en **640x480 entrelazado** (`VI_CONTROL` con serrate) y programa
+`VI_WIDTH=1280`. VI_WIDTH es el paso de linea del framebuffer EN PIXELES, no el ancho
+visible: con 1280 de paso cada campo lee lineas alternas del mismo framebuffer de 640x480,
+que es como se hace el entrelazado en la consola. Lo visible siguen siendo 640, y sale de
+la ventana activa de `VI_H_VIDEO` escalada por `X_SCALE`.
+
+Aqui los dos consumidores del framebuffer trataban VI_WIDTH como ancho:
+
+- `dumpFramebufferBmp` (`src/cpu/cpu.cpp`) capaba `srcW > 640 -> 320`. Capar el PASO
+  desplaza cada fila: salia una imagen negra de 320 columnas.
+- El presentador (`src/video/present.cpp`) usaba `width` a la vez de paso y de ancho, y
+  ademas lo capaba a `kMaxSrcW` (1024), con lo que el paso quedaba mal y la imagen salia
+  cizallada. Eso es lo que se veia en la ventana.
+
+Arreglado en los dos: el paso es `VI_WIDTH` (tope = los 12 bits del registro) y el ancho
+sale de `((H_END - H_START) * X_SCALE) >> 10`. Solo se RECORTA -- barrer mas pixeles de los
+que hay en la linea no pasa nunca --, asi que ninguna ROM donde paso y ancho coinciden
+cambia ni un byte. Y coinciden en casi todas: H_VIDEO estandar son 640 relojes activos, o
+sea X_SCALE 0x200 -> 320 y 0x400 -> 640.
+
+Verificado: krom 371/371, `regress=0 improve=0 new=0` (mean_exact 88,71). El volcado de DK64
+pasa de 0,0 % de pixeles no negros a 22,1 % (logo N64 girando, 640x240) y 7,6 %.
+
+## 2026-09-23 (d) -- Enlace TLB entre paginas y pre-armado del permiso: PD -15 % de pared
+
+Dos cambios en el dynarec, los dos con `[statehash]` y `[frames]` identicos.
+
+**1. Enlace de bloques cuyo destino cae en otro marco de 4 KB** (`g_jitTlbXPage`, ahora por
+defecto puesto; `KESTREL_JIT_NOTLBXPAGE=1` vuelve atras). Perfect Dark ejecuta desde
+`0x70000000`, o sea todo mapeado por TLB, y la restriccion de "mismo marco" dejaba sin enlazar
+cualquier `JAL` a otra funcion: **1,28 M de salidas lentas directas por corrida, el 41 % de las
+entradas al driver**. El destino se resuelve con `c.tlbProbePhys(va)`, una sonda sin efectos
+secundarios. Es sano por la misma razon que el enlace TLB de mismo marco: la traduccion queda
+congelada en el sitio, y cualquier remapeo (TLBWI/TLBWR/ASID) sube `cpu.tlbGen`, que desenlaza
+TODO y re-sondea la VA de cada sitio antes del siguiente despacho (`[icache] desenlaceTLB=0` en
+esta ventana, o sea que ni se toca). Medido F993->F1082, tres tandas intercaladas: 4590/4656 ms
+-> 4042/4122 ms, **-12 %**. `lentaDirecta` 1 280 000 -> 11 580, `ops/entrada` 27,5 -> 45,5.
+
+**2. Pre-armado del permiso en el driver** (`KESTREL_JIT_NOPREARM=1` para bisecar). El camino
+rapido en linea veia `jitGuard == 0`, saltaba a `kestrel_jitProceedTramp` y este llamaba a
+`jitReenterProceed`: una llamada Win64 y una rama fallada por CADA entrada al driver, 3,1 M por
+corrida de PD y 3,85 % del hilo de CPU en el perfil de anfitrion. El trampolin no hace nada mas
+que estadisticas y esa llamada, asi que el driver la hace directo con la MISMA K y con
+`jitChain` recien puesto a 0 -- el mismo `jitChain == 1` que veia el trampolin. min-de-5:
+4318/4103/4051/4057/4043 -> 4066/3967/3963/4035/3893, **-3,7 %**, lecturas casi disjuntas.
+
+**Resultado negativo del mismo barrido**: la hipotesis de que el borde del timer trocea las
+cadenas era FALSA. Instrumentado el permiso concedido de verdad (`[permiso]` con medias y
+`[permisohist]`, histograma log2): media 718 ops, moda en el cubo 256-1024. El tope
+`kGuardMaxOps` se concede 16 411 veces con media 30 010. Re-barrido `KESTREL_RSPTANDA` tras los
+dos cambios: 128 -> 4390/4182/4142, 256 -> 4013/3998/3996, 1024 -> 3931/3939/3977, 4096 ->
+3928/3974/3994. **1024 se queda.**
+
+Validado: sm64 md5 `d35bd8aa9b13d459ce9332c07a79a53a` en interp / jit / threaded / threaded-jit,
+systemtest threaded-jit 0/3721 0/2 0/6.
+
+## 2026-09-23 (e) -- `KESTREL_SPLEAD`: se rompe la alternancia estricta CPU<->RSP, PD -25 %
+
+Con los dos cambios de arriba los dos hilos salian **saturados** (`[block] rsp ocupado 93,4 % |
+CPU real: cpu 101,4 % rsp 96,4 %`) y el 18 % del hilo de CPU caia en `Memory::rcpRetire`, o sea
+girando en la barrera del SP. La razon es estructural: la barrera del SP clava a la CPU en
+`spBarrierAt()`, el instante al que el RSP ha trabajado DE VERDAD, y la cita de `SP_RD_LEN`
+obliga al RSP a cumplir `cartNow() >= now`. Las dos juntas fuerzan **reloj de CPU == reloj de
+RSP**: alternancia estricta, cero solape entre los dos hilos por construccion. 177 441 citas y
+243 M de vueltas de giro por corrida de PD.
+
+`KESTREL_SPLEAD=<ops>` da a la CPU un adelanto FIJO sobre la barrera, siempre, no solo mientras
+dura una cita (que es lo que ya hacia `kRdvLead`). Medido en PD F993->F1082, min de 3:
+
+| adelanto | pared | citas | vueltas de giro |
+|---|---|---|---|
+| 0 | 3999-4250 ms | 177 441 | 243 M |
+| 1024 | 2927-3013 ms | 70 128 | 107 M |
+| 4096 | 2910-2950 ms | | |
+| 16384 | 2857-2982 ms | | |
+
+**El primer intento NO era determinista** y hubo que arreglarlo: con la CPU por delante, el
+instante crudo del BREAK puede nacer ya vencido y habia que reencajarlo en `cartNow()`, que es
+hora de anfitrion -- 193 plazos vencidos por corrida y `[statehash]` distinto entre corridas del
+mismo binario. La cura es sumar la MISMA L al instante del fin de tarea en `Memory::spEndArm`:
+asi el plazo es funcion pura del instante del RSP y no puede nacer vencido, porque la barrera
+garantiza `cartNow() <= spBarrierAt() + L <= T + L`. Con eso `[spvenc] 0 vencidos` y el
+`[statehash]` sale **identico corrida tras corrida** para cada L.
+
+Lo que si cambia es el MODELO de tiempo: `MI_SP` sube L ops de invitado mas tarde (con 1024,
+~15 us de invitado), y el contador `stale=` de `[det]` pasa de 0 a 62 -- respuestas de DPC
+calculadas contra un FIFO al que le faltaba un tramo que la CPU instalo mas adelante. O sea,
+threaded deja de coincidir con lockstep. Misma clase que `KESTREL_DPLOGLEAD` y **misma
+politica**: sin variable (o `auto`) manda el modo de velocidad, puesto en "libre" con **1024** y
+quitado en `KESTREL_SPEEDMODE=hw`; `scripts/validate.py` lo fija a 0, asi que las puertas siguen
+siendo el oraculo determinista. Opcion en el lanzador y en la barra de menu.
+
+Otros juegos, 200 intercambios desde arranque en frio: DK64 3003-3026 -> 2569-2587 ms (**-15 %**,
+`[statehash]` identico con y sin adelanto), SM64 3843-3948 -> 3525-3580 ms (**-8 %**; el
+statehash de SM64 desde arranque en frio ya variaba entre corridas SIN adelanto, no es cosa de
+esto). sm64 md5 `d35bd8aa9b13d459ce9332c07a79a53a` MATCH en los cuatro modos incluso con
+`KESTREL_SPLEAD=4096`.
+
+**Descartado en el mismo sitio**: `KESTREL_DMAGRAIN` (pedir un grano de mas en la cita del DMA
+del SP). Con el adelanto puesto ya cabria, pero medido es PEOR y no reproducible: grano 0 ->
+2965/2987 ms, 4096 -> 3227/3305, 16384 -> 3516/3527, y tres `[statehash]` distintos entre
+corridas. Codigo retirado, queda la nota en `src/rsp/rsp.cpp`. Retirado tambien `KESTREL_BARSLOW`,
+que era un andamio de biseccion.
+
+**Resumen de la tanda**: PD F993->F1082 de ~4600 ms a ~2950 ms, **-36 %**.

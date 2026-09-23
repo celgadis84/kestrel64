@@ -577,6 +577,13 @@ auto System::serviceStateReq() -> void {
 }
 
 auto System::run() -> void {
+  // KESTREL_LOADSTATE=<ranura>: cargar un estado nada mas arrancar. Medir el rendimiento en
+  // el menu o en la intro no dice nada del juego; esto lleva la maquina a la partida guardada
+  // sin pasar por el mando. Va por la misma peticion que la tecla, o sea que espera al reposo
+  // del RCP y no se salta nada.
+  if(const char* ls = std::getenv("KESTREL_LOADSTATE"))
+    stateLoadReq.store(std::atoi(ls), std::memory_order_release);
+
   // Ciclos de RSP: los publica el propio core en cada step(), asi que el contador vale igual
   // en Lockstep (interleave del bucle) que en Threaded (tarea entera en el worker).
   auto rspNow = [this]{ return memory.rsp.cyclesRun.load(std::memory_order_relaxed); };
@@ -803,6 +810,8 @@ auto System::run() -> void {
       }
     });
   }
+  // El hilo de CPU es el palo largo: se queda el nucleo fisico 0 para el solo.
+  Memory::pinCpuThread();
   hostprof::start();   // opt-in host sampler; samples THIS (CPU) thread
 
   // M1: run the CPU in short batches when not paused, yielding coreMutex between
@@ -1116,6 +1125,11 @@ auto System::run() -> void {
       std::fprintf(stderr, "[dplog] %llu apuntadas (%llu DMA), %llu esperas, %u renuncias\n",
                    (unsigned long long)memory.dpLogPushes.load(), (unsigned long long)memory.dmaLogPushes.load(),
                    (unsigned long long)memory.dpLogWaits.load(), memory.dpLogWaives.load());
+      // Cuantas veces el hilo de CPU tuvo que mirar si un DMA del diario tapaba lo que iba a
+      // leer (una por fallo de linea de D con el diario no vacio) y cuantas de esas acerto.
+      std::fprintf(stderr, "[dmasettle] %llu miradas, %llu aciertos (%.2f%%)\n",
+                   (unsigned long long)memory.dmaSettles.load(), (unsigned long long)memory.dmaSettleHits.load(),
+                   memory.dmaSettles.load() ? 100.0 * (double)memory.dmaSettleHits.load() / (double)memory.dmaSettles.load() : 0.0);
       // Fallos de cache primaria del tramo. Es la materia prima del CPI real: el VR4300 no
       // gasta un numero fijo de ciclos por instruccion, gasta uno mas la penalizacion de
       // RDRAM de cada fallo. Sin esta cuenta el CPI solo se puede suponer.

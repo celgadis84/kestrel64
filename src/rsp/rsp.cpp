@@ -150,6 +150,8 @@ auto R128::operator()(u32 e) const -> R128 {
 }
 
 Rsp::Rsp() {
+  if(const char* e = std::getenv("KESTREL_RSPPROF")) if(std::strtoul(e, nullptr, 0)) profOn = true;
+  if(const char* e = std::getenv("KESTREL_RSPSHOW")) idleShow = (u32)std::strtoul(e, nullptr, 0);
   // Salto del bucle de espera del FIFO (ver Rsp::idleSkip). KESTREL_RSPIDLE=0 lo apaga y el
   // md5 del framebuffer tiene que salir igual: es un atajo de anfitrion, no de semantica.
   { const char* v = std::getenv("KESTREL_RSPIDLE"); idleOn = !(v && v[0] == '0'); }
@@ -194,7 +196,48 @@ Rsp::Rsp() {
   }
 }
 
-Rsp::~Rsp() { if(statsOn) jitStatsDump(); for(auto*& w : jcWay) { delete w; w = nullptr; } jc = nullptr; }
+// KESTREL_RSPPROF=<topN>: perfil de IMEM del microcodigo (ranura de 4 B). Usa el mismo
+// contador que el muestreador del MCP; solo cuenta el camino del INTERPRETE, asi que para
+// una foto completa hay que correr con KESTREL_RSPJIT=0.
+auto Rsp::profDump() -> void {
+  if(idleCycCur | idleCycSt) {
+    std::printf("[rspgiro] cur=%lluM st=%lluM\n", (unsigned long long)(idleCycCur/1000000),
+                (unsigned long long)(idleCycSt/1000000));
+    for(u32 i = 0; i < 16 && idlePcHist[i]; i++) {
+      std::printf("[rspgiro] pc=%03X %s ciclos=%lluM\n", (u32)(idlePcKey[i] & 0xfffu),
+                  (idlePcKey[i] >> 31) ? "STATUS" : "CURRENT",
+                  (unsigned long long)(idlePcHist[i]/1000000));
+    { const u32 pc0 = (u32)(idlePcKey[i] & 0xff0u);
+      for(u32 k = 0; k < 10; k++) { const u32 a = (pc0 + k * 4) & 0xffcu;
+        const u32 w = ((u32)mem->imem[a]<<24)|((u32)mem->imem[a+1]<<16)|((u32)mem->imem[a+2]<<8)|mem->imem[a+3];
+        std::printf("[rspgiro]   %03X: %08X\n", a, w); } } }
+  }
+
+  const char* e = std::getenv("KESTREL_RSPPROF");
+  if(!e || !profTotal) return;
+  u32 top = (u32)std::strtoul(e, nullptr, 0); if(!top) return;
+  std::vector<u32> idx; for(u32 i = 0; i < 1024; i++) if(profPc[i]) idx.push_back(i);
+  std::sort(idx.begin(), idx.end(), [&](u32 a, u32 b){ return profPc[a] > profPc[b]; });
+  std::fprintf(stderr, "[rspprof] muestras=%llu ranuras=%zu\n",
+               (unsigned long long)profTotal, idx.size());
+  for(u32 r = 0; r < top && r < idx.size(); r++)
+    std::fprintf(stderr, "[rspprof] %2u imem=0x%03x %10u %6.2f%%\n", r, idx[r] * 4,
+                 profPc[idx[r]], 100.0 * profPc[idx[r]] / (double)profTotal);
+  std::fflush(stderr);
+}
+
+auto Rsp::taskDump() -> void {
+  u64 tot = 0; for(u32 i = 0; i < 8; i++) tot += taskCyc[i];
+  if(!tot || !std::getenv("KESTREL_RSPTASKS")) return;
+  for(u32 i = 0; i < 8; i++) if(taskN[i])
+    std::fprintf(stderr, "[rsptask] tipo=%u tareas=%llu ciclos=%lluM (%.1f%%) media=%llu\n", i,
+                 (unsigned long long)taskN[i], (unsigned long long)(taskCyc[i]/1000000),
+                 100.0 * (double)taskCyc[i] / (double)tot,
+                 (unsigned long long)(taskCyc[i] / taskN[i]));
+  std::fflush(stderr);
+}
+
+Rsp::~Rsp() { taskDump(); profDump(); if(statsOn) jitStatsDump(); for(auto*& w : jcWay) { delete w; w = nullptr; } jc = nullptr; }
 
 // Elige la tabla de bloques que corresponde al microcodigo que hay AHORA en IMEM.
 //
@@ -450,7 +493,15 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   // drenado en `now` no hay ningun tramo lanzado con fecha posterior, asi que el siguiente nace
   // forzosamente donde la CPU este o mas alla: aterrizar en SU lanzamiento es correcto y ademas
   // es un instante de invitado. Eso es lo que devuelve rspParkWait.
-  const u64 tgt = mem->rspParkWait(now, seq0, until);
+// Sin cambio FECHADO por delante (`until` vacio) el unico que puede sacar al RSP del bucle es
+  // la CPU, y su escritura no tiene instante conocido: no hay nada que saltar. Aparcarse a
+  // esperarla hacia que el salto aterrizase en `now + kParkLead`, que es el tope del regulador
+  // -- un numero nuestro, no un instante que produzca el chip -- y encima se realimentaba,
+  // porque la barrera del SP para a la CPU justo en ese tope mientras el RSP esta aparcado.
+  // Medido en Perfect Dark: 38 de 38 aparcamientos salian asi, 16,7 M de ops cada uno = 637 M
+  // de 4606 M, el 13,8 % del tiempo del juego, inventadas. Queda solo la carrera de
+  // publicacion, que si es un instante de invitado.
+  const u64 tgt = until ? mem->rspParkWait(now, seq0, until) : mem->rspParkMissed(seq0);
   if(tgt <= now) { idleNoRoom++; return; }
   // Vueltas que se pueden saltar: las lecturas en cyc + j*len (j = 1..k) tienen que caer TODAS
   // antes de `tgt`, que es lo que habria visto el bucle dando las vueltas de verdad (Lockstep).
@@ -467,6 +518,16 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   publishExact();
   cyclesRun.fetch_add(k * len, std::memory_order_relaxed);
   idleAt += k * len;
+  idleCyc.store(idleCyc.load(std::memory_order_relaxed) + k * len, std::memory_order_relaxed);
+  if(until) idleCycRdp += k * len; else idleCycCpu += k * len;
+  if(cur) idleCycCur += k * len; else idleCycSt += k * len;
+  if(idleShow) { idleShow--;
+    std::printf("[rspgiro!] pc=%03X cur=%08X s3=%08X s7=%08X k=%llu len=%llu\n",
+                idlePc, val, r[19], r[23], (unsigned long long)k, (unsigned long long)len); }
+  { const u64 key = (u64)idlePc | (cur ? 0 : (1ull << 31));
+    for(u32 i = 0; i < 16; i++) {
+      if(!idlePcHist[i]) idlePcKey[i] = key;
+      if(idlePcKey[i] == key) { idlePcHist[i] += k * len; break; } } }
   bumpOwned(idleSkips);                 // solo escribe el hilo del RSP
   idleIters.store(idleIters.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
 }
@@ -598,6 +659,11 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   // distinto de Lockstep; con la cita, igual. KESTREL_DMARDV=0 la quita (para bisecar).
   if(((rd & 7) == 2 || (rd & 7) == 3) && (dmaRdv & (1u << ((rd & 7) - 2))) && mem->rcpMode == Memory::RcpMode::Threaded) {
     const u64 now = mem->rspGuestNowAt(exactCycles());
+    // GRANO DE LA CITA: PROBADO Y DESCARTADO. Pedir un poco mas que `now` (KESTREL_DMAGRAIN)
+    // ahorraba citas pero salio PEOR de pared y no reproducible: con SPLEAD=1024 en Perfect
+    // Dark, 2965/2987 ms con grano 0 contra 3227/3305 con 4096 y 3516/3527 con 16384, y tres
+    // statehash distintos entre corridas del mismo binario. El adelanto que si sirve es el de
+    // la barrera del SP (Memory::spLeadOps), que no toca el instante de la cita.
     if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now, 4); }
   }
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
@@ -628,7 +694,7 @@ auto Rsp::exec(u32 op) -> void {
     case 0x0d:                                                     // BREAK
       // INTR_ON_BREAK decide el aviso del BREAK: no puede quedar escrito en el diario.
       if(mem->spLogCrit.load(std::memory_order_acquire)) { publishExact(); mem->dpLogWait(0, false); }
-      if(Memory::spSigQuant() > 1 && !mem->rcp.sp_intr_on_break) {
+      if(Memory::spSigQuant() > 1 && !mem->rcp.sp_intr_on_break.load(std::memory_order_acquire)) {
         // Senales de la CPU aun aplazadas por el grano: ver Memory::spLateClearHalt.
         const u64 now = mem->rspGuestNowAt(exactCycles());
         if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < now) {
@@ -2153,6 +2219,10 @@ auto Rsp::step(u64 maxInsns) -> void {
     // publishes everything the microcode wrote (DMEM output, PC) to the poller.
     if(broke) {
       broke = false;
+      // Reparto del coste del RSP por TIPO de tarea (OSTask.type en DMEM 0xFC0): con esto se
+      // ve si el gasto se va en graficos o en audio. Solo contadores, sin efecto en el invitado.
+      { u32 a = 0xfc0; u32 ty = ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3];
+        u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += ran; }
       static const bool tr = std::getenv("KESTREL_RSPTRACE") != nullptr;
       if(tr) { static unsigned n = 0; n++;
         auto dm = [&](u32 a){ a &= 0xffc;
@@ -2170,7 +2240,7 @@ auto Rsp::step(u64 maxInsns) -> void {
       } else {
         mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
         mem->spRets.fetch_add(1, std::memory_order_relaxed);
-        if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
+        if(mem->rcp.sp_intr_on_break.load(std::memory_order_acquire)) mem->raiseIntr(MI_SP);
       }
     }
     running = false; brake = false; return;
@@ -2182,7 +2252,7 @@ auto Rsp::step(u64 maxInsns) -> void {
     dumpHang();
     mem->rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);
     mem->spRets.fetch_add(1, std::memory_order_relaxed);
-    if(mem->rcp.sp_intr_on_break) mem->raiseIntr(MI_SP);
+    if(mem->rcp.sp_intr_on_break.load(std::memory_order_acquire)) mem->raiseIntr(MI_SP);
     running = false; brake = false;
   }
 }
