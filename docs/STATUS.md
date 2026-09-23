@@ -8485,3 +8485,180 @@ corridas. Codigo retirado, queda la nota en `src/rsp/rsp.cpp`. Retirado tambien 
 que era un andamio de biseccion.
 
 **Resumen de la tanda**: PD F993->F1082 de ~4600 ms a ~2950 ms, **-36 %**.
+
+---
+
+## 2026-09-23/24 — El banco de pruebas cambio: la intro NO era el juego
+
+Durante toda la tanda anterior el banco era la ranura 5/6 del savestate de Perfect Dark PAL.
+Volcando el framebuffer con `KESTREL_VIDEO_DUMP` resulto ser **la cinematica de atraccion**,
+no partida. El usuario grabo una partida de verdad en la **ranura 0** (la vieja quedo en
+`test_roms/pd-pal-intro-bench.st0.bak`, sigue valiendo para A/B si se restaura).
+
+**Banco de partida (el que manda a partir de ahora)**:
+
+```sh
+B="/e/Claude/N64/test_roms/Perfect Dark (Europe) (En,Fr,De,Es,It).n64"
+KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 KESTREL_MAXFLIPS=1793 ./build-prdp-static/kestrel64.exe "$B" --run
+```
+
+Invariantes que NO pueden moverse:
+
+```
+[frames] 1793 buffer swaps, 3221 VI fields, 1717 RDP syncs, 332 lecturas de mando after 4318M insns, origin=663140
+[statehash] 58e909a726442e1c
+```
+
+El savestate arranca ya en el intercambio 1613 / campo 2889, asi que el tramo medido es
+**180 intercambios y 332 campos VI = 6,64 s de invitado** (PAL, 50 campos/s) y **444 M de
+instrucciones de CPU** (CPI ~1,4 a 93,75 MHz: cuadra con la maquina). El juego va a
+**27 fps**, que es su ritmo real. La carga se reparte `rsp ocupado ~90 % | rdp ~16 % |
+cpuWait ~12 %`: manda el RSP.
+
+**Cuidado con la aritmetica**: "332 lecturas de mando" NO son campos VI. Tomandolo por campos
+salia un invitado de 6,64 s donde en realidad hay 64,4 s **desde arranque en frio**; el tramo
+del banco si son 6,64 s. Un rato se creyo que ibamos a 8x tiempo real y no.
+
+### Punto de partida
+
+Pared 7,42-7,64 s para 6,64 s de invitado = **0,87-0,92x tiempo real**. Faltaba un 10-15 %.
+
+Perfil de anfitrion (`KESTREL_HOSTPROF`), hilo del RSP: `33,88 % Rsp::mfc0`, `19,02 % <<JIT>>`
+(microcodigo de verdad), `15,20 % Memory::spReadSync`, `4,57 % dpcCurrentFor`. Hilo de CPU:
+`37,85 % Memory::rcpRetire`, `23,74 % <<JIT>>`. O sea: solo una quinta parte del hilo del RSP
+ejecuta microcodigo; el resto es el sondeo del FIFO y el apreton con la CPU.
+
+### Diseccion del sondeo
+
+`[det]` del banco: `dpcRd=26779941/953183` — **26,8 M lecturas de DPC_CURRENT** en 6,64 s de
+invitado. El delta de `rspCycles` es 401,6 M en ese tramo = 60,5 MHz sobre 62,5 MHz: el RSP va
+al 97 % de ocupacion **de invitado**, y 26,8 M sondeos a 15 ciclos de media se lo comen. El
+bucle es de 4 ciclos (`len=4`) en `pc=0x1A4`.
+
+Contadores nuevos (temporales) partiendo `idleNoRoom` en sus tres salidas:
+
+```
+idle=38815/223649   nr=25709793/49/212 u=25709793
+```
+
+- `nr1` = 25 709 793 renuncias por `tgt <= now`, y **las mismas 25,7 M** con `until == 0`.
+- `nr2`/`nr3` = 49 + 212. El camino con motor ocupado casi siempre SI salta (38 815 saltos).
+
+Volcando el estado en esas renuncias:
+
+```
+[nr1] pc=1A4 val=000C2DE0 start=000C2DE0 end=000D2DA8 cur=000C2DE0 st=00000002 sub=694603 comp=694603 len=4
+```
+
+`sub == comp` siempre: **motor drenado**. Y ahi esta el hallazgo: con el motor drenado
+`dpNextChangeAt` devuelve 0 por construccion (todos los tramos han cerrado antes de `now`), y
+con `until` vacio el unico destino posible es `rspParkMissed`, que solo responde a la **carrera
+de publicacion** — un tramo que entre entre las dos cargas de `dpSubSeq`. Medido: **0 aciertos
+en 25,7 M de sondeos**. O sea que ese camino no puede saltar nunca, pero pagaba entero el
+precio de intentarlo: huella FNV de los 31 escalares en cadena, `dpNextChangeAt`,
+`dpDrainedAt`, la carga de `dpSubSeq`.
+
+(De paso queda apuntado: `sub=694603` tramos de FIFO en 180 cuadros = **3859 tramos por
+cuadro**. El microcodigo de Rare empuja DPC_END en trozos minusculos. No se toca ahora, pero es
+el numero que hay que mirar si algun dia el coste por tramo vuelve a aparecer en el perfil.)
+
+### Lo que se hizo
+
+**1. Salida barata con el motor drenado** (`Rsp::idleSkip`). Una carga de `dpSchedEnd` y fuera,
+antes de la huella. La cadena de firma se marca rota (`idleHashOk`), asi que para saltar hacen
+falta dos lecturas seguidas con huella — se pierden 152 vueltas de salto de 223 649, nada.
+
+**2. Huella en cuatro carriles.** El FNV-1a en serie son 31 multiplicaciones dependientes
+(~155 ciclos de latencia) y se pagaban en cada sondeo. Cuatro cadenas independientes de siete,
+mismo papel (funcion de todo el banco escalar), misma deteccion: `idle=38815/223497` frente a
+`38815/223649`.
+
+Medida aislada del coste de la huella: sustituyendola por `r[1]^r[2]^r[3]^r[4]`
+(`KESTREL_CHEAPHASH`, andamio ya retirado) la pared bajaba de 7,42-7,64 a 6,79-6,91 s = **8 %**.
+
+### Resultado
+
+| version | pared (min de 3) | statehash |
+|---|---|---|
+| base | 7,42 s | `58e909a726442e1c` |
+| + huella en 4 carriles | 7,22 s | `58e909a726442e1c` |
+| + salida con motor drenado | **6,49 s** | `58e909a726442e1c` |
+
+**-12 %**, y el invitado NO se mueve: mismos 1793 intercambios, 3221 campos, 1717 sincronias de
+RDP, 4318 M de instrucciones, mismo `[statehash]`. Con 6,64 s de invitado en ~6,55 s de pared,
+**Perfect Dark PAL en partida va a tiempo real (1,01x)** en el i7-870.
+
+### Puertas
+
+`gate_prdp.sh` verde entero: systemtest `0/3721 · 0/2 · 0/6`, sm64 prdp y prdp-jit
+`MATCH md5=b5521b24d8fc280fbf102df22d7d30cb`, krom 371/371 `mean_exact=89,25 mean_close=92,57`
+con `regress=0 improve=0 new=0`. De paso queda resuelta la deuda de la linea base vieja de
+sm64 prdp-jit (`d35bd8aa...`): la actual casa con la referencia.
+
+### 3. El reloj de la CPU, recordado en vez de releido
+
+`cartNow()` no es una variable: es `*cartClock + *cartClockPend + atasco`, o sea tres o cuatro
+lineas de cache que el hilo de CPU esta escribiendo continuamente. El bucle de espera del FIFO
+las pedia desde el otro nucleo en **cada vuelta** — `dpReadAhead(wq)` es exactamente
+`cartNow() < wq` — 26,8 M de veces por partida. Cada una de esas lecturas es un viaje de
+coherencia y ademas le roba la linea al hilo que la esta escribiendo.
+
+El reloj de la CPU solo puede crecer. Entonces basta con que el hilo del RSP recuerde el ultimo
+valor que vio (`Rsp::cpuSeen`): mientras el borde de grano pedido no lo pase, la respuesta a
+"ya ha llegado?" es **exacta** sin mirar nada; solo cuando lo pasa hay que ir a leer de verdad,
+y tras una cita se refresca. Es memoizacion de un valor monotono: no cambia ni una decision.
+Se reseteta al cargar un savestate, igual que la firma del bucle.
+
+Aplicado en los tres sitios de `Rsp::mfc0` que pedian cita (DPC_CURRENT/STATUS, SP_STATUS y el
+resto de DPC).
+
+| version | pared (min de 3) | statehash |
+|---|---|---|
+| base | 7,42 s | `58e909a726442e1c` |
+| + huella en 4 carriles | 7,22 s | `58e909a726442e1c` |
+| + salida con motor drenado | 6,49 s | `58e909a726442e1c` |
+| + `cpuSeen` | **5,95 s** | `58e909a726442e1c` |
+
+**-20 % sobre la base**, invitado idéntico byte a byte. 6,64 s de invitado en 5,95 s de pared =
+**1,12x tiempo real**.
+
+### Donde esta el techo ahora
+
+Perfil de anfitrion tras los tres cambios (`build-prof-prdp`, mismo banco):
+
+```
+=== RSP (dentro de imagen 70,8 %, JIT 25,0 %)
+ 23.89%  spReadSync          memory.cpp:4178
+  2.93%  exactCycles
+  2.86%  mfc0
+=== CPU (dentro de imagen 70,7 %, JIT 23,0 %)
+ 17.70%  spBarrierWait       memory.cpp:4548
+ 11.10%  (atomicos de esa misma linea)
+  3.30%  jitTryBlock
+  2.05%  dpSpinUntil
+```
+
+`Rsp::mfc0` ha pasado del 33,9 % al 2,9 %: el sondeo del FIFO ya no cuesta. Lo que queda es
+**los dos hilos esperandose**: el RSP en `spReadSync` (que la CPU llegue al borde de grano) y la
+CPU en `spBarrierWait` (que el RSP publique). El ancho de esa ventana es `SPLEAD + grano`.
+
+Barrido de `KESTREL_SPLEAD` en este banco (2 corridas por valor):
+
+| SPLEAD | pared | campos VI | statehash |
+|---|---|---|---|
+| (auto, por defecto) | 5,95-6,17 s | 3221 | `58e909a726442e1c` estable |
+| 1024 | 6,22-6,25 s | 3211 | estable |
+| 4096 | 6,05-6,14 s | 3221 | estable |
+| 16384 | 5,96-6,10 s | 3221 | estable |
+| 65536 | 5,68-5,80 s | 3239 | **DOS statehash distintos entre corridas** |
+| 262144 | 5,21-5,27 s | 3250 | estable |
+
+Con 65536 se **pierde el determinismo**, asi que ese valor queda descartado de raiz. Los que
+corren mas mueven ademas los campos VI (3221 -> 3250), o sea que cambian el modelo de tiempo,
+no solo la pared: es la misma clase de compromiso que ya tiene documentada la variable. El
+valor por defecto no se toca.
+
+El siguiente frente real no es un pomo, es la **publicacion del reloj de la CPU**: hoy el RSP
+sondea las lineas calientes del otro hilo y viceversa. Una linea de publicacion dedicada
+(escrita por la CPU en bordes gruesos, leida solo por el RSP) quitaria el robo de linea de los
+dos giros. Pendiente de medir.

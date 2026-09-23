@@ -188,9 +188,20 @@ struct Rsp {
   u64 idlePcHist[16] = {}, idlePcKey[16] = {};   // donde gira: PC de IMEM | bit31 = leia STATUS
   u64 idleCycCur = 0, idleCycSt = 0;
   u32 idleShow = 0;   // ciclos de giro esperando al RDP vs a la CPU
+  bool idleHashOk = false;   // la huella guardada es de la lectura inmediatamente anterior
   u64 idleNoSig = 0;     // firma distinta de la lectura anterior (o longitud fuera de [2,64])
   u64 idleNoDrain = 0;   // motor del RDP sin drenar en `now`
   u64 idleNoRoom = 0;    // aparcamiento sin hueco: destino <= now, o no cabe una vuelta entera
+  // Ultimo instante de invitado de la CPU que ha visto ESTE hilo. `cartNow()` no es una
+  // variable: son tres o cuatro lineas de cache que el hilo de CPU esta escribiendo sin
+  // parar (reloj retirado, pendiente, atasco), y el bucle de espera del FIFO las pedia en
+  // cada vuelta -- 26,8 M de veces por partida de Perfect Dark. Como el reloj de la CPU solo
+  // puede crecer, recordar el ultimo valor visto responde exacto a "ya ha llegado a T?"
+  // siempre que T no lo pase; solo entonces hay que ir a mirar de verdad. Lo resetea
+  // Memory al cargar un savestate, igual que la firma del bucle.
+  u64 cpuSeen = 0;
+  auto cpuReached(u64 t) -> bool;
+
   auto publishExact() -> void {
     if(!exactOn) return;
     const u64 ranNow = exactEnd - exactLeft;

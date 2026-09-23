@@ -3920,6 +3920,8 @@ auto Memory::rcpSchedReset() -> void {
   // casar por casualidad con la primera de la nueva.
   rsp.idlePc = 0xffffffffu;
   rsp.idleHash = rsp.idleVal = 0;
+  rsp.idleHashOk = false;
+  rsp.cpuSeen = 0;
   rsp.idleAt = rsp.idleLen = 0;
   rsp.idleNoSig = rsp.idleNoDrain = rsp.idleNoRoom = 0;
 }

@@ -1395,3 +1395,19 @@ son dos buffers del tamano de la RDRAM (`rdpShadow[2]`), el anillo de eventos es
 entradas fijas y `dpLog`/`dmaPay` son anillos de tamano fijo. Queda por mirar el lado de
 parallel-rdp y el camino con ventana/presentacion, que es el que NO tenia la corrida que se
 midio plana.
+
+## SoftRDP: render roto en DK64 (fase posterior)
+
+2026-09-23, reportado por el usuario con dos capturas del backend SoftRDP:
+
+- Pantalla de seleccion de personaje (los cinco Kongs sobre la tarima): la geometria y
+  las texturas salen bien, pero el suelo lleva **lineas negras rectas y punteadas**
+  cruzando la tarima -- artefacto de rasterizado en los bordes de span, no de textura.
+- Vista de mira/telescopio en la jungla: **bloques enormes de color plano** (rojo, amarillo)
+  encima del personaje donde tendria que ir el HUD/texto, el texto de abajo sale como una
+  fila de rectangulos de color, y el fondo lleva bandas verticales. Pinta a texrect con
+  formato/TLUT mal resuelto, o a combinador cayendo a color primitivo.
+
+No bloquea: el backend por defecto es parallel-rdp por orden expresa del usuario
+("NO quiero nada de SoftRDP, la idea es Parallel-RDP"). SoftRDP se queda como modelo de
+coste y oraculo de diagnostico. Se arregla cuando toque la fase de precision del RDP propio.

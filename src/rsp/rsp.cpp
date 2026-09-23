@@ -468,11 +468,41 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   // al bucle del FIFO desde el campo 67 de DK64 sin que entrara un solo buffer mas.
   if(!idleOn || !mem || mem->rcpMode != Memory::RcpMode::Threaded) return;
   const u64 cyc = exactCycles();
-  u32 h = 0x811c9dc5u;
-  for(int i = 1; i < 32; ++i) h = (h ^ r[i]) * 0x01000193u;
+  // Motor DRENADO: no hay ningun instante fechado al que saltar. Todos los tramos han
+  // cerrado ya, asi que `dpNextChangeAt` da 0, y con `until` vacio el unico destino posible
+  // es `rspParkMissed`, que solo responde a la carrera de publicacion -- un tramo que entre
+  // entre las dos cargas de dpSubSeq. Medido en Perfect Dark: 0 aciertos en 25,7 M de
+  // sondeos, el 99,996 % de las renuncias. Se sale antes de la huella de los 31 registros,
+  // que en ese bucle de 4 ciclos costaba el 8 % de la pared. La cadena de firma se marca
+  // rota: para saltar hara falta repetir la huella en dos lecturas seguidas.
+  if(mem->dpDrainedAt(now)) {
+    idlePc = pc; idleVal = val; idleLen = cyc - idleAt; idleAt = cyc;
+    idleHashOk = false;
+    idleNoRoom++;
+    return;
+  }
+  // Huella de los 31 escalares en cuatro carriles. Es el mismo papel que un FNV-1a en
+  // serie -- funcion de TODO el banco -- pero sin la cadena de 31 multiplicaciones
+  // dependientes: el bucle de espera del FIFO la pagaba en cada sondeo, 26,8 M por partida
+  // en Perfect Dark, y salia el 8 % de la pared. Cuatro cadenas independientes de siete.
+  u32 h;
+  {
+    constexpr u32 P = 0x01000193u;
+    u32 h0 = 0x811c9dc5u, h1 = h0, h2 = h0, h3 = h0;
+    for(int i = 1; i <= 25; i += 4) {
+      h0 = (h0 ^ r[i])     * P;
+      h1 = (h1 ^ r[i + 1]) * P;
+      h2 = (h2 ^ r[i + 2]) * P;
+      h3 = (h3 ^ r[i + 3]) * P;
+    }
+    h0 = (h0 ^ r[29]) * P;
+    h1 = (h1 ^ r[30]) * P;
+    h2 = (h2 ^ r[31]) * P;
+    h = (((h0 ^ h1) * P) ^ ((h2 ^ h3) * P)) * P;
+  }
   const u64 len = cyc - idleAt;
-  const bool same = idlePc == pc && idleHash == h && idleVal == val && idleLen == len;
-  idlePc = pc; idleHash = h; idleVal = val; idleLen = len; idleAt = cyc;
+  const bool same = idleHashOk && idlePc == pc && idleHash == h && idleVal == val && idleLen == len;
+  idlePc = pc; idleHash = h; idleVal = val; idleLen = len; idleAt = cyc; idleHashOk = true;
   if(!same || len < 2 || len > 64) { idleNoSig++; return; }
   const u64 seq0 = mem->dpSubSeq.load(std::memory_order_acquire);
   // Motor OCUPADO en `now` (libdragon: rdpq sondea DP_STATUS esperando a que el RDP acabe el
@@ -532,6 +562,13 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   idleIters.store(idleIters.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
 }
 
+auto Rsp::cpuReached(u64 t) -> bool {
+  if(t <= cpuSeen) return true;
+  const u64 c = mem->cartNow();
+  if(c > cpuSeen) cpuSeen = c;
+  return t <= cpuSeen;
+}
+
 // --- COP0 register access (SP + DPC) ----------------------------------------
 auto Rsp::mfc0(int rt, int rd) -> void {
   if((rd & 0xf) == 10) bumpOwned(mem->rcp.dpcCurReads);  // DPC_CURRENT (solo escribe el RSP)
@@ -555,7 +592,9 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // borde de grano, igual que las senales de SP_STATUS: espera solo si la CPU va mas de
       // un grano por detras. Ver docs/ARCH-SYNC.md.
       const u64 wq = now & ~(Memory::spSigQuant() - 1);
-      if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq, 0); }
+      if(mem->rcpMode == Memory::RcpMode::Threaded && !cpuReached(wq)) {
+        publishExact(); mem->spReadSync(wq, 0); cpuSeen = mem->cartNow();
+      }
       mem->dpcMbRsp(now);   // escrituras de la CPU ya visibles (ver Memory::dpcMbPost)
       // Sin esperar al worker del RDP: CURRENT y STATUS salen del horario de invitado que fijo
       // dpScheduleSpan al lanzar el tramo, no de por donde vaya el anfitrion. Lo unico del RDP
@@ -579,8 +618,8 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     const u64 now = mem->rspGuestNowAt(exactCycles());
     // Solo son visibles las escrituras de CPU fechadas hasta el ultimo borde de grano.
     const u64 vis = now & ~(Memory::spSigQuant() - 1);
-    if(mem->rcpMode == Memory::RcpMode::Threaded && mem->cartNow() < vis) {
-      publishExact(); mem->spReadSync(vis, 1);
+    if(mem->rcpMode == Memory::RcpMode::Threaded && !cpuReached(vis)) {
+      publishExact(); mem->spReadSync(vis, 1); cpuSeen = mem->cartNow();
     }
     // Sus propias escrituras aun en el diario: tiene que verlas ya.
     if(mem->spLogPend.load(std::memory_order_acquire)) { publishExact(); mem->dpLogWait(0, false); }
@@ -591,7 +630,9 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     // Resto de DPC (START/END/contadores): mismo borde de grano para ver lo de la CPU.
     const u64 now = mem->rspGuestNowAt(exactCycles());
     const u64 wq = now & ~(Memory::spSigQuant() - 1);
-    if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq, 2); }
+    if(mem->rcpMode == Memory::RcpMode::Threaded && !cpuReached(wq)) {
+      publishExact(); mem->spReadSync(wq, 2); cpuSeen = mem->cartNow();
+    }
     mem->dpcMbRsp(now);
   }
   u32 data = mem->rcpReg32((rd & 8) ? PHYS_DPC + ((rd & 7) << 2)
