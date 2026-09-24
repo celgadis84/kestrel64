@@ -9521,3 +9521,31 @@ lanzar el normal y dejar creer que se grabo algo. El paquete no lo trae: va 1,24
 
 Comprobado: `--pgo-capture` con SM64 deja `pgo/raw/Super-Mario-64--USA--<pid>.profraw` y el
 statehash del binario instrumentado sigue siendo el mismo que el del normal.
+
+## 2026-09-24 (o) -- el VI no descuadra nada, y los mandos ya se leen cuando toca
+
+Dos preguntas del usuario, las dos contestadas con medidas y no con teoria.
+
+**"No puede venir algun problema de sincronia del VI?"** No. `KESTREL_VITICKS` (4 / 16 / 64)
+solo trocea el bucle del ANFITRION; no mueve ni un instante de invitado. Comprobado con PD:
+la lista `[irq]` de instantes de invitado (1466 lineas: VI, AI, SP, PI) sale BYTE A BYTE
+identica con los tres valores, el md5 del framebuffer a los 60 intercambios es el mismo y
+`[frames]` tambien. La razon es de construccion: `viTick` se llama desde DENTRO de `stepCpu`
+en la instruccion exacta del cruce de la linea de VI_INTR, y `VI_V_CURRENT` se deriva del
+MISMO contador (`viFieldInsns`) que dispara la interrupcion. Lo unico que se mueve con
+VITICKS es donde PARA la corrida (statehash final, +-1 lectura de mando), que es efecto de
+recorte, no de sincronia.
+
+**"Los mandos se leian una vez al final de cada frame?"** Ya no, y hace tiempo. El joybus se
+ejecuta DENTRO de la DMA de lectura PIF->RDRAM (`pifProcessJoybus`, llamada desde `siDma`),
+con su plazo de reloj de invitado (`siDoneAt`), y la entrega mas el MI_SI ocurren en
+`siFinish`. La DMA de escritura solo deposita el bloque y consume el bit 0 del byte de
+control 0x3F. O sea: se lee cuando el JUEGO lo pide, no una vez por campo. Medido en PD: 322
+lecturas de mando en 1793 campos. `KESTREL_SIINSTANT=1` recupera el comportamiento
+instantaneo de antes, solo para bisecar.
+
+Quien espera a quien, medido (PD, hilo a hilo): el RSP NUNCA espera al RDP (0,0%); ~95% de
+las muestras del hilo del RSP estan en `spReadSync`, o sea el RSP va POR DELANTE y espera a
+la CPU -- espera gratis, no cuesta pared. La CPU espera 13,3% en la barrera del DP, pero
+`KESTREL_DPBARRIER=0` no da pared (5980/5926 vs 6057/5901 ms, mismo statehash): el cuello
+esta en el HILO DE CPU, que va al 100% de un nucleo. Ahi es donde hay que seguir apretando.
