@@ -329,6 +329,16 @@ CATEGORIES = [
   dict(id="debug", label="Depuracion", icon="bug",
        desc="Trazas y trampas. Todas cuestan rendimiento; ninguna esta activa de fabrica.",
        options=[
+    # Captura de perfil de PGO. No es una variable de entorno: es un argumento de la linea
+    # de ordenes Y un ejecutable distinto (el instrumentado), asi que el lanzador lo resuelve
+    # en _launch. Se pone aqui porque cuesta rendimiento como todo lo de este grupo.
+    O("pgocap", None, "Grabar perfil de compilacion (PGO)", "bool", False,
+      help="Lanza el binario INSTRUMENTADO y apunta que codigo del emulador se usa de verdad "
+           "mientras juegas. Al salir deja pgo/raw/<rom>.profraw; luego "
+           "'sh scripts/pgo.sh --merge' y 'sh scripts/release.sh' recompilan el emulador "
+           "colocado para lo que TU juegas (medido: -4 a -9 % de tiempo de pared). El binario "
+           "instrumentado va 1,24x mas lento y hay que compilarlo antes con "
+           "'sh scripts/pgo.sh --capture' o 'cmake -DKESTREL_PGO=gen'."),
     O("bp", "KESTREL_BP", "Punto de ruptura (PC hex)", "hex", ""),
     O("bptrace", "KESTREL_BPTRACE", "Traza en el punto de ruptura", "bool", False),
     O("watch", "KESTREL_WATCH", "Punto de vigilancia de escritura (addr)", "hex", ""),
@@ -513,6 +523,12 @@ def to_env(profile):
     else:
         if not p.get("video", True):
             env["KESTREL_NOVIDEO"] = "1"
+
+    # Captura de perfil: bandera de linea de ordenes. El ejecutable instrumentado lo elige
+    # el lanzador (kestrel_launcher.pick_exe / _launch); en un binario normal la bandera solo
+    # imprime un aviso y no hace nada, que es lo que se quiere si alguien la deja puesta.
+    if p.get("pgocap", False):
+        argv.append("--pgo-capture")
 
     port = int(p.get("port", 9128) or 9128)
     argv += ["--port", str(port)]

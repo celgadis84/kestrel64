@@ -264,6 +264,28 @@ auto syncMenu() -> void {
 
 // Reconstruye la linea de ordenes y el entorno desde el perfil y arranca una copia nueva del
 // emulador. Se llama SIEMPRE desde main(), con el audio y el video ya cerrados.
+// Ejecutable INSTRUMENTADO para grabar perfil de PGO, y la carpeta desde la que hay que
+// lanzarlo, o vacio si no esta compilado. La instrumentacion se decide al COMPILAR
+// (cmake -DKESTREL_PGO=gen), asi que grabar perfil no es una opcion del mismo .exe sino OTRO
+// .exe. En arbol de desarrollo el nuestro vive en <raiz>/build-*/kestrel64.exe y el
+// instrumentado en <raiz>/build-pgogen/; instalado, un kestrel64-pgo.exe al lado.
+static auto pgoExe(std::string& cwd) -> std::string {
+  std::string me = exePath();
+  std::string dir = me.substr(0, me.find_last_of("/\\"));
+  std::string cands[2] = {dir.substr(0, dir.find_last_of("/\\")) + "/build-pgogen/kestrel64.exe",
+                          dir + "/kestrel64-pgo.exe"};
+  for(int i = 0; i < 2; i++) {
+    if(GetFileAttributesA(cands[i].c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+    // El .profraw se escribe en "pgo/raw/", relativo a la carpeta de trabajo: para el
+    // instrumentado del arbol esa carpeta es la RAIZ del proyecto, que es de donde lee
+    // `sh scripts/pgo.sh --merge`.
+    cwd = i == 0 ? dir.substr(0, dir.find_last_of("/\\")) : dir;
+    return cands[i];
+  }
+  cwd.clear();
+  return std::string();
+}
+
 auto relaunchNow() -> void {
   std::vector<std::pair<std::string, std::string>> env;
   std::vector<std::string> argv;
@@ -287,7 +309,26 @@ auto relaunchNow() -> void {
   // nuevo tiene que seguir apuntando al MISMO perfil que acabamos de guardar.
   SetEnvironmentVariableA("KESTREL_PROFILE", profilePath().c_str());
 
-  std::string cmd = "\"" + exePath() + "\"";
+  // Grabar perfil de PGO manda sobre todo lo demas: hay que relanzar OTRO binario, el
+  // instrumentado, y desde la raiz del proyecto.
+  std::string exe = exePath(), cwd;
+  if(g_prof.getBool("pgocap")) {
+    std::string pe = pgoExe(cwd);
+    if(pe.empty()) {
+      MessageBoxA(nullptr,
+                  "Grabar perfil (PGO) pide el binario instrumentado y no esta compilado.\n\n"
+                  "Compilalo con:\n"
+                  "  cmake -S . -B build-pgogen -DKESTREL_PRDP=ON -DKESTREL_PGO=gen\n"
+                  "  cmake --build build-pgogen -j8\n\n"
+                  "o directamente: sh scripts/pgo.sh --capture \"<rom>\"",
+                  "kestrel64", MB_OK | MB_ICONWARNING);
+      g_prof.set("pgocap", "0");
+      saveProfile(g_prof);
+    } else {
+      exe = pe;
+    }
+  }
+  std::string cmd = "\"" + exe + "\"";
   std::string rom = g_prof.get("rom");
   if(rom.empty()) rom = g_h.rom;
   if(!rom.empty()) cmd += " \"" + rom + "\"";
@@ -298,8 +339,8 @@ auto relaunchNow() -> void {
   PROCESS_INFORMATION pi = {};
   std::vector<char> line(cmd.begin(), cmd.end());
   line.push_back(0);
-  if(CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                    &si, &pi)) {
+  if(CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                    cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
     // Que la ventana nueva pueda ponerse delante: si no, Windows la deja detras y parece que
     // el reinicio no hizo nada (es el mismo problema del foco que ya trata present.cpp).
     AllowSetForegroundWindow(pi.dwProcessId);

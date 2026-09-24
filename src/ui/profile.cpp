@@ -376,6 +376,11 @@ auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& e
     drop("KESTREL_THROTTLE");
   }
 
+  // Grabar perfil de PGO: bandera de linea de ordenes, no variable de entorno. Quien decide
+  // el ejecutable instrumentado es quien relanza (menu_win32.cpp relaunchNow) o el lanzador;
+  // en un binario normal la bandera solo avisa y no hace nada.
+  if(p.getBool("pgocap")) argv.push_back("--pgo-capture");
+
   std::string plug = p.get("plugin");
   if(plug == "prdp") put("KESTREL_PRDP", "1");
   else if(plug == "soft") put("KESTREL_PRDP", "0");

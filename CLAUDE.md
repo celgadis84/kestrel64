@@ -72,6 +72,14 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
     con `--pgo-capture`; se juega un nivel, se sale normal y el `.profraw` cae en `pgo/raw/`.
     `sh scripts/pgo.sh --merge` fusiona lo que haya ahi sin volver a correr nada. Varias
     capturas se suman. `KESTREL_PGO_NAME` etiqueta una.
+  - **Desde la interfaz**: opcion `pgocap` ("Grabar perfil de compilacion (PGO)", grupo
+    depuracion) tanto en el lanzador como en el menu de la ventana. No es una variable de
+    entorno: quien la lee relanza el binario INSTRUMENTADO (`build-pgogen/kestrel64.exe` en
+    arbol de desarrollo, `kestrel64-pgo.exe` al lado del lanzador si esta instalado) con
+    `--pgo-capture` y con la carpeta de trabajo en la raiz del proyecto, que es donde cae
+    `pgo/raw/`. Si ese binario no existe, avisa con como compilarlo y se apaga sola. El
+    paquete NO lo trae (va 1,24x mas lento): hay que compilarlo con `sh scripts/pgo.sh
+    --capture` o `cmake -DKESTREL_PGO=gen`.
   - El binario instrumentado va **1,24x mas lento** (PD en juego 7377 contra 5951 ms), o sea
     0,90x tiempo real en el juego mas apretado. Se juega para capturar; NO se distribuye.
   - Un perfil viejo no rompe nada (clang avisa y sigue, con `-Wno-profile-instr-out-of-date`),

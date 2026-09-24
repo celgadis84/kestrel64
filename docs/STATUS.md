@@ -9490,3 +9490,34 @@ para capturar; ese binario NO se distribuye.
 hardware -- LBR / Intel PT -- y una cadena de herramientas que en Windows no existe; el
 muestreador propio (`KESTREL_HOSTPROF`) va a 1 ms y sin pila de llamadas, demasiado grueso
 para alimentarlo. Anotado como via, no como disponible.
+
+## 2026-09-24 (n) -- capturar el perfil JUGANDO, desde la interfaz
+
+Idea del usuario: el perfil bueno es el del juego de verdad, no el de una tanda de 400
+campos; y pedirselo a la gente por linea de ordenes es pedir que no lo haga nunca. Asi que la
+captura es ahora una casilla mas.
+
+**Opcion `pgocap`** ("Grabar perfil de compilacion (PGO)", grupo de depuracion), en el
+lanzador y en el menu de la ventana -- una sola definicion, `tools/launcher/options.py`, de la
+que `src/ui/optdefs.cpp` se genera con `python tools/gen_optdefs.py`.
+
+No es una variable de entorno, porque la instrumentacion se decide al COMPILAR: grabar perfil
+significa lanzar OTRO ejecutable.
+
+- `tools/launcher/kestrel_launcher.py`: `pgo_exe()` busca `build-pgogen/kestrel64.exe` (arbol
+  de desarrollo) o `kestrel64-pgo.exe` al lado del lanzador (instalado); `_launch` cambia el
+  ejecutable Y la carpeta de trabajo a la raiz del proyecto.
+- `src/ui/menu_win32.cpp`: lo mismo en el relanzado desde la ventana (`relaunchNow`), con
+  `lpCurrentDirectory` puesto por primera vez.
+- `src/ui/profile.cpp` y `options.py:to_env`: la casilla anade `--pgo-capture` a la linea de
+  ordenes.
+
+La carpeta de trabajo importa: el tiempo de ejecucion de clang escribe `pgo/raw/<rom>.profraw`
+con ruta RELATIVA, y ahi es donde mira `sh scripts/pgo.sh --merge`.
+
+Si el binario instrumentado no esta compilado, la casilla avisa de como hacerlo
+(`sh scripts/pgo.sh --capture "<rom>"` o `cmake -DKESTREL_PGO=gen`) y se apaga sola en vez de
+lanzar el normal y dejar creer que se grabo algo. El paquete no lo trae: va 1,24x mas lento.
+
+Comprobado: `--pgo-capture` con SM64 deja `pgo/raw/Super-Mario-64--USA--<pid>.profraw` y el
+statehash del binario instrumentado sigue siendo el mismo que el del normal.

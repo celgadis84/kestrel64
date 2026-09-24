@@ -196,6 +196,21 @@ def builds():
     return out
 
 
+def pgo_exe():
+    """Ejecutable INSTRUMENTADO para grabar perfil de PGO, o None.
+
+    No es otro rasterizador ni otra opcion del mismo .exe: la instrumentacion se decide al
+    COMPILAR (`cmake -DKESTREL_PGO=gen`), asi que grabar perfil significa lanzar un binario
+    distinto. En arbol de desarrollo sale de build-pgogen/, que es donde lo deja
+    scripts/pgo.sh; instalado, de un kestrel64-pgo.exe al lado del lanzador (el paquete no lo
+    trae: va 1,24x mas lento y no es lo que se juega)."""
+    for c in (os.path.join(KESTREL, "build-pgogen", "kestrel64.exe"),
+              os.path.join(APPDIR, "kestrel64-pgo.exe")):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
 def pick_exe(plugin):
     b = builds()
     if not b:
@@ -846,7 +861,22 @@ class H(BaseHTTPRequestHandler):
         if TELE_CLIENT[0] is not None:
             TELE_CLIENT[0].close()
             TELE_CLIENT[0] = None
-        cmd = EMU.start(bl["exe"], rom, env, argv, os.path.dirname(bl["exe"]),
+        # Grabar perfil de PGO: manda sobre el rasterizador elegido, porque el binario
+        # instrumentado es UNO (se compila con parallel-RDP). Y se lanza desde la raiz del
+        # proyecto, no desde la carpeta del .exe, para que el .profraw caiga en pgo/raw/,
+        # que es de donde lo lee `sh scripts/pgo.sh --merge`.
+        exe, cwd = bl["exe"], os.path.dirname(bl["exe"])
+        if prof.get("pgocap", False):
+            pe = pgo_exe()
+            if not pe:
+                return dict(ok=False, error=(
+                    "Grabar perfil (PGO) pide el binario instrumentado y no esta compilado. "
+                    "Hazlo con: sh scripts/pgo.sh --capture \"<rom>\"  (lo compila y lo lanza), "
+                    "o cmake -S . -B build-pgogen -DKESTREL_PRDP=ON -DKESTREL_PGO=gen "
+                    "&& cmake --build build-pgogen -j8"))
+            exe, cwd = pe, KESTREL
+            os.makedirs(os.path.join(KESTREL, "pgo", "raw"), exist_ok=True)
+        cmd = EMU.start(exe, rom, env, argv, cwd,
                         CARD.meta_key(rom, rom_header(rom)))
         return dict(ok=True, cmd=cmd, env=env, build=bl["id"], tele_port=TELE_PORT[0])
 
