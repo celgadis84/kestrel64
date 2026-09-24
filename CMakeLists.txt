@@ -10,6 +10,7 @@ endif()
 
 # Tune for this host by default (weak Nehalem i7-870, SSE4.2). Toggle off for portable builds.
 option(KESTREL_BUILD_LOCAL "Tune for the build host (-march=native)" ON)
+set(KESTREL_LTO "thin" CACHE STRING "thin | full | off")
 
 # GPU RDP via Themaister's paraLLEl-RDP. ON by default: el rasterizado en GPU es EL camino
 # del emulador (ver docs/parallel-rdp-integration.md). El arbol esta vendorizado bajo
@@ -216,8 +217,18 @@ else()
   # -O3 (not -O2): this appended after the Release profile's -O3, so a lower value
   # here would silently *downgrade* the interpreter hot loop. Keep them equal.
   target_compile_options(kestrel64 PRIVATE -O3 -Wall -Wextra -Wno-unused-parameter)
-  target_compile_options(kestrel64 PRIVATE -flto=thin)
-  target_link_options(kestrel64 PRIVATE -flto=thin)
+  # LTO: thin de fabrica. `-DKESTREL_LTO=full` compila con LTO monolitico (mas lento de
+  # enlazar, mas margen de inlining entre unidades) y `off` lo quita, para poder medir la
+  # diferencia sin tocar el fichero.
+  if(NOT KESTREL_LTO STREQUAL "off")
+    if(KESTREL_LTO STREQUAL "full")
+      target_compile_options(kestrel64 PRIVATE -flto)
+      target_link_options(kestrel64 PRIVATE -flto)
+    else()
+      target_compile_options(kestrel64 PRIVATE -flto=thin)
+      target_link_options(kestrel64 PRIVATE -flto=thin)
+    endif()
+  endif()
   if(KESTREL_BUILD_LOCAL)
     target_compile_options(kestrel64 PRIVATE -march=native)
   else()

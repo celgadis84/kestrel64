@@ -9549,3 +9549,23 @@ las muestras del hilo del RSP estan en `spReadSync`, o sea el RSP va POR DELANTE
 la CPU -- espera gratis, no cuesta pared. La CPU espera 13,3% en la barrera del DP, pero
 `KESTREL_DPBARRIER=0` no da pared (5980/5926 vs 6057/5901 ms, mismo statehash): el cuello
 esta en el HILO DE CPU, que va al 100% de un nucleo. Ahi es donde hay que seguir apretando.
+
+## 2026-09-24 (p) -- LTO monolitico contra thin: EMPATE, se queda thin
+
+Ultimo hueco sin medir de la linea de compilacion. Nueva opcion `KESTREL_LTO`
+(`thin` de fabrica | `full` | `off`) para poder hacer el A/B sin editar el CMakeLists.
+
+Arbol `build-lto-full` con la MISMA configuracion que el distribuible (PRDP + static + PGO),
+solo cambia `-flto=thin` por `-flto`. Parejas intercaladas para que la deriva termica no se
+lleve a uno de los dos.
+
+PD (ranura 0, `MAXFLIPS=1793`), descartada la primera corrida de cada exe (paginacion en
+frio): thin 5664/5850/5898/5918/5925/5946/6063 -> mediana **5918 ms**; full
+5626/5860/5892/5892/5961/6111 -> mediana **5892 ms**. SM64 (400 intercambios): thin
+6945/7020/7033, full 6955/6960/7164. Diferencia **0,4 %** en PD y **0,3 %** en SM64, o sea
+dentro del ruido de la maquina (~1,5 %). Statehash identico en todo (PD
+`0a64f3863fd236b1`; en SM64 la alternancia conocida sale igual en los dos binarios, asi que
+no es del LTO).
+
+Enlazar cuesta mas con full y no paga: **se queda thin**. La opcion se conserva porque el
+A/B habra que repetirlo cuando cambie clang o cuando el reparto de coste se mueva de sitio.
