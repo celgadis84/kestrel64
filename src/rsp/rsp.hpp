@@ -223,10 +223,12 @@ struct Rsp {
   // que el camino largo fuese a hacer. Se desarma en spMarkKick, rcpSchedReset y en cualquier
   // escritura del propio microcodigo a DPC.
   u64 dpcFastEnd = 0;          // ultimo ciclo local de RSP en que vale la respuesta cacheada
-  u64 dpcFastSeq = 0;          // dpSubSeq con el que se armo
+  u64 dpcFastSeq = 0;          // dpcEpoch con el que se armo
   u32 dpcFastVal = 0;          // la respuesta
-  u64 dpcFastHits = 0, dpcFastFills = 0;
-  auto dpcFastFill(u64 now, u64 sub0, u32 val) -> void;
+  u64 dpcFastHits = 0, dpcFastFills = 0, dpcFastJumps = 0, dpcFastIters = 0;
+  auto dpcFastFill(u64 now, u64 ep0, u32 val) -> void;
+  auto dpcFastJump(u64 cyc, u32 val) -> void;
+  auto hash31() const -> u32;
 
   auto publishExact() -> void {
     if(!exactOn) return;

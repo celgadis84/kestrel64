@@ -461,6 +461,25 @@ auto Rsp::accSat(int n, bool slice, u16 neg, u16 pos) const -> u16 {
 // La firma del bucle se saca de la propia corriente: mismo PC, misma huella de los 31
 // registros escalares, mismo valor devuelto y misma distancia en ciclos que la vuelta
 // anterior. Si algo de eso cambia, no es un bucle de espera y no se salta nada.
+// Huella de los 31 escalares en cuatro carriles. Es el mismo papel que un FNV-1a en
+// serie -- funcion de TODO el banco -- pero sin la cadena de 31 multiplicaciones
+// dependientes: el bucle de espera del FIFO la pagaba en cada sondeo, 26,8 M por partida
+// en Perfect Dark, y salia el 8 % de la pared. Cuatro cadenas independientes de siete.
+auto Rsp::hash31() const -> u32 {
+  constexpr u32 P = 0x01000193u;
+  u32 h0 = 0x811c9dc5u, h1 = h0, h2 = h0, h3 = h0;
+  for(int i = 1; i <= 25; i += 4) {
+    h0 = (h0 ^ r[i])     * P;
+    h1 = (h1 ^ r[i + 1]) * P;
+    h2 = (h2 ^ r[i + 2]) * P;
+    h3 = (h3 ^ r[i + 3]) * P;
+  }
+  h0 = (h0 ^ r[29]) * P;
+  h1 = (h1 ^ r[30]) * P;
+  h2 = (h2 ^ r[31]) * P;
+  return (((h0 ^ h1) * P) ^ ((h2 ^ h3) * P)) * P;
+}
+
 auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   // Solo en Threaded. En Lockstep los dos chips comparten hilo y se turnan por construccion:
   // aparcar al RSP ahi es aparcar al unico hilo que hay, y el que tendria que despertarlo --
@@ -481,25 +500,7 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
     idleNoRoom++;
     return;
   }
-  // Huella de los 31 escalares en cuatro carriles. Es el mismo papel que un FNV-1a en
-  // serie -- funcion de TODO el banco -- pero sin la cadena de 31 multiplicaciones
-  // dependientes: el bucle de espera del FIFO la pagaba en cada sondeo, 26,8 M por partida
-  // en Perfect Dark, y salia el 8 % de la pared. Cuatro cadenas independientes de siete.
-  u32 h;
-  {
-    constexpr u32 P = 0x01000193u;
-    u32 h0 = 0x811c9dc5u, h1 = h0, h2 = h0, h3 = h0;
-    for(int i = 1; i <= 25; i += 4) {
-      h0 = (h0 ^ r[i])     * P;
-      h1 = (h1 ^ r[i + 1]) * P;
-      h2 = (h2 ^ r[i + 2]) * P;
-      h3 = (h3 ^ r[i + 3]) * P;
-    }
-    h0 = (h0 ^ r[29]) * P;
-    h1 = (h1 ^ r[30]) * P;
-    h2 = (h2 ^ r[31]) * P;
-    h = (((h0 ^ h1) * P) ^ ((h2 ^ h3) * P)) * P;
-  }
+  const u32 h = hash31();
   const u64 len = cyc - idleAt;
   const bool same = idleHashOk && idlePc == pc && idleHash == h && idleVal == val && idleLen == len;
   idlePc = pc; idleHash = h; idleVal = val; idleLen = len; idleAt = cyc; idleHashOk = true;
@@ -563,28 +564,76 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
 }
 
 // Arma el camino rapido del sondeo de DPC_CURRENT. Ver el comentario largo en rsp.hpp.
-auto Rsp::dpcFastFill(u64 now, u64 sub0, u32 val) -> void {
+auto Rsp::dpcFastFill(u64 now, u64 ep0, u32 val) -> void {
   dpcFastEnd = 0;
   static const bool off = []{ const char* e = std::getenv("KESTREL_DPCFAST"); return e && e[0] == (char)48; }();
   if(off) return;
   if(mem->rcpMode != Memory::RcpMode::Threaded) return;
   if(!mem->rspBusy.load(std::memory_order_relaxed)) return;   // sin tarea el reloj sale de cartNow
-  if(!Memory::dpGuestOn() || !sub0) return;                   // sin horario de invitado manda rcp.dpc_current
+  if(!Memory::dpGuestOn()) return;                            // sin horario de invitado manda rcp.dpc_current
+  if(!mem->dpSubSeq.load(std::memory_order_acquire)) return;  // sin tramo archivado, idem
   if(!mem->dpDrainedAt(now)) return;
-  // Segunda lectura: si entre la primera y dpcCurrentFor ha entrado un tramo, el valor que
-  // llevamos puede ser ya del tramo nuevo y no puede colgarse del contador viejo.
-  if(mem->dpSubSeq.load(std::memory_order_acquire) != sub0) return;
-  if(mem->dpcMbN.load(std::memory_order_acquire)) return;     // escrituras de la CPU por aplicar
+  if(mem->dpcMbN.load(std::memory_order_acquire)) return;     // apuntes viejos de la CPU por aplicar
   // Refrescar el reloj de la CPU AQUI es justo el cambio: el bucle lo miraba en cada vuelta.
+  // Se lee ANTES de confirmar la epoca a proposito: si tras leerlo la epoca sigue siendo la
+  // misma, ninguna publicacion se habia hecho todavia, y como la CPU fecha lo que publique en
+  // el instante en que este -- que ya es >= este mismo valor -- nada futuro puede caer dentro
+  // de la ventana. Ese orden es lo que hace que el salto de dpcFastJump sea legitimo.
   { const u64 c = mem->cartNow(); if(c > cpuSeen) cpuSeen = c; }
+  // Segunda lectura de la epoca: si algo se movio entre la primera (antes de dpcCurrentFor) y
+  // aqui, el valor que llevamos puede ser ya del tramo nuevo y no puede colgarse de la vieja.
+  if(mem->dpcEpoch.load(std::memory_order_acquire) != ep0) return;
   const u64 nowMax = cpuSeen | (Memory::spSigQuant() - 1);    // ultimo instante con wq <= cpuSeen
   if(nowMax <= now) return;
   const u64 absEnd = mem->rcpOpsToCycles(nowMax);             // redondeo A LA BAJA: no se pasa
   if(absEnd <= mem->spKickEdge) return;
-  dpcFastSeq = sub0;
+  dpcFastSeq = ep0;
   dpcFastVal = val;
   dpcFastEnd = mem->spKickCycles + (absEnd - mem->spKickEdge);
   ++dpcFastFills;
+}
+
+// Salta de golpe las vueltas del bucle de espera del FIFO mientras vale la respuesta
+// cacheada. Es el mismo razonamiento que Rsp::idleSkip pero con el tope que arma dpcFastFill:
+// hasta dpcFastEnd el motor sigue drenado y la epoca no se ha movido, asi que DPC_CURRENT es
+// una CONSTANTE y ademas todas esas lecturas caen en granos que la CPU YA ha retirado -- no
+// hay cita que atender. El bucle no tiene efecto lateral: emular sus vueltas una a una solo
+// produce avance de reloj, y eso se cobra entero.
+//
+// El reloj NO se inventa. Se saltan k vueltas COMPLETAS de longitud len, asi que el reloj
+// aterriza en la misma rejilla cyc + j*len que habria recorrido vuelta a vuelta, y siempre
+// por debajo de dpcFastEnd. La vuelta en la que el bucle sale la fija el instante en que la
+// CPU escribe DPC, no lo lejos que hubieramos saltado: el reloj de salida es identico al de
+// la corrida sin salto. Lo unico que cambia es que el hilo no ejecuta las vueltas puras.
+//
+// La firma es la de idleSkip: mismo PC, misma huella de los 31 escalares, mismo valor y misma
+// distancia en ciclos que la lectura anterior. Si algo de eso cambia no es un bucle de espera.
+auto Rsp::dpcFastJump(u64 cyc, u32 val) -> void {
+  static const bool off = []{ const char* e = std::getenv("KESTREL_DPCJUMP"); return e && e[0] == (char)48; }();
+  const u32 h = hash31();
+  const u64 len = cyc - idleAt;
+  const bool same = idleHashOk && idlePc == pc && idleHash == h && idleVal == val && idleLen == len;
+  idlePc = pc; idleHash = h; idleVal = val; idleLen = len; idleAt = cyc; idleHashOk = true;
+  if(off) { idleHashOk = false; idleNoRoom++; return; }
+  if(!same || len < 2 || len > 64) { idleNoSig++; return; }
+  if(dpcFastEnd <= cyc)            { idleNoRoom++; return; }
+  u64 k = (dpcFastEnd - cyc) / len;
+  if(!k)                           { idleNoRoom++; return; }
+  if(k > (1u << 20)) k = 1u << 20;
+  publishExact();
+  cyclesRun.fetch_add(k * len, std::memory_order_relaxed);
+  idleAt += k * len;
+  idleCyc.store(idleCyc.load(std::memory_order_relaxed) + k * len, std::memory_order_relaxed);
+  idleCycCpu += k * len;
+  idleCycCur += k * len;
+  { const u64 key = (u64)idlePc;
+    for(u32 i = 0; i < 16; i++) {
+      if(!idlePcHist[i]) idlePcKey[i] = key;
+      if(idlePcKey[i] == key) { idlePcHist[i] += k * len; break; } } }
+  bumpOwned(idleSkips);                 // solo escribe el hilo del RSP
+  idleIters.store(idleIters.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
+  ++dpcFastJumps;
+  dpcFastIters += k;
 }
 
 auto Rsp::cpuReached(u64 t) -> bool {
@@ -610,17 +659,10 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       bumpOwned(mem->dpcRdRsp);
       if(r == 2 && dpcFastEnd) {
         const u64 cyc = exactCycles();
-        if(cyc <= dpcFastEnd
-           && mem->dpSubSeq.load(std::memory_order_acquire) == dpcFastSeq
-           && !mem->dpcMbN.load(std::memory_order_acquire)) {
+        if(cyc <= dpcFastEnd && mem->dpcEpoch.load(std::memory_order_acquire) == dpcFastSeq) {
           setR(rt, dpcFastVal);
           ++dpcFastHits;
-          // Misma contabilidad que la salida temprana por motor drenado de Rsp::idleSkip: el
-          // motor sigue drenado, asi que el camino largo habria hecho exactamente esto.
-          if(idleOn) {
-            idlePc = pc; idleVal = dpcFastVal; idleLen = cyc - idleAt; idleAt = cyc;
-            idleHashOk = false; idleNoRoom++;
-          }
+          if(idleOn) dpcFastJump(cyc, dpcFastVal);
           return;
         }
       }
@@ -644,10 +686,10 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // KESTREL_RSPDPAWAIT=1 vuelve a la espera antigua (para bisecar).
       static const bool aw = []{ const char* e = std::getenv("KESTREL_RSPDPAWAIT"); return e && e[0] == '1'; }();
       if(aw) mem->rdpAwaitGuest(now);
-      const u64 sub0 = mem->dpSubSeq.load(std::memory_order_acquire);
+      const u64 ep0 = mem->dpcEpoch.load(std::memory_order_acquire);
       const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
       setR(rt, val);
-      if(r == 2) dpcFastFill(now, sub0, val);
+      if(r == 2) dpcFastFill(now, ep0, val);
       idleSkip(now, val, r == 2);
       return;
     }

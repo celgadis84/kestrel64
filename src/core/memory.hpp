@@ -687,6 +687,11 @@ struct Memory {
   std::atomic<u64> dpMaxQuery{0};
   std::atomic<u32> dpStale{0}, dpStaleC{0}, dpStaleR{0};
   std::atomic<u64> dpSubSeq{0};    // tramos lanzados y YA fechados (escritores: CPU y RSP, bajo rdpMx)
+  // Un solo contador que resume TODO lo que puede mover la respuesta de DPC_CURRENT: cada
+  // publicacion de dpSubSeq y cada apunte al buzon de la CPU. El camino rapido del sondeo del
+  // RSP (ver Rsp::mfc0) lo mira en vez de mirar dpSubSeq y dpcMbN por separado -- dos lineas
+  // distintas que reescribe el hilo de CPU, o sea dos fallos de coherencia por sondeo.
+  std::atomic<u64> dpcEpoch{0};
   std::atomic<u64> dpCompSeq{0};   // trabajos pintados por el anfitrion (solo detector de cambio)
   u64 dpJobStartG[kDpRingN]{};     // instante de invitado de arranque
   u64 dpJobEndG[kDpRingN]{};       // instante de invitado de cierre

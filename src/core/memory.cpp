@@ -3467,6 +3467,7 @@ auto Memory::dpScheduleReload(u32 addr) -> void {
   dpJobKickG[seq & kDpRingM]   = kg;
   dpSchedEnd.store(t, std::memory_order_release);
   dpSubSeq.store(seq + 1, std::memory_order_release);
+  dpcEpoch.fetch_add(1, std::memory_order_release);
   if(rspPark.load(std::memory_order_acquire)) {
     u64 exp = 0;
     if(rspParkWake.compare_exchange_strong(exp, kick, std::memory_order_acq_rel)) {
@@ -3514,6 +3515,7 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpJobKickG[seq & kDpRingM]   = (tlIsRspThread || tlDpLogApply || lockRspExec) ? kick : kick + 1;
   dpSchedEnd.store(t1, std::memory_order_release);
   dpSubSeq.store(seq + 1, std::memory_order_release);
+  dpcEpoch.fetch_add(1, std::memory_order_release);
   // Sin pase de coste no se sabe si trae SYNC_FULL: se da por hecho. Un tramo vacio no trae nada.
   dpLastSpanSync = costed ? softCost.sawSyncFull : (current != end && rdpCostOn()) || !rdpCostOn();
   // Si el RSP esta aparcado esperando justo esto, su instante de despertar es el lanzamiento
@@ -3662,6 +3664,7 @@ auto Memory::dpcMbPost(u32 phys, u32 v) -> bool {
   dpcMb[(dpcMbHead + dpcMbCount) % kDpcMbN] = {(raw + q - 1) & ~(q - 1), phys, v};
   ++dpcMbCount;
   dpcMbN.fetch_add(1, std::memory_order_release);
+  dpcEpoch.fetch_add(1, std::memory_order_release);
   bumpOwned(dpcMbPosts);     // solo escribe el hilo de CPU, y ademas bajo dpcMbMx
   rcpPend.fetch_or(32u, std::memory_order_release);
   return true;
@@ -3893,6 +3896,7 @@ auto Memory::rcpSchedReset() -> void {
   dpSyncEnds.clear();
   dpSyncBarAt.store(~0ull, std::memory_order_relaxed);
   dpSubSeq.store(0, std::memory_order_relaxed);
+  dpcEpoch.fetch_add(1, std::memory_order_release);
   dpCompSeq.store(0, std::memory_order_relaxed);
   dpMaxQuery.store(0, std::memory_order_relaxed);
   dpLastKick = 0;

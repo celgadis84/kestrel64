@@ -1078,9 +1078,11 @@ auto System::run() -> void {
       // Camino rapido del sondeo de DPC_CURRENT (ver Rsp::mfc0 y rsp.hpp): respuestas
       // servidas sin division de reloj, sin cita y sin recorrer el anillo, y cuantas veces
       // hubo que volver a armar la ventana.
-      std::fprintf(stderr, "[dpcfast] aciertos=%llu armados=%llu\n",
+      std::fprintf(stderr, "[dpcfast] aciertos=%llu armados=%llu saltos=%llu vueltas=%llu\n",
                    (unsigned long long)memory.rsp.dpcFastHits,
-                   (unsigned long long)memory.rsp.dpcFastFills);
+                   (unsigned long long)memory.rsp.dpcFastFills,
+                   (unsigned long long)memory.rsp.dpcFastJumps,
+                   (unsigned long long)memory.rsp.dpcFastIters);
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
       // Reparto por sitio: citas / vueltas de giro. Dice cual de las esperas del RSP es la cara.

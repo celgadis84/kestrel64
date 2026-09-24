@@ -8952,3 +8952,70 @@ llegue a el mas deprisa. Lo que se gana es el trabajo que se deja de hacer, no l
 **Sigue siendo la misma conclusion de (b) y (c)**: el techo de este banco es que los dos
 hilos se esperan mutuamente en tiempo de INVITADO, y eso no se baja con contabilidad. Lo unico
 que queda por raspar en el sondeo son las dos cargas atomicas del acierto.
+
+
+## 2026-09-24 (e) -- Salto de las vueltas del bucle de espera del FIFO: otro -5,6 % en Perfect Dark en juego
+
+El camino rapido de (d) abarata el sondeo pero NO lo elimina: el microcodigo seguia dando las
+25,7 M de vueltas al bucle de espera del FIFO, y ejecutar ese bucle era el 27 % del hilo del RSP.
+`Rsp::idleSkip` ya sabe saltar vueltas, pero solo con un destino FECHADO (cierre o lanzamiento de
+tramo). Con el motor drenado no hay ninguno, y por eso su rama drenada se salia sin saltar nada.
+
+La ventana que arma `dpcFastFill` SI es un destino valido: hasta `dpcFastEnd` el motor sigue
+drenado y la epoca no se ha movido, luego DPC_CURRENT es una CONSTANTE, y ademas todas esas
+lecturas caen en granos que la CPU YA ha retirado, o sea que ninguna tiene cita que atender.
+El bucle no tiene efecto lateral: emular sus vueltas una a una solo produce avance de reloj.
+
+`Rsp::dpcFastJump` cobra ese avance de golpe, con la misma firma que `idleSkip` (mismo PC, misma
+huella de los 31 escalares, mismo valor, misma distancia en ciclos que la lectura anterior).
+
+El reloj no se inventa. Se saltan k vueltas COMPLETAS de longitud `len`, asi que aterriza en la
+misma rejilla `cyc + j*len` que habria recorrido vuelta a vuelta y siempre por debajo de
+`dpcFastEnd`. La vuelta en la que el bucle SALE la fija el instante en que la CPU escribe DPC,
+no lo lejos que hayamos saltado: el reloj de salida es identico al de la corrida sin salto. Por
+eso el destino puede colgarse de `cartNow()` sin contaminar nada, al reves que el aparcamiento
+de (b) -- aquel aterrizaba en `now + kParkLead`, un numero nuestro, e inventaba 637 M de ops.
+Para que el argumento cierre, `dpcFastFill` lee ahora `cartNow()` ANTES de confirmar la epoca:
+si tras leerlo la epoca no se ha movido, nada se habia publicado todavia, y lo que la CPU
+publique despues lo fechara en el instante en que este, que ya es posterior a la ventana.
+
+Medido (mismo banco de juego, ranura 0, 1793 volteos, 5 pares intercalados, rangos DISJUNTOS):
+
+| | min | mediana | max |
+|---|---|---|---|
+| `KESTREL_DPCJUMP=0` | 6330 | 6402 | 6474 ms |
+| salto activo (defecto) | 6004 | 6045 | 6259 ms |
+
+-5,6 %. `[statehash] 58e909a726442e1c` y `[frames] 1793 / 3221 campos VI / 1717 syncs RDP /
+332 lecturas de mando / 4318M insns / origin=663140` identicos en las diez corridas.
+`[dpcfast] aciertos=13592 armados=307084 saltos=6796 vueltas=25689694`: 6796 saltos absorben
+los 25,7 M de sondeos enteros, 3780 vueltas de media cada uno. Acumulado con (d): 6440 -> 6004
+ms, -6,8 %.
+
+### Las correas NO son margen recuperable
+
+Antes de esto se probo el techo por el otro lado, ensanchando las ventanas de sincronizacion.
+Sale PEOR, y ademas cambia el estado:
+
+```
+base                                       6371 ms  statehash 58e909a726442e1c
+KESTREL_SPLEAD=1000000                     7994 ms  statehash 9c6b4d42862aa8da
+KESTREL_SPSIGQ=20                          6714 ms  statehash e93194f05447e8c1
+KESTREL_SPLEAD=1000000 KESTREL_SPSIGQ=20   6825 ms  statehash cc9cedb3ecf4fea4
+```
+
+Con mas correa un hilo se adelanta mucho, el otro tiene que recuperarlo en una rafaga larga y
+el primero duerme mientras: mismo total y peor localidad. La espera mutua no es tiempo
+desperdiciado que se pueda reclamar aflojando -- es la dependencia de tiempo de invitado. Lo
+unico que si baja la pared es QUITAR TRABAJO de los caminos que generan reloj, que es lo que
+hacen (d) y (e).
+
+### Fusionar `dpSubSeq` + `dpcMbN` en `dpcEpoch`
+
+Hecho: una sola atomica que resume todo lo que puede mover la respuesta, en vez de dos lineas
+distintas que reescribe el hilo de CPU. En pared salio PLANO frente a las dos cargas (6250 vs
+6207 ms de minimo, dentro de la banda de ruido de +-200 ms). Se queda porque el salto de (e)
+necesita un unico punto de confirmacion para el orden `cartNow` -> epoca; el beneficio es de
+correccion estructural, no de velocidad.
+
+Interruptor nuevo: `KESTREL_DPCJUMP=0` desactiva el salto (deja solo el camino rapido de (d)).
