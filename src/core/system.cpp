@@ -1246,6 +1246,11 @@ auto System::run() -> void {
                        pc(memory.rdpCpuNs.load(std::memory_order_relaxed)));
           // Escala del giro de la barrera del SP: cuantas llamadas llegan a girar y cuantas
           // vueltas gasta cada una. Con vueltas/llamada alto la espera es LARGA.
+          if(memory.retireCalls)
+            std::fprintf(stderr, "[retire] %.1f M llamadas | rapidas %.1f%% | largas %.1f M\n",
+                         memory.retireCalls / 1e6,
+                         100.0 * memory.retireFast / (double)memory.retireCalls,
+                         memory.retireSlow / 1e6);
           u64 bc = memory.barSpinCalls.load(std::memory_order_relaxed);
           u64 bt = memory.barSpinTurns.load(std::memory_order_relaxed);
           std::fprintf(stderr, "[barspin] %llu llamadas, %llu vueltas, %.1f vueltas/llamada"

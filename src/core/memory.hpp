@@ -343,6 +343,10 @@ struct Memory {
   std::atomic<u64>        rspParkNs{0};
   std::atomic<u64>        rdpJobsRun{0}, rspJobsRun{0};
   std::atomic<u64>        cpuWaitNs{0};   // CPU thread blocked on an RCP worker
+  // Escala de rcpRetire: lo llama el bucle de CPU tras CADA bloque del JIT y tras cada
+  // instruccion del interprete, asi que su coste por llamada se multiplica por millones.
+  // Solo escribe el hilo de CPU (y solo el las lee, en el latido), asi que van sin atomico.
+  u64 retireCalls = 0, retireFast = 0, retireSlow = 0;
   // Tiempo de CPU REALMENTE consumido por cada worker, frente al tiempo de pared que ya
   // miden rspBusyNs/rdpBusyNs. La diferencia entre los dos es la unica forma de separar
   // "emulamos despacio" de "al hilo no le dan nucleo": si un worker esta 80% de la pared

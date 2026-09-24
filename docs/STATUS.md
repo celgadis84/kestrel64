@@ -9569,3 +9569,35 @@ no es del LTO).
 
 Enlazar cuesta mas con full y no paga: **se queda thin**. La opcion se conserva porque el
 A/B habra que repetirlo cuando cambie clang o cuando el reparto de coste se mueva de sitio.
+
+## 2026-09-24 (q) -- El latido mentia: la barrera del SP no costaba 0,6 % sino 18 %
+
+Perfil de anfitrion del hilo de CPU en PD (partida, 1793 intercambios), con el JIT y PGO de
+hoy: **75 % de las muestras dentro de la imagen caen en `Memory::rcpRetire`** (31,7 % del
+total; el codigo emitido por el JIT es otro 24,7 % y `jitTryBlock` un 3,6 %). Eso no cuadraba
+con el latido, que daba `barSP 0,6 %`.
+
+No cuadraba porque el latido **solo cronometraba el sueno** de `spBarrierWait`, no su giro. Y
+el giro es lo que hay: `[barspin] 767 k llamadas, 103 M vueltas, 134 vueltas/llamada`. Con el
+giro cronometrado (dos lecturas de reloj por llamada que gire, ~800 k por corrida):
+
+```
+antes:  cpuWait 14.1% (barSP  0.6%  barDP 12.4%)
+ahora:  cpuWait 31.1% (barSP 17.9%  barDP 12.4%)
+```
+
+Contadores nuevos `[retire]` (2,9 M llamadas por corrida, 16,5 % salen por el camino corto):
+la llamada en si no es el coste -- son 540 k/s --, el coste es lo que se espera dentro.
+
+Y el otro lado: perfil del hilo del RSP, **77,8 % de lo que cae dentro de la imagen esta en
+`spReadSync`** (48 % del hilo), esperando a que la CPU llegue a su instante. Los dos hilos se
+esperan: CPU 31 % y RSP 48 %.
+
+**El adelanto no es la causa.** Barrido `KESTREL_SPLEAD` 512 / 1024 / 2048 / 4096 en PD, dos
+corridas cada uno: 5686-5953 / 5775-5825 / 5687-5699 / 5582-5647 ms, y `barSP` se queda en
+17-18 % en los cuatro. O sea que multiplicar por 8 el adelanto ni quita la espera ni da pared
+(y cambia el statehash, porque cambia el intercalado -- determinista dentro de cada valor).
+Lo que serializa no es el tope conservador: es la dependencia de datos real entre los dos.
+
+Trabajo real de cada hilo, descontadas las esperas: CPU ~69 % de la pared, RSP ~44 %. El
+siguiente sitio donde hay algo que ganar es el coste de emular, no el reparto.

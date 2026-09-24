@@ -4481,6 +4481,12 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
   // cita en un viaje de ida y vuelta de milisegundos, y hay millones de citas por corrida.
   u32 k = 0;
   const u32 lim = barSpinLen();
+  // El giro tambien es ESPERA, y no se contaba: `spBarBlockNs` solo sumaba el sueno de abajo,
+  // asi que el latido decia "barSP 0,6 %" mientras el hilo de CPU se dejaba ahi 120 M de
+  // vueltas por corrida de PD -- que es de donde salia el grueso de `rcpRetire` en el perfil
+  // de anfitrion. Dos lecturas de reloj por llamada. Cuenta de mas lo que `dpLogApply` haga
+  // dentro del giro, que es trabajo y no espera, pero son unos pocos miles de llamadas.
+  const auto spinT0 = std::chrono::steady_clock::now();
   // PROBADO Y DESCARTADO (2026-09-24): espaciar las lecturas AUXILIARES de este giro. De las
   // cinco lineas que mira, la unica que se mueve en el caso normal es `rsp.cyclesRun`; las otras
   // cuatro -- `rcpPend`, `rspPark`, `rspRdvAt` y `rspLogWait` -- las escribe el otro hilo un
@@ -4501,6 +4507,12 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
   }
   addOwned(barSpinTurns, k);   // solo escribe el hilo de CPU
   bumpOwned(barSpinCalls);
+  if(k) {
+    u64 sdt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - spinT0).count();
+    cpuWaitNs.fetch_add(sdt, std::memory_order_relaxed);
+    spBarBlockNs.fetch_add(sdt, std::memory_order_relaxed);
+  }
   if(k < lim) return;
   // RSP aparcado con tope: llegar a la barrera ES llegar al tope, que es lo que espera el RSP
   // para despertar. Sin este aviso dormia hasta el vencimiento de su condvar.
@@ -4716,12 +4728,14 @@ auto Memory::rcpFlushPending(u32 bits) -> void {
 
 auto Memory::rcpRetire(u64 opStart) -> void {
   u32 pend = rcpPend.load(std::memory_order_acquire);
-  if(!pend) return;
+  retireCalls++;
+  if(!pend) { retireFast++; return; }
   u64 now = cartNow();
   // Camino corto: con SOLO la barrera del SP armada y el reloj propio todavia por detras de
   // ella no hay nada que hacer, y preguntarlo cuesta leer el reloj del hilo del RSP. Ver la
   // nota de spBarSafe. El aparcamiento se queda fuera: su tope lo mueve el otro hilo.
-  if(pend == 8u && now < spBarSafe && !rspPark.load(std::memory_order_relaxed)) return;
+  if(pend == 8u && now < spBarSafe && !rspPark.load(std::memory_order_relaxed)) { retireFast++; return; }
+  retireSlow++;
   retireOpStart = opStart;
   // Las barreras PRIMERO. El plazo de MI_DP se arma ahora al lanzar el tramo, o sea que puede
   // vencer antes de que el anfitrion haya pintado un pixel de el; publicar la interrupcion ahi
