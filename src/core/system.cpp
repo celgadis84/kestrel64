@@ -1086,6 +1086,10 @@ auto System::run() -> void {
                    (unsigned long long)memory.spRdvSiteN[3].load(), (unsigned long long)memory.spRdvSiteK[3].load(),
                    (unsigned long long)memory.spRdvSiteN[4].load(), (unsigned long long)memory.spRdvSiteK[4].load(),
                    (unsigned long long)memory.spRdvSiteN[5].load(), (unsigned long long)memory.spRdvSiteK[5].load());
+      std::fprintf(stderr, "[sprdv hueco] ops de invitado que le faltaban a la CPU: dpcCur=%llu spStatus=%llu dpcOtros=%llu wDpc=%llu dma=%llu break=%llu\n",
+                   (unsigned long long)memory.spRdvSiteGap[0].load(), (unsigned long long)memory.spRdvSiteGap[1].load(),
+                   (unsigned long long)memory.spRdvSiteGap[2].load(), (unsigned long long)memory.spRdvSiteGap[3].load(),
+                   (unsigned long long)memory.spRdvSiteGap[4].load(), (unsigned long long)memory.spRdvSiteGap[5].load());
       // TODOS los puntos donde manda el ANFITRION y no el invitado, juntos. Si alguno sale
       // != 0 la corrida no es reproducible y el statehash que salga de ella vale lo que valga
       // el reloj de esta maquina. Estaban contados pero no se imprimian, asi que no habia
@@ -1226,6 +1230,15 @@ auto System::run() -> void {
                        pc(memory.cpuCpuNs.load(std::memory_order_relaxed)),
                        pc(memory.rspCpuNs.load(std::memory_order_relaxed)),
                        pc(memory.rdpCpuNs.load(std::memory_order_relaxed)));
+          // Escala del giro de la barrera del SP: cuantas llamadas llegan a girar y cuantas
+          // vueltas gasta cada una. Con vueltas/llamada alto la espera es LARGA.
+          u64 bc = memory.barSpinCalls.load(std::memory_order_relaxed);
+          u64 bt = memory.barSpinTurns.load(std::memory_order_relaxed);
+          std::fprintf(stderr, "[barspin] %llu llamadas, %llu vueltas, %.1f vueltas/llamada"
+                       " (renuncias %llu)\n",
+                       (unsigned long long)bc, (unsigned long long)bt,
+                       bc ? (double)bt / (double)bc : 0.0,
+                       (unsigned long long)memory.spBarWaives.load(std::memory_order_relaxed));
         }
         if(cpu.mulDivMode)
           std::fprintf(stderr, "[muldiv] %llu mult/div enteras (%.3f%% de las retiradas),"

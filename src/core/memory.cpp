@@ -4151,9 +4151,11 @@ auto Memory::spStatusForRsp(u64 now) -> u32 {
 // llegar a la CPU justo hasta el reloj publicado, que el llamador ya ha publicado exacto.
 // No depende de KESTREL_DPRDV: sin ella el ciclo en que el microcodigo ve SIG0 es de anfitrion.
 auto Memory::spReadSync(u64 now, u32 site) -> void {
-  if(cartNow() >= now) return;
+  const u64 at0 = cartNow();
+  if(at0 >= now) return;
   spRdv.fetch_add(1, std::memory_order_relaxed);
-  if(site < kRdvSites) spRdvSiteN[site].fetch_add(1, std::memory_order_relaxed);
+  if(site < kRdvSites) { spRdvSiteN[site].fetch_add(1, std::memory_order_relaxed);
+                         spRdvSiteGap[site].fetch_add(now - at0, std::memory_order_relaxed); }
   struct SiteK {                              // vueltas del giro, para saber cual CUESTA
     std::atomic<u64>* c; u32 k = 0;
     ~SiteK() { if(c) c->fetch_add(k, std::memory_order_relaxed); }
@@ -4393,17 +4395,22 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
   // su reloj, y cuando lo publica para pedir una cita de lectura del FIFO (dpReadSync) lo
   // que falta son decenas de instrucciones de CPU. Dormir 200 us para eso convierte cada
   // cita en un viaje de ida y vuelta de milisegundos, y hay millones de citas por corrida.
-  for(u32 k = 0, lim = barSpinLen(); k < lim; ++k) {
-    if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;
+  u32 k = 0;
+  const u32 lim = barSpinLen();
+  for(; k < lim; ++k) {
+    if(!(rcpPend.load(std::memory_order_acquire) & 8u)) break;
     // Camino raro (RSP aparcado): la barrera no sale de la conversion sino del tope del
     // aparcamiento, asi que ahi se pregunta entero.
-    if(rspPark.load(std::memory_order_acquire)) { if(now < spBarrierEff()) return; }
+    if(rspPark.load(std::memory_order_acquire)) { if(now < spBarrierEff()) break; }
     else if(rsp.cyclesRun.load(std::memory_order_acquire)
-            >= (rspRdvAt.load(std::memory_order_acquire) ? thrLead : thrPlain)) return;
+            >= (rspRdvAt.load(std::memory_order_acquire) ? thrLead : thrPlain)) break;
     // El RSP esperando a que apliquemos su diario no va a mover el reloj: aplicar aqui.
     if(rspLogWait.load(std::memory_order_acquire)) dpLogApply(now);
     if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
   }
+  barSpinTurns.fetch_add(k, std::memory_order_relaxed);
+  barSpinCalls.fetch_add(1, std::memory_order_relaxed);
+  if(k < lim) return;
   // RSP aparcado con tope: llegar a la barrera ES llegar al tope, que es lo que espera el RSP
   // para despertar. Sin este aviso dormia hasta el vencimiento de su condvar.
   if(rspPark.load(std::memory_order_acquire)) {

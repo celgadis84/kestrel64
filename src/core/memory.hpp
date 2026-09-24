@@ -716,6 +716,10 @@ struct Memory {
   // Solo se tocan cuando la cita ESPERA de verdad, que es lo que cuesta.
   static constexpr u32 kRdvSites = 6;
   std::atomic<u64> spRdvSiteN[kRdvSites]{}, spRdvSiteK[kRdvSites]{};
+  // Hueco de invitado que la CPU tenia que recorrer al empezar cada cita (`now - cartNow()`).
+  // Es lo que separa "el RSP se ha ido lejos" de "la CPU va lenta": el giro cuesta vueltas,
+  // pero solo el hueco dice CUANTO trabajo de invitado falta de verdad.
+  std::atomic<u64> spRdvSiteGap[kRdvSites]{};
   // La CPU esta dentro de dpBarrierWait: la retiene el RDP (trabajo del anfitrion, p. ej. la GPU
   // compilando pipelines), no el RSP. Una cita del RSP que espera a la CPU no puede soltarse
   // por reloj de pared mientras dure: el RDP no depende del RSP, asi que no hay bloqueo mutuo
@@ -1051,6 +1055,10 @@ struct Memory {
   // rastro por campo (KESTREL_FIELDTRACE) se compara por md5 entre corridas: tiene que mirar
   // los retiros, no los armados. Los armados siguen en la linea [det], que no se compara.
   std::atomic<u32> spRets{0}, dpRets{0};
+  // Escala del GIRO de spBarrierWait (el bloqueo dormido va en spBarBlockNs). Sin esto no se
+  // sabe si la CPU da dos vueltas o mil antes de que el RSP levante la barrera, y esa es la
+  // diferencia entre "la espera no existe" y "la espera es el techo".
+  std::atomic<u64> barSpinTurns{0}, barSpinCalls{0};
   std::atomic<u64> spBarBlockNs{0};
   std::atomic<u32> spBarWaives{0};
   std::atomic<u64> dpBarBlockNs{0};    // tiempo de pared parado en la barrera

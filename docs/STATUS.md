@@ -8662,3 +8662,87 @@ El siguiente frente real no es un pomo, es la **publicacion del reloj de la CPU*
 sondea las lineas calientes del otro hilo y viceversa. Una linea de publicacion dedicada
 (escrita por la CPU en bordes gruesos, leida solo por el RSP) quitaria el robo de linea de los
 dos giros. Pendiente de medir.
+
+## 2026-09-24 -- Medido donde se pierde el tiempo: la cita del DMA del SP, no el sondeo del FIFO
+
+Tras los tres cambios del dia anterior el banco de partida de Perfect Dark va a 5,95-6,17 s de
+pared para 6,64 s de invitado. Queda un 10-15 % en "los dos hilos esperandose", y hasta ahora
+eso era una frase, no un numero. Se ha instrumentado para convertirlo en numeros.
+
+### Telemetria nueva (solo cuenta, no cambia semantica)
+
+- `[barspin] N llamadas, M vueltas, M/N vueltas/llamada (renuncias R)` -- escala del GIRO de
+  `spBarrierWait`. El bloqueo dormido ya salia en `spBarBlockNs`; lo que faltaba era saber si la
+  CPU da dos vueltas o mil antes de que el RSP levante la barrera.
+- `[sprdv hueco]` -- por sitio de cita, la suma de `now - cartNow()` al ENTRAR. Es el hueco de
+  invitado que le faltaba a la CPU. Separa "el RSP se ha ido lejos" de "la CPU va lenta": las
+  vueltas de giro dicen lo que cuesta, solo el hueco dice cuanto trabajo falta de verdad.
+
+`[statehash] 58e909a726442e1c` sin mover con la telemetria puesta.
+
+### Lo que dice el banco
+
+```
+[sprdv sitios] dpcCur=3831/28386249  spStatus=1198/2282386  dpcOtros=0/0
+               wDpc=302/741714  dma=74238/161745922  break=0/0
+[sprdv hueco]  dpcCur=9453638  spStatus=746610  dpcOtros=0  wDpc=261263
+               dma=38519848  break=0
+[barspin] 1035630 llamadas, 138894819 vueltas, 134,1 vueltas/llamada (renuncias 0)
+[block] pared 6,24 s | cpuWait 9,9 % (freno 0,0 % barSP 0,4 % barDP 8,7 %)
+        | rsp ocupado 92,3 % aparcado 0,1 % | rdp ocupado 14,6 %
+        | CPU real: cpu 99,1 % rsp 91,3 % rdp 43,0 %
+```
+
+Perfiles de anfitrion (`build-prof-prdp`, mismo banco):
+
+```
+=== RSP   22,27 % spReadSync · 3,33 % exactCycles · 2,71 % publishExact
+          · 2,32 % mfc0 · 1,70 % dpcCurrentFor · 1,62 % cartNow   (JIT 25,1 %)
+=== CPU   18,24 % spBarrierWait + 8,42 % (atomico u64) + 4,51 % (atomico u32),
+          los tres en memory.cpp:4553 = 31,2 % en el giro de la barrera
+          · 2,22 % dpSpinUntil · 1,85 % dpLogApply · 1,77 % dcMiss
+          · 1,77 % jitTryBlock · 1,70 % chargeFpu   (JIT 21,8 %)
+```
+
+**Conclusion 1: la cita cara NO es el sondeo del FIFO.** `dpcCur` son 3831 citas; el **DMA del
+SP** (sitio 4, `rsp.cpp:708`, SP_RD_LEN = RDRAM -> DMEM) son **74 238 citas y 161,7 M de vueltas
+de giro = el 84 % de todo lo que gira el hilo del RSP**. Las escrituras SP_WR_LEN casi no pasan
+por ahi porque el diario (`spDmaLogPush`) se las lleva; lo que queda son las lecturas.
+
+**Conclusion 2: el hueco por cita es minusculo.** 38,5 M de ops repartidas en 74 238 citas de
+DMA = **519 ops de invitado por cita**. En `dpcCur` son 2467. O sea que el RSP no espera a que la
+CPU haga trabajo: espera a que la CPU *reaccione*. Lo que se paga es **latencia de relevo dentro
+de la ventana CPU<->RSP**, no trabajo real. Ahi hay margen; el problema es que no hay pomo que
+lo suelte sin mentir.
+
+Descartada de paso la compilacion del JIT como sospechosa: `[compila] bloques=22601 vaciados=0
+sobreMuerto=0 muertosProceed=0`.
+
+### Tres palancas probadas y RECHAZADAS con medida
+
+**(a) Retroceso por linea de cache en el giro de la barrera** (`KESTREL_BARBACKOFF` /
+`KESTREL_BARNEAR`). Hipotesis razonable: los cinco atomicos que lee el giro viven en cinco
+lineas distintas y las escribe el hilo del RSP, o sea robo de linea. Barrido 0/4/16/64/256 x 3
+corridas: **6,35-6,53 s en todos**, statehash identico. Sin efecto -- el giro es espera de
+verdad, no traqueteo de coherencia. Pomo retirado; se queda solo la telemetria `[barspin]`.
+
+**(b) Aparcar el RSP con el motor del RDP drenado** (`KESTREL_DRAINPARK`, con `capOut` en
+`rspParkWait` para rechazar el destino inventado del tope). `DRAINPARK=64` -> **16,0 s**,
+statehash `c2ba1545f99500c5`, **10 555 campos VI en vez de 3221**, `idle=0/0` (todos los
+aparcamientos salian por el tope). `DRAINPARK=1024` -> 10,6 s, `772fb37e37d16621`, 4789 campos.
+Infiel y mucho mas lento; revertido entero. Confirma el comentario que ya habia en `idleSkip`.
+
+**(c) Grano de publicacion del reloj del RSP** (`KESTREL_SPSIGQ`, la ultima palanca sin tocar de
+la ventana). 14/12/10/8, dos corridas cada uno: 6,31-6,46 s frente a 6,41-6,45 de base = dentro
+del ruido, campos VI clavados en 3221, pero el **statehash salta de `58e909a726442e1c` a
+`35cb1c4fbfc6815a` en CUALQUIER valor por debajo de 14** (determinista por valor). El grano de
+publicacion es parte del modelo de tiempo, no un pomo de anfitrion. Se queda en 14.
+
+### Estado del frente
+
+La ventana CPU<->RSP esta medida y acotada: el coste es relevo, el hueco es de 519 ops, y los
+tres pomos baratos que la rodean estan probados y rechazados. `KESTREL_SPLEAD` la ensancha pero
+es pomo de FIDELIDAD (a 65536 el RSP lee RDRAM que la CPU ya ha sobrepasado -> dos statehash), y
+por eso el defecto no se toca. Lo que queda no es un pomo: es cambiar la forma del relevo (una
+linea de publicacion dedicada CPU -> RSP, escrita en bordes gruesos y leida solo por el RSP), y
+eso es trabajo de diseno, no un barrido.
