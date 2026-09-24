@@ -8746,3 +8746,58 @@ es pomo de FIDELIDAD (a 65536 el RSP lee RDRAM que la CPU ya ha sobrepasado -> d
 por eso el defecto no se toca. Lo que queda no es un pomo: es cambiar la forma del relevo (una
 linea de publicacion dedicada CPU -> RSP, escrita en bordes gruesos y leida solo por el RSP), y
 eso es trabajo de diseno, no un barrido.
+
+## 2026-09-24 (b) -- El suelo de la sincronizacion: 15 % de la pared, y de ahi no se baja sin mentir
+
+Con la ventana CPU<->RSP ya medida (entrada anterior), la pregunta que faltaba era cuanto vale
+ENTERA. Se mide apagando las dos mitades a la vez en el banco de partida de Perfect Dark
+-- `KESTREL_DMARDV=0` (el RSP deja de esperar a la CPU antes de un DMA del SP) y
+`KESTREL_SPLEAD=262144` (la CPU deja de esperar al RSP en la practica) --, las dos infieles y
+solo para saber donde esta el suelo:
+
+| configuracion | pared (min de 2) | campos VI | statehash |
+|---|---|---|---|
+| base | 6,37 s | 3221 | `58e909a726442e1c` |
+| sin cita de DMA | 6,03 s | 3221 | `58e909a726442e1c` |
+| ventana ancha | 5,53 s | 3250 | `6655e1f75605c663` |
+| las dos | **5,39 s** | 3250 | `6655e1f75605c663` |
+
+**Toda la sincronizacion cuesta el 15,4 %.** La cita del DMA sola, el 4,5 %, y ademas en este
+juego no mueve el statehash (en junkrunner64 si: por eso sigue puesta). El resto, 11 %, es el
+ancho de ventana, que es pomo de fidelidad. O sea: aunque el relevo fuese gratis se pasaria de
+1,05x a 1,23x tiempo real; los otros 5,39 s son emulacion de verdad.
+
+### Donde va el tiempo del hilo del RSP
+
+```
+muestras 1280 · dentro de imagen 68,8 % · fuera 31,2 % (de ella, codigo JIT 27,3 %)
+ 20,16 % spReadSync      3,36 % mfc0         2,97 % idleSkip     2,97 % LOCK XADD (memory.cpp:1845)
+  2,97 % exec            2,66 % exactCycles  2,27 % publishExact 2,19 % carga atomica (dpcMbRsp)
+  1,95 % div (rspGuestNowAt)  1,88 % fetch_or (rspDpcWrite)  1,80 % carga atomica (idleSkip)
+  1,33 % dpcCurrentFor   1,25 % cartNow      0,86 % dpScanFwd
+```
+
+Lectura: el microcodigo de verdad es el 27,3 % (el "fuera de imagen" es casi todo codigo
+generado por el dynarec del RSP, no kernel: el kernel se queda en ~4 %). La espera es el 20 %.
+Y **queda otro ~18 % en el camino de leer DPC_CURRENT**: 26,8 M lecturas por partida, cada una
+con `exactCycles` + `rspGuestNowAt` + buzon + `dpcCurrentFor` + `idleSkip`. Ese es el siguiente
+sitio con grasa de verdad, y no es sincronizacion: es contabilidad.
+
+### Palancas probadas y rechazadas en esta tanda
+
+- **`KESTREL_RSPTANDA` re-barrido en el banco de partida** (grano con que el RSP publica su
+  reloj; 1024 de fabrica). 1024/2048/4096/8192 x3: minimos 6307 / 6257 / 6345 / 6401 ms. El 2048
+  gana 0,8 % pero las lecturas NO son disjuntas (6307 < 6335) y en los otros tres juegos el 1024
+  ya habia ganado. Se queda en 1024.
+- **Espaciar las lecturas auxiliares del giro de la barrera** (`KESTREL_BARCHEAP`, la simetrica
+  de `KESTREL_RDVCHEAP` en el lado del RSP): de las cinco lineas que mira el giro solo
+  `rsp.cyclesRun` se mueve. Mirar las otras cuatro 1 de cada 16 vueltas baja las vueltas por
+  llamada de 126 a 120 y deja la pared IGUAL (min de 3: 6302 contra 6314 ms). Misma leccion que
+  el retroceso por linea de cache: **ahi no se espera por trafico de coherencia, se espera por
+  TIEMPO**, y abaratar la vuelta solo da mas vueltas. Revertido, la leccion queda en el codigo.
+
+### Lo que si se queda
+
+`dmaLogPushes` y `dpcMbPosts` eran `fetch_add` (LOCK XADD en x86) sobre contadores con UN solo
+hilo escritor -- el primero salia al 2,97 % del hilo del RSP en el perfil. Pasan a `bumpOwned`,
+que es el idioma que ya usa el resto del emulador para eso. Cuentan igual.

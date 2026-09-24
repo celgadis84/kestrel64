@@ -1842,7 +1842,7 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   rcp.sp_rd_len = rcp.sp_wr_len = 0xff8;
   const u32 t = dpLogTail.load(std::memory_order_relaxed);
   dpLogDma[t & kDpLogM] = {dram, length, count, skip, pay};
-  dmaLogPushes.fetch_add(1, std::memory_order_relaxed);
+  bumpOwned(dmaLogPushes);   // solo escribe el hilo del RSP: sin LOCK XADD
   // Las paginas se apuntan ANTES de publicar la entrada (dpLogPush suelta la cola con release):
   // asi el hilo de CPU no puede ver la entrada sin ver a que paginas afecta.
   dmaPgPend.fetch_add(1, std::memory_order_relaxed);
@@ -3662,7 +3662,7 @@ auto Memory::dpcMbPost(u32 phys, u32 v) -> bool {
   dpcMb[(dpcMbHead + dpcMbCount) % kDpcMbN] = {(raw + q - 1) & ~(q - 1), phys, v};
   ++dpcMbCount;
   dpcMbN.fetch_add(1, std::memory_order_release);
-  dpcMbPosts.fetch_add(1, std::memory_order_relaxed);
+  bumpOwned(dpcMbPosts);     // solo escribe el hilo de CPU, y ademas bajo dpcMbMx
   rcpPend.fetch_or(32u, std::memory_order_release);
   return true;
 }
@@ -4155,7 +4155,7 @@ auto Memory::spReadSync(u64 now, u32 site) -> void {
   if(at0 >= now) return;
   spRdv.fetch_add(1, std::memory_order_relaxed);
   if(site < kRdvSites) { spRdvSiteN[site].fetch_add(1, std::memory_order_relaxed);
-                         spRdvSiteGap[site].fetch_add(now - at0, std::memory_order_relaxed); }
+                         addOwned(spRdvSiteGap[site], now - at0); }   // solo el hilo del RSP
   struct SiteK {                              // vueltas del giro, para saber cual CUESTA
     std::atomic<u64>* c; u32 k = 0;
     ~SiteK() { if(c) c->fetch_add(k, std::memory_order_relaxed); }
@@ -4397,6 +4397,13 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
   // cita en un viaje de ida y vuelta de milisegundos, y hay millones de citas por corrida.
   u32 k = 0;
   const u32 lim = barSpinLen();
+  // PROBADO Y DESCARTADO (2026-09-24): espaciar las lecturas AUXILIARES de este giro. De las
+  // cinco lineas que mira, la unica que se mueve en el caso normal es `rsp.cyclesRun`; las otras
+  // cuatro -- `rcpPend`, `rspPark`, `rspRdvAt` y `rspLogWait` -- las escribe el otro hilo un
+  // punado de veces por corrida. Mirarlas 1 de cada 16 vueltas, como hace KESTREL_RDVCHEAP en el
+  // lado del RSP, baja las vueltas por llamada de 126 a 120 y deja la PARED IGUAL (min de 3:
+  // 6302 contra 6314 ms). Misma leccion que el retroceso por linea de cache: aqui no se espera
+  // por trafico de coherencia, se espera por TIEMPO, y abaratar la vuelta solo da mas vueltas.
   for(; k < lim; ++k) {
     if(!(rcpPend.load(std::memory_order_acquire) & 8u)) break;
     // Camino raro (RSP aparcado): la barrera no sale de la conversion sino del tope del
@@ -4408,8 +4415,8 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
     if(rspLogWait.load(std::memory_order_acquire)) dpLogApply(now);
     if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
   }
-  barSpinTurns.fetch_add(k, std::memory_order_relaxed);
-  barSpinCalls.fetch_add(1, std::memory_order_relaxed);
+  addOwned(barSpinTurns, k);   // solo escribe el hilo de CPU
+  bumpOwned(barSpinCalls);
   if(k < lim) return;
   // RSP aparcado con tope: llegar a la barrera ES llegar al tope, que es lo que espera el RSP
   // para despertar. Sin este aviso dormia hasta el vencimiento de su condvar.

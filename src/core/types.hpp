@@ -43,6 +43,9 @@ inline auto bswap64(u64 v) -> u64 {
 template<class A> inline auto bumpOwned(A& a) -> void {
   a.store(a.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
+template<class A, class T> inline auto addOwned(A& a, T n) -> void {
+  a.store(a.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
+}
 
 
 // Asignador alineado a pagina para los bloques de memoria del invitado. La RDRAM se le
