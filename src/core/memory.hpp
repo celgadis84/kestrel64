@@ -720,6 +720,28 @@ struct Memory {
   auto spSigAtKick() -> void;              // lanzamiento: lo pendiente pasa a su instante real
   auto spLateClearHalt(u64 now) -> u32;    // SOLO quien ejecuta el RSP, en BREAK (ver rsp.cpp)
   auto spReadSync(u64 now, u32 site = 0) -> void;        // SOLO hilo del RSP: la CPU llega a `now`, sin adelanto
+  // --- Siesta de la cita del RSP -------------------------------------------------
+  // Cuando el RSP se ha ido MUY por delante de la CPU (en Perfect Dark el sitio del sondeo de
+  // DPC espera 11 000 ops de invitado de media, o sea ~117 us), el giro no compra nada: la CPU
+  // no puede llegar antes por mucho que se la mire. Y el giro no es gratis aunque este thread
+  // no sea el palo largo: son cientos de millones de PAUSE golpeando lineas que el hilo de CPU
+  // -- que SI es el palo largo -- esta reescribiendo. Con `rspWaitAt` puesto, el hilo de CPU
+  // avisa al pasar por ese instante y el del RSP duerme mientras tanto.
+  //
+  // Solo es coste de ANFITRION: `rspWaitAt` no entra en ninguna fecha de invitado, y la
+  // condicion de salida de la cita sigue siendo exactamente `cartNow() >= now`.
+  std::mutex              rspWaitMx;
+  std::condition_variable rspWaitCv;
+  std::atomic<u64>        rspWaitAt{0};    // instante que espera el RSP dormido (0 = nadie)
+  std::atomic<u64>        rspSleeps{0}, rspSleepNs{0};
+  // La mira el hilo de CPU tras cada bloque. Con nadie dormido es UNA lectura relajada.
+  auto rspWakeIfDue() -> void {
+    const u64 want = rspWaitAt.load(std::memory_order_relaxed);
+    if(!want || cartNow() < want) return;
+    rspWaitAt.store(0, std::memory_order_release);
+    { std::lock_guard<std::mutex> lk(rspWaitMx); }
+    rspWaitCv.notify_all();
+  }
   std::atomic<u32> spRdv{0}, spRdvWaives{0}, spLateHalts{0};
   // Reparto de las citas del RSP por sitio de llamada: 0 mfc0 DPC CURRENT/STATUS, 1 mfc0
   // SP_STATUS, 2 mfc0 resto de DPC, 3 mtc0 DPC, 4 mtc0 DMA (SP_RD_LEN / SP_WR_LEN), 5 BREAK.

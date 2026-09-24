@@ -337,6 +337,9 @@ auto System::stepCpu(u64 n) -> u64 {
     // termina de calcular. Con Lockstep o con KESTREL_RCPDEADLINE=0 nunca hay nada armado y
     // esto es una lectura atomica relajada que sale en cero.
     if(memory.rcpPend.load(std::memory_order_relaxed)) memory.rcpRetire(opStart);
+    // Aviso al hilo del RSP si estaba dormido esperando a que este reloj llegara a su
+    // instante (Memory::rspWaitAt). Con nadie dormido es una lectura relajada.
+    memory.rspWakeIfDue();
     // Regulador Threaded: el equivalente al interleave 2:3 de abajo. Cada 64 ops basta —
     // es una lectura atomica relajada y el margen del regulador es de miles de ops.
     if(paced && (i & 0x3F) == 0) memory.rcpPace(cpu.guestOps());

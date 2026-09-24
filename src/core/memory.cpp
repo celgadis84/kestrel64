@@ -4163,6 +4163,18 @@ auto Memory::spStatusForRsp(u64 now) -> u32 {
 // podria caer en un instante ya rebasado y el plazo de SP naceria tarde. La barrera del SP deja
 // llegar a la CPU justo hasta el reloj publicado, que el llamador ya ha publicado exacto.
 // No depende de KESTREL_DPRDV: sin ella el ciclo en que el microcodigo ve SIG0 es de anfitrion.
+// Hueco de invitado (ops de CPU que faltan) a partir del cual la cita del RSP DUERME en vez de
+// girar. 0 = no dormir nunca, que es el comportamiento de siempre. Ver rspWakeIfDue.
+static auto rdvSleepGap() -> u64 {
+  static const u64 v = []() -> u64 {
+    const char* e = std::getenv("KESTREL_RDVSLEEP");
+    if(e && *e) { char* end = nullptr; unsigned long long n = std::strtoull(e, &end, 0);
+                  if(end && !*end) return (u64)n; }
+    return 0ull;
+  }();
+  return v;
+}
+
 auto Memory::spReadSync(u64 now, u32 site) -> void {
   const u64 at0 = cartNow();
   if(at0 >= now) return;
@@ -4190,6 +4202,29 @@ auto Memory::spReadSync(u64 now, u32 site) -> void {
     if(look) { if(cartNow() >= now) break; }
     if((look || !cheap) && (rspStop || rsp.hostStop.load(std::memory_order_relaxed))) break;
     if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
+    // Siesta: con la CPU a mas de `gap` ops de distancia, girar no la acerca -- en Perfect Dark
+    // el sitio del sondeo de DPC espera 11 000 ops de invitado (~117 us) de media. Se apunta el
+    // instante, se duerme, y el hilo de CPU avisa al pasar por el (Memory::rspWakeIfDue). Va con
+    // su PROPIA cadencia, no detras del yield: ese va 1 de cada 65536 vueltas y una espera de
+    // 17 000 vueltas no llegaria a el nunca. El tope de 200 us cubre el aviso perdido; la
+    // condicion de salida sigue siendo `cartNow() >= now`, asi que el invitado sale identico.
+    if(const u64 gap = rdvSleepGap(); gap && (k & 0x3FFu) == 0x3FFu) {
+      const u64 at = cartNow();
+      if(at < now && now - at > gap) {
+        rspWaitAt.store(now, std::memory_order_release);
+        auto s0 = std::chrono::steady_clock::now();
+        {
+          std::unique_lock<std::mutex> lk(rspWaitMx);
+          rspWaitCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+            return cartNow() >= now || rspStop || rsp.hostStop.load(std::memory_order_relaxed); });
+        }
+        rspWaitAt.store(0, std::memory_order_release);
+        rspSleeps.fetch_add(1, std::memory_order_relaxed);
+        rspSleepNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::steady_clock::now() - s0).count(),
+                             std::memory_order_relaxed);
+      }
+    }
     if((k & ym) != ym) continue;
     std::this_thread::yield();
     if(rspWaiters.load(std::memory_order_acquire)) rspCv.notify_all();

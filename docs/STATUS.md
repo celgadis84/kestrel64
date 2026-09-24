@@ -9366,3 +9366,74 @@ determinismo, el premio maximo es ese ~9 %, y medido en pared el salto de 512 a 
 Lo que sigue, por tanto, no es mas sincronia: es el coste del hilo del RSP (perfil de anfitrion
 sobre Perfect Dark, que es el caso pesado; el perfil del RSP que hay en `docs/GAPS.md` es de
 SM64, donde ese hilo iba al 65 % y no al 92 %).
+
+## 2026-09-24 (l) -- CORRECCION: el adelanto 512 TAMPOCO es reproducible, y donde se va el tiempo de verdad
+
+**Correccion de STATUS (j).** Alli se apunto que con `KESTREL_DUEWATCH` el adelanto 512 daba 8/8
+el mismo statehash en SM64. Con 12 corridas sale **8 x `aef8faa47154aa4a` + 4 x
+`1389d35cf154aa4a`**: dos estados, no uno. Ocho corridas iguales con dos estados posibles no
+prueban nada, y esto es la segunda vez en el dia que esa trampa cuela (la otra, el 6/6 a 1024 de
+STATUS (k)). Regla para el futuro: **una afirmacion de determinismo pide 12 corridas minimo, y
+si el barrido dice que un valor se parte, el de al lado tambien se parte hasta que se demuestre
+lo contrario.**
+
+Lo que sigue siendo cierto de (j) es el arreglo en si -- el prologo en linea no veia un plazo
+armado a mitad de cadena, y ahora lo ve -- y que quita la mayor parte de la varianza (de tres
+estados a dos). Lo que NO es cierto es que la cierre. La causa que queda es la de siempre y esta
+descrita en `CLAUDE.md`: con adelanto L la CPU puede haberse PASADO del instante en que el RSP
+lee, y por cuanto se pasa depende del anfitrion. Solo L=0 es reproducible, y cuesta +23 %.
+
+### Siesta de la cita del RSP: MEDIDA PLANA
+
+Hipotesis: el hilo del RSP gira 382 M de vueltas por corrida en `spReadSync` -- 167 M de ellas en
+el sitio del sondeo de DPC, que espera **11 150 ops de invitado de media** (~117 us) -- y ese giro
+golpea lineas que el hilo de CPU, que es quien tiene que avanzar, esta reescribiendo. Puesto
+`KESTREL_RDVSLEEP=<ops>`: pasado ese hueco el RSP apunta su instante en `Memory::rspWaitAt`,
+duerme en su propio condvar, y el hilo de CPU lo despierta al pasar por el (`rspWakeIfDue`, una
+lectura relajada por bloque cuando no hay nadie dormido).
+
+Funciona y el invitado sale identico (statehash igual en los cuatro juegos), pero **no compra
+pared**. Dos rondas intercaladas de min-de-4, PD en juego: ronda 1 `0` 6090 ms contra `2048`
+6089; ronda 2 6095 contra 6061. SM64 min-de-3: 7288/7300 contra 7261/7280. DK64: 4745/4765 contra
+4765/4763. Queda **apagada de fabrica** (`0`) y documentada, no como mejora.
+
+Primer intento fallido, anotado porque es facil repetirlo: la siesta estaba DETRAS del portillo
+del yield (`KESTREL_RDVYIELD`, 1 de cada 65536 vueltas), asi que una espera de 17 000 vueltas no
+llegaba a ella nunca y la medida salia plana por no ejecutarse. Ahora va con cadencia propia
+(1 de cada 1024).
+
+### El reparto real del anfitrion (perfiles de los dos hilos, Perfect Dark en juego)
+
+Hilo del RSP (1253 muestras, `KESTREL_HOSTPROF_WHO=rsp`):
+
+| % | donde |
+|---|---|
+| 46,29 % | `spReadSync` -- esperando a que la CPU llegue |
+| 18,0 % | codigo emitido (JIT del RSP) |
+| 3,27 % | `cartNow` (dentro de la cita) |
+| 2,55 % | `Rsp::publishExact` |
+| resto | atomicas, mmio, `spDmaLogPush`, `Rsp::exec` 0,72 % |
+
+Hilo de CPU (1232 muestras):
+
+| % | donde |
+|---|---|
+| 26,5 % | codigo emitido (JIT de la CPU) |
+| ~28 % | `Memory::spBarrierWait` + sus atomicas + `dpSpinUntil` |
+| 2,92 % | `CPU::jitTryBlock` (compilar) |
+| 2,19 % | `CPU::dcMiss` |
+
+O sea: los dos hilos se pasan casi un tercio de su tiempo esperandose. **Pero eso NO es el
+techo**, y hay una medida vieja que lo dice: con el adelanto a 65536 -- casi desacoplados -- la
+pared solo baja un 4 %. Lo que cuesta es emular, no citarse.
+
+### Velocidad real medida hoy (tiempo de invitado / pared)
+
+| juego | campos | invitado | pared | ratio |
+|---|---|---|---|---|
+| Perfect Dark PAL, en juego | 332 | 6,64 s | 5,89 s | **1,13x** |
+| SM64 (400 intercambios) | 941 | 15,70 s | 7,02 s | **2,24x** |
+| DK64 (400 intercambios) | 977 | 16,30 s | 4,42 s | **2,70x** |
+
+Los tres por encima del tiempo real en este anfitrion (i7-870 de 2009). El caso apretado es
+Perfect Dark en juego, que es justo el que el usuario mira.
