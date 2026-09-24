@@ -3922,6 +3922,7 @@ auto Memory::rcpSchedReset() -> void {
   rsp.idleHash = rsp.idleVal = 0;
   rsp.idleHashOk = false;
   rsp.cpuSeen = 0;
+  rsp.dpcFastEnd = 0;   // camino rapido del sondeo de DPC (ver rsp.hpp)
   rsp.idleAt = rsp.idleLen = 0;
   rsp.idleNoSig = rsp.idleNoDrain = rsp.idleNoRoom = 0;
 }

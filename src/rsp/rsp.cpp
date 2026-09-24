@@ -562,6 +562,31 @@ auto Rsp::idleSkip(u64 now, u32 val, bool cur) -> void {
   idleIters.store(idleIters.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
 }
 
+// Arma el camino rapido del sondeo de DPC_CURRENT. Ver el comentario largo en rsp.hpp.
+auto Rsp::dpcFastFill(u64 now, u64 sub0, u32 val) -> void {
+  dpcFastEnd = 0;
+  static const bool off = []{ const char* e = std::getenv("KESTREL_DPCFAST"); return e && e[0] == (char)48; }();
+  if(off) return;
+  if(mem->rcpMode != Memory::RcpMode::Threaded) return;
+  if(!mem->rspBusy.load(std::memory_order_relaxed)) return;   // sin tarea el reloj sale de cartNow
+  if(!Memory::dpGuestOn() || !sub0) return;                   // sin horario de invitado manda rcp.dpc_current
+  if(!mem->dpDrainedAt(now)) return;
+  // Segunda lectura: si entre la primera y dpcCurrentFor ha entrado un tramo, el valor que
+  // llevamos puede ser ya del tramo nuevo y no puede colgarse del contador viejo.
+  if(mem->dpSubSeq.load(std::memory_order_acquire) != sub0) return;
+  if(mem->dpcMbN.load(std::memory_order_acquire)) return;     // escrituras de la CPU por aplicar
+  // Refrescar el reloj de la CPU AQUI es justo el cambio: el bucle lo miraba en cada vuelta.
+  { const u64 c = mem->cartNow(); if(c > cpuSeen) cpuSeen = c; }
+  const u64 nowMax = cpuSeen | (Memory::spSigQuant() - 1);    // ultimo instante con wq <= cpuSeen
+  if(nowMax <= now) return;
+  const u64 absEnd = mem->rcpOpsToCycles(nowMax);             // redondeo A LA BAJA: no se pasa
+  if(absEnd <= mem->spKickEdge) return;
+  dpcFastSeq = sub0;
+  dpcFastVal = val;
+  dpcFastEnd = mem->spKickCycles + (absEnd - mem->spKickEdge);
+  ++dpcFastFills;
+}
+
 auto Rsp::cpuReached(u64 t) -> bool {
   if(t <= cpuSeen) return true;
   const u64 c = mem->cartNow();
@@ -583,6 +608,22 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     const u32 r = rd & 7;
     if(r == 2 || r == 3) {
       bumpOwned(mem->dpcRdRsp);
+      if(r == 2 && dpcFastEnd) {
+        const u64 cyc = exactCycles();
+        if(cyc <= dpcFastEnd
+           && mem->dpSubSeq.load(std::memory_order_acquire) == dpcFastSeq
+           && !mem->dpcMbN.load(std::memory_order_acquire)) {
+          setR(rt, dpcFastVal);
+          ++dpcFastHits;
+          // Misma contabilidad que la salida temprana por motor drenado de Rsp::idleSkip: el
+          // motor sigue drenado, asi que el camino largo habria hecho exactamente esto.
+          if(idleOn) {
+            idlePc = pc; idleVal = dpcFastVal; idleLen = cyc - idleAt; idleAt = cyc;
+            idleHashOk = false; idleNoRoom++;
+          }
+          return;
+        }
+      }
       // El sondeo del FIFO del RDP se responde en el instante de invitado del RSP, asi que
       // ese instante tiene que ser el de ESTA instruccion, no el de la ultima frontera de
       // tanda: cuantas vueltas da el bucle de espera es justo lo que cambiaba entre corridas.
@@ -603,8 +644,10 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       // KESTREL_RSPDPAWAIT=1 vuelve a la espera antigua (para bisecar).
       static const bool aw = []{ const char* e = std::getenv("KESTREL_RSPDPAWAIT"); return e && e[0] == '1'; }();
       if(aw) mem->rdpAwaitGuest(now);
+      const u64 sub0 = mem->dpSubSeq.load(std::memory_order_acquire);
       const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
       setR(rt, val);
+      if(r == 2) dpcFastFill(now, sub0, val);
       idleSkip(now, val, r == 2);
       return;
     }
@@ -640,6 +683,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
   setR(rt, data);
 }
 auto Rsp::mtc0(int rd, u32 v) -> void {
+  dpcFastEnd = 0;   // cualquier escritura del microcodigo puede mover DPC (ver rsp.hpp)
   // Es la unica puerta del microcodigo al MMIO del RCP, y por ella salen los lanzamientos de
   // DMA y las escrituras de DPC_END. Todo lo que hay detras sella eventos con el reloj de
   // invitado del RSP, asi que aqui ese reloj tiene que estar exacto, no redondeado a la

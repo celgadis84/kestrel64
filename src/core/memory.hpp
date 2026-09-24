@@ -589,6 +589,7 @@ struct Memory {
   // misma instruccion.
   u64  spKickEdge = 0;
   auto spMarkKick() -> void {
+    rsp.dpcFastEnd = 0;   // cambia el ancla ciclos<->ops del camino rapido (ver rsp.hpp)
     spKickOps    = cartNow();
     spKickEdge   = rcpOpsToCycles(spKickOps);
     spKickCycles = rsp.cyclesRun.load(std::memory_order_relaxed);

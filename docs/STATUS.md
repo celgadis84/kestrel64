@@ -8876,3 +8876,79 @@ Lo que SI queda como frontera real, por orden de tamano:
 
 El memo no esta en el arbol. La perilla `KESTREL_DPCMEMO` tampoco: una perilla que no cambia nada
 medible es ruido en la matriz de biseccion.
+
+## 2026-09-24 (d) -- Camino rapido FIEL del sondeo de DPC_CURRENT: -3,6 % de pared en Perfect Dark en juego
+
+El memo de la entrada (c) quitaba solo los dos recorridos del anillo de `dpcCurrentFor` y salio
+plano. La aritmetica del perfil decia por que: `dpcCurrentFor` era el 2,7 % del hilo del RSP,
+pero el CAMINO ENTERO del sondeo era el ~23 % (`mfc0` 3,36 + `idleSkip` 2,97 + `exactCycles`
+2,66 + `publishExact` 2,27 + la carga de `dpcMbRsp` 2,19 + la division del reloj 1,95 +
+`rspjit_cop0` 1,33 + `dpcCurrentFor` 1,33 + `cartNow` 1,25 + `dpScanFwd` 0,86 + ...). O sea:
+recortar un 1,3 % no se ve bajo la banda de ruido de +-200 ms, pero recortar el camino entero
+si puede verse.
+
+Cota superior medida primero, con una chapuza deliberadamente INFIEL (responder el sondeo con
+el ultimo valor 63 de cada 64 veces, sin tocar nada): 6372 -> 4961 ms = **-22 %**. No es
+alcanzable -- los campos VI bajan de 3221 a 3146 y el `statehash` cambia --, pero decia que
+habia sitio.
+
+### Lo que se ha hecho
+
+`Rsp::dpcFastFill` / camino rapido al entrar en `Rsp::mfc0` (ver el comentario largo en
+`src/rsp/rsp.hpp`). Mientras se cumplan a la vez estas dos cosas, la respuesta del sondeo esta
+FIJADA y ninguna espera del camino largo se iba a producir:
+
+1. el motor del RDP esta **drenado** (`dpSchedEnd <= now`) y `dpSubSeq` no se ha movido.
+   Entonces `dpcCurrentFor` devuelve `dpJobEndAddr[sub-1]`, que no cambia: TODO cambio del
+   valor (lanzar tramo, recargar START) publica `dpSubSeq` en la misma seccion critica que
+   `dpSchedEnd` (`dpScheduleReload`, `dpScheduleSpan`, `rcpSchedReset`), y las escrituras
+   diferidas de la CPU van por el buzon, que se comprueba con `dpcMbN`.
+2. el instante de invitado del RSP no ha pasado del ultimo borde de grano al que la CPU ya
+   habia llegado (`now <= cpuSeen | (Q-1)`). Entonces `cpuReached(wq)` habria dicho que si y
+   no habria habido cita.
+
+La clave para que salga barato es que la condicion (2) se guarda **ya convertida a ciclos
+locales del RSP** (`dpcFastEnd = spKickCycles + rcpOpsToCycles(nowMax) - spKickEdge`,
+redondeo a la baja), asi que comprobarla NO pasa por la division del reloj ni por `cartNow`.
+El acierto cuesta una comparacion de ciclos y dos cargas atomicas; el camino largo costaba
+division + `cartNow` + buzon + dos barridos del anillo. Al caducar la ventana se toma un
+camino largo, que refresca `cpuSeen` y la vuelve a armar: la ventana solo se acorta con el
+tiempo, nunca se alarga sola. Se desarma en `spMarkKick` (cambia el ancla ciclos<->ops),
+en `rcpSchedReset` (savestate) y en cualquier `mtc0` del microcodigo a DPC.
+
+El acierto replica ademas, letra por letra, la salida temprana por motor drenado de
+`Rsp::idleSkip` (cadena de firma rota, `idleNoRoom++`), que es lo que el camino largo habria
+hecho: el motor sigue drenado por construccion.
+
+### Medido
+
+Banco de juego real (ranura 0, `KESTREL_MAXFLIPS=1793`), cuatro parejas intercaladas en el
+mismo binario con `KESTREL_DPCFAST=0|1`:
+
+| | 1 | 2 | 3 | 4 | min |
+|---|---|---|---|---|---|
+| con camino rapido | 6379 | 6207 | 6234 | 6261 | **6207** |
+| sin el | 6440 | 6481 | 6449 | 6513 | 6440 |
+
+Cuatro de cuatro a favor y las dos lecturas **disjuntas**: -3,6 % de pared. `[statehash]
+58e909a726442e1c` en las ocho corridas y las invariantes intactas (`1793 intercambios, 3221
+campos VI, 1717 sincronias RDP, 332 lecturas de mando, origin=663140`).
+
+`[dpcfast] aciertos=25394428 armados=307129`: el 95 % de las 26,8 M lecturas se responden sin
+tocar nada, y `cartNow()` -- la linea que el hilo de CPU reescribe sin parar -- se mira 307 k
+veces en vez de 26,8 M.
+
+SM64 y DK64 (300 intercambios, tres parejas cada uno) salen PLANOS, y era de esperar: en ellos
+el microcodigo no gasta la corrida sondeando el FIFO con el motor drenado.
+
+### El efecto de segundo orden, que confirma la entrada (b)
+
+Con el camino rapido puesto, el hilo del RSP llega ANTES a su siguiente cita: `[sprdv sitios]`
+pasa de `dpcCur=3831/28386249` a `dpcCur=7102/71467970`. O sea, el doble de citas y dos veces
+y media de vueltas de giro esperando a que la CPU alcance el borde de grano. Abaratar el
+sondeo no mueve el suelo de sincronizacion del 15,4 % (entrada (b)): solo hace que el RSP
+llegue a el mas deprisa. Lo que se gana es el trabajo que se deja de hacer, no la espera.
+
+**Sigue siendo la misma conclusion de (b) y (c)**: el techo de este banco es que los dos
+hilos se esperan mutuamente en tiempo de INVITADO, y eso no se baja con contabilidad. Lo unico
+que queda por raspar en el sondeo son las dos cargas atomicas del acierto.

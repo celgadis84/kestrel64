@@ -1075,6 +1075,12 @@ auto System::run() -> void {
       // Citas del sondeo de SP_STATUS (Memory::spReadSync) y BREAK relanzados por un CLEAR_HALT
       // aplazado (Memory::spLateClearHalt). Con el grano por defecto las citas son del orden de
       // una por borde cruzado; si suben al millon es que el grano se ha perdido.
+      // Camino rapido del sondeo de DPC_CURRENT (ver Rsp::mfc0 y rsp.hpp): respuestas
+      // servidas sin division de reloj, sin cita y sin recorrer el anillo, y cuantas veces
+      // hubo que volver a armar la ventana.
+      std::fprintf(stderr, "[dpcfast] aciertos=%llu armados=%llu\n",
+                   (unsigned long long)memory.rsp.dpcFastHits,
+                   (unsigned long long)memory.rsp.dpcFastFills);
       std::fprintf(stderr, "[sprdv] %u citas, %u renuncias, %u relanzados\n",
                    memory.spRdv.load(), memory.spRdvWaives.load(), memory.spLateHalts.load());
       // Reparto por sitio: citas / vueltas de giro. Dice cual de las esperas del RSP es la cara.

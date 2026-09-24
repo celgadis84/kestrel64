@@ -202,6 +202,32 @@ struct Rsp {
   u64 cpuSeen = 0;
   auto cpuReached(u64 t) -> bool;
 
+  // --- CAMINO RAPIDO DEL SONDEO DE DPC_CURRENT ------------------------------------
+  // El microcodigo grafico sondea DPC_CURRENT en bucle cerrado (26,8 M de veces por partida
+  // de Perfect Dark). El camino largo cuesta, en ese orden: la division del reloj de invitado
+  // (rspGuestNowAt), la cita con la CPU (cartNow, una linea que el hilo de CPU reescribe sin
+  // parar), el buzon de escrituras de la CPU y los DOS recorridos del anillo de tramos de
+  // dpcCurrentFor. Nada de eso hace falta mientras se cumplan a la vez estas dos cosas:
+  //
+  //   1) el motor del RDP esta DRENADO y dpSubSeq no se ha movido. Entonces DPC_CURRENT vale
+  //      la direccion de cierre del ultimo tramo archivado y NO PUEDE cambiar: todo cambio
+  //      del valor (lanzar tramo, recargar START) publica dpSubSeq en la misma seccion
+  //      critica que dpSchedEnd, y las escrituras diferidas de la CPU van por el buzon.
+  //   2) el instante de invitado del RSP no ha pasado del ultimo borde de grano al que la
+  //      CPU ya habia llegado. Entonces la cita `cpuReached(wq)` habria dicho que si.
+  //
+  // La condicion (2) se guarda ya convertida a CICLOS LOCALES del RSP (dpcFastEnd) para que
+  // comprobarla no pase por la division. La ventana solo se acorta con el tiempo, nunca se
+  // alarga sola: al caducar se toma un camino largo, que refresca cpuSeen y vuelve a armar.
+  // Es FIEL: responde exactamente lo mismo que el camino largo y no se salta ninguna espera
+  // que el camino largo fuese a hacer. Se desarma en spMarkKick, rcpSchedReset y en cualquier
+  // escritura del propio microcodigo a DPC.
+  u64 dpcFastEnd = 0;          // ultimo ciclo local de RSP en que vale la respuesta cacheada
+  u64 dpcFastSeq = 0;          // dpSubSeq con el que se armo
+  u32 dpcFastVal = 0;          // la respuesta
+  u64 dpcFastHits = 0, dpcFastFills = 0;
+  auto dpcFastFill(u64 now, u64 sub0, u32 val) -> void;
+
   auto publishExact() -> void {
     if(!exactOn) return;
     const u64 ranNow = exactEnd - exactLeft;
