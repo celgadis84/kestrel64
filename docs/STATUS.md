@@ -9019,3 +9019,71 @@ necesita un unico punto de confirmacion para el orden `cartNow` -> epoca; el ben
 correccion estructural, no de velocidad.
 
 Interruptor nuevo: `KESTREL_DPCJUMP=0` desactiva el salto (deja solo el camino rapido de (d)).
+
+## 2026-09-24 (f) -- Por que Lockstep y Threaded no dan el mismo estado en SM64: es el adelanto del fin de tarea del SP, y solo eso
+
+Pregunta de fondo: `KESTREL_THREADS=0` (Lockstep, oraculo) y el modo de hilos daban `[statehash]`
+distinto en SM64, con `[frames]` y `[maxinsn]` identicos. Mientras eso no se explique, cualquier
+medida de fidelidad del modo rapido vale poco.
+
+### Como se cazo
+
+1. `KESTREL_STATEDUMP=1` (nuevo, `src/cpu/cpu.cpp`) vuelca los 32 gpr + 32 cop0 + 32 fpr +
+   pc/nextPc/hi/lo al llegar al tope. El statehash dice SI dos modos acabaron en el mismo sitio;
+   esto dice EN QUE se separaron. Resultado: solo `cp01` (Random), `cp09` (Count) y en topes
+   intermedios `cp013` (Cause) diferian. Todo lo demas, byte a byte igual.
+2. Biseccion por tope de instrucciones: identicos hasta 8 M, distintos a 11 M.
+3. `KESTREL_EXCTRACE=999999` en los dos modos y `diff` de las 65 excepciones hasta 11 M. Las dos
+   primeras que se separan son interrupciones con `mi_intr=0x01` (SP), y la diferencia de
+   `retired` es **exactamente 8192 ops** las tres veces. No es ruido: es una constante.
+4. 8192 es `Memory::spLeadOps()`, el desplazamiento con que `spEndArm` fecha el fin de la tarea
+   del RSP (`spDoneAt = spCycleAt(cyclesUsed) + spLeadOps()`).
+
+### Confirmacion
+
+Con `KESTREL_SPLEAD=0` el modo de hilos sale **identico al Lockstep**: mismo volcado completo de
+estado a 11 M, las 6630 excepciones del arranque entero de SM64 (tope 1052514415) iguales una a
+una, y los mismos `[det]` salvo el numero de armados. El resto que quedaba a tope maximo
+(`Count` +333 ticks, `Random` +4) es **artefacto de la medida, no divergencia**: el nuevo
+`[sd] cnt ops=... ret=...` enseña que el modo de hilos se pasa del tope en 476 ops (el Lockstep
+para clavado), y 476 ops x 0,699 ticks/op = 333 ticks. Cuadra exacto.
+
+Ademas, con `SPLEAD=0` desaparece la fuga de fidelidad de `KESTREL_RSPTANDA`: el statehash de SM64
+pasa a ser el MISMO con tanda 1024 y con 4096 (`3108e5108d932398`), y en Perfect Dark el statehash
+es invariante a la tanda (128/256/1024/4096 -> `0a64f3863fd236b1`). O sea: la tanda no filtraba por
+si misma; filtraba a traves del adelanto.
+
+### Lo que cuesta la exactitud
+
+Perfect Dark en juego (ranura 0, 1793 flips, alternado):
+
+| Adelanto | Pared | statehash |
+|---|---|---|
+| 0 | 7426-7479 ms | `0a64f386...` (= Lockstep) |
+| 512 | 6151-6303 ms | `0a64f386...` |
+| 2048 | 6016-6116 ms | `915f2435...` |
+| 4096 | 6082-6085 ms | `4f6612d5...` |
+| **8192 (fabrica)** | **6069-6329 ms** | `58e909a7...` |
+
+El adelanto exacto cuesta **+22 %** de pared. Y no se recupera por otro lado: con `SPLEAD=0` la
+tanda del RSP no compra nada (128 -> 8082 ms, 256 -> 7711, 1024 -> 7451, 4096 -> 7421), lo que dice
+que la CPU no espera a que el RSP PUBLIQUE su reloj sino a que lo ALCANCE. Con adelanto 0 los dos
+hilos se serializan y se pierde justo el solape que da el modo de hilos.
+
+En Perfect Dark el adelanto 512 sale gratis y da el mismo estado que el 0, pero eso es suerte del
+juego: en SM64 con 512 siguen difiriendo 343 excepciones. No es un ajuste seguro en general.
+
+### Fechar exacto con barrera holgada: NO vale
+
+`KESTREL_SPDATE=<ops>` (nuevo, prueba) separa el adelanto de la BARRERA del desplazamiento con que
+se FECHA el fin. Con barrera 8192 y fecha 0 el plazo nace vencido: dos corridas del mismo binario
+dan `spArm=215/107` y `215/108` vencidos. El numero de vencidos depende del anfitrion, asi que ese
+camino no es determinista -- exactamente lo que avisaba el comentario de `spEndArm`. Descartado.
+
+### Veredicto
+
+El adelanto se queda en 8192 de fabrica. La divergencia Lockstep/Threaded esta **explicada al
+completo y es un desplazamiento fijo y conocido**: MI_SP sube 8192 ops de invitado (~87 us de
+invitado) mas tarde que en hardware, del orden de la latencia real de la interrupcion del SP.
+`KESTREL_SPLEAD=0` es el modo "fiel al oraculo" y vale para auditar cualquier cambio futuro:
+si con el puesto el modo de hilos no sale identico al Lockstep, hay un bug de verdad.

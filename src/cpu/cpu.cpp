@@ -974,6 +974,23 @@ auto CPU::unimplemented(u32 op) -> void {
       for(int r = 0; r < 32; r++) mix(fpr[r]);
       mix(pc); mix(nextPc); mix(hi); mix(lo);
       std::fprintf(stderr, "[statehash] %016llx\n", (unsigned long long)h);
+      // KESTREL_STATEDUMP=1: el estado arquitectonico entero, una linea por registro. El
+      // statehash dice SI dos modos llegaron al mismo sitio; esto dice EN QUE se separaron,
+      // que es lo unico util cuando Lockstep y Threaded no cuadran.
+      if(std::getenv("KESTREL_STATEDUMP")) {
+        for(int r = 0; r < 32; r++)
+          std::fprintf(stderr, "[sd] gpr%-2d %016llx\n", r, (unsigned long long)gpr[r]);
+        for(int r = 0; r < 32; r++)
+          std::fprintf(stderr, "[sd] cp0%-2d %016llx\n", r, (unsigned long long)cop0[r]);
+        for(int r = 0; r < 32; r++)
+          std::fprintf(stderr, "[sd] fpr%-2d %016llx\n", r, (unsigned long long)fpr[r]);
+        std::fprintf(stderr, "[sd] cnt ops=%llu ret=%llu frac=%u stall=%llu\n",
+                     (unsigned long long)countOpsTot, (unsigned long long)retired,
+                     countFrac, (unsigned long long)stallTotal);
+        std::fprintf(stderr, "[sd] pc %016llx nextPc %016llx hi %016llx lo %016llx\n",
+                     (unsigned long long)pc, (unsigned long long)nextPc,
+                     (unsigned long long)hi, (unsigned long long)lo);
+      }
     }
     std::fprintf(stderr, "[maxinsn] cap %llu reached, pc=0x%08x sp=0x%08x ra=0x%08x\n",
                  (unsigned long long)maxInsn, (u32)pc, (u32)gpr[29], (u32)gpr[31]);

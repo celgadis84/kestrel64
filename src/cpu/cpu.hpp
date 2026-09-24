@@ -495,7 +495,9 @@ struct CPU {
   // Sin paradas devuelve <= ops siempre (invariante de las guardas del JIT); con ellas puede
   // devolver MAS, y por eso todo latch de Count==Compare tiene que ser de CRUCE, no de
   // igualdad, y la guarda de borde del JIT reserva sitio (ver jitTryBlock).
+  u64  countOpsTot = 0;   // DIAG: ops totales cobradas a Count
   auto countTicks(u32 ops) -> u32 {
+    countOpsTot += ops;
     if(cpi256 == 256 && !stallCycles) return ops;      // camino de fabrica, sin aritmetica extra
     // 1 ciclo de CPU = medio tick de Count = 128/256.
     u64 a = (u64)countFrac + (u64)ops * (u64)cpi256 + ((u64)stallCycles << 7);

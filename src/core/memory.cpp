@@ -4473,7 +4473,13 @@ auto Memory::spEndArm(u64 cyclesUsed) -> void {
   // cartNow() <= spBarrierAt() + L <= T + L. El precio es que MI_SP sube L ops de invitado mas
   // tarde, un retraso fijo y conocido, del mismo orden que la latencia real de la interrupcion
   // del SP en la consola. Con L=0 (defecto) no cambia nada.
-  spDoneAt = spCycleAt(cyclesUsed) + spLeadOps();
+  // PRUEBA (KESTREL_SPDATE=<ops>): separa el adelanto de la BARRERA del desplazamiento con
+  // que se FECHA el fin de tarea. Por defecto son el mismo valor (spLeadOps), que es lo que
+  // garantiza que el plazo no nazca vencido. Con SPDATE menor el MI_SP sube antes -- mas fiel --
+  // a cambio de arriesgar plazos vencidos (spLate), que son los que rompen el determinismo.
+  static const s64 kSpDate = []{ const char* e = std::getenv("KESTREL_SPDATE");
+                                 return (e && *e) ? (s64)std::strtoll(e, nullptr, 10) : (s64)-1; }();
+  spDoneAt = spCycleAt(cyclesUsed) + (kSpDate < 0 ? spLeadOps() : (u64)kSpDate);
   spArms.fetch_add(1, std::memory_order_relaxed);
   if(spDoneAt < cartNow()) {
     const u64 nowOps = cartNow();
