@@ -1211,3 +1211,55 @@ despachador habría encontrado igual, con el mismo prólogo). Comprobado además
 - `sm64[jit]` y `sm64[threaded-jit]` md5 idéntico al de siempre.
 - `systemtest[jit]` 0/3721 · 0/2 · 0/6.
 - Los dos portones verdes con la ITC puesta.
+
+## 21. Propuesta externa de optimizacion, punto por punto (2026-09-25)
+
+Llego un documento de propuestas de rendimiento. Se comprobo cada punto contra el codigo y,
+donde hacia falta, con una medida. Resultado: **nada accionable**. Se deja escrito para no
+volver a evaluarlo.
+
+| propuesta | veredicto |
+|---|---|
+| RDRAM de solo lectura + `VirtualProtect`/VEH para SMC | **Descartada**: techo medido ~1 % y rompe fidelidad (ver abajo) |
+| Enlace directo de bloques, sin volver al despachador | **Ya hecho** de fabrica (+ ITC para `JR`/`JALR`) |
+| Mapeo fijo de gpr MIPS a registros x86-64 | **Ya hecho, y mejor**: cache DINAMICA de 5 registros |
+| `[[unlikely]]` en el camino caliente | **Redundante** con PGO puesta |
+| COP2 con AVX2/AVX-512 | **Imposible en este anfitrion**: no hay AVX |
+| HLE de microcodigo por firma de IMEM | **Ya existe** la via HLE; el LLE es el oraculo |
+| Espera adaptativa en `spReadSync` (girar y luego dormir) | **Ya hecho y barrido**; la siesta midio PLANA |
+| MMIO sin mutex, registros sombra | **Ya es asi**: `coreMutex` no aparece en la ruta MMIO |
+| LTO / LTCG | **Ya puesta**: `-flto=thin` de fabrica |
+| `always_inline` en `cartNow` y compania | Marginal con LTO + PGO ya puestas |
+
+### Lo unico que pedia medida: cuanto cuesta hoy la validacion SMC
+
+`KESTREL_JIT_NOSMC=1` quita la validacion ENTERA, o sea que da el **techo absoluto** de
+cualquier esquema de paginas protegidas. Dos rondas, min de 4, 300 intercambios,
+`threaded-jit`:
+
+| juego | base | `NOSMC=1` |
+|---|---|---|
+| SM64 | 7,70 / 7,61 s | 7,54 / 7,55 s |
+| Perfect Dark | 4,53 / 4,54 s | 4,55 / 4,52 s |
+
+SM64 ~**1,3 %**, PD **plano** (las lecturas se cruzan). Y eso es el techo de borrar la
+comprobacion; un esquema con excepciones del SO se come parte de ese 1,3 % en el manejador.
+
+Ademas **no seria fiel**. La validacion no mira RDRAM: mira la **linea de I-cache**, por sello,
+y solo compara palabras cuando la linea se ha vuelto a rellenar (un bloque de 16 ops = 3
+comparaciones de `u32`). Es asi a proposito, porque en el VR4300 un DMA que reescribe RDRAM sin
+invalidar deja a la CPU ejecutando codigo **stale** de I-cache. Proteger paginas de RDRAM
+invalidaria justo donde el hardware NO invalida. Y las escrituras a RDRAM salen de cuatro
+sitios -- CPU, DMA del SP, PI, RDP --, o sea excepciones de kernel en los hilos worker.
+
+### Por que el mapeo fijo de registros ya esta superado
+
+`jit.cpp:311` tiene `kRcRegs = { RSI, RDI, R13, R14, R15 }`, cinco ranuras que se asignan
+**por bloque y por uso**, con volcado dirigido (`writebackOne`) y con instantanea para los stubs
+de salida. Fijar `$sp` o `$v0` a un registro seria un caso PARTICULAR peor: gasta una ranura
+aunque ese gpr no se toque en el bloque.
+
+### AVX
+
+Preguntado al propio compilador con `-march=native` en este anfitrion (i7-870, Nehalem, 2009):
+solo `__SSE4_2__` y `__POPCNT__`, **ningun `__AVX__`**. `_mm256_madd_epi16` no existe aqui.
