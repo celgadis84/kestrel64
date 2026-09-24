@@ -1,10 +1,12 @@
 #pragma once
-// kestrel64 — R4300i CPU (MIPS III, 64-bit). M1: interpreter.
+// kestrel64 — R4300i CPU (MIPS III, 64-bit): interprete + estado arquitectonico.
 //
 // GPRs are 64-bit; 32-bit ("word") ops sign-extend their result to 64 bits.
 // Branch delay slots are modeled with the pc/nextPc pair (see step()).
-// Address translation at M1 is the kernel-segment shortcut (paddr = vaddr &
-// 0x1fffffff), which is exact for KSEG0/KSEG1; the TLB lands in M2.
+// Address translation goes through the real 32-entry TLB (see translate()), with the
+// KSEG0/KSEG1 shortcut as the fast path; I$/D$ are modeled (tags, dirty, fill).
+// El dynarec (src/cpu/jit.cpp) esta ACTIVO de fabrica y usa este interprete como
+// oraculo y como ruta de respaldo. Ver docs/CORES-CPU-RSP.md.
 
 #include "../core/types.hpp"
 #include <string>

@@ -1,10 +1,13 @@
 #pragma once
-// kestrel64 dynarec foundation — Etapa 1 (infra de code-cache + emisor x86-64).
+// kestrel64 dynarec de CPU — infra de code-cache + emisor x86-64.
 //
-// Esto NO está cableado todavía al bucle de ejecución: es la maquinaria verificable
-// en aislado (buffer ejecutable + emisor + self-test). El intérprete sigue siendo la
-// única ruta activa, así que 0/3721 queda intacto por construcción. La Etapa 2 usará
-// este emisor para compilar bloques de guest a x86-64.
+// ACTIVO DE FABRICA: `KESTREL_JIT` por defecto 1 (`KESTREL_JIT=0` lo apaga y deja al
+// interprete como unica ruta). Compila bloques de linea recta desde una direccion
+// FISICA, absorbe branches/saltos con su delay slot, enlaza bloques (estatico + cache
+// de destinos indirectos) y delega en el interprete, dentro del bloque, todo lo que no
+// sabe emitir (COP1, memoria desalineada, DIV/DMULT). El interprete es el ORACULO: los
+// casos dificiles ejecutan literalmente su mismo codigo, asi que no pueden divergir.
+// Estado, etapas y perillas: docs/CORES-CPU-RSP.md §3.
 #include "../core/types.hpp"
 #include <cstddef>
 #include <vector>

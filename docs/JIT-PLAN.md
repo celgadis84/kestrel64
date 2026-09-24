@@ -1,5 +1,12 @@
 # kestrel64 — Plan del recompilador (dynarec) y optimización del intérprete
 
+> **Estado 2026-09-24:** documento HISTORICO. El dynarec de CPU esta ACTIVO de fabrica
+> (`KESTREL_JIT=0` lo apaga) y lo que aqui figura como trabajo futuro — enlace de
+> bloques, cache de destinos indirectos, residencia de registros, fastmem, bloques que
+> cruzan pagina, ALU de 64 bits y de trampa, COP0 en bloque, validacion SMC por linea de
+> I-cache — **ya esta implementado**. Estado actual y perillas: `docs/CORES-CPU-RSP.md`
+> §3. Esto se conserva por el razonamiento y las medidas del camino.
+
 Objetivo: **100% de velocidad N64** (medido por `speed.cpuPct`, 100 = tiempo real).
 Precisión NO negociable: `n64-systemtest` debe seguir en **0/3721** en cada paso.
 

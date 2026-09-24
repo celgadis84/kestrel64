@@ -1,5 +1,10 @@
 # RSP dynarec (`src/rsp/rspjit.{hpp,cpp}`)
 
+> **Estado 2026-09-24:** ACTIVO de fabrica (`KESTREL_RSPJIT=0` lo apaga). Etapas 1, 2,
+> 2b y 3 hechas: linea recta, saltos+delay slot absorbidos, COP0 en bloque y enlace de
+> bloques por tabla. Resumen corto y perillas: `docs/CORES-CPU-RSP.md` §5. Lo de abajo
+> es el detalle de diseno; donde un parrafo hable en futuro de una etapa, ya esta hecha.
+
 Straight-line block compiler for the **scalar** half of the RSP core. Toggle
 `KESTREL_RSPJIT` (reads a value: `=0` turns it off). Oracle = the RSP
 interpreter itself: same framebuffer md5 with the dynarec on and off, in every
@@ -20,16 +25,24 @@ dynarec hard:
 
 ## What gets compiled
 
-Only the straightforward scalar ALU/shift work is emitted as native x86-64.
-Everything else — COP2 (the whole VU), loads, stores, branches, jumps, COP0
-(MMIO on SP/DP registers) — is a `call` back into the interpreter's own
-helper (`execCop2` / `execLoad` / `execStore` / `exec`). That is deliberate:
-the helpers are the oracle, so a compiled block **cannot** diverge from the
+Scalar ALU/shift work, LUI and the byte loads/stores are emitted as native
+x86-64. Branches and jumps are **absorbed with their delay slot** (Stage 2) and
+MFC0/MTC0 go through the `Rsp::jitCop0` bridge (Stage 2b). Parts of the vector
+side are emitted inline too — vector loads/stores, packing and moves, each with
+its own A/B switch (`KESTREL_RSPJIT_NOVECMEM` / `_NOVECPACK` / `_NOVECMOVE`).
+Everything still not emitted — the rest of COP2 (the VU proper), the 16/32-bit
+scalar loads and stores — is a `call` back into the interpreter's own helper
+(`execCop2` / `execLoad` / `execStore` / `exec`). That is deliberate: the
+helpers are the oracle, so a compiled block **cannot** diverge from the
 interpreter on the hard cases; the dynarec only removes decode+dispatch cost.
+The inline broadcast shuffles reuse the interpreter's own `pshufb` table
+(`rspBcastMask` → `kBcast`), so two different broadcasts cannot exist.
 
-A block ends at the first branch/jump (they are never absorbed — that is
-Stage 2), at `kMaxOps = 64` instructions, or at the end of IMEM. Runs shorter
-than `kMinOps = 3` are not worth a call and stay interpreted.
+A block ends at BREAK, at the first opcode it does not recognise, at an MTC0
+that halts the core or DMAs into IMEM, at `kMaxOps = 64` instructions, or at
+the end of IMEM. Runs shorter than `kMinOps = 3` are not worth a call and stay
+interpreted. Blocks link to each other through the table with a tail `jmp`
+(Stage 3, `KESTREL_RSPJIT_LINK`), so the stack does not grow with chain length.
 
 Emitted prologue (Win64 ABI, `RCX` = `Rsp*`, `RDX` = opcode for helper calls):
 
