@@ -4385,14 +4385,30 @@ auto Memory::spBarrierOn() -> bool {
 // Coste en Perfect Dark (1793 swaps, minimo de tres): 8192 -> 6041 ms, 1024 -> 6037,
 // 256 -> 6235, 64 -> 6594, 0 -> 7423. O sea casi toda la ganancia esta en el adelanto
 // PEQUENO: 256 cuesta un 3 % sobre 8192, y 0 cuesta un 23 %.
-// De fabrica 256: reproducible en las tres roms (SM64 12/12, DK64 4/4, PD 3/3) por 3 %.
 // Con 0 se pierde el 23 % y TAMPOCO se llega al estado de Lockstep (medido: PD lockstep
 // 14995cfadedc7f38 vs threaded-0 0a64f3863fd236b1; SM64 lockstep b5f10ec436221af5 vs
 // threaded-0 b6f551242339420c), asi que 0 no compra fidelidad, solo lentitud.
+// 2026-09-24 (segunda vuelta). Media fuga tiene arreglo sin bajar el adelanto: es
+// Memory::cpuRamWrBarrier. Una escritura de la CPU solo se ve desde el RSP cuando LLEGA a
+// RDRAM, y eso pasa en dos sitios contados (vuelco de linea sucia de cache-D y escritura no
+// cacheada), mas DMEM/IMEM, que el RSP ve en el acto. Se para la CPU en ESOS sitios con
+// adelanto CERO y se la deja correr libre entre medias.
+// SOLO MEDIA. Con la barrera puesta el adelanto sube a 512 y ahi se acaba: por encima SIGUE
+// sin repetir. Barrido honesto en SM64, 400 swaps, 8-16 corridas por valor:
+// 512 -> 16/16 un solo statehash; 1024 -> 8/2; 2048 -> 10/2; 4096 -> 7/3.
+// Descartado que sea el grano del RSP (con KESTREL_RSPTANDA=64 filtra igual) y descartado
+// que sea DMEM (extender la barrera ahi no limpio 1024 ni 4096). Los dos hashes de cada
+// valor comparten los 28 bits bajos, o sea que se mueve UN campo, no el estado entero.
+// Queda por cazar; es la misma pregunta que (g), por que Threaded no llega a Lockstep.
+// A/B con el MISMO binario, intercalado, viejo (256 sin barrera) contra nuevo (512 con):
+// SM64 6,97-7,09 -> 6,80-6,96 s; PD 5,85-5,94 -> 5,68-5,74; DK64 4,49-4,50 -> 4,36-4,39.
+// Entre -2,5 % y -3 %. PD y DK64 dan el MISMO statehash que antes, o sea que en esos dos el
+// cambio no toca la conducta; SM64 cambia de estado y repite 16/16.
+// De fabrica 512 + barrera.
 auto Memory::spLeadOps() -> u64 {
   static const u64 v = []() -> u64 {
     const char* e = std::getenv("KESTREL_SPLEAD");
-    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 256ull;
+    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 512ull;
     return (u64)std::strtoull(e, nullptr, 0);
   }();
   return v;
@@ -4472,6 +4488,79 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
     // Salvavidas, igual que el del regulador: si el RSP deja de avanzar (microcodigo que
     // espera algo de la CPU) la barrera se suelta para ESTE valor. Nunca via de bloqueo.
     if(waited > kBarrierMaxWait) { spBarWaivedAt = bar; spBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
+  }
+}
+
+auto Memory::wrBarrierOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_WRBARRIER");
+    if(!e || !*e) return true;   // de fabrica ENCENDIDA: es semantica de la maquina, no un ajuste
+    return std::strcmp(e, "0") && std::strcmp(e, "off");
+  }();
+  return v;
+}
+
+// BARRERA DE ESCRITURA. La barrera del SP para a la CPU en CADA instruccion en cuanto se pasa
+// del reloj del RSP, y eso SERIALIZA los dos hilos: medido en PD con el perfilador de anfitrion
+// (2026-09-24), el hilo del RSP se pasa el 44,8 % de su tiempo dentro de spReadSync esperando a
+// la CPU y el de CPU el 27 % dentro de spBarrierWait esperando al RSP. Turnandose, no
+// solapando, que es justo lo contrario de para lo que estan los hilos.
+//
+// Pero lo UNICO que el RSP puede ver de la CPU es RDRAM: su bus solo llega a DMEM/IMEM y lo
+// toca por DMA, y los registros (SP_STATUS, DPC) ya van fechados por sus diarios. Y un store
+// cacheado de la CPU NO toca RDRAM: la unica via es el volcado de una linea sucia (CPU::dcFlush)
+// y los accesos no cacheados. O sea que para garantizar que el RSP no lee jamas un byte de su
+// futuro no hace falta parar a la CPU en cada instruccion: basta con pararla en las escrituras
+// que de verdad llegan a RDRAM. Entre dos volcados la CPU puede correr libre.
+//
+// El plazo de fin de tarea del SP sigue protegido por la barrera normal (el adelanto acotado):
+// esto no la sustituye, la complementa para poder subir ese adelanto sin que las escrituras
+// se cuelen en el futuro del RSP.
+//
+// Sin abrazo mortal: la CPU solo espera aqui cuando va POR DELANTE del RSP, y el RSP solo
+// espera en spReadSync cuando va por delante de la CPU. Las dos condiciones son excluyentes.
+// Con el RSP aparcado no se espera: aparcado no puede leer RDRAM.
+auto Memory::cpuRamWrBarrier(u64 now) -> void {
+  if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;
+  if(rspPark.load(std::memory_order_acquire)) return;
+  const u64 thr = spBarThreshold(now);
+  if(rsp.cyclesRun.load(std::memory_order_acquire) >= thr) return;
+  bumpOwned(wrBarN);
+  u32 k = 0;
+  const u32 lim = barSpinLen();
+  for(; k < lim; ++k) {
+    if(!(rcpPend.load(std::memory_order_acquire) & 8u)) break;
+    if(rspPark.load(std::memory_order_acquire)) break;
+    if(rsp.cyclesRun.load(std::memory_order_acquire) >= thr) break;
+    if(rspLogWait.load(std::memory_order_acquire)) dpLogApply(now);
+    if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
+  }
+  addOwned(wrBarTurns, k);
+  if(k < lim) return;
+  u64 waited = 0;
+  for(;;) {
+    auto t0 = std::chrono::steady_clock::now();
+    {
+      std::unique_lock<std::mutex> lk(rspMx);
+      rspWaiters.fetch_add(1);
+      rspCv.wait_for(lk, std::chrono::microseconds(200), [&]{
+        return !(rcpPend.load(std::memory_order_acquire) & 8u)
+            || rspPark.load(std::memory_order_acquire)
+            || rsp.cyclesRun.load(std::memory_order_acquire) >= thr
+            || rspLogWait.load(std::memory_order_acquire); });
+      rspWaiters.fetch_sub(1);
+    }
+    if(rspLogWait.load(std::memory_order_acquire)) dpLogApply(now);
+    u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now() - t0).count();
+    cpuWaitNs.fetch_add(dt, std::memory_order_relaxed);
+    wrBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    if(!(rcpPend.load(std::memory_order_acquire) & 8u)) return;
+    if(rspPark.load(std::memory_order_acquire)) return;
+    if(rsp.cyclesRun.load(std::memory_order_acquire) >= thr) return;
+    waited += dt;
+    // Salvavidas, como las demas esperas: la fidelidad nunca puede ser via de bloqueo.
+    if(waited > kBarrierMaxWait) { wrBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
   }
 }
 

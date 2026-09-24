@@ -1246,6 +1246,19 @@ auto System::run() -> void {
                        (unsigned long long)bc, (unsigned long long)bt,
                        bc ? (double)bt / (double)bc : 0.0,
                        (unsigned long long)memory.spBarWaives.load(std::memory_order_relaxed));
+          // Barrera de escritura (Memory::cpuRamWrBarrier): cuantas escrituras que SI llegan a
+          // RDRAM tuvieron que esperar al RSP. Las renuncias son fidelidad perdida por el
+          // salvavidas de pared, asi que si no son cero hay que mirarlas.
+          if(Memory::wrBarrierOn()) {
+            u64 wc = memory.wrBarN.load(std::memory_order_relaxed);
+            u64 wt = memory.wrBarTurns.load(std::memory_order_relaxed);
+            std::fprintf(stderr, "[wrbar] %llu esperas, %llu vueltas, %.1f vueltas/espera,"
+                         " %.1f ms dormidos (renuncias %llu)\n",
+                         (unsigned long long)wc, (unsigned long long)wt,
+                         wc ? (double)wt / (double)wc : 0.0,
+                         (double)memory.wrBarBlockNs.load(std::memory_order_relaxed) / 1e6,
+                         (unsigned long long)memory.wrBarWaives.load(std::memory_order_relaxed));
+          }
         }
         if(cpu.mulDivMode)
           std::fprintf(stderr, "[muldiv] %llu mult/div enteras (%.3f%% de las retiradas),"

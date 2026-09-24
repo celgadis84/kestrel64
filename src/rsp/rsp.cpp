@@ -751,7 +751,11 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     // lo mismo que al leer: hasta el ultimo borde de grano.
     const u64 now = mem->rspGuestNowAt(exactCycles());
     const u64 wq = now & ~(Memory::spSigQuant() - 1);
-    if(mem->dpReadAhead(wq)) mem->spReadSync(wq, 3);
+    // Publicar el reloj ANTES de pedir cita, como los otros cinco sitios: si el RSP se duerme
+    // sin publicar, la CPU parada en cpuRamWrBarrier lo ve atrasado y espera a un RSP que la
+    // esta esperando a ella. Se deshacia solo por el salvavidas de pared, o sea perdiendo
+    // fidelidad.
+    if(mem->dpReadAhead(wq)) { publishExact(); mem->spReadSync(wq, 3); }
     mem->dpcMbRsp(now);
     mem->rspDpcWrite(now, rd & 7, v);
     return;

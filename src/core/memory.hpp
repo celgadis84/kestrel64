@@ -1041,6 +1041,11 @@ struct Memory {
     return spCycleAt(rsp.cyclesRun.load(std::memory_order_acquire) - spKickCycles);
   }
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
+  // BARRERA DE ESCRITURA -- ver Memory::cpuRamWrBarrier en memory.cpp. KESTREL_WRBARRIER=1.
+  static auto wrBarrierOn() -> bool;
+  auto cpuRamWrBarrier(u64 now) -> void;   // SOLO hilo de CPU
+  std::atomic<u64> wrBarN{0}, wrBarTurns{0}, wrBarBlockNs{0};
+  std::atomic<u32> wrBarWaives{0};
   auto spBarThreshold(u64 now) const -> u64;   // barrera en ciclos crudos del RSP
   u64  spBarWaivedAt = ~0ull;
   // Hasta que instante de invitado se sabe que la barrera NO muerde. La barrera solo puede

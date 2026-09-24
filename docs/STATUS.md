@@ -9192,3 +9192,75 @@ Detalle que conviene anotar: el statehash ya **no depende** de la tanda en ningu
 juegos. Antes si dependia (era una de las fugas apuntadas en (f)), y deja de hacerlo por el mismo
 motivo que (g) -- con el adelanto corto la CPU no puede escribir RDRAM tan lejos en el futuro del
 RSP, asi que el grano con que el RSP mira el reloj deja de decidir lo que el RSP se lleva.
+
+## 2026-09-24 (i) -- La barrera de escritura: media fuga cerrada, el adelanto sube de 256 a 512
+
+### El coste que se buscaba
+
+Antes de tocar nada, perfil de anfitrion con `KESTREL_HOSTPROF` sobre Perfect Dark en juego
+(1793 swaps, threaded+JIT+Parallel-RDP), atribuyendo tambien el codigo JIT y el externo:
+
+- hilo del RSP: **44,8 % dentro de `spReadSync`**, esperando a que la CPU llegue a su instante.
+- hilo de la CPU: **~27 %** entre `spBarrierWait` y sus atomicos.
+- la cita del DMA tiene **1731 ops de invitado** de hueco de media (`[sprdv sitios]`).
+
+O sea que los dos hilos **se turnan**, no se solapan. El del RDP si solapa (ocupacion 15 %).
+
+### Por donde ve el RSP a la CPU
+
+Por RDRAM y por DMEM/IMEM, y por nada mas: su bus no llega a otro sitio y los registros
+(SP_STATUS, DPC) ya van fechados por sus diarios. Y una escritura de la CPU **no llega a RDRAM
+cuando el invitado la ejecuta**: un store cacheado se queda en la cache-D y solo baja en
+`CPU::dcFlush` (vuelco de linea sucia) o por el camino no cacheado (`CPU::ramUncached`).
+
+Asi que la cita no hace falta por instruccion: hace falta en esos sitios. `Memory::cpuRamWrBarrier`
+para ahi al hilo de la CPU hasta que el reloj del RSP alcanza el instante de la CPU **con adelanto
+cero**, y entre medias la deja correr con el adelanto normal. Sin abrazo mortal: la CPU solo
+espera cuando va por delante y el RSP solo espera cuando va por detras. `KESTREL_WRBARRIER=0` la
+apaga; telemetria en `[wrbar]`. Es barata: **3479 esperas y 5 ms dormidos** por corrida de SM64,
+0 renuncias.
+
+De paso, `Rsp::step` pedia cita en el sitio 3 (escritura de DPC) **sin publicar antes su reloj**,
+al reves que los otros cinco sitios. Con la barrera de escritura eso es un abrazo que solo se
+deshace por el salvavidas de pared, o sea perdiendo fidelidad. Arreglado.
+
+### Lo que compra, medido
+
+A/B con el **mismo binario**, corridas intercaladas, viejo (`SPLEAD=256`, sin barrera) contra
+nuevo (`SPLEAD=512`, con barrera):
+
+| juego | viejo | nuevo | statehash |
+|---|---|---|---|
+| SM64, 400 swaps | 6,97-7,09 s | **6,80-6,96** | cambia, repite 16/16 |
+| Perfect Dark en juego | 5,85-5,94 s | **5,68-5,74** | **el mismo que antes** |
+| DK64, 400 swaps | 4,49-4,50 s | **4,36-4,39** | **el mismo que antes** |
+
+Entre **-2,5 % y -3 %**. En PD y DK64 el cambio no toca la conducta en absoluto: mismo estado
+final, menos pared.
+
+### Lo que NO compra, y conviene no adornarlo
+
+La barrera cierra **media** fuga. Por encima de 512 el adelanto sigue sin repetir. Barrido honesto
+en SM64 (400 swaps, 8-16 corridas por valor, con la barrera puesta):
+
+| adelanto | 512 | 1024 | 2048 | 4096 |
+|---|---|---|---|---|
+| statehashes | **16/16 uno** | 8/2 | 10/2 | 7/3 |
+
+Primero se apunto "4096 reproducible, 4/4". Con 13 corridas salieron **tres** hashes distintos:
+la muestra corta mentia. Descartado que la causa sea el grano del RSP (con `KESTREL_RSPTANDA=64`
+filtra igual) y descartado que sea DMEM (extender ahi la barrera no limpio 1024 ni 4096). Los dos
+hashes de cada valor comparten los **28 bits bajos**, o sea que se mueve un campo, no el estado
+entero. Con 0 plazos del RDP vencidos y 0 renuncias en las tres escotillas contadas, la fuga que
+queda no es ninguna de las conocidas. Es la misma pregunta abierta que (g).
+
+### Lo estructural
+
+Mientras la exactitud obligue a que la CPU **llegue** al instante del RSP, ese trabajo es serie:
+el turnarse no es overhead, es la forma del problema. El hueco de 1731 ops de la cita del DMA es
+trabajo de CPU que tiene que estar hecho antes de que el RSP lea. Lo que queda por ganar sale de
+**emular mas barato** (calidad del JIT), no de sincronizar mejor.
+
+### Decision
+
+`KESTREL_SPLEAD=auto` pasa de **256 a 512**, barrera de escritura **encendida** de fabrica.

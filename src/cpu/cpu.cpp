@@ -55,6 +55,10 @@ static const bool g_fastFetch       = !std::getenv("KESTREL_NOFETCHFAST");
 static const bool g_intLog          = std::getenv("KESTREL_INTLOG")      != nullptr;
 static const bool g_jlogNoSpin      = std::getenv("KESTREL_JLOG_NOSPIN") != nullptr;
 static const bool g_dcWriteThrough  = std::getenv("KESTREL_DCWT")        != nullptr;
+// Barrera de escritura: ver Memory::cpuRamWrBarrier. Apagada = una comparacion contra un bool.
+static const bool g_wrBarrier       = [] { const char* e = std::getenv("KESTREL_WRBARRIER");
+                                          if(!e || !*e) return true;
+                                          return (bool)(std::strcmp(e, "0") && std::strcmp(e, "off")); }();
 
 // Depuracion: anillo de transiciones de UNA palabra de RDRAM que elige el usuario
 // (`KESTREL_SEENADDR=<fisica>`), volcado junto al veredicto de un xlog con
@@ -656,7 +660,17 @@ auto CPU::storeCart(u32 phys, u64 reg, u32 width) -> bool {
 // (cacheable() vive ahora en linea en cpu.hpp: se llama una vez por acceso a memoria.)
 
 auto CPU::ramUncached(u32 pe, u32 size) -> void {
-  if(mem && pe < (u32)mem->rdram.size()) ramCpuBytes += size;
+  if(!mem) return;
+  if(pe < (u32)mem->rdram.size()) {
+    ramCpuBytes += size;
+    // Escritura no cacheada: llega a RDRAM ya, asi que no puede adelantar al RSP.
+    if(g_wrBarrier) mem->cpuRamWrBarrier(mem->cartNow());
+    return;
+  }
+  // DMEM/IMEM: el otro sitio por el que una escritura de la CPU es visible al RSP EN EL ACTO.
+  // No pasa por RDRAM ni por diario -- Memory::resolve la manda directa al vector -- asi que
+  // necesita la misma cita que un volcado de linea sucia. Ver Memory::cpuRamWrBarrier.
+  if(g_wrBarrier && pe >= 0x0400'0000u && pe < 0x0404'0000u) mem->cpuRamWrBarrier(mem->cartNow());
 }
 
 auto CPU::ramSettle(u32 pe, u32 size) -> void {
@@ -680,6 +694,9 @@ auto CPU::dcFlush(u32 idx) -> void {
   if(!l.valid() || !l.dirty) return;
   ramCpuBytes += 16;
   u32 tag = l.ptag();
+  // Unica via por la que un store CACHEADO llega a RDRAM, o sea el unico punto en el que la
+  // CPU puede ensenarle al RSP un byte de su futuro. Ver Memory::cpuRamWrBarrier.
+  if(g_wrBarrier) mem->cpuRamWrBarrier(mem->cartNow());
   mem->dmaSettle(tag, (u64)tag + 16);
   // El volcado de una linea sucia es la unica forma en que un store CACHEADO de la CPU
   // llega a RDRAM, asi que sin esto KESTREL_WATCH no ve el 99% de lo que escribe el juego.
