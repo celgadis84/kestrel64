@@ -1099,7 +1099,12 @@ struct Memory {
   std::atomic<u64> barSpinTurns{0}, barSpinCalls{0};
   std::atomic<u64> spBarBlockNs{0};
   std::atomic<u32> spBarWaives{0};
-  std::atomic<u64> dpBarBlockNs{0};    // tiempo de pared parado en la barrera
+  std::atomic<u64> dpBarBlockNs{0};    // tiempo de pared parado en la barrera, HILO DE CPU
+  // Lo mismo pero en el HILO DEL RSP (rdpAwaitGuest, rspDmaRdpWait). Va aparte porque los dos
+  // se sumaban en el mismo contador y la linea [block] lo mostraba dentro de cpuWait: una
+  // espera del RSP por el RDP salia contada como espera de la CPU, que es justo la pregunta
+  // que esa linea existe para responder (quien espera a quien).
+  std::atomic<u64> dpBarRspNs{0};
   std::atomic<u32> dpBarWaives{0};     // veces que el salvavidas la solto
   // Diagnostico del sondeo de DPC desde el RSP (docs/GAPS.md 3b): cuantas lecturas hace el
   // microcodigo, cuantas ven el motor ocupado y cuantas ven END_VALID. Si dos corridas dan

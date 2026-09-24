@@ -1228,13 +1228,17 @@ auto System::run() -> void {
           auto pc = [&](u64 ns) { return ws > 0.0 ? ns / 1e9 / ws * 100.0 : 0.0; };
           memory.sampleWorkerCpu();
           std::fprintf(stderr, "[block] pared %.2f s | cpuWait %.1f%% (freno %.1f%% barSP %.1f%%"
-                       " barDP %.1f%%) | rsp ocupado %.1f%% aparcado %.1f%% | rdp ocupado %.1f%%"
+                       " barDP %.1f%%) | rsp ocupado %.1f%% (esperaDP %.1f%%) aparcado %.1f%%"
+                       " | rdp ocupado %.1f%%"
                        " | CPU real: cpu %.1f%% rsp %.1f%% rdp %.1f%%\n",
                        ws, pc(memory.cpuWaitNs.load(std::memory_order_relaxed)),
                        pc(memory.paceBlockNs.load(std::memory_order_relaxed)),
                        pc(memory.spBarBlockNs.load(std::memory_order_relaxed)),
                        pc(memory.dpBarBlockNs.load(std::memory_order_relaxed)),
                        pc(memory.rspBusyNs.load(std::memory_order_relaxed)),
+                       // Espera del RSP POR EL RDP. Cae DENTRO de "rsp ocupado": el worker
+                       // tiene tarea, pero el tiempo se va en la barrera, no en emular.
+                       pc(memory.dpBarRspNs.load(std::memory_order_relaxed)),
                        pc(memory.rspParkNs.load(std::memory_order_relaxed)),
                        pc(memory.rdpBusyNs.load(std::memory_order_relaxed)),
                        pc(memory.cpuCpuNs.load(std::memory_order_relaxed)),

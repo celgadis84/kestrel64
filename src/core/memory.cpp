@@ -4317,7 +4317,7 @@ auto Memory::rdpAwaitGuest(u64 now) -> void {
     }
     u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now() - t0).count();
-    dpBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    dpBarRspNs.fetch_add(dt, std::memory_order_relaxed);
     if(!(rcpPend.load(std::memory_order_acquire) & 4u)) return;
     u64 nextComp = dpCompSeq.load(std::memory_order_acquire);
     if(nextComp != comp) { comp = nextComp; waited = 0; continue; }
@@ -4371,7 +4371,7 @@ auto Memory::rspDmaRdpWait(u32 lo, u32 hi) -> void {
     }
     u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now() - t0).count();
-    dpBarBlockNs.fetch_add(dt, std::memory_order_relaxed);
+    dpBarRspNs.fetch_add(dt, std::memory_order_relaxed);
     waited += dt;
     if(waited > kBarrierMaxWait) { dpBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
   }
