@@ -8801,3 +8801,78 @@ sitio con grasa de verdad, y no es sincronizacion: es contabilidad.
 `dmaLogPushes` y `dpcMbPosts` eran `fetch_add` (LOCK XADD en x86) sobre contadores con UN solo
 hilo escritor -- el primero salia al 2,97 % del hilo del RSP en el perfil. Pasan a `bumpOwned`,
 que es el idioma que ya usa el resto del emulador para eso. Cuentan igual.
+
+## 2026-09-24 (c) -- El sondeo de DPC_CURRENT NO es el cuello: memo medido PLANO, y el perfil del hilo de CPU dice por que
+
+La seccion anterior senalaba como "el siguiente sitio con grasa de verdad" el camino de lectura de
+DPC_CURRENT: ~18 % del hilo del RSP, 26,8 M de lecturas por partida de Perfect Dark, y de ellas el
+96,9 % con el motor del RDP drenado. Con el motor drenado el valor es una CONSTANTE -- la direccion
+de cierre del ultimo tramo -- y no puede cambiar hasta que entre otro tramo, o sea hasta que se mueva
+`dpSubSeq`. Eso permite un memo exacto: guardar el par `(dpSubSeq, valor)` en el hilo del RSP y
+responder sin recorrer el anillo.
+
+**Implementado, correcto y medido PLANO. Revertido.**
+
+El memo funcionaba: `[dpcmemo] aciertos=25954896 fallos=825197 (96,91 %)`, con los invariantes del
+banco de juego intactos (`1793 intercambios, 3221 campos VI, 1717 sincronias RDP, 332 lecturas de
+mando`) y `[statehash] 58e909a726442e1c` identico. Ahorraba los DOS recorridos del anillo de
+`dpcCurrentFor` (`dpCompletedAt` + `dpVisibleAt`, cada uno con su cursor en almacenamiento de hilo)
+en 25,95 M de las 26,78 M lecturas.
+
+Pared, cinco pares intercalados en el mismo ejecutable con la perilla `KESTREL_DPCMEMO`:
+
+| brazo | lecturas (ms) | min |
+|---|---|---|
+| memo puesto | 6347 / 6324 / 6330 / 6267 / 6273 | 6267 |
+| memo quitado | 6257 / 6307 / 6340 / 6357 / 6336 | 6257 |
+
+Las lecturas se solapan enteras. Segunda ronda quitando ademas del camino de acierto las dos
+anotaciones de diagnostico que quedaban (`dpMaxQuery`, que es una escritura a una linea compartida
+25,7 M de veces, y `dpcRdCur`), cuatro pares intercalados: memo 6412/6290/6318/6317 (min **6290**)
+contra base 6333/6393/6291/6327 (min **6291**). Un milisegundo. Nada.
+
+### Por que no gana: los dos hilos se esperan MUTUAMENTE
+
+Perfil del anfitrion del hilo de **CPU** en el mismo banco (1259 muestras, dentro de imagen 70,7 %,
+fuera 29,3 % de la cual codigo JIT 22,7 %):
+
+| % | sitio |
+|---|---|
+| 18,11 | `spBarrierWait` |
+| 7,07 | carga atomica de 64 bits, dentro de `spBarrierWait` |
+| 4,69 | carga atomica de 32 bits, dentro de `spBarrierWait` |
+| 3,73 | `jitTryBlock` |
+| 2,62 | `dpSpinUntil` |
+| 1,51 | `chargeFpu` |
+| 1,51 | `dcMiss` |
+| 1,43 | `spBarrierEff` |
+| 1,43 | `emit` (JIT) |
+| 1,11 | `dpLogApply` |
+| 1,03 | `jitIdleSkip` |
+
+y fuera de la imagen, por llamante: **21,37 % `jitIdleSkip`** (el hilo ocioso de libultra del propio
+invitado, que en PD es el 65,6 % del tiempo de invitado) y 1,27 % la espera con plazo de la barrera.
+
+Sumando lo que es ESPERA en la barrera del SP -- `spBarrierWait` mas sus dos atomicas mas
+`spBarrierEff` mas `dpSpinUntil` -- sale **33,9 %** del hilo de CPU. Y el perfil del hilo del RSP de
+la seccion (b) daba **20,2 % en `spReadSync`**. O sea: la CPU espera al RSP un tercio de su tiempo y
+el RSP espera a la CPU un quinto del suyo. Se esperan el uno al otro.
+
+Con ese reparto, quitar trabajo de CONTABILIDAD a cualquiera de los dos no mueve la pared: el hilo
+al que se le quita trabajo simplemente llega antes a la siguiente espera. Es la tercera vez que sale
+la misma leccion, y ya con tres experimentos independientes que la respaldan -- el retroceso por
+linea de cache, `KESTREL_BARCHEAP` y ahora el memo de DPC_CURRENT. **Queda escrito para no volver a
+gastar aqui: en este emulador, abaratar la vuelta de una espera o el bookkeeping de un hilo que
+espera no es una optimizacion, es cambiar trabajo por giro.**
+
+Lo que SI queda como frontera real, por orden de tamano:
+
+1. **El suelo de sincronizacion, 15,4 % de la pared** (seccion (b)), y solo se baja rompiendo la
+   fidelidad (`KESTREL_DMARDV=0` + ventana ancha cambian los campos VI y el statehash).
+2. **El trabajo de verdad**: 27,3 % del hilo del RSP es microcodigo compilado y 22,7 % del hilo de
+   CPU es codigo JIT del invitado. Ahi si, cada instruccion que se quite es pared que baja.
+3. El hilo ocioso de libultra (21,4 % del hilo de CPU) ya se cobra en bloque (`KESTREL_CPUIDLE`);
+   lo que queda ahi es el coste de entrar y salir del bloque, no las vueltas.
+
+El memo no esta en el arbol. La perilla `KESTREL_DPCMEMO` tampoco: una perilla que no cambia nada
+medible es ruido en la matriz de biseccion.
