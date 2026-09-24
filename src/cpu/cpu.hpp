@@ -108,6 +108,12 @@ struct CPU {
   //    prologo mira en linea) — asi que el resto de eslabones se saltan la llamada entera.
   //    El driver lo pone a 0 en cada entrada: un permiso nunca cruza dos entradas.
   u32  jitGuard = 0;
+  //  - jitPendSeen = mapa de plazos del RCP (Memory::rcpPend) que habia cuando el trampolin
+  //    calculo el permiso. El prologo en linea lo compara con el vivo: si el otro hilo ARMA
+  //    un plazo a mitad de cadena, el permiso de arriba ya no lo respeta y hay que volver a
+  //    preguntar. Sin esto la interrupcion cae donde acabe el permiso, que lo recorta el
+  //    regulador con el reloj VIVO del RSP -- o sea, en un punto que depende del anfitrion.
+  u32  jitPendSeen = 0;
 
   // --- VR4300 primary caches (direct-mapped, write-back) ---------------------
   // Only RDRAM is cacheable; MMIO/cart accesses (KSEG1 / uncached) bypass. The N64

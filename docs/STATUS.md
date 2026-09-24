@@ -9264,3 +9264,62 @@ trabajo de CPU que tiene que estar hecho antes de que el RSP lea. Lo que queda p
 ### Decision
 
 `KESTREL_SPLEAD=auto` pasa de **256 a 512**, barrera de escritura **encendida** de fabrica.
+
+## 2026-09-24 (j) -- Un plazo armado a mitad de cadena: el dynarec no lo veia, y por eso el estado final de SM64 salia distinto entre corridas del MISMO binario
+
+**Sintoma.** Con el adelanto de fabrica (`KESTREL_SPLEAD=512`, ver (i)) SM64 a 400
+intercambios daba TRES estados finales distintos en ocho corridas del mismo ejecutable
+(`aef8faa47154aa4a` x5, `1389d35cf154aa4a` x2, `9357703a9e498081` x1). No es el tope de
+instrucciones cortando a mitad de cadena: dos de los tres difieren tambien en la mitad
+baja del hash, o sea trayectoria distinta de verdad.
+
+**Donde estaba.** El permiso de la cadena enlazada (`jitGuard`, ver `jitReenterProceed`)
+se calcula UNA vez y luego el prologo en linea lo descuenta bloque a bloque sin volver a
+preguntar. Ese permiso ya contaba los plazos que habia EN ESE MOMENTO — `rcpDueIn` entra
+en el mismo cupo que el plazo del SI — pero un plazo que ARMA EL OTRO HILO mientras la
+cadena corre no lo ve nadie hasta que el permiso se agota. Y cuanto dura el permiso lo
+recorta `Memory::rcpPace`, que lee el reloj VIVO del RSP: host-dependiente. Resultado:
+`MI_SP` se entrega en una instruccion que depende de como fueron de rapidos los hilos.
+
+Medido con `KESTREL_IRQTRACE=4000`, dos corridas que acaban en estados distintos: las
+6566 subidas de interrupcion son las MISMAS salvo un punado de `SP`, y ahi el instante de
+invitado baila 1-34 ops (`SP #109 at=120840810` contra `at=120840776`).
+
+La prueba que lo senalo: `KESTREL_JIT_CHAIN=1` (romper la cadena en cada bloque, con lo
+que el driver vuelve a mirar los plazos cada vez) da UN solo estado, 6/6 con adelanto 1024
+y 3/3 con 8192 — o sea no es "la CPU va mas lenta y el adelanto no se usa", porque los dos
+adelantos dan hashes distintos entre si.
+
+**Arreglo.** `CPU::jitPendSeen` guarda el mapa de plazos del RCP (`Memory::rcpPend`,
+bits 0 fin de SP / 1 fin de RDP / 4 escritura DPC en el diario — los otros dos los escribe
+el hilo de CPU y no pueden cambiar a mitad de cadena) con el que se calculo el permiso, y
+el camino rapido del prologo lo compara con el vivo: si no coinciden, la cadena vuelve al
+trampolin y el permiso se recalcula con el plazo nuevo dentro. El mapa se lee ANTES de
+`rcpDueIn`, no despues, para que una carrera entre las dos lecturas deje el mapa VIEJO y
+corte de mas en vez de de menos. Son dos instrucciones x86 y una lectura de linea
+compartida por bloque. Solo se emite en Threaded con plazos; `KESTREL_DUEWATCH=0` lo quita.
+
+**Resultado.** SM64 400 intercambios, adelanto de fabrica: **8/8 el mismo estado** con la
+comprobacion puesta contra 3 estados distintos en 8 sin ella. PD en juego 4/4
+`0a64f3863fd236b1` y DK64 400 intercambios 4/4 `d2417ef1c80c80e2`, los dos ya con ella.
+Cuesta **~1,3 % de pared** (PD en juego, lecturas intercaladas y disjuntas: 6141-6228 ms
+con, 6081-6113 sin; SM64 7200-7283 contra 7150-7191). Mismo `[statehash]` en los dos
+brazos cuando el brazo sin ella no se descarrila, o sea que no cambia la semantica: cambia
+DONDE se corta la cadena.
+
+**Lo que NO arregla.** El adelanto sigue sin poder subir. Con la comprobacion puesta,
+adelanto 768 se parte (5/6 + 1) y 1024 se parte (dos estados, 6 corridas), aunque 1024
+valdria **-2,6 %** de pared en PD. La razon es otra y es estructural: con adelanto L la
+CPU puede haberse PASADO del instante en que el RSP lee, y por cuanto depende del
+anfitrion. La barrera obliga a la CPU a LLEGAR, no a no haberse pasado. 512 se queda.
+
+**Descartado y medido plano, para que no se vuelva a intentar:**
+- `KESTREL_RSPTANDAW` (acortar el grano con que el RSP publica su reloj MIENTRAS la CPU
+  espera en la barrera): pared 6037-6316 contra 6081-6176 ms y las vueltas de la barrera
+  iguales (111,9 M / 112,7 M / 115,2 M para 0/256/64). La CPU no espera al grano, espera a
+  que el RSP AVANCE. Revertido.
+- `KESTREL_IDLEPACE=0` (quitar el recorte del regulador dentro de `jitIdleSkip`, que era
+  el primer sospechoso por leer el reloj vivo del RSP): sigue partiendose a 1024. Se queda
+  como palanca de A/B.
+- `KESTREL_CPUIDLE=0` (apagar el cobro en bloque del hilo ocioso entero): igual, dos
+  estados.

@@ -1004,6 +1004,18 @@ auto CPU::unimplemented(u32 op) -> void {
         std::fprintf(stderr, "[sd] cnt ops=%llu ret=%llu frac=%u stall=%llu\n",
                      (unsigned long long)countOpsTot, (unsigned long long)retired,
                      countFrac, (unsigned long long)stallTotal);
+        // Historial de las ultimas excepciones. Con el statehash solo se ve QUE campo cambio;
+        // esto dice en que retiro cambio la ENTREGA, que es lo unico que separa dos corridas
+        // del mismo binario cuando la trayectoria es identica. Pide KESTREL_EXCTAIL.
+        if(excTail) {
+          u32 n = excRingIdx < (u32)kExcRing ? excRingIdx : (u32)kExcRing;
+          u32 start = excRingIdx >= (u32)kExcRing ? excRingIdx - kExcRing : 0;
+          for(u32 k = 0; k < n; k++) {
+            u32 i = (start + k) % kExcRing;
+            std::fprintf(stderr, "[sdexc] code=%u epc=%016llx ret=%llu\n", excRingCode[i],
+                         (unsigned long long)excRingEpc[i], (unsigned long long)excRingRet[i]);
+          }
+        }
         std::fprintf(stderr, "[sd] pc %016llx nextPc %016llx hi %016llx lo %016llx\n",
                      (unsigned long long)pc, (unsigned long long)nextPc,
                      (unsigned long long)hi, (unsigned long long)lo);

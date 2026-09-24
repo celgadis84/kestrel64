@@ -1149,6 +1149,17 @@ static const int g_jitTlbLink = std::getenv("KESTREL_JIT_NOTLBLINK") ? 0 : 1;
 static const int g_jitTlbXPage = std::getenv("KESTREL_JIT_NOTLBXPAGE") ? 0 : 1;
 // DIAGNOSTICO: deja el ITC por ruta TLB pero desactiva el enlace ESTATICO TLB.
 static const int g_noTlbStatic = std::getenv("KESTREL_JIT_NOTLBSTATIC") ? 1 : 0;
+// Plazos del RCP que puede ARMAR el otro hilo mientras la CPU corre una cadena enlazada:
+// bit0 fin de tarea del SP, bit1 fin del RDP, bit4 escritura DPC apuntada en el diario. Los
+// otros dos bits de rcpPend (barreras, buzon DPC de la propia CPU) los escribe el hilo de CPU,
+// asi que no pueden cambiar a mitad de cadena.
+static constexpr u32 kPendWatch = 1u | 2u | 16u;
+// KESTREL_DUEWATCH=0 quita la comprobacion (A/B).
+static auto dueWatchOn() -> bool {
+  static const bool v = [] { const char* e = std::getenv("KESTREL_DUEWATCH");
+                             return !e || !*e || (bool)std::strcmp(e, "0"); }();
+  return v;
+}
 // Camino rápido en línea del prólogo re-validable (ver más abajo). KESTREL_JIT_NOFAST=1 lo
 // apaga y deja la llamada al trampolín en cada entrada de bloque (bisección).
 static const int g_jitFast = std::getenv("KESTREL_JIT_NOFAST") ? 0 : 1;
@@ -1205,6 +1216,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
 
   const s32 guardOff   = (s32)((char*)&c.jitGuard     - (char*)&c);
   const s32 timerOff   = (s32)((char*)&c.timerIntr    - (char*)&c);
+  const s32 duePendOff = (s32)((char*)&c.jitPendSeen  - (char*)&c);
   // MI: el prólogo lee (mi_intr & mi_mask) directamente. Las dos viven en la misma línea de
   // caché de Rcp, así que el segundo acceso es gratis; el desplazamiento es constante.
   const s32 miMaskDelta = (s32)((char*)&c.mem->rcp.mi_mask - (char*)&c.mem->rcp.mi_intr);
@@ -1231,7 +1243,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     // interpretadas, y esas terminan el bloque y devuelven el control al driver. Así que si hay
     // permiso y no hay interrupción, se entra al cuerpo sin llamar a nadie.
     const bool fastOk = g_jitFast;
-    usize fastToSlow[4] = {0,0,0,0}; usize fastToBody = 0; int nSlow = 0;
+    usize fastToSlow[5] = {0,0,0,0,0}; usize fastToBody = 0; int nSlow = 0;
     if(fastOk) {
       e.mov_r32_m(RAX, RBX, guardOff);            // eax = ops permitidas
       e.alu32_imm(5, RAX, 0);                     // sub eax, K (placeholder)
@@ -1243,6 +1255,20 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       fastToSlow[nSlow++] = e.jne_rel32_placeholder();  // interrupción del RCP pendiente
       e.cmp_m8_imm(RBX, timerOff, 0);             // latch Count==Compare ya disparado
       fastToSlow[nSlow++] = e.jne_rel32_placeholder();
+      // Plazo ARMADO A MITAD DE CADENA. El permiso de arriba lo calculo el trampolin con los
+      // plazos que habia ENTONCES (rcpDueIn); el que arma despues el hilo del RSP -- fin de
+      // tarea del SP, fin del RDP, escritura DPC del diario -- no lo ve nadie hasta que el
+      // permiso se agota, y ahi MI_SP cae en una instruccion que depende del ANFITRION,
+      // porque a ese permiso lo recorta el regulador con el reloj VIVO del RSP. Comparar aqui
+      // el mapa de plazos cuesta una lectura de linea compartida por bloque y hace que el
+      // corte caiga EXACTAMENTE en el plazo, como en Lockstep.
+      if(dueWatchOn() && c.mem && c.mem->rcpMode == Memory::RcpMode::Threaded && Memory::rcpDeadlineOn()) {
+        e.mov_r_imm64(RDX, (u64)&c.mem->rcpPend);
+        e.mov_r32_m(RCX, RDX, 0);
+        e.alu32_imm(4, RCX, kPendWatch);          // and ecx, mascara
+        e.cmp_r32_m(RCX, RBX, duePendOff);
+        fastToSlow[nSlow++] = e.jne_rel32_placeholder();
+      }
       // En LOCKSTEP el hilo CPU interleavea pasos del RSP en cuanto un store lo arranca, así
       // que un bloque de la cadena que lo arranque tiene que devolver el control. Es un byte
       // en una línea de caché propia (rsp.running); comprobarlo aquí cuesta lo mismo que en
@@ -2291,6 +2317,11 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   // punto distinto al del interprete y los modos dejarian de ser el mismo emulador.
   u64 siDue = ~0ull;
   if(mem) {
+    // ANTES de mirar los plazos: si el otro hilo arma uno entre esta lectura y rcpDueIn,
+    // el mapa visto se queda VIEJO y el prologo en linea corta la cadena en el siguiente
+    // bloque. Al reves -- leerlo despues -- el plazo nuevo quedaria dentro del permiso sin
+    // estar contado, que es justo lo que se quiere evitar.
+    jitPendSeen = mem->rcpPend.load(std::memory_order_acquire) & jit::kPendWatch;
     u64 now = mem->cartNow();
     siDue = mem->eventDueIn(now);
     // El fin de tarea del RCP en Threaded es otro plazo del mismo reloj: si el bloque se lo
@@ -2445,6 +2476,12 @@ namespace jit { u64 g_idleLim[5] = {}, g_idleLimOps[5] = {}; }
 // RCP" de "el juego espera a un plazo" (VI, timer), que son problemas distintos.
 static u64 g_idleWho[4] = {0,0,0,0};
 
+static auto idlePaceOn() -> bool {
+  static const bool v = [] { const char* e = std::getenv("KESTREL_IDLEPACE");
+                             return !e || !*e || (bool)std::strcmp(e, "0"); }();
+  return v;
+}
+
 auto CPU::jitIdleSkip(u32 phys) -> u32 {
   if(jitPending) { jit::g_idleWhy[0]++; return 0; }   // el driver siempre entra con la cadena vacia
   if((usize)phys + 8 > mem->rdram.size()) return 0;
@@ -2480,7 +2517,12 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
   { u64 r = mem->rcpDueIn(now); if(r < due) due = r; }
   if(due != ~0ull) { u64 d = opsForGuest(due); if(d < lim) { lim = d; who = 1; } }
   if((u64)jitOpsBudget < lim) { lim = jitOpsBudget; who = 2; }
-  if(mem->rcpMode == Memory::RcpMode::Threaded) {
+  // PRUEBA (KESTREL_IDLEPACE=0): el regulador es la UNICA entrada host-dependiente de este
+  // limite -- sale del reloj VIVO del RSP -- y con el puesto, cuantas vueltas del bucle
+  // ocioso se saltan cambia entre corridas del mismo binario. Como el salto entrega la
+  // interrupcion en el SALTO y la ejecucion normal puede entregarla en la ranura de
+  // retardo, eso mueve Cause.BD.
+  if(mem->rcpMode == Memory::RcpMode::Threaded && idlePaceOn()) {
     u32 pa = mem->rcpPace(guestOps());
     if((u64)pa < lim) { lim = pa; who = 3; }
   }
