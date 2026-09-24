@@ -428,8 +428,15 @@ extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(vo
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
 // al epílogo); *isStore = si muta memoria. Devuelve false si op no es un mem-op soportado.
+// `mmioSite` (opcional): sitio del jne que saca del bloque cuando el ayudante contesta 2
+// (= el acceso ARMO un plazo nuevo). Ver CPU::jitMemOp y Memory::armEpoch. Se emite solo si
+// `mmioExit`; en una ranura de retardo NO se pide, que el bloque ya termina en el salto que
+// la precede. Vale para cargas y para stores: leer DPC tambien arma. `mmioSnapOut` recoge la
+// instantanea del cache de registros con la que sale el stub (la de DESPUES de `forget`).
 static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore,
-                      RcSnap& snap, u32 opsBefore, s32 pendOff) -> bool {
+                      RcSnap& snap, u32 opsBefore, s32 pendOff,
+                      usize* mmioSite = nullptr, bool mmioExit = false,
+                      RcSnap* mmioSnapOut = nullptr) -> bool {
   u32 OP = op >> 26;
   void* fn = nullptr;
   bool isFp = false;
@@ -635,8 +642,15 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
   e.test_al_al();
   bailSite = e.je_rel32_placeholder();    // al==0 (faulted) → salta al stub de bail
   snap = rc.snap();                       // lo sucio aqui lo escribe el stub de bail
+  // `forget` va ANTES de la salida por MMIO: la op YA se completo, o sea que el ayudante
+  // escribio gpr[rt] el mismo, y el volcado del stub no debe pisarlo con la copia vieja.
+  // Es estado de compilacion, no emite nada, asi que adelantarlo no cambia el camino rapido.
+  if(!isStore && !isFp) rc.forget(rt);
+  // al==2: el acceso SI se hizo, pero ARMO un plazo -> el bloque sale AQUI (ver armEpoch).
+  if(mmioSite && mmioExit) { if(mmioSnapOut) *mmioSnapOut = rc.snap();
+                             e.cmp_al_imm8(1); *mmioSite = e.jne_rel32_placeholder(); }
+  else if(mmioSite) *mmioSite = 0;
   if(hasFast) e.patchRel32(fastDone);     // el camino rapido se reune aqui
-  if(!isStore && !isFp) rc.forget(rt);    // el helper acaba de escribir gpr[rt] en memoria
   return true;
 }
 
@@ -1347,6 +1361,8 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   }
 
   std::vector<usize> bailSites;   // offset del disp32 del je de cada mem-op
+  // Salidas inmediatas por store a un registro de control del RCP (ver emitMemOp/CPU::jitMemOp).
+  std::vector<usize> mmioSites; std::vector<u32> mmioIdx; std::vector<RcSnap> mmioSnap;
   std::vector<u32>   bailIdx;     // ops retiradas antes de esa mem-op (índice)
   std::vector<RcSnap> bailSnap;   // ranuras sucias en cada bail (spill perezoso)
   std::vector<usize> interpSites; // je de cada op interpretada (salida de control)
@@ -1688,9 +1704,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
-    usize site; bool isStore; RcSnap msnap;
-    if(emitMemOp(e, rc, op, site, isStore, msnap, b.nOps, pendOff)) {
+    usize site; bool isStore; RcSnap msnap, mmsnap; usize msite = 0;
+    if(emitMemOp(e, rc, op, site, isStore, msnap, b.nOps, pendOff, &msite, true, &mmsnap)) {
       bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap); bailUndo.push_back(ilkUndo);
+      // Retira ESTA op y sale: el acceso ya tuvo efecto (b.nOps aun no se ha incrementado).
+      if(msite) { mmioSites.push_back(msite); mmioIdx.push_back(b.nOps + 1); mmioSnap.push_back(mmsnap); }
       b.hasMem = true; if(isStore) b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
     }
@@ -2075,6 +2093,17 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       }
     }
     e.mov_r_imm32(RAX, bailIdx[k]);
+    toDone.push_back(e.jmp_rel32_placeholder());
+  }
+  // Stubs de salida por MMIO que ARMA. A diferencia del bail, el acceso YA se hizo: se sale
+  // contando la op como retirada y SIN bandera de control, o sea el conductor avanza pc
+  // secuencialmente (pc += 4*R) y acto seguido remata SI/PI/VI, rcpRetire y el muestreo de
+  // interrupcion -- en la instruccion exacta, como el interprete. Nada que deshacer del
+  // interlock: la op se completo.
+  for(usize k = 0; k < mmioSites.size(); k++) {
+    e.patchRel32(mmioSites[k]);
+    rc.emitSnapSpill(mmioSnap[k]);
+    e.mov_r_imm32(RAX, mmioIdx[k]);
     toDone.push_back(e.jmp_rel32_placeholder());
   }
   // Stubs de salida de op interpretada: a diferencia del bail, la op YA tuvo efecto y el

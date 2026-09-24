@@ -2637,6 +2637,10 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
   u32 pe = (sz == 8) ? (u32)p : (u32)reXor(p, sz);
   bool inRdram = cacheable(a) && pe < mem->rdram.size();
   if constexpr(!store) {
+    // Sello de armado ANTES del acceso: una LECTURA de MMIO tambien puede armar un plazo --
+    // leer un registro DPC aplica el diario del RSP (dpLogApply) y eso arma el fin de tramo
+    // del RDP. Si el sello cambia, el bloque sale en esta instruccion (ver abajo y armEpoch).
+    const u32 ep0 = inRdram ? 0u : mem->armEpoch;
     u64 raw = inRdram ? dcRead(pe, sz)
             : uncachedRead(pe, sz, [&]{ return sz == 1 ? (u64)mem->read8(pe) : sz == 2 ? (u64)mem->read16(pe)
                                              : sz == 4 ? (u64)mem->read32(pe) : mem->read64(pe); });
@@ -2649,7 +2653,7 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
     else if constexpr(OPc == 0x31) fprSet32(rt, (u32)raw);   // LWC1
     else if constexpr(OPc == 0x35) fprSet64(rt, raw);        // LDC1
     else                           set(rt, raw);            // LD
-    return 1;
+    return (!inRdram && mem->armEpoch != ep0) ? (u8)2 : (u8)1;
   } else {
     u32 pm = (u32)p & 0x1fff'ffff;
     if constexpr(fp) rtVal = (sz == 4) ? (u64)fprGet32(rt) : fprGet64(rt);
@@ -2658,11 +2662,22 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
     if constexpr(sz != 4)            { if(mem->wordStoreQuirk(pm, rtVal, sz)) return 1; }
     if(inRdram) { dcWrite(pe, rtVal, sz); return 1; }
     ramUncached(pe, sz);
+    const u32 ep0 = mem->armEpoch;
     if      constexpr(sz == 1) mem->write8 (pe, (u8) rtVal);
     else if constexpr(sz == 2) mem->write16(pe, (u16)rtVal);
     else if constexpr(sz == 4) mem->write32(pe, (u32)rtVal);
     else                       mem->write64(pe, rtVal);
-    return 1;
+    // SALIDA INMEDIATA DEL BLOQUE si el acceso ARMO algo. El store ya esta fechado bien (el
+    // prologo del ayudante suma las ops del bloque a jitPending), pero lo que arma -- plazo
+    // del VI/AI, tramo del RDP, cesion del SP, DMA del SI/PI, mascara del MI -- puede vencer
+    // DENTRO de las ops que le quedan al bloque, y ahi no mira nadie: el conductor no vuelve a
+    // muestrear plazos ni interrupciones hasta el final del bloque, y `*jitGuardPtr = 0` corta
+    // la CADENA (lo mira el prologo del bloque siguiente), no el bloque en curso.
+    // Devolviendo 2 el bloque sale en esta op y el conductor remata SI/PI/VI, rcpRetire y el
+    // muestreo de interrupcion en la instruccion exacta, igual que el interprete.
+    // El disparo es el sello `Memory::armEpoch`, que suben exactamente los sitios que arman
+    // (Memory::jitCancelChain): ni un MMIO inocuo paga la salida, ni se escapa uno que arme.
+    return (mem->armEpoch != ep0) ? (u8)2 : (u8)1;
   }
 }
 

@@ -1299,6 +1299,16 @@ public:
   // CPU lo pone a 0: el permiso se calculo antes de que existiera, asi que la cadena se lo
   // tragaria. A 0 el siguiente prologo vuelve al trampolin, que ya lo ve (siDueIn).
   u32* jitGuardPtr = nullptr;
+  // Sello de ARMADO. Lo sube cualquiera de los sitios de arriba, o sea cada vez que un acceso
+  // MMIO del hilo de CPU deja un plazo nuevo (o mas cercano) o cambia lo que se ve de una
+  // interrupcion. El ayudante de memoria del JIT lo lee antes y despues del acceso: si cambio,
+  // devuelve 2 y el bloque compilado SALE en esa instruccion. Hace falta porque `*jitGuardPtr = 0`
+  // corta la CADENA -- lo mira el prologo del bloque SIGUIENTE -- y no el bloque en curso: el
+  // plazo recien armado puede vencer dentro de las ops que le quedan, y ahi no mira nadie.
+  // Sirve igual para una LECTURA: leer un registro DPC aplica el diario del RSP (dpLogApply) y
+  // eso puede armar el fin de tramo del RDP. Es solo del hilo de CPU, por eso u32 pelado.
+  u32 armEpoch = 0;
+  auto jitCancelChain() -> void;
   const u64* cartStall = nullptr;       // ops equivalentes a las paradas de cache (CPU::stallOps)
   // Paradas ya cobradas pero aun sin volcar a stallOps (CPU::stallCycles, su resto y el CPI).
   // El interprete vuelca en cada instruccion y el JIT al cerrar el bloque: sin sumarlas aqui,

@@ -181,6 +181,9 @@ public:
   // en el buffer para parchear luego con patchRel32(). Salto tomado cuando al==0.
   auto je_rel32_placeholder() -> usize { buf.emit(0x0F); buf.emit(0x84); usize at = buf.used; imm32(0); return at; }
   auto jmp_rel32_placeholder() -> usize { buf.emit(0xE9); usize at = buf.used; imm32(0); return at; }
+  // cmp al, imm8 / jne rel32. Los usa la salida inmediata de bloque tras un store a un
+  // registro de control del RCP: el ayudante devuelve 2 y el bloque sale ahi mismo.
+  auto cmp_al_imm8(u8 v) -> void { buf.emit(0x3C); buf.emit(v); }
   // Parchea un disp32 emitido en `at` para que apunte al cursor actual (destino = aquí).
   auto patchRel32(usize at) -> void {
     if(!buf.base || at + 4 > buf.cap) return;

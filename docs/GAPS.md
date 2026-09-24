@@ -1411,3 +1411,45 @@ midio plana.
 No bloquea: el backend por defecto es parallel-rdp por orden expresa del usuario
 ("NO quiero nada de SoftRDP, la idea es Parallel-RDP"). SoftRDP se queda como modelo de
 coste y oraculo de diagnostico. Se arregla cuando toque la fase de precision del RDP propio.
+
+## El estado guardado del banco de Perfect Dark en juego ya no carga (2026-09-24)
+
+La medida "PD en juego" de STATUS sale de cargar la ranura 0 de `Perfect Dark (Europe) (En,Fr,De,It).st0`
+(`KESTREL_LOADSTATE=0` + `KESTREL_MAXFLIPS=1793`). Hoy esa corrida imprime `[state] estado
+cargado de ranura 0` y acto seguido descarrila:
+
+```
+[RI] op cfffcfff (op.33) @ pc=70015de4 -> Reserved Instruction
+```
+
+y se queda dando vueltas sin llegar nunca al tope de intercambios (una corrida se comio 330 s).
+**Pasa igual con el binario de HEAD sin ningun cambio encima**, o sea que es la foto la que ya
+no casa con el formato/semantica de hoy, no una regresion de un cambio reciente. Mientras no se
+vuelva a capturar, la cifra de "PD en juego" no se puede reproducir; las comparaciones de pared
+de esta tanda se hicieron con PD desde el arranque (300 intercambios) y con SM64/DK64 en `bench`.
+
+Pendiente: recapturar la foto con el binario actual (o llegar al nivel con `scripts/pad.py` /
+escritura directa de `g_MissionConfig`, ver `docs/PD-GAMEPLAY.md`) y anotar la ranura nueva.
+
+## El reparto diario/cita del DMA del SP depende del anfitrion (2026-09-24)
+
+`Memory::spDmaLogPush` decide si un DMA SP->RDRAM se apunta en el diario o se resuelve con la
+cita mirando, entre otras cosas, si el destino pisa una imagen que el RDP pueda tener en vuelo
+(`rcpPend & 4`, rangos `dpWrLo`/`dpWrHi`). Esos campos los mueve el **worker del RDP en tiempo
+de pared**, asi que el reparto baila en cada corrida: medido en SM64 400 intercambios, 831825 /
+831867 / 831905 DMA apuntados en tres corridas del mismo binario.
+
+Las dos vias no son equivalentes para la CPU -- la cita para al RSP hasta que la CPU llega, el
+diario no --, asi que el reparto modula el adelanto REAL. Con `KESTREL_SPLEAD > 0` eso se ve en
+el estado final: SM64 da DOS statehash en ocho corridas. Con `SPLEAD=0` u `DMALOG=0`, 8/8 igual.
+Barrido completo y descarte de los otros candidatos (diario de DPC, diario de SP_STATUS,
+`DPCFAST`/`DPCJUMP`, `DMARDV`/`DMASPAN`) en `docs/STATUS.md` 2026-09-24 (s).
+
+Cierre pendiente: que la eleccion diario/cita no mire nada en hora de anfitrion -- marcar las
+paginas y que el consumidor del FIFO consulte el diario, que es lo que ya hace `dmaSettle` en
+el lado de la CPU. Mientras tanto las puertas siguen fijando `SPLEAD=0`, que es reproducible.
+
+Hueco secundario visto al leer, sin medir aun: `CPU::write8/16/32/64` (store **sin cache**) hace
+`ramUncached(pe,sz)` + `mem->writeN(pe,x)` y **no llama a `dmaSettle`**, al contrario que
+`uncachedRead`, `dcFlush`/`dcFill`, `miRepeatStore` y los DMA de PI/SI. Un store sin cache sobre
+una pagina con un DMA del diario aun sin aplicar se lo puede comer la aplicacion posterior.

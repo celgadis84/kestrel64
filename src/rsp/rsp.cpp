@@ -711,6 +711,15 @@ auto Rsp::mfc0(int rt, int rd) -> void {
     setR(rt, mem->spStatusForRsp(now));
     return;
   }
+  // SP_SEMAPHORE: el UNICO registro del RCP cuya LECTURA tiene efecto (devuelve el valor y
+  // deja 1). Es el cerrojo entre CPU y RSP, asi que quien se lo lleva lo decide EN QUE INSTANTE
+  // lee cada uno -- sin cita lo decidia el anfitrion. Misma regla que SP_STATUS: esperar a que
+  // la CPU llegue al ultimo borde de grano y leer ahi.
+  if(rd == 7 && mem->rcpMode == Memory::RcpMode::Threaded) {
+    const u64 now = mem->rspGuestNowAt(exactCycles());
+    const u64 vis = now & ~(Memory::spSigQuant() - 1);
+    if(!cpuReached(vis)) { publishExact(); mem->spReadSync(vis, 1); cpuSeen = mem->cartNow(); }
+  }
   if(rd & 8) {
     // Resto de DPC (START/END/contadores): mismo borde de grano para ver lo de la CPU.
     const u64 now = mem->rspGuestNowAt(exactCycles());

@@ -259,6 +259,17 @@ auto Memory::piXferCycles(u32 cartPhys, u32 len) const -> u64 {
 // que el invitado observa de verdad.
 // A/B: KESTREL_PIINSTANT=1 devuelve el comportamiento anterior (termina en la instruccion que
 // lo arranca). Solo para bisecar: en hardware NO pasa.
+// Un plazo NUEVO armado desde el hilo de CPU: se anula el permiso de la cadena del JIT (lo
+// mira el prologo del bloque siguiente) y se sube el sello que hace SALIR al bloque en curso
+// en la instruccion exacta (lo miran los ayudantes de memoria, ver CPU::jitMemOp y armEpoch).
+// Desde el hilo del RSP -- dpLogApply cuando la CPU se para o cuando salta el salvavidas de
+// pared -- solo lo primero, que el sello es del hilo de CPU y tocarlo desde fuera seria a la
+// vez carrera y una salida de bloque decidida por el anfitrion.
+auto Memory::jitCancelChain() -> void {
+  if(jitGuardPtr) *jitGuardPtr = 0;
+  if(!tlIsRspThread) armEpoch++;
+}
+
 auto Memory::piArm(u32 cartPhys, u32 len) -> void {
   static const bool instant = std::getenv("KESTREL_PIINSTANT") != nullptr;
   if(instant || !len) { rcp.pi_status = 0x8; raiseIntr(MI_PI); return; }
@@ -267,7 +278,7 @@ auto Memory::piArm(u32 cartPhys, u32 len) -> void {
   rcp.pi_status = PI_DMA_BUSY;
   // Lo arranca un store que con el JIT puede ir en mitad de una cadena enlazada cuyo permiso
   // no conocia este plazo (mismo caso que siDma).
-  if(jitGuardPtr) *jitGuardPtr = 0;
+  jitCancelChain();
 }
 
 // Vencimiento del plazo del PI.
@@ -792,6 +803,10 @@ auto Memory::wordStoreQuirk(u32 phys, u64 reg, u32 width) -> bool {
   bool pif = phys >= BASE_PIFRAM && phys < BASE_PIFRAM + PIFRAM_SIZE;
   if(!sp && !pif) return false;
   if(width == 4) return false;                 // SW behaves normally on these devices
+  // SB/SH/SD a DMEM/IMEM: esta rareza NO pasa por CPU::ramUncached, asi que sin esto se cuela
+  // una escritura de la CPU en la memoria que el RSP lee ahora mismo, y en Threaded con
+  // adelanto esa memoria es el futuro del RSP. Misma cita que el resto. Ver cpuRamWrBarrier.
+  if(sp && wrBarrierOn() && !tlIsRspThread) cpuRamWrBarrier(cartNow());
   u32 out;
   if(width == 8) {
     out = (u32)(reg >> 32);                     // SD writes only the upper 32 bits
@@ -824,6 +839,9 @@ auto Memory::miRepeatStore(u32 phys, u64 value, u32 sz) -> void {
   for(u32 p = 0; p < unit; p++) pat[p] = (u8)(word >> (8 * (unit - 1 - p)));  // big-endian lanes
   u32 end  = (phys & ~7u) + rcp.mi_repeat_len;    // span counts from the start of the 8-byte column
   u32 page = phys & ~0x7ffu;                       // 2 KiB wrap region
+  // Difusion a RDRAM desde el hilo de CPU: escribe RDRAM de verdad, asi que necesita la misma
+  // cita que un volcado de linea sucia (ver cpuRamWrBarrier).
+  if(wrBarrierOn() && !tlIsRspThread) cpuRamWrBarrier(cartNow());
   dmaSettle(page, (u64)page + 0x800);
   for(u32 j = phys; j < end; j++) {
     u32 a = page | (j & 0x7ff);
@@ -1074,12 +1092,17 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       if(v & (1 << 8)) { rcp.mi_repeat_on = true; rcp.mi_repeat_len = (v & 0x7f) + 1;  // arm: span = length+1
                          if(cpuStGuard) *cpuStGuard |= 2u; }
       if(v & (1 << 11)) clearIntr(MI_DP);   // clear DP interrupt
+      jitCancelChain();
       break;
     case 0x0c: {  // MI_MASK: (clear,set) pairs for the 6 interrupts
       for(u32 i = 0; i < 6; i++) {
         if(v & (1u << (2 * i)))     rcp.mi_mask &= ~(1u << i);
         if(v & (1u << (2 * i + 1))) rcp.mi_mask |=  (1u << i);
       }
+      // Quitar la mascara a una interrupcion YA pendiente la hace visible en el acto: el
+      // interprete la coge en la instruccion siguiente, asi que el bloque compilado tiene que
+      // salir aqui en vez de seguir hasta su final. Ver Memory::armEpoch.
+      jitCancelChain();
       break;
     }
     }
@@ -1410,7 +1433,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     // Reprogramar la linea de coincidencia (o la altura del campo) mueve el plazo del VI:
     // el que estuviera armado se calculo con el valor viejo. Se invalida y se saca al JIT de
     // la cadena, igual que hace piArm, para que el siguiente prologo lo recalcule.
-    case 0x0c: rcp.vi_intr = v & 0x3ff; viNextAt = viNextEvent(viLastRetired); evArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
+    case 0x0c: rcp.vi_intr = v & 0x3ff; viNextAt = viNextEvent(viLastRetired); evArm(); jitCancelChain(); break;
     case 0x10: {
       static int vilog = std::getenv("KESTREL_VILOG") ? 1 : 0;
       if(vilog) { static u32 n=0; if((n++ & 0x3f)==0)
@@ -1418,7 +1441,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       clearIntr(MI_VI); break;   // VI_CURRENT write acks the VI interrupt
     }
     case 0x14: rcp.vi_burst = v; break;
-    case 0x18: rcp.vi_vsync = v; viNextAt = viNextEvent(viLastRetired); evArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
+    case 0x18: rcp.vi_vsync = v; viNextAt = viNextEvent(viLastRetired); evArm(); jitCancelChain(); break;
     case 0x1c: rcp.vi_hsync = v; break;
     case 0x20: rcp.vi_leap = v; break;
     case 0x24: rcp.vi_hstart = v; break;
@@ -1452,7 +1475,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
         // Un bufer nuevo en la cola pone plazo donde no lo habia (o lo adelanta): se rearma
         // y se saca al JIT de la cadena, igual que hacen piArm y la escritura de VI_INTR.
         aiArm();
-        if(jitGuardPtr) *jitGuardPtr = 0;
+        jitCancelChain();
         // Fan the accepted buffer out to the host speakers. Read-only on RDRAM, so
         // this cannot perturb determinism (systemtest / lockstep md5 unaffected).
         u32 rate = rcp.ai_dacrate ? (aiVidClock / (rcp.ai_dacrate + 1)) : 32'000u;
@@ -1470,7 +1493,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     // 0xffffffff dentro, el `dacrate + 1` de `aiNextEvent` daba la vuelta a 0 en aritmetica de
     // 32 bits y el anfitrion se moria de division entera por cero. Una ROM que escriba basura
     // en los registros -- junkrunner64 lo hace a proposito -- tumbaba el emulador entero.
-    case 0x10: aiTick(cartNow()); rcp.ai_dacrate = v & 0x3fff; aiArm(); if(jitGuardPtr) *jitGuardPtr = 0; break;
+    case 0x10: aiTick(cartNow()); rcp.ai_dacrate = v & 0x3fff; aiArm(); jitCancelChain(); break;
     case 0x14: rcp.ai_bitrate = v & 0xf; break;                 // BITRATE[3:0], igual
     }
     return;
@@ -1993,7 +2016,7 @@ auto Memory::siDma(bool toPif) -> void {
   // Lo arranca un store, que con el JIT puede ir en mitad de una cadena enlazada cuyo permiso
   // no conocia este plazo: DK64 Lockstep veia MI_SI ~2600 instrucciones tarde con JIT. El
   // resto del bloque en curso no llega (una transaccion dura cientos de us = miles de ops).
-  if(jitGuardPtr) *jitGuardPtr = 0;
+  jitCancelChain();
   rcp.si_status = SI_DMA_BUSY;
   if(instant) siFinish();
 }
@@ -3567,7 +3590,7 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
     }
     // Plazo nuevo armado desde el hilo de CPU (un store a DPC_END, que con el JIT puede ir en
     // mitad de una cadena): el permiso de la cadena no lo conocia. Igual que siDma.
-    if(!tlIsRspThread && jitGuardPtr) *jitGuardPtr = 0;
+    if(!tlIsRspThread) jitCancelChain();
   }
   // Zona que este tramo puede pintar (ver rspDmaRdpWait). Se publica ANTES de que rdpSubmit
   // levante el bit2: quien vea el bit ya ve la zona. Sin pase de coste no se sabe: todo.
@@ -3760,7 +3783,7 @@ auto Memory::dpLogApply(u64 upTo) -> void {
       dpcViewPend.fetch_sub(1, std::memory_order_release);
     } else if(e.reg & 64u) {
       dpEndArmAt(dpLogArm[h & kDpLogM]);
-      if(jitGuardPtr) *jitGuardPtr = 0;
+      jitCancelChain();
     } else if(e.reg & 16u) {
       const DpLogDma& d = dpLogDma[h & kDpLogM];
       spDmaLogApply(d);
@@ -3857,8 +3880,11 @@ auto Memory::rdvWaiveDue(bool& timing, std::chrono::steady_clock::time_point& t0
   return t - t1 > std::chrono::milliseconds(20);
 }
 
-// Adelanto de la CPU en la cita de lectura de DPC (ver dpLogWait). Opcional y APAGADO de
-// fabrica: con la CPU por delante del RSP los eventos y plazos que nacen del RSP llegan tarde
+// Adelanto de la CPU en la cita de lectura de DPC (ver dpLogWait). PUESTO de fabrica en
+// velocidad libre y QUITADO con `KESTREL_SPEEDMODE=hw`; las puertas lo fijan a 0 y por eso
+// siguen siendo el oraculo determinista. OJO AL MEDIR A MANO: una corrida suelta sin la
+// variable lo lleva PUESTO, o sea que el statehash NO tiene por que repetir -- y eso es
+// ESTO, no el adelanto de la barrera del SP. Con la CPU por delante del RSP los eventos y plazos que nacen del RSP llegan tarde
 // y su reajuste depende del anfitrion, asi que threaded deja de coincidir con lockstep
 // (junkrunner64 a 400M instrucciones da un statehash distinto en cada corrida). A cambio,
 // Perfect Dark en juego pasa de ~15 a ~39 fps. Modo rapido, no fiel.
@@ -4790,7 +4816,7 @@ auto Memory::rspSubmitKick() -> void {
     // lanzamiento es un store en mitad de ella). Antes lo cubria la guarda `rsp.brake` del
     // prologo; en Threaded con plazos esa guarda ya no se emite (ver jit.cpp), asi que se
     // anula el permiso igual que siDma o dpScheduleSpan.
-    if(jitGuardPtr) *jitGuardPtr = 0;
+    jitCancelChain();
     rspKick = true;
     wakeRsp = rspIdleWaiting;
     ev("sp.kick", rcp.sp_pc, rcp.sp_status.load());

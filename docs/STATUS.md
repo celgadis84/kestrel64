@@ -9601,3 +9601,162 @@ Lo que serializa no es el tope conservador: es la dependencia de datos real entr
 
 Trabajo real de cada hilo, descontadas las esperas: CPU ~69 % de la pared, RSP ~44 %. El
 siguiente sitio donde hay algo que ganar es el coste de emular, no el reparto.
+
+## 2026-09-24 (r) -- Auditoria A-D de sincronizacion: el bloque del JIT ya no se traga un plazo recien armado
+
+Repaso pedido punto por punto sobre los cuatro frentes de sincronizacion: bloques del JIT
+contra `cartNow()`, sondeo de la CPU sobre el RSP, barreras de escritura a RDRAM y publicacion
+de las interrupciones del MI. Dos agujeros reales, dos confirmaciones de que no habia nada que
+tocar. Lo de fondo es siempre la misma frontera: **un bloque compilado no muestrea nada por
+dentro**, asi que cualquier cosa que nazca a mitad de bloque se ve tarde.
+
+### (A) Salida inmediata del bloque cuando el acceso ARMA algo -- ARREGLADO
+
+El permiso de la cadena ya estaba bien acotado (borde del timer, `eventDueIn`, `rcpDueIn`,
+`jitOpsBudget`, `rcpPace`) y el ayudante lento de memoria ya fechaba bien el acceso MMIO (el
+prologo suma las ops del bloque a `jitPending` antes de la llamada). El hueco estaba en otro
+sitio: `*jitGuardPtr = 0` corta la **cadena** -- lo mira el prologo del bloque SIGUIENTE -- y
+no el bloque en curso. O sea que un plazo armado a mitad de bloque (`VI_INTR`, `AI_DACRATE`,
+un tramo corto de RDP por `DPC_END`, el DMA del SI/PI, el arranque del SP) podia vencer dentro
+de las ops que le quedaban al bloque, y ahi no mira nadie: el conductor no vuelve a mirar
+plazos ni interrupciones hasta el final. El interprete, en cambio, lo ve en la instruccion
+siguiente.
+
+El disparo es un sello, `Memory::armEpoch`, que sube `Memory::jitCancelChain()` -- la funcion
+por la que pasan ahora los nueve sitios que antes escribian `*jitGuardPtr = 0` a pelo, mas la
+escritura de `MI_MASK` y el `clearIntr(MI_DP)` de `MI_MODE`, que no arman plazo pero cambian lo
+que se VE de una interrupcion ya pendiente. `CPU::jitMemOp` lee el sello antes y despues del
+acceso y, si cambio, devuelve **2**; el codigo emitido compara `al` y salta a un stub que sale
+del bloque contando esa op como retirada y sin bandera de control, o sea que el conductor
+avanza `pc` y acto seguido remata SI/PI/VI, `rcpRetire` y el muestreo de interrupcion **en la
+instruccion exacta**, igual que el interprete. Nada que deshacer del interlock: la op se
+completo.
+
+Detalles que importan:
+- Vale para **cargas** tambien, no solo para stores: leer un registro DPC aplica el diario del
+  RSP (`dpLogApply`) y eso puede armar el fin de tramo del RDP. La instantanea del cache de
+  registros del stub de la carga se toma DESPUES de `forget(rt)`, que si no el volcado pisaria
+  con la copia vieja el valor que acaba de escribir el ayudante.
+- Solo paga la **ruta lenta**: el camino rapido de RDRAM del JIT se reune despues del `jne`.
+- Con el sello no hay falsos positivos (un MMIO inocuo no paga salida) ni falsos negativos (un
+  sitio que arme sube el sello). Un rango de direcciones, que fue el primer intento, tenia las
+  dos cosas.
+- Desde el hilo del RSP (`dpLogApply` cuando la CPU se para o cuando salta el salvavidas de
+  pared) `jitCancelChain` **no** toca el sello: seria carrera y, peor, una salida de bloque
+  decidida por el anfitrion.
+
+Lo que NO cubre esto es un plazo que arme el OTRO hilo a mitad de cadena (fin de tarea del SP,
+fin del RDP): eso es lo que ya mira `KESTREL_DUEWATCH` en el prologo, ver (j).
+
+### (A, lado RSP) -- ya estaba bien
+
+`Rsp::jitCop0` pasa MFC0/MTC0 por el interprete con el reloj exacto de esa instruccion y
+devuelve true (cortar el bloque) cuando hay `halt` o cambia la generacion de IMEM. Cada
+escritura de DPC/DMA/SP_STATUS hace su `spReadSync` o su apunte al diario en linea. No hay
+rafaga que se trague un instante.
+
+### (B) Sondeo de la CPU sobre `SP_STATUS` -- no hacia falta tocar nada
+
+Los bloques terminan en el salto, asi que un bucle de sondeo compilado es un bloque que se
+enlaza consigo mismo, y el **permiso** de esa cadena ya incluye `rcpDueIn()`: cuando el plazo
+del SP se acerca, el permiso lo recorta y se vuelve al conductor. La lectura de `SP_STATUS`
+aplica antes el diario del RSP, y HALT/BROKE se hacen visibles en `spDoneAt` por `rcpRetire`.
+El arreglo de (A) ademas garantiza que se vuelve a muestrear justo despues de cualquier
+escritura de control. El hilo del RSP progresa en `spReadSync` mientras tanto: la CPU no lo
+bloquea por girar.
+
+### (C) Barreras de escritura CPU -> RDRAM -- dos huecos cerrados, uno de lectura tambien
+
+Repasadas TODAS las vias por las que el hilo de CPU deja bytes donde el RSP mira:
+- `dcFlush` (unica via por la que un store cacheado llega a RDRAM) -- ya cubierta.
+- `ramUncached` (RDRAM sin cachear + DMEM/IMEM) -- ya cubierta.
+- PI DMA -> RDRAM y SI PIF -> RDRAM -- ya cubiertas (`KESTREL_DMABARRIER`).
+- **`Memory::wordStoreQuirk`**: SB/SH/SD a DMEM/IMEM. Esta rareza NO pasa por `ramUncached`, o
+  sea que se colaba una escritura de la CPU en la memoria que el RSP esta leyendo ahora mismo.
+  CERRADO.
+- **`Memory::miRepeatStore`**: la difusion a RDRAM del modo repeat del MI escribe RDRAM de
+  verdad desde el hilo de CPU. CERRADO, misma cita que un volcado de linea sucia.
+- **`SP_SEMAPHORE`**: es el unico registro del RCP cuya LECTURA tiene efecto (devuelve el valor
+  y deja 1), o sea el cerrojo entre CPU y RSP. Quien se lo lleva lo decide en que instante lee
+  cada uno, y sin cita eso lo decidia el anfitrion. Ahora `Rsp::mfc0` le da la misma cita de
+  tiempo de invitado que a `SP_STATUS`: esperar al ultimo borde de grano al que la CPU ha
+  llegado y leer ahi.
+
+Los stores del camino rapido del JIT caen en la linea de D-cache con dirty=1, asi que los cubre
+`dcFlush`: no hay hueco por ahi.
+
+### (D) `rcpRetire` y las interrupciones del MI -- verificado, sin cambios
+
+En Threaded cada fin de tarea/tramo arma su plazo (`spEndArm`/`dpEndArm`) y **solo la CPU**
+publica, dentro de `rcpRetire`. Las dos unicas llamadas a `raiseIntr(MI_SP)` fuera de ahi son
+el camino no diferido de Lockstep y el de depuracion `KESTREL_RSPBUDGET`. `raiseIntr` usa
+`fetch_or(release)`, `clearIntr` `fetch_and(acq_rel)` y los lectores carga seq_cst; `mi_mask`
+es solo del hilo de CPU. Ningun `MI_SP`/`MI_DP` puede subir en hora de anfitrion.
+
+### Medidas
+
+- **Puertas**: `gate_all` RC=0 dos veces, con la version de rango (12m32s) y con la del sello
+  (12m10s). Los diez modos con `systemtest Base:0/3721 Timing:0/2 Cycle:0/6`, sm64
+  `d35bd8aa9b13d459ce9332c07a79a53a` en todos, krom 371/371 `mean_exact=88.71
+  mean_close=92.08` con **regress=0 improve=0 new=0**.
+- **Pared**: A/B intercalado, minimo de 4, `bench --mode threaded-jit --bench-flips 400`. Ronda
+  1 base SM64 10,99 s / DK64 10,73 contra nuevo 10,60 / 10,47 (gana el nuevo); ronda 2 base
+  10,38 / 10,37 contra nuevo 10,78 / 10,66 (gana la base). Las lecturas se cruzan y los rangos
+  se solapan: **ruido, coste no medible**. El trabajo de invitado es identico (1013 campos VI
+  en SM64, 977 en DK64), o sea que la salida de bloque no anade vueltas.
+- **Invitado intacto**: Perfect Dark, 300 intercambios desde el arranque, `[statehash]
+  34771a4b3df1e28b` con el binario nuevo y con el de HEAD. Es lo esperado: el sello adelanta
+  CUANDO se mira, no cambia lo que se ve.
+
+### Lo que esto NO arregla
+
+SM64 a 400 intercambios, ocho corridas del binario nuevo con el adelanto de fabrica
+(`KESTREL_SPLEAD=512`): **seis `2f2c588f16c4d89d` y dos `bf9ecc5296c4d89d`**. O sea que la
+alternancia de (l) sigue viva y no era esto. Coherente con el diagnostico: lo que queda es la
+CPU pasandose del instante en que el RSP lee, que el sello no toca. Solo `SPLEAD=0` es
+reproducible.
+
+## 2026-09-24 (s) -- De donde sale la varianza de SM64 con adelanto: el reparto diario/cita del DMA del SP
+
+Barrido sobre SM64, 400 intercambios, ocho corridas del MISMO binario por variante, todo con
+los defectos de fabrica salvo lo que dice cada fila (o sea `KESTREL_SPLEAD=512` y
+`KESTREL_DPLOGLEAD` PUESTO, que es lo que lleva una corrida a mano; las puertas fijan los dos
+a 0 y por eso son el oraculo):
+
+| variante | ocho corridas |
+|---|---|
+| de fabrica | 6x `2f2c588f16c4d89d` / 2x `bf9ecc5296c4d89d` |
+| `KESTREL_SPLEAD=0` | **8/8** `4bd7f68b8baf1907` |
+| `KESTREL_DMALOG=0` | **8/8** `bc287601a798938d` |
+| `KESTREL_DPLOG=0` | 6/2, LOS MISMOS dos hashes |
+| `KESTREL_SPLOG=0` | 7/1, los mismos dos |
+| `KESTREL_DPCFAST=0 KESTREL_DPCJUMP=0` | 6/2, los mismos dos |
+| `KESTREL_DMARDV=3 KESTREL_DMASPAN=0` | 4/4, los mismos dos |
+
+Lo que se aprende:
+
+- **Descartados** el diario de DPC, el de SP_STATUS y el camino rapido de sondeo de
+  DPC_CURRENT: los cuatro siguen partiendo y ademas dan **los mismos dos** estados, o sea que
+  no mueven al invitado, solo el reparto. Con `KESTREL_DPLOG=0` no hay diario y por tanto
+  tampoco adelanto de `dpLogWait`, asi que **`KESTREL_DPLOGLEAD` queda descartado** tambien:
+  no es el culpable de la alternancia (y su comentario, que decia "APAGADO de fabrica", estaba
+  al reves y se ha corregido).
+- Solo cierran la alternancia las dos cosas que quitan la **combinacion** adelanto + diario de
+  DMA: `SPLEAD=0` (sin adelanto) y `DMALOG=0` (todos los DMA por cita).
+
+Y la pieza que lo explica: en `Memory::spDmaLogPush` la eleccion entre **diario** y **cita** no
+es de invitado. El push se rinde (`return false`, camino de siempre) cuando la transferencia
+pisa una imagen que el RDP pueda estar pintando, y eso se decide mirando `rcpPend & 4` y los
+rangos `dpWrLo`/`dpWrHi`, que los mueve el worker del RDP **en tiempo de pared**. Medido: en
+tres corridas seguidas salen 831825, 831867 y 831905 DMA apuntados, y **dos de ellas con el
+mismo statehash final** -- o sea que el reparto baila SIEMPRE y solo a veces arrastra el
+estado. Arrastrarlo puede, porque las dos vias no son equivalentes para la CPU: la cita para al
+RSP hasta que la CPU llega, el diario no, y con `SPLEAD > 0` el estado depende de cuanto
+adelanto real le queda a la CPU.
+
+O sea que la raiz sigue siendo la de (g) -- el adelanto es infiel por definicion --, pero **la
+varianza no la mete el adelanto, la mete el reparto host-dependiente que lo modula**. Camino
+para cerrarlo de verdad: que la eleccion diario/cita no dependa de lo que el RDP tenga en vuelo
+en hora de anfitrion (marcar las paginas y que el consumidor del FIFO consulte el diario, como
+ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue siendo
+`SPLEAD=0`, que es lo que fijan las puertas.
