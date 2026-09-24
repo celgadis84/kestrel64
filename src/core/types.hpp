@@ -47,6 +47,26 @@ template<class A, class T> inline auto addOwned(A& a, T n) -> void {
   a.store(a.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
 }
 
+// Lo mismo con DOS duenos posibles. El motor de DMA del SP lo mueven los dos hilos -- el de
+// CPU cuando el invitado escribe SP_RD_LEN/SP_WR_LEN, y el del RSP cuando el microcodigo lo
+// hace por su cuenta --, asi que un solo contador propio perderia cuentas. Con una ranura por
+// hilo, cada una en su linea de cache, el incremento vuelve a ser un load+store sin LOCK y sin
+// robarle la linea al otro; el lector suma las dos. Va una unidad por detras, como cualquier
+// contador de telemetria.
+template<class T = u64>
+struct Owned2 {
+  struct alignas(64) Slot { std::atomic<T> v{0}; };
+  Slot s[2];
+  auto add(int who, T n) -> void { addOwned(s[who].v, n); }
+  auto bump(int who) -> void { bumpOwned(s[who].v); }
+  auto get() const -> T {
+    return s[0].v.load(std::memory_order_relaxed) + s[1].v.load(std::memory_order_relaxed);
+  }
+  auto reset() -> void {
+    s[0].v.store(0, std::memory_order_relaxed); s[1].v.store(0, std::memory_order_relaxed);
+  }
+};
+
 
 // Asignador alineado a pagina para los bloques de memoria del invitado. La RDRAM se le
 // entrega a Vulkan tal cual con VK_EXT_external_memory_host (parallel-rdp la mapea sin

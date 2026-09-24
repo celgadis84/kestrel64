@@ -1665,13 +1665,13 @@ auto Memory::spDma(bool toRam) -> void {
   u32 count  = ((len >> 12) & 0xff) + 1;
   u32 skip   = (len >> 20) & 0xfff;
   // Ocupacion del bus: el salto entre filas no se transfiere, solo se saltan direcciones.
-  ramBytesRsp.fetch_add((u64)length * count, std::memory_order_relaxed);
+  const int slot = tlIsRspThread ? 1 : 0;
+  ramBytesRsp.add(slot, (u64)length * count);
   const u64 nb = (u64)length * count;
-  (toRam ? spDmaWrCnt : spDmaRdCnt).fetch_add(1, std::memory_order_relaxed);
-  (toRam ? spDmaWrBytes : spDmaRdBytes).fetch_add(nb, std::memory_order_relaxed);
-  (toRam ? spDmaWrHist : spDmaRdHist)[spDmaBucket(nb)].fetch_add(1, std::memory_order_relaxed);
-  if(rcp.sp_mem_addr & 0x1000) { spDmaImemCnt.fetch_add(1, std::memory_order_relaxed);
-                                 spDmaImemBytes.fetch_add(nb, std::memory_order_relaxed); }
+  (toRam ? spDmaWrCnt : spDmaRdCnt).bump(slot);
+  (toRam ? spDmaWrBytes : spDmaRdBytes).add(slot, nb);
+  (toRam ? spDmaWrHist : spDmaRdHist)[spDmaBucket(nb)].bump(slot);
+  if(rcp.sp_mem_addr & 0x1000) { spDmaImemCnt.bump(slot); spDmaImemBytes.add(slot, nb); }
   u32 memAddr  = rcp.sp_mem_addr & 0x1fff;
   bool imem    = (memAddr & 0x1000) != 0;
   u32 memOff   = memAddr & 0xff8;
@@ -1814,12 +1814,12 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   if(dmaPayTail + total - dmaPayHead.load(std::memory_order_acquire) > kDmaPayN
      || dpLogTail.load(std::memory_order_relaxed) - dpLogHead.load(std::memory_order_acquire) >= kDpLogN)
     dpLogWait(at, false);
-  ramBytesRsp.fetch_add(total, std::memory_order_relaxed);
-  spDmaWrCnt.fetch_add(1, std::memory_order_relaxed);        // este camino es solo SP -> RDRAM
-  spDmaWrBytes.fetch_add(total, std::memory_order_relaxed);
-  spDmaWrHist[spDmaBucket(total)].fetch_add(1, std::memory_order_relaxed);
-  if(imem) { spDmaImemCnt.fetch_add(1, std::memory_order_relaxed);
-             spDmaImemBytes.fetch_add(total, std::memory_order_relaxed); }
+  const int slot = tlIsRspThread ? 1 : 0;
+  ramBytesRsp.add(slot, total);
+  spDmaWrCnt.bump(slot);                                     // este camino es solo SP -> RDRAM
+  spDmaWrBytes.add(slot, total);
+  spDmaWrHist[spDmaBucket(total)].bump(slot);
+  if(imem) { spDmaImemCnt.bump(slot); spDmaImemBytes.add(slot, total); }
   const std::vector<u8>& sp = imem ? this->imem : this->dmem;
   const u64 pay = dmaPayTail;
   u64 w = pay;
@@ -4369,10 +4369,30 @@ auto Memory::spBarrierOn() -> bool {
 // statehash, reproducible, con [frames] identico y 0 vencidos. De fabrica 8192: es donde se
 // acaba la bajada, y en este juego el statehash que sale es ADEMAS el de lockstep
 // (8654851006521c62) -- con 1024 y con 16384 no. SM64 da el mismo md5 con 1024 y con 8192.
+// 2026-09-24. EL ADELANTO GRANDE NO ERA REPRODUCIBLE. Con 8192, SM64 (400 swaps,
+// Parallel-RDP, JIT) daba statehash DISTINTO entre corridas del mismo binario: 5 valores
+// distintos en 8 corridas. No es el punto de parada -- con parada por swaps el contador de
+// ops es identico -- sino estado de verdad: el RSP quemaba ciclos distintos (420826365 vs
+// 420770470) y hacia DMA distintos (540918 vs 540986 lecturas), y el rastro acababa en el bit
+// BD de Cause, o sea la ultima interrupcion cayendo en otra instruccion. Con 0 renuncias y 0
+// plazos vencidos: la fuga no es ninguna de las escotillas contadas.
+// La causa es el adelanto en si. La cita de DMA obliga a la CPU a LLEGAR al reloj del RSP,
+// pero no a no haberse pasado: con adelanto L la CPU ya ha escrito en RDRAM hasta L ops en el
+// futuro del RSP, y lo que el RSP lee de esa zona depende de por donde vaya el anfitrion.
+// Barrido en SM64, 6 corridas por valor: 0/64/256 dan un solo statehash; 512 da dos; 1024 y
+// 4096 dan dos; 8192 dio uno en ese barrido y cinco en el de ocho corridas. DK64 (400 swaps)
+// y Perfect Dark salen reproducibles en todos, asi que el margen depende del juego.
+// Coste en Perfect Dark (1793 swaps, minimo de tres): 8192 -> 6041 ms, 1024 -> 6037,
+// 256 -> 6235, 64 -> 6594, 0 -> 7423. O sea casi toda la ganancia esta en el adelanto
+// PEQUENO: 256 cuesta un 3 % sobre 8192, y 0 cuesta un 23 %.
+// De fabrica 256: reproducible en las tres roms (SM64 12/12, DK64 4/4, PD 3/3) por 3 %.
+// Con 0 se pierde el 23 % y TAMPOCO se llega al estado de Lockstep (medido: PD lockstep
+// 14995cfadedc7f38 vs threaded-0 0a64f3863fd236b1; SM64 lockstep b5f10ec436221af5 vs
+// threaded-0 b6f551242339420c), asi que 0 no compra fidelidad, solo lentitud.
 auto Memory::spLeadOps() -> u64 {
   static const u64 v = []() -> u64 {
     const char* e = std::getenv("KESTREL_SPLEAD");
-    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 8192ull;
+    if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 256ull;
     return (u64)std::strtoull(e, nullptr, 0);
   }();
   return v;

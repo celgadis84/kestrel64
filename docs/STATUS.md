@@ -9087,3 +9087,83 @@ completo y es un desplazamiento fijo y conocido**: MI_SP sube 8192 ops de invita
 invitado) mas tarde que en hardware, del orden de la latencia real de la interrupcion del SP.
 `KESTREL_SPLEAD=0` es el modo "fiel al oraculo" y vale para auditar cualquier cambio futuro:
 si con el puesto el modo de hilos no sale identico al Lockstep, hay un bug de verdad.
+
+## 2026-09-24 (g) -- El adelanto de 8192 NO era reproducible: SM64 daba cinco estados distintos en ocho corridas. Defecto a 256
+
+Siguiendo el hilo de (f) se comprobo lo que alli se daba por hecho: que con el defecto la corrida
+es la misma siempre. **No lo era.** SM64 (Parallel-RDP, JIT, threaded, parada por 400 swaps) daba
+cinco `[statehash]` distintos en ocho corridas del mismo binario.
+
+### No es el punto de parada
+
+Primero hubo que descartar el artefacto que ya aparecio en (f): parando por `KESTREL_MAXINSN` el
+modo de hilos se pasa del tope una cantidad variable (`[sd] cnt ret=` 1052517833 en una corrida y
+1052518005 en otra, 172 ops), y con eso Count y Random ya cambian solos. Parando por **swaps de
+buffer** el contador sale clavado -- `ops=1052524185` en todas -- y el statehash SIGUE cambiando.
+Divergencia de verdad.
+
+### En que se separan
+
+`KESTREL_STATEDUMP=1` sobre seis volcados: de los 32 gpr, 32 cop0, 32 fpr, pc, nextPc, hi y lo,
+lo unico que cambia es `cop0[13]`, o sea **Cause**, y dentro de Cause solo el bit BD:
+`ffffffff80000000` contra `0`. BD solo se escribe al tomar una excepcion, asi que lo que cambia es
+**en que instruccion cae la ultima interrupcion** (en una corrida en un delay slot, en otra no).
+
+El resto del cierre dice de donde viene:
+
+| | corrida A | corrida B |
+|---|---|---|
+| `rspCycles` | 420826365 | 420770470 |
+| `spdma` lecturas | 540918 | 540986 |
+| excepciones `Int(0)` | 6352 | 6349 |
+| renuncias / plazos vencidos | 0 / 0 | 0 / 0 |
+| `ooo` / `stale` | 0 / 0 | 0 / 0 |
+
+O sea: **el RSP ejecuta distinto**. Y ninguna de las escotillas contadas ha disparado, asi que no
+es ninguna de las fugas que ya estaban vigiladas.
+
+### La causa es el adelanto en si
+
+La cita de DMA (`spReadSync`, sitio `dma`) obliga a la CPU a **llegar** al reloj del RSP. No le
+puede obligar a no haberse pasado: con adelanto L la CPU ya ha escrito en RDRAM hasta L ops en el
+futuro del RSP, y lo que el RSP se lleva de esa zona depende de por donde ande el anfitrion. Es la
+asimetria de la barrera, no un fallo de un sitio concreto.
+
+Barrido en SM64, 6 corridas por valor, contando statehash distintos:
+
+| L | 0 | 64 | 256 | 512 | 1024 | 4096 | 8192 |
+|---|---|---|---|---|---|---|---|
+| estados distintos | 1 | 1 | 1 | 2 | 2 | 2 | 1 (y 5 en la tanda de 8) |
+
+DK64 y Perfect Dark salen reproducibles con todos los valores, asi que el margen lo pone el juego.
+
+### Lo que cuesta cerrarlo
+
+Perfect Dark en juego (1793 swaps, minimo de tres):
+
+| L | 8192 | 1024 | 256 | 64 | 0 |
+|---|---|---|---|---|---|
+| pared | 6041 ms | 6037 | 6235 | 6594 | 7423 |
+| statehash | 58e909a7 | fd0cdf65 | 0a64f386 | 7caf1f73 | 0a64f386 |
+
+Casi toda la ganancia del adelanto esta en el adelanto **pequeno**: 256 cuesta un 3 % sobre 8192 y
+0 cuesta un 23 %. Y 256 da en PD el MISMO estado que 0.
+
+### Y el oraculo no estaba donde se creia
+
+De paso se midio contra Lockstep de verdad, con la misma parada:
+
+| | Lockstep | Threaded L=0 |
+|---|---|---|
+| Perfect Dark 1793 swaps | `14995cfadedc7f38` (54,1 s) | `0a64f3863fd236b1` |
+| SM64 400 swaps | `b5f10ec436221af5` | `b6f551242339420c` |
+
+O sea **L=0 no compra fidelidad**, solo lentitud: sigue sin ser el estado de Lockstep. La igualdad
+que se apunto en (f) era con parada por `MAXINSN` y no se sostiene con parada por swaps. Queda
+pendiente (y aparte) por que Threaded no llega a Lockstep ni con el adelanto a cero.
+
+### Decision
+
+`KESTREL_SPLEAD=auto` pasa de **8192 a 256**. Reproducible en SM64 12/12, DK64 4/4 y PD 3/3, por
+un 3 % de pared. Un defecto que no repite no vale nada: cualquier medida A/B hecha con 8192 sobre
+SM64 estaba comparando contra ruido de estado, no solo de reloj.
