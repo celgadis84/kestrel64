@@ -9437,3 +9437,56 @@ pared solo baja un 4 %. Lo que cuesta es emular, no citarse.
 
 Los tres por encima del tiempo real en este anfitrion (i7-870 de 2009). El caso apretado es
 Perfect Dark en juego, que es justo el que el usuario mira.
+
+## 2026-09-24 (m) -- PGO: el primer -7 % que no sale de tocar la sincronizacion
+
+La entrada (l) cierra el frente de la cita: los dos hilos se esperan mucho, pero desacoplarlos
+del todo vale un 4 %. El techo es lo que cuesta EMULAR. Asi que por primera vez se mira el
+anfitrion y no el invitado.
+
+**Compilacion guiada por perfil (PGO).** Se instrumenta el binario (`-fprofile-generate`), se
+corren los tres juegos, se fusiona el perfil (`llvm-profdata merge`) y se recompila con
+`-fprofile-use`. El compilador deja de adivinar que rama es la caliente: la pone en linea, se
+lleva la fria lejos, hace inline solo de lo que se ejecuta y junta las funciones calientes en
+las mismas paginas.
+
+Aqui pega fuerte porque la mitad del tiempo del anfitrion se va en codigo lleno de saltos
+impredecibles -- despachador del JIT, ayudantes de memoria, la cita CPU<->RSP --, que es
+justo donde un compilador a ciegas coloca mal.
+
+**Medida (min de 4, intercalado A/B en la misma tanda):**
+
+| juego | sin PGO | con PGO | |
+|---|---|---|---|
+| PD PAL, en juego (1793 swaps) | 6409 ms | 5956 ms | **-7,1 %** |
+| SM64 (400 swaps) | 7318 ms | 6688 ms | **-8,6 %** |
+| DK64 (400 swaps) | 4981 ms | 4774 ms | **-4,2 %** |
+
+Las propias puertas bajan: `gate_all` 760 -> **720 s**, `gate_prdp` 378 -> **362 s**.
+
+**No cambia el invitado.** El statehash sale identico en los tres (PD `0a64f3863fd236b1`,
+DK64 `d2417ef1c80c80e2`, SM64 sus dos estados conocidos de (l)). `gate_all` RC=0 con
+systemtest 0/3721 Timing 0/2 Cycle 0/6 en los diez modos y krom regress=0; `gate_prdp` RC=0
+regress=0 improve=0 new=0. Es colocacion de codigo del ANFITRION, nada mas.
+
+**No hace falta un perfil por juego.** DK64 aporto muy poco al perfil y aun asi gana 4,2 %:
+lo caliente es el codigo compartido. Un perfil de PD solo ya serviria.
+
+**Como se usa.** `KESTREL_PGO=gen|use` en cmake; `release.sh` pone `use` SOLO si existe
+`pgo/kestrel.profdata` (commiteado, 445 KB), asi que un arbol sin el fichero compila como
+siempre. `sh scripts/pgo.sh` rehace el perfil con el lote de tres juegos.
+
+**Captura jugando** (idea del usuario, y es la buena): `sh scripts/pgo.sh --capture "<rom>"`
+construye el instrumentado y lo lanza con `--pgo-capture`; se juega un nivel de verdad, se
+sale normal y el `.profraw` cae en `pgo/raw/` nombrado con la ROM. `--merge` fusiona lo que
+haya sin volver a correr nada, y varias capturas se suman. El contador se pone a cero tras
+cargar la ROM para que el arranque no ensucie el perfil.
+
+Coste de la instrumentacion, medido: **1,24x** mas lento (PD en juego 7377 contra 5951 ms),
+o sea 0,90x tiempo real en el juego mas apretado y de sobra en los otros dos. Se juega bien
+para capturar; ese binario NO se distribuye.
+
+**Lo que NO esta**: AutoFDO (muestrear el binario normal, coste cero) pide muestreo por
+hardware -- LBR / Intel PT -- y una cadena de herramientas que en Windows no existe; el
+muestreador propio (`KESTREL_HOSTPROF`) va a 1 ms y sin pila de llamadas, demasiado grueso
+para alimentarlo. Anotado como via, no como disponible.

@@ -44,9 +44,17 @@ kill_exes() {
   taskkill //F //IM kestrel64-gui.exe >/dev/null 2>&1 || true
 }
 
+# Compilacion guiada por perfil: se usa SOLO si el perfil existe (scripts/pgo.sh lo genera y
+# se commitea). Vale un 4-9 % de pared en los tres juegos y no cambia el invitado -- el
+# statehash sale identico. Sin el fichero, todo compila como siempre.
+PGO=""
+[ -f pgo/kestrel.profdata ] && PGO="-DKESTREL_PGO=use"
+
 conf() { # conf <dir> <opciones de cmake...>
   d=$1; shift
-  [ -f "$d/CMakeCache.txt" ] || cmake -S . -B "$d" -G Ninja -DCMAKE_BUILD_TYPE=Release "$@"
+  # Siempre se invoca a cmake, no solo la primera vez: un arbol de ayer no conoce $PGO y se
+  # quedaba compilando sin perfil para siempre. Con la cache puesta esto es casi gratis.
+  cmake -S . -B "$d" -G Ninja -DCMAKE_BUILD_TYPE=Release $PGO "$@" >/dev/null
 }
 
 T0=$(date +%s)

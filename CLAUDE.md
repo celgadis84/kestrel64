@@ -58,6 +58,26 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
   `release.sh`. Sus piezas sueltas siguen ahi si hace falta una a mano: `scripts/pack.sh`
   (estatico -> `dist/` -> zip -> Inno Setup), `scripts/dist.sh` (empaquetar un build ya
   hecho), `scripts/gui.sh` (congelar solo el lanzador).
+- **PGO (compilacion guiada por perfil): PUESTA de fabrica.** `release.sh` compila los cuatro
+  arboles con `-fprofile-use=pgo/kestrel.profdata` **si ese fichero existe** (esta commiteado,
+  445 KB); si falta, todo compila como siempre. MEDIDO 2026-09-24 (min de 4, intercalado,
+  i7-870): **PD -7,1 % (6409 -> 5956 ms), SM64 -8,6 % (7318 -> 6688), DK64 -4,2 % (4981 ->
+  4774)**, y las propias puertas `gate_all` 760 -> 720 s y `gate_prdp` 378 -> 362 s. **No toca
+  la semantica del invitado** -- es colocacion de codigo del ANFITRION --: el statehash sale
+  identico en los tres juegos, y las dos puertas pasan RC=0 con regress=0. El perfil no hace
+  falta por juego: uno de PD ya mejora DK64, porque lo caliente es el codigo COMPARTIDO
+  (despachador del JIT, ayudantes de memoria, cita CPU<->RSP, RSP).
+  - Regenerarlo: `sh scripts/pgo.sh` (lote de los tres juegos) o, para capturar jugando de
+    verdad, `sh scripts/pgo.sh --capture "<rom>"`, que construye el instrumentado y lo lanza
+    con `--pgo-capture`; se juega un nivel, se sale normal y el `.profraw` cae en `pgo/raw/`.
+    `sh scripts/pgo.sh --merge` fusiona lo que haya ahi sin volver a correr nada. Varias
+    capturas se suman. `KESTREL_PGO_NAME` etiqueta una.
+  - El binario instrumentado va **1,24x mas lento** (PD en juego 7377 contra 5951 ms), o sea
+    0,90x tiempo real en el juego mas apretado. Se juega para capturar; NO se distribuye.
+  - Un perfil viejo no rompe nada (clang avisa y sigue, con `-Wno-profile-instr-out-of-date`),
+    solo rinde menos. Rehacerlo tras un cambio grande de codigo caliente.
+  - La via de coste cero (AutoFDO: muestrear el binario NORMAL) necesita muestreo por hardware
+    (LBR / Intel PT) y cadena de herramientas que en Windows no esta. Anotado, no disponible.
 - Double-clicking the exe implies `--play` (run + window + ROM picker); launching from a
   shell keeps the paused-for-MCP default, so gates and debugging are unaffected.
 

@@ -225,6 +225,30 @@ else()
   endif()
 endif()
 
+# --- Compilacion guiada por perfil (PGO) -------------------------------------------
+# KESTREL_PGO=gen  -> binario instrumentado; cada corrida deja un .profraw.
+# KESTREL_PGO=use  -> compila con el perfil fusionado que apunte KESTREL_PGO_DATA.
+# No toca NADA de la semantica del invitado: es reordenacion de codigo del anfitrion, y el
+# statehash de las tres tandas tiene que salir identico al del binario sin PGO. Ver
+# scripts/pgo.sh.
+set(KESTREL_PGO "" CACHE STRING "off | gen | use")
+set(KESTREL_PGO_DATA "${CMAKE_SOURCE_DIR}/pgo/kestrel.profdata" CACHE FILEPATH "perfil fusionado para KESTREL_PGO=use")
+if(NOT MSVC AND KESTREL_PGO STREQUAL "gen")
+  target_compile_options(kestrel64 PRIVATE -fprofile-generate)
+  target_link_options(kestrel64 PRIVATE -fprofile-generate)
+  # Deja que main.cpp sepa que el tiempo de ejecucion del perfil esta enlazado: sin esto,
+  # --pgo-capture tendria que llamar a simbolos que en el binario normal no existen.
+  target_compile_definitions(kestrel64 PRIVATE KESTREL_PGO_GEN=1)
+elseif(NOT MSVC AND KESTREL_PGO STREQUAL "use")
+  if(NOT EXISTS "${KESTREL_PGO_DATA}")
+    message(FATAL_ERROR "KESTREL_PGO=use pero no existe ${KESTREL_PGO_DATA}")
+  endif()
+  target_compile_options(kestrel64 PRIVATE "-fprofile-use=${KESTREL_PGO_DATA}"
+                                           -Wno-profile-instr-out-of-date
+                                           -Wno-profile-instr-unprofiled)
+  target_link_options(kestrel64 PRIVATE "-fprofile-use=${KESTREL_PGO_DATA}")
+endif()
+
 # Video presenter: cross-platform Vulkan + GLFW.
 find_package(Vulkan REQUIRED)
 target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw3)

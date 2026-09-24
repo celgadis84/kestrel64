@@ -51,3 +51,8 @@ scratchpad/
 
 # Huellas de los ficheros publicados (scripts/publish.py), se regeneran.
 SHA256SUMS.txt
+
+# PGO: el perfil fusionado SI se commitea (445 KB, lo usan todos los arboles);
+# los .profraw de cada corrida no.
+pgo/raw/
+*.profraw

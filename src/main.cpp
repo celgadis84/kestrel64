@@ -18,6 +18,26 @@
 #include <windows.h>
 #endif
 
+#ifdef KESTREL_PGO_GEN
+// Modo de captura de perfil (--pgo-capture). El tiempo de ejecucion de la instrumentacion de
+// clang escribe el .profraw al salir y toma el nombre del fichero del entorno; estas dos
+// funciones son la misma decision tomada DESDE DENTRO, que es lo que permite que una persona
+// capture jugando sin tener que exportar nada antes de arrancar.
+extern "C" void __llvm_profile_set_filename(const char*);
+extern "C" void __llvm_profile_reset_counters(void);
+#endif
+
+// Nombre corto de la ROM, sin carpeta ni extension: con el se nombra el .profraw para que una
+// carpeta de capturas diga de un vistazo de que juego salio cada una.
+static auto romStem(const std::string& path) -> std::string {
+  std::string::size_type a = path.find_last_of("/\\");
+  std::string s = (a == std::string::npos) ? path : path.substr(a + 1);
+  std::string::size_type d = s.find_last_of('.');
+  if(d != std::string::npos) s = s.substr(0, d);
+  for(char& c : s) if(c == ' ' || c == '(' || c == ')' || c == ',') c = '-';
+  return s.empty() ? std::string("rom") : s;
+}
+
 static kestrel::System* g_system = nullptr;
 
 static void onSignal(int) {
@@ -118,6 +138,8 @@ int main(int argc, char** argv) {
   bool freeRun = false;
   bool play = false;   // modo usuario final: corriendo Y con ventana
   [[maybe_unused]] bool useLibrary = false;  // abrir la biblioteca aunque haya consola (--library)
+  bool pgoCapture = false;                  // --pgo-capture: escribir el perfil de PGO al salir
+  std::string pgoName;                      // nombre que lo etiqueta (por defecto, el de la ROM)
 
   for(int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -126,6 +148,12 @@ int main(int argc, char** argv) {
     // --run solo significa "sin pausa", y ademas apaga la ventana porque nacio para el lote
     // (gates, bench, krom). --play es lo que quiere una persona: corriendo Y viendose.
     else if(a == "--play") { play = true; }
+    // Captura de perfil jugando de verdad. Solo hace algo en un binario instrumentado
+    // (cmake -DKESTREL_PGO=gen, o sh scripts/pgo.sh --capture, que lo construye y lo lanza).
+    // Sin nombre opcional a proposito: lo siguiente en la linea de ordenes es casi siempre la
+    // ROM, y tragarsela dejaba al emulador sin nada que cargar. El .profraw se nombra con la
+    // ROM; para etiquetar una captura concreta esta KESTREL_PGO_NAME.
+    else if(a == "--pgo-capture") { pgoCapture = true; }
 #ifdef _WIN32
     // Abre la BIBLIOTECA (el carrusel de caratulas) aunque haya consola. Es el modo de
     // uso normal cuando se lanza a mano, y la unica forma de probar el lanzador desde una
@@ -174,7 +202,8 @@ int main(int argc, char** argv) {
       std::printf("kestrel64 %s\nusage: %s <rom> [--port N] [--run|--play]\n"
                   "  --run   sin pausa y sin ventana (lote: gates, bench)\n"
                   "  --play  sin pausa y con ventana (uso normal; implicito al abrir desde el Explorador)\n"
-                  "  --library  abre la biblioteca de ROMs (carrusel de caratulas)\n",
+                  "  --library  abre la biblioteca de ROMs (carrusel de caratulas)\n"
+                  "  --pgo-capture  graba perfil de PGO jugando (solo binario instrumentado)\n",
                   kestrel::System::kVersion, argv[0]);
       return 0;
     }
@@ -218,6 +247,27 @@ int main(int argc, char** argv) {
 
   // Siembra desde el entorno los ajustes que el menu de la ventana podra cambiar en
   // caliente. Antes de arrancar nada: a partir de aqui manda el atomico, no getenv().
+  if(pgoCapture) {
+#ifdef KESTREL_PGO_GEN
+    if(const char* e = std::getenv("KESTREL_PGO_NAME"); e && *e) pgoName = e;
+    if(pgoName.empty()) pgoName = romStem(romPath);
+    // %p = pid, para que dos capturas seguidas no se pisen. La carpeta es la que lee
+    // scripts/pgo.sh --merge.
+    std::string out = "pgo/raw/" + pgoName + "-%p.profraw";
+    __llvm_profile_set_filename(out.c_str());
+    // Los contadores traen ya lo que costo arrancar (biblioteca, dialogos, carga de la ROM).
+    // Eso no es el codigo caliente que se quiere colocar bien, asi que se tiran y el perfil
+    // empieza limpio en el primer fotograma.
+    __llvm_profile_reset_counters();
+    std::printf("[pgo] capturando: al salir se escribe %s\n", out.c_str());
+    std::printf("[pgo] juega un rato de VERDAD (nivel cargado, no el menu) y sal normal.\n");
+    std::printf("[pgo] luego: sh scripts/pgo.sh --merge\n");
+#else
+    std::fprintf(stderr, "[pgo] este binario NO esta instrumentado: --pgo-capture no hace nada.\n"
+                         "[pgo] usa: sh scripts/pgo.sh --capture \"<rom>\"\n");
+#endif
+  }
+
   kestrel::rt::initFromEnv();
 
   kestrel::System system;
