@@ -1043,6 +1043,7 @@ struct Memory {
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
   // BARRERA DE ESCRITURA -- ver Memory::cpuRamWrBarrier en memory.cpp. KESTREL_WRBARRIER=1.
   static auto wrBarrierOn() -> bool;
+  static auto dmaBarrierOn() -> bool;
   auto cpuRamWrBarrier(u64 now) -> void;   // SOLO hilo de CPU
   std::atomic<u64> wrBarN{0}, wrBarTurns{0}, wrBarBlockNs{0};
   std::atomic<u32> wrBarWaives{0};

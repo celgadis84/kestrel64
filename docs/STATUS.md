@@ -9323,3 +9323,46 @@ anfitrion. La barrera obliga a la CPU a LLEGAR, no a no haberse pasado. 512 se q
   como palanca de A/B.
 - `KESTREL_CPUIDLE=0` (apagar el cobro en bloque del hilo ocioso entero): igual, dos
   estados.
+
+## 2026-09-24 (k) -- La barrera de escritura tambien para las transferencias, y donde esta AHORA el palo largo
+
+Quedaba un hueco por donde el hilo de CPU podia ensenarle al RSP su propio futuro: la barrera
+`Memory::cpuRamWrBarrier` solo la llamaban TRES sitios, los tres en `src/cpu/cpu.cpp` (vaciado
+de D-cache, stores a DMEM/IMEM, escritura no cacheada). Pero la CPU escribe RDRAM por dos vias
+mas, y las dos corren en su hilo:
+
+- `Memory::piDma` en el sentido cartucho -> RDRAM y guardado -> RDRAM. Es la fuente de los datos
+  NUEVOS que luego lee el RSP (microcodigo, listas, texturas): justo lo que no debe aparecer
+  antes de tiempo.
+- `Memory::siFinish` en el sentido PIF -> RDRAM.
+
+Puestas las dos barreras (`KESTREL_DMABARRIER=0` las quita, para A/B). Es la misma semantica que
+la de los stores, asi que se queda; pero la medida hay que contarla como es:
+
+**PLANA.** SM64 400 intercambios, adelanto 512: 8/8 `aef8faa47154aa4a` con la barrera y 6/6 sin
+ella. Perfect Dark en juego: 4/4 `0a64f3863fd236b1`, pared 6126-6278 ms contra 6141-6228 de la
+medida anterior = empate. DK64: 4/4 `d2417ef1c80c80e2` con y sin.
+
+**Y NO desbloquea subir el adelanto,** que era la hipotesis. Con la barrera puesta, adelanto
+1024 en SM64 da DOS estados en 8 corridas (`17c49bf696bf7680` x6, `b85a5f3216bf7680` x2), y sin
+ella da los mismos dos en 4. O sea: el adelanto sigue siendo la tolerancia, y la tolerancia es
+lo que se ve. Una primera tanda de 6 corridas que salio 6/6 a 1024 fue CASUALIDAD -- anotado
+aqui para no volver a creersela: con dos estados posibles, seis corridas iguales no prueban nada.
+
+### Donde esta el palo largo ahora (Perfect Dark en juego, `KESTREL_HEARTBEAT=1`)
+
+```
+[block] pared 5.89 s | cpuWait 9.3% (freno 0.0% barSP 0.6% barDP 8.1%)
+        | rsp ocupado 92.1% aparcado 0.5% | rdp ocupado 15.1%
+        | CPU real: cpu 99.6% rsp 95.4% rdp 50.3%
+```
+
+El hilo del RSP esta ocupado el **92,1 %** de la pared. El hilo de CPU se bloquea el 9,3 %, y de
+eso 8,1 puntos son la barrera del RDP, no la del SP (0,6 %). Conclusion dura: **la sincronia ya
+no es el techo en Perfect Dark**. Aunque el adelanto pudiera subir a infinito sin perder
+determinismo, el premio maximo es ese ~9 %, y medido en pared el salto de 512 a 1024 vale 2,3 %
+(6126-6278 -> 6007-6023 ms). Lo que manda es lo que cuesta EMULAR el RSP.
+
+Lo que sigue, por tanto, no es mas sincronia: es el coste del hilo del RSP (perfil de anfitrion
+sobre Perfect Dark, que es el caso pesado; el perfil del RSP que hay en `docs/GAPS.md` es de
+SM64, donde ese hilo iba al 65 % y no al 92 %).

@@ -1530,6 +1530,12 @@ static auto dmaVectorWarn() -> bool {
 
 auto Memory::piDma(bool toCart) -> void {
   // El DMA del cartucho lee o escribe RDRAM directamente: diario de DMA del RSP asentado antes.
+  // Y si ESCRIBE en RDRAM, es una escritura del hilo de CPU que el RSP puede leer: sin barrera
+  // el RSP ve el resultado de una transferencia que en la maquina aun no habria acabado, o que
+  // acaba en un instante distinto cada corrida. El cartucho es la fuente de datos NUEVOS
+  // (microcodigo, listas, texturas) que luego lee el RSP, asi que este es justo el sitio por
+  // donde se cuela un adelanto no acotado.
+  if(!toCart && wrBarrierOn() && dmaBarrierOn()) cpuRamWrBarrier(cartNow());
   {
     const u32 d = rcp.pi_dram_addr & 0xff'ffff;
     const u32 n = (rcp.pi_wr_len > rcp.pi_rd_len ? rcp.pi_wr_len : rcp.pi_rd_len) + 1;
@@ -1999,6 +2005,8 @@ auto Memory::siFinish() -> void {
   siBusy = false;
   if(!siToPif) {
     u32 dram = siDram;
+    // PIF -> RDRAM tambien es escritura del hilo de CPU visible para el RSP: misma barrera.
+    if(wrBarrierOn() && dmaBarrierOn()) cpuRamWrBarrier(cartNow());
     if(watchAddr) std::fprintf(stderr, "[siDma] PIF->RDRAM dram=0x%06x by pc=0x%08x\n", dram, (u32)storePc);
     dmaSettle(dram, (u64)dram + 64);
     for(u32 i = 0; i < 64; i++) if(dram + i < rdram.size()) { wrtag::mark(dram + i, wrtag::kSiDma, 0); watchHit(dram + i, 1, pifram[i], true); rdram[dram + i] = pifram[i]; }
@@ -4489,6 +4497,18 @@ auto Memory::spBarrierWait(u64 now) -> void { LazyWaitMark rwm_;
     // espera algo de la CPU) la barrera se suelta para ESTE valor. Nunca via de bloqueo.
     if(waited > kBarrierMaxWait) { spBarWaivedAt = bar; spBarWaives.fetch_add(1, std::memory_order_relaxed); return; }
   }
+}
+
+// KESTREL_DMABARRIER=0 quita la barrera de las transferencias que escriben RDRAM desde el
+// hilo de CPU (PI del cartucho y del guardado, SI del PIF). Solo para A/B: de fabrica va
+// ENCENDIDA porque es la misma semantica que la de los stores.
+auto Memory::dmaBarrierOn() -> bool {
+  static const bool v = [] {
+    const char* e = std::getenv("KESTREL_DMABARRIER");
+    if(!e || !*e) return true;
+    return std::strcmp(e, "0") && std::strcmp(e, "off");
+  }();
+  return v;
 }
 
 auto Memory::wrBarrierOn() -> bool {
