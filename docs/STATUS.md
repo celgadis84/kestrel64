@@ -9167,3 +9167,28 @@ pendiente (y aparte) por que Threaded no llega a Lockstep ni con el adelanto a c
 `KESTREL_SPLEAD=auto` pasa de **8192 a 256**. Reproducible en SM64 12/12, DK64 4/4 y PD 3/3, por
 un 3 % de pared. Un defecto que no repite no vale nada: cualquier medida A/B hecha con 8192 sobre
 SM64 estaba comparando contra ruido de estado, no solo de reloj.
+
+## 2026-09-24 (h) -- Al bajar el adelanto, la tanda del RSP se queda corta: 1024 -> 4096
+
+Consecuencia directa de (g). El barrido que fijo la tanda en 1024 (`KESTREL_RSPTANDA`, cada cuantas
+instrucciones publica `Rsp::step` el reloj del RSP a la barrera del SP) se hizo con el adelanto de
+la CPU en 8192. Con el adelanto en 256 ese barrido ya no vale, asi que se rehizo.
+
+El optimo se movio **arriba**, y tiene sentido: cuanto menos adelanto tiene la CPU, mas veces se
+para en la barrera, y publicar el reloj del RSP mas a menudo no la desbloquea antes -- lo que la
+desbloquea es que el RSP AVANCE --, solo anade vueltas de contabilidad al bucle del RSP.
+
+Parejas intercaladas, rangos de 3-4 corridas, **mismo `[statehash]` en todos los valores**:
+
+| juego | 1024 | 2048 | 4096 | 8192 |
+|---|---|---|---|---|
+| SM64, 400 swaps | 7440-7595 | 7333-7374 | 7254-7359 | 7265-7277 |
+| Perfect Dark en juego | 6206-6311 | 6202-6331 | 6191-6212 | 6191-6229 |
+| DK64, 400 swaps | 4751-4763 | 4769-4792 | 4772-4790 | 4767-4793 |
+
+SM64 -2,5 %, PD -1,5 %, DK64 plano. 4096 y 8192 empatan; se coge **4096** por dejar margen de grano.
+
+Detalle que conviene anotar: el statehash ya **no depende** de la tanda en ninguno de los tres
+juegos. Antes si dependia (era una de las fugas apuntadas en (f)), y deja de hacerlo por el mismo
+motivo que (g) -- con el adelanto corto la CPU no puede escribir RDRAM tan lejos en el futuro del
+RSP, asi que el grano con que el RSP mira el reloj deja de decidir lo que el RSP se lleva.

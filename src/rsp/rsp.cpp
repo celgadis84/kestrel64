@@ -2207,10 +2207,18 @@ auto Rsp::dumpDpWait() const -> void {
 }
 
 // Instrucciones por tanda de Rsp::step (ver el comentario del bucle). KESTREL_RSPTANDA=N.
+// 2026-09-24: 1024 -> 4096. El barrido que fijo 1024 se hizo con el adelanto de la CPU sobre la
+// barrera del SP en 8192; al bajarlo a 256 por reproducibilidad (ver Memory::spLeadOps) el optimo
+// se movio arriba, que es lo esperable: cuanto menos adelanto tiene la CPU, mas veces se para en
+// la barrera, y publicar el reloj del RSP mas a menudo no le sirve de nada si igualmente tiene que
+// esperar -- solo anade vueltas al bucle del RSP. Parejas intercaladas, todas con el mismo
+// statehash: SM64 400 swaps 1024 7440-7595 ms, 2048 7333-7374, 4096 7254-7359, 8192 7265-7277;
+// PD en juego 1024 6206-6311, 2048 6202-6331, 4096 6191-6212, 8192 6191-6229; DK64 plano en todos.
+// 4096 y 8192 empatan, se coge 4096 por dejar margen de grano.
 static const u64 kRspTanda = [] {
   const char* e = std::getenv("KESTREL_RSPTANDA");
   u64 v = e ? std::strtoull(e, nullptr, 0) : 0;
-  return v ? v : 1024ull;
+  return v ? v : 4096ull;
 }();
 
 __attribute__((flatten))
