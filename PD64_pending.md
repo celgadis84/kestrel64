@@ -142,7 +142,7 @@ lento. Las ROM de las ramas de PD son `ntsc-final` y traen su `pd.map`.
 **Hacer**: `--symbols <pd.map>` (formato map de GNU ld) → `prof.cpu` y `cpu.disasm`
 devuelven `funcion+off`. Opcional: tool `sym_lookup name|addr`.
 
-## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[HECHO 2026-09-30 (commit P6)]`
+## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[HECHO 2026-09-30 f64c648]`
 
 **Por que**: el retail de `test_roms/` es PAL y su mapa no casa (PD-GAMEPLAY.md). Las
 ROMs de la optimizacion son `ntsc-final` (`../perfect_dark/build/ntsc-final/*.z64`,
