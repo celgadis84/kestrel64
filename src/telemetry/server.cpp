@@ -528,6 +528,9 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
                    &st.loadRedundant, &st.loadRedundantBytes, &st.otherModesSame, &st.combineSame})
       a->store(0, r);
     st.viFlips0 = rcp.viFlips; st.viFields0 = rcp.viFields;
+    st.guestOps0 = system.memory.cartNow(); st.retired0 = system.cpu.retired;
+    st.idleOps0 = system.cpu.idleSkipOps; st.rspCyc0 = system.memory.rsp.cyclesRun.load(r);
+    st.rspPoll0 = system.memory.rsp.idleCyc.load(r);
     st.on.store(true, r);
   } else if(cmd == "rdp.stats.off") {
     st.on.store(false, r);
@@ -556,6 +559,30 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
   const u64 gp = st.gclkPixel.load(r), gf = st.gclkFill.load(r), gt = st.gclkTmem.load(r), gs = st.gclkSync.load(r);
   g.set("pixel", gp).set("fill", gf).set("tmem", gt).set("sync", gs).set("total", gp + gf + gt + gs);
   data.set("gclk", g);
+  // Tiempo de INVITADO de la ventana (PD64_pending P4). No es pared del anfitrion como
+  // rdpBusyPct/rspBusyPct de emu_status: sale del reloj de la CPU emulada (ops / insnTarget).
+  // rdpBusyPct = GCLK del modelo de coste / (s * 62,5 MHz); rspRunPct = ciclos del RSP sin
+  // parar / (s * reloj RSP); cpuIdlePct = ops del bucle ocioso del kernel (beq $0,$0,-1)
+  // cobradas de golpe por el dynarec / retiradas -- cota inferior: el ocio que corre
+  // instruccion a instruccion (interprete, KESTREL_CPUIDLE=0) no entra. rspPollPct = parte
+  // de rspRunPct que el microcodigo paso en bucles de sondeo (DPC/SP) que Rsp::idleSkip y
+  // dpcFastJump cobraron de golpe: tambien cota inferior. rspRunPct - rspPollPct ~ trabajo.
+  {
+    const auto& ck = system.clocks;
+    const u64 dOps = system.memory.cartNow() - st.guestOps0;
+    const double sec = ck.insnTarget() > 0 ? (double)dOps / ck.insnTarget() : 0.0;
+    const u64 dRet = system.cpu.retired - st.retired0, dIdle = system.cpu.idleSkipOps - st.idleOps0;
+    const u64 dRsp = system.memory.rsp.cyclesRun.load(r) - st.rspCyc0;
+    const u64 dPoll = system.memory.rsp.idleCyc.load(r) - st.rspPoll0;
+    json::Value gu = json::Value::object();
+    gu.set("seconds", sec).set("ms", sec * 1000.0).set("cpuOps", dOps);
+    gu.set("rdpBusyPct", sec > 0 ? 100.0 * (double)(gp + gf + gt + gs) / (sec * 62'500'000.0) : 0.0);
+    gu.set("rspRunPct", sec > 0 ? 100.0 * (double)dRsp / (sec * ck.rspTarget()) : 0.0);
+    gu.set("rspPollPct", sec > 0 ? 100.0 * (double)dPoll / (sec * ck.rspTarget()) : 0.0);
+    gu.set("cpuIdlePct", dRet ? 100.0 * (double)dIdle / (double)dRet : 0.0);
+    if(flips) gu.set("msPerFlip", sec * 1000.0 / flips);
+    data.set("guest", gu);
+  }
   json::Value px = json::Value::object();
   px.set("1cyc", st.px[0].load(r)).set("2cyc", st.px[1].load(r)).set("copy", st.px[2].load(r))
     .set("fill", st.px[3].load(r)).set("written", st.pxWritten.load(r)).set("imRd", st.pxImRd.load(r))
@@ -893,6 +920,12 @@ auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
     e.set("imem", (u64)(hot[k].second << 2));   // IMEM byte address
     e.set("count", (u64)hot[k].first);
     e.set("pct", 100.0 * (double)hot[k].first / (double)total);
+    // Palabra que hay AHORA en ese hueco (big-endian). Cada tarea recarga el IMEM: si el
+    // hueco lo comparten varios microcodigos, la palabra es la del ultimo cargado.
+    const auto& im = system.memory.imem;
+    u32 o = hot[k].second << 2;
+    if(o + 4 <= im.size())
+      e.set("word", (u64)((u32)im[o] << 24 | (u32)im[o + 1] << 16 | (u32)im[o + 2] << 8 | im[o + 3]));
     list.push(e);
   }
   data.set("total", (u64)s.profTotal);

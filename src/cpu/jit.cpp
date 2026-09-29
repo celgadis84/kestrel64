@@ -2565,6 +2565,7 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
   if(countAdd(countTicks(k))) timerIntr = true;
   cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], k);
   if(jitCache) jitCache->hits += k;
+  idleSkipOps += k;
   if(g_jitStats) { g_idleSkips++; g_idleOps += k;
     u32 who = (mem->rspBusy.load(std::memory_order_relaxed) ? 1u : 0u)
             | (mem->rdpBusy.load(std::memory_order_relaxed) ? 2u : 0u);

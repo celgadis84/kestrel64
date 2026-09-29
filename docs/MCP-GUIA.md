@@ -102,6 +102,11 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   primitiva desde el anterior; `syncPipePure`/`syncLoadPure`/`syncTilePure` = ni primitiva NI
   carga de TMEM (los que sobran sin discusion). Detalle en `PD64_pending.md` P3; banco que lo
   usa por ROM: `scripts/pdbench.py` (`docs/baselines/pd-opt.md`).
+  `guest` = reparto en TIEMPO DE INVITADO de la ventana (no pared del anfitrion):
+  `seconds`/`ms`, `cpuOps`, `rdpBusyPct` (GCLK / 62,5 MHz), `rspRunPct` (ciclos que el RSP
+  ejecuto), `rspPollPct` (ciclos del RSP absorbidos en bucles de sondeo reconocidos),
+  `cpuIdlePct` (instrucciones de CPU en el bucle ocioso del kernel), `msPerFlip`. Cotas
+  inferiores del modelo: el RSP cuenta 1 ciclo por instruccion sin paradas del vectorial.
 - `breakpoint_add/del/list`, `run_until(addr, timeout_ms)`: se para en una PC. Con
   breakpoints armados la CPU pasa por el interprete y va mas lenta; quitarlos al acabar.
 
@@ -130,7 +135,8 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   (mas lento, pero el reparto es fiel), o bien arrancar con `KESTREL_GPCPROF=20`, que
   muestrea bajo el JIT por tiempo y vuelca el top al cerrar por stderr.
 - `profile_rsp`: ranura de IMEM del microcodigo; el propio perfilado pasa el RSP al
-  interprete, asi que sale fiel. Sirve para ver donde gasta el ucode grafico/audio.
+  interprete, asi que sale fiel. Sirve para ver donde gasta el ucode grafico/audio. `word`
+  = la palabra que hay AHORA en el hueco (la del ultimo microcodigo cargado).
 
 ## 5. Variables de entorno utiles para medir un juego
 

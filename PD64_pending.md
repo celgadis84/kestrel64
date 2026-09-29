@@ -118,7 +118,7 @@ Referencia SM64 titulo (build-prdp-static): 186 SyncPipe/flip de los que ~80 red
 prdp-jit `b5521b24`, Thar0 0.1332).
 **Pendiente del "hecho cuando"**: cuadrar contra rdp-sync-dedup.md en PD en nivel = P6.
 
-## P4 — Metrica de "cuanto de GPU-bound" sin el profiler de host `[ABIERTO]`
+## P4 — Metrica de "cuanto de GPU-bound" sin el profiler de host `[HECHO 2026-09-30 COMMIT]`
 
 **Nota PD-opt 2026-09-29**: `emu_status` ya trae `rdpBusyPct`/`rspBusyPct`/`cpuWaitPct`
 (docs/MCP-GUIA.md). Puede bastar; PD-opt lo validara en nivel real y si cuadra con el
@@ -133,6 +133,44 @@ recuerda: incluye el giro en citas con la CPU y la espera al RDP.
 guest en que el RDP esta ocupado (`rdpGclk` / GCLK de pared guest), y fraccion de
 instrucciones CPU dentro del bucle ocioso del kernel (el detector de ocio ya existe,
 ver GAPS.md). Con eso "81 % esperando al RDP" sale de un comando, no de un perfil.
+
+**Hecho (kestrel)**: `rdp_stats("reset")` ... `rdp_stats("read")` trae `guest` = reparto en
+TIEMPO DE INVITADO de la misma ventana: `rdpBusyPct` (GCLK / 62,5 MHz), `rspRunPct` (ciclos
+que el RSP ejecuto / 62,5 MHz), `rspPollPct` (ciclos del RSP absorbidos en bucles de sondeo
+reconocidos: el RSP esperando, no trabajando), `cpuIdlePct` (instrucciones de CPU dentro
+del bucle ocioso del kernel, `beq $0,$0,-1` cobrado en bloque), `ms`, `cpuOps`,
+`msPerFlip`. Son cotas inferiores del modelo: el RSP cuenta 1 ciclo por instruccion sin
+paradas del vectorial ni latencia de DMA. `pdbench` lo pone en `out["guest"]` y en la
+columna `invitado % RDP/RSP (sondeo)/CPU-ocio`; `--prof N` ademas guarda en `out["prof"]` el
+top N de CPU (con simbolo, P5) y de RSP (hueco de IMEM + palabra) de la ventana.
+
+Uso:
+
+```sh
+python scripts/pdbench.py $R/v2-03-collsq.z64 --map $R/v2-03.map --mode threaded --prof 80
+```
+
+Cruce: `rdpBusyPct` = `rdp_frame_pct` de pdbench (54 = 54, 44 = 44).
+
+**Resultado Villa (spawn, threaded = lockstep)**:
+
+| rom | fps | RDP % | RSP % (sondeo) | CPU ocio % | instr RSP / fotograma |
+|---|---|---|---|---|---|
+| ref-stock | 44.06 | 44 | 99 (15) | 58 | 1,204 M |
+| v2-03-collsq | 52.96 | 54 | 100 (0) | 67 | 1,178 M |
+| v2-04-aaoff | 53.03 | 48 | 100 (0) | 67 | - |
+
+- **v2 esta limitado por el RSP**, no por el RDP ni la CPU: 1,178 M instrucciones de RSP por
+  fotograma = 18,84 ms a 62,5 MHz, y el fotograma dura 18,88 ms. Sin sondeo: trabaja todo
+  el rato. Por eso AA-off (-10,6 % GCLK) no mueve fps.
+- stock hace el mismo trabajo de RSP por fotograma (1,204 M) pero la CPU tarda mas: el
+  RSP sobra 15 % sondeando. stock -> perf gano fps hasta chocar con el RSP.
+- Perfil RSP (`--prof 1024`): plano por todo el IMEM, el hueco mas caliente es el bucle de
+  despacho de comandos del ucode grafico (~5,9 k comandos por fotograma) con 0,5 %. No hay
+  bucle de espera escondido: es trabajo real del microcodigo (grafico + audio).
+- Siguiente palanca de fps en PD = trabajo del RSP (lista de visualizacion mas corta /
+  ucode). Ojo: en hardware el RSP sera MAS lento que este modelo (paradas del vectorial,
+  latencia de DMA), asi que el techo por RSP ya es real aqui.
 
 ## P5 — Simbolos: cargar `pd.map` del build `[HECHO 2026-09-30 927d71d]`
 

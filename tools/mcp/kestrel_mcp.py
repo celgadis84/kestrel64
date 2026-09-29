@@ -212,7 +212,11 @@ def rdp_stats(action: str = "read") -> dict:
     imRd, zCmp, zUpd), redundancy (SYNC_* with no primitive since the previous one of
     the same kind or SYNC_FULL; TMEM/TLUT loads leaving TMEM identical; repeated
     identical SET_OTHER_MODES / SET_COMBINE) and `perFlip`: the same divided by
-    framebuffer swaps in the window. Works with SoftRDP and parallel-rdp alike."""
+    framebuffer swaps in the window. Works with SoftRDP and parallel-rdp alike.
+    `guest`: GUEST-time split of the window (not host wall time): seconds/ms, cpuOps,
+    rdpBusyPct (GCLK / 62.5 MHz), rspRunPct (cycles the RSP executed), rspPollPct (RSP
+    cycles absorbed in recognized poll loops), cpuIdlePct (CPU ops in the kernel idle
+    loop), msPerFlip. Model lower bounds: 1 RSP cycle per instruction, no VU stalls."""
     cmd = {"reset": "rdp.stats.reset", "off": "rdp.stats.off"}.get(action, "rdp.stats")
     data, _ = query(cmd)
     return data
@@ -373,7 +377,8 @@ def profile_cpu(top: int = 20) -> dict:
 
 def profile_rsp(top: int = 20) -> dict:
     """Top RSP microcode hotpath by IMEM instruction address (exact per-instruction).
-    Each entry: {imem, count, pct}. Also {total}. Tells which microcode routine
+    Each entry: {imem, count, pct, word}. Also {total}. `word` is the instruction in
+    that slot NOW (the last microcode loaded). Tells which microcode routine
     dominates RSP time (graphics vs audio vs custom). Momentarily pauses the core to
     take a clean snapshot, then restores the prior run state."""
     return _snapshot("prof.rsp", top=int(top))

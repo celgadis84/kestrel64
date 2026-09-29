@@ -30,7 +30,7 @@ Uso:
 R=../perfect_dark/roms_v2
 sh scripts/pdbench.sh --mode threaded $R/v2-03-collsq.z64=$R/v2-03.map $R/v2-04-aaoff.z64=$R/v2-04.map
 python scripts/pdbench.py <rom> --map <map> --stage villa|defection|0x.. --mode lockstep \
-    [--intro keep] [--png out/villa]   # --png guarda el fotograma de inicio y fin de ventana
+    [--intro keep] [--png out/villa] [--prof 80]   # --png: fotogramas inicio/fin; --prof: top CPU/RSP
 ```
 
 **Pasar siempre el map**: sin el, `pdbench.py` cae al `pd.map` de `build/ntsc-final` y en
@@ -66,6 +66,22 @@ Lectura:
   Ver `docs/GAPS.md`.
 - sync_load b = 0: cada SYNC_LOAD va pegado a una carga. sync_pipe b ~61/f = los duplicados
   que se pueden quitar sin discutir (~3 k GCLK/f = 0,5 % del RDP).
+
+## 2026-09-30 — reparto de tiempo de invitado (PD64_pending P4)
+
+Misma escena. `invitado %` = `rdp_stats` `guest` de la ventana (columna nueva de
+`pdbench.sh`): RDP ocupado / RSP ejecutando (sondeando) / CPU en el bucle ocioso.
+
+| rom | fps | RDP % | RSP % (sondeo) | CPU ocio % | instr RSP / fotograma |
+|---|---|---|---|---|---|
+| ref-stock | 44.06 | 44 | 99 (15) | 58 | 1,204 M |
+| v2-03-collsq | 52.96 | 54 | 100 (0) | 67 | 1,178 M |
+| v2-04-aaoff | 53.03 | 48 | 100 (0) | 67 | - |
+
+Lectura: v2 esta **limitado por el RSP** (1,178 M instr/f = 18,84 ms a 62,5 MHz contra un
+fotograma de 18,88 ms, sin sondeo). stock hace el mismo trabajo de RSP pero la CPU va
+detras (RSP 15 % sondeando). Perfil del RSP plano (`--prof`): trabajo real del ucode, no
+esperas. Detalle en `PD64_pending.md` P4.
 
 ## 2026-09-29 — primer resultado (guion viejo, NO comparable)
 

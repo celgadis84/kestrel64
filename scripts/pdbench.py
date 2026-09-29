@@ -60,6 +60,9 @@ def main():
     ap.add_argument("--png", help="guarda el fotograma del INICIO y del FIN de la ventana "
                     "(<png>_0.png, <png>_1.png) para ver que escena se midio")
     ap.add_argument("--timeout", type=int, default=900, help="tope de pared total, s")
+    ap.add_argument("--prof", type=int, default=0, metavar="N",
+                    help="perfila la ventana: top N de CPU (con simbolo) y de RSP (hueco de "
+                    "IMEM + palabra) en out['prof']. Mismo resultado de la fila")
     a = ap.parse_args()
 
     if a.stage in STAGES:
@@ -164,6 +167,9 @@ def main():
         if a.png:
             k.capture_framebuffer(f"{a.png}_0.png")
         k.rdp_stats("reset")
+        if a.prof:
+            k.profile_reset()
+            k.profile_start()
         n0, s0, w0 = rd32(gv + OFF_LVFRAMENUM), f240(), time.time()
         while f240() - s0 < a.measure:
             if time.time() > deadline:
@@ -173,6 +179,10 @@ def main():
         n1, s1, w1 = rd32(gv + OFF_LVFRAMENUM), f240(), time.time()
         st = k.rdp_stats("read")
         k.rdp_stats("off")
+        prof = None
+        if a.prof:
+            k.profile_stop()
+            prof = {"cpu": k.profile_cpu(top=a.prof), "rsp": k.profile_rsp(top=a.prof)}
         if a.png:
             k.capture_framebuffer(f"{a.png}_1.png")
     finally:
@@ -213,10 +223,17 @@ def main():
     }
     out["rdp_frame_pct"] = (100.0 * out["rdp_ms_per_frame"] / out["frame_ms"]
                             if out["frame_ms"] else 0.0)
+    # P4: fracciones de tiempo de INVITADO de la ventana (rdp.stats "guest")
+    gu = st.get("guest", {})
+    out["guest"] = {k: gu.get(k, 0.0) for k in ("rdpBusyPct", "rspRunPct", "rspPollPct", "cpuIdlePct", "ms")}
+    if prof:
+        out["prof"] = prof
     print(json.dumps(out, indent=1))
     p = out["per_frame"]
+    gq = out["guest"]
     print(f"| {out['rom']} | {out['md5']} | {out['stage']} | {a.mode} | {out['fps']:.2f} | "
           f"{p['gclk']:.0f} ({out['rdp_ms_per_frame']:.2f} ms = {out['rdp_frame_pct']:.0f}%) | "
+          f"{gq['rdpBusyPct']:.0f}/{gq['rspRunPct']:.0f} ({gq['rspPollPct']:.0f})/{gq['cpuIdlePct']:.0f} | "
           f"{p['px_imrd']:.0f} | {p['gclk_sync']:.0f} | {p['gclk_tmem']:.0f} | {p['tris']:.0f} | "
           f"{p['sync_pipe']:.1f} ({p['sync_pipe_red']:.1f}/{p['sync_pipe_pure']:.1f}) | "
           f"{p['sync_load']:.1f} ({p['sync_load_red']:.1f}/{p['sync_load_pure']:.1f}) | "

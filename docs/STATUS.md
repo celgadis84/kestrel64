@@ -9810,3 +9810,14 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   VA por las paginas del TLB (PD matching corre en 0x70000000) y si no KSEG0.
 - Tools MCP `sym_load`, `sym_lookup`. `pdbench.py` lanza con `--symbols`.
 - Puertas: `release.sh --quick`, `gate_quick.sh` ALL OK; pdbench v2-03 misma fila.
+
+## 2026-09-30 (d) -- reparto de tiempo de invitado por ventana (PD64_pending P4)
+
+- `rdp.stats` publica `guest`: `rdpBusyPct`, `rspRunPct`, `rspPollPct`, `cpuIdlePct`,
+  `msPerFlip`, `ms`, `cpuOps` de la ventana, en tiempo de INVITADO (`cartNow`, no pared).
+  `CPU::idleSkipOps` cuenta lo que `jitIdleSkip` cobra en bloque. `prof.rsp` anade `word`.
+- `pdbench.py`: columna `invitado % RDP/RSP (sondeo)/CPU-ocio` y `--prof N` (top CPU con
+  simbolo + top RSP a `out["prof"]`).
+- Hallazgo: PD v2 en Villa esta limitado por el RSP (1,178 M instr/fotograma = el
+  fotograma entero, sin sondeo; perfil plano = trabajo real del ucode). RDP 54 %.
+- Puertas: `release.sh --quick`, `gate_quick.sh` ALL OK; pdbench v2-03 misma fila.

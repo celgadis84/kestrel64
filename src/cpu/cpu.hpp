@@ -908,6 +908,7 @@ public:
   jit::CodeCache* jitCache = nullptr;
   auto jitTryBlock() -> u32;              // ejecuta un bloque; devuelve nº ops (0 = declina)
   auto jitIdleSkip(u32 phys) -> u32;      // cobra de golpe el bucle ocioso; 0 = aqui no hay
+  u64  idleSkipOps = 0;                   // ops cobradas asi (telemetria, rdp.stats guest.cpuIdlePct)
   // Re-chequeo de reentrada de bloque (block-linking Step 1): muestrea interrupt + borde de
   // timer EXACTAMENTE como el driver. Devuelve 1 = seguro correr K ops; 0 = bail a ruta lenta
   // (entrega de interrupt pendiente o cruzaría Count==Compare). Lo llama el prólogo emitido.

@@ -8,13 +8,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ARGS=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --mode|--stage|--skip|--measure|--exe|--port) ARGS="$ARGS $1 $2"; shift 2 ;;
+    --mode|--stage|--skip|--measure|--exe|--port|--prof) ARGS="$ARGS $1 $2"; shift 2 ;;
     *) break ;;
   esac
 done
 mkdir -p out
-echo "| rom | md5 | stage | mode | fps | gclk (ms RDP invitado = % del frame) | px IM_RD | gclk_sync | gclk_tmem | tris | sync_pipe (sin prim / ni prim ni load) | sync_load (sin prim / ni prim ni load) | loads(TMEM igual) | wall_s |"
-echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+echo "| rom | md5 | stage | mode | fps | gclk (ms RDP invitado = % del frame) | invitado % RDP/RSP (sondeo)/CPU-ocio | px IM_RD | gclk_sync | gclk_tmem | tris | sync_pipe (sin prim / ni prim ni load) | sync_load (sin prim / ni prim ni load) | loads(TMEM igual) | wall_s |"
+echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 for spec in "$@"; do
   rom=${spec%%=*}
   map=""

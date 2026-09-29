@@ -47,6 +47,10 @@ struct RdpStats {
   bool primSince[3] = {true, true, true};
   bool workSince[3] = {true, true, true};  // primitiva o carga de TMEM
   u32 viFlips0 = 0, viFields0 = 0;
+  // Reloj de INVITADO al reset (PD64_pending P4): con ellos rdp.stats da que fraccion del
+  // tiempo de invitado de la ventana tuvo ocupado al RDP (GCLK), corriendo al RSP y a la CPU
+  // en el bucle ocioso del kernel.
+  u64 guestOps0 = 0, retired0 = 0, idleOps0 = 0, rspCyc0 = 0, rspPoll0 = 0;
 };
 
 struct SoftRdp {
