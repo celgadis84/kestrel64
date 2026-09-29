@@ -265,7 +265,7 @@ python scripts/pdbench.py <rom> --map <map> [--stage villa|defection|0x..]     [
   (sin oraculo HW de triangulos). En Villa da RDP ~54 % del fotograma y AA-off no mueve
   fps. Anotado en `docs/GAPS.md` ("Coste del RDP: sin setup...").
 
-## P7 — FILL cycle y contadores separados (menor para PD, anotado en RDP-TIMING.md) `[BLOQUEADO: falta oraculo HW del ciclo FILL; DPC_CLOCK hecho COMMIT]`
+## P7 — FILL cycle y contadores separados (menor para PD, anotado en RDP-TIMING.md) `[BLOQUEADO: falta oraculo HW del ciclo FILL; DPC_CLOCK hecho 4859ca6]`
 
 `CLOCK = BUFBUSY = PIPEBUSY` identicos y FILL ~2x lento. PD borra con FILL cada frame:
 inflar el FILL sesga el reparto de P3. Separar contadores y dar a FILL su camino de
