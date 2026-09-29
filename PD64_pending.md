@@ -134,7 +134,7 @@ guest en que el RDP esta ocupado (`rdpGclk` / GCLK de pared guest), y fraccion d
 instrucciones CPU dentro del bucle ocioso del kernel (el detector de ocio ya existe,
 ver GAPS.md). Con eso "81 % esperando al RDP" sale de un comando, no de un perfil.
 
-## P5 — Simbolos: cargar `pd.map` del build `[HECHO 2026-09-30 P5COMMIT]`
+## P5 — Simbolos: cargar `pd.map` del build `[HECHO 2026-09-30 927d71d]`
 
 **Por que**: `prof.cpu` da PCs fisicos en cubos de 16 B; traducir a funciones a mano es
 lento. Las ROM de las ramas de PD son `ntsc-final` y traen su `pd.map`.
