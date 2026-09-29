@@ -59,6 +59,7 @@ private:
   auto cmdRewind(const json::Value& args, json::Value& data) -> bool;
   auto cmdState(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
   auto cmdRcpRegs(const json::Value& args, json::Value& data) -> void;
+  auto cmdRdpStats(const std::string& cmd, json::Value& data) -> void;
   auto cmdRspRegs(const json::Value& args, json::Value& data) -> void;
   // Decode the live VI framebuffer to RGBA8888 (blob) + geometry (data).
   auto cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool;

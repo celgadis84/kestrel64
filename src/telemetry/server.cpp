@@ -110,6 +110,8 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     if(cmdRewind(args, data)) done(); else fail(data.has("msg") ? data.get("msg").asString() : "rewind");
   } else if(cmd == "rcp.regs") {
     cmdRcpRegs(args, data); done();
+  } else if(cmd == "rdp.stats" || cmd == "rdp.stats.reset" || cmd == "rdp.stats.off") {
+    cmdRdpStats(cmd, data); done();
   } else if(cmd == "rsp.regs") {
     cmdRspRegs(args, data); done();
   } else if(cmd == "vi.capture") {
@@ -502,6 +504,73 @@ auto Server::cmdState(const std::string& cmd, const json::Value& args, json::Val
   }
   data.set("msg", "el bucle de ejecucion no atendio la peticion (5 s)");
   return false;
+}
+
+// rdp.stats (PD64_pending P3): histograma del RDP por ventana. `rdp.stats.reset` pone a cero
+// y enciende, `rdp.stats` lee (totales y por intercambio de framebuffer), `rdp.stats.off`
+// apaga. Solo cuenta el paseo que cobra cada tramo (ver RdpStats en rdp.hpp).
+auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
+  auto& st = system.memory.rdpStats;
+  auto& rcp = system.memory.rcp;
+  const auto r = std::memory_order_relaxed;
+  if(cmd == "rdp.stats.reset") {
+    for(auto& a : st.op) a.store(0, r);
+    for(auto& a : st.px) a.store(0, r);
+    for(auto& a : st.syncRedundant) a.store(0, r);
+    for(auto* a : {&st.gclkPixel, &st.gclkFill, &st.gclkTmem, &st.gclkSync, &st.pxWritten,
+                   &st.pxImRd, &st.pxZCmp, &st.pxZUpd, &st.loads, &st.loadBytes,
+                   &st.loadRedundant, &st.loadRedundantBytes, &st.otherModesSame, &st.combineSame})
+      a->store(0, r);
+    st.viFlips0 = rcp.viFlips; st.viFields0 = rcp.viFields;
+    st.on.store(true, r);
+  } else if(cmd == "rdp.stats.off") {
+    st.on.store(false, r);
+  }
+  static const char* names[64] = {
+    "NOOP",0,0,0,0,0,0,0,"TRI_FILL","TRI_FILL_Z","TRI_TXTR","TRI_TXTR_Z","TRI_SHADE","TRI_SHADE_Z",
+    "TRI_SHADE_TXTR","TRI_SHADE_TXTR_Z",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    "TEXRECT","TEXRECT_FLIP","SYNC_LOAD","SYNC_PIPE","SYNC_TILE","SYNC_FULL","SET_KEY_GB",
+    "SET_KEY_R","SET_CONVERT","SET_SCISSOR","SET_PRIM_DEPTH","SET_OTHER_MODES","LOAD_TLUT",0,
+    "SET_TILE_SIZE","LOAD_BLOCK","LOAD_TILE","SET_TILE","FILL_RECT","SET_FILL_COLOR",
+    "SET_FOG_COLOR","SET_BLEND_COLOR","SET_PRIM_COLOR","SET_ENV_COLOR","SET_COMBINE",
+    "SET_TEXTURE_IMAGE","SET_Z_IMAGE","SET_COLOR_IMAGE"};
+  const u32 flips = rcp.viFlips - st.viFlips0, fields = rcp.viFields - st.viFields0;
+  const double pf = flips ? 1.0 / flips : 0.0;
+  data.set("on", st.on.load(r));
+  data.set("flips", (u64)flips);
+  data.set("fields", (u64)fields);
+  json::Value ops = json::Value::object();
+  for(int i = 0; i < 64; i++)
+    if(u64 n = st.op[i].load(r)) {
+      char k[8]; std::snprintf(k, sizeof k, "%02x", i);
+      ops.set(names[i] ? names[i] : k, n);
+    }
+  data.set("ops", ops);
+  json::Value g = json::Value::object();
+  const u64 gp = st.gclkPixel.load(r), gf = st.gclkFill.load(r), gt = st.gclkTmem.load(r), gs = st.gclkSync.load(r);
+  g.set("pixel", gp).set("fill", gf).set("tmem", gt).set("sync", gs).set("total", gp + gf + gt + gs);
+  data.set("gclk", g);
+  json::Value px = json::Value::object();
+  px.set("1cyc", st.px[0].load(r)).set("2cyc", st.px[1].load(r)).set("copy", st.px[2].load(r))
+    .set("fill", st.px[3].load(r)).set("written", st.pxWritten.load(r)).set("imRd", st.pxImRd.load(r))
+    .set("zCmp", st.pxZCmp.load(r)).set("zUpd", st.pxZUpd.load(r));
+  data.set("pixels", px);
+  json::Value red = json::Value::object();
+  red.set("syncLoad", st.syncRedundant[0].load(r)).set("syncPipe", st.syncRedundant[1].load(r))
+     .set("syncTile", st.syncRedundant[2].load(r)).set("loads", st.loads.load(r))
+     .set("loadBytes", st.loadBytes.load(r)).set("loadRedundant", st.loadRedundant.load(r))
+     .set("loadRedundantBytes", st.loadRedundantBytes.load(r))
+     .set("otherModesSame", st.otherModesSame.load(r)).set("combineSame", st.combineSame.load(r));
+  data.set("redundant", red);
+  // Lo que se mira a diario, ya dividido por intercambio de framebuffer.
+  json::Value per = json::Value::object();
+  auto opn = [&](int o) { return (double)st.op[o].load(r) * pf; };
+  per.set("gclk", (double)(gp + gf + gt + gs) * pf).set("gclkSync", (double)gs * pf)
+     .set("gclkTmem", (double)gt * pf).set("syncPipe", opn(0x27)).set("syncLoad", opn(0x26))
+     .set("syncTile", opn(0x28)).set("syncPipeRedundant", (double)st.syncRedundant[1].load(r) * pf)
+     .set("loads", (double)st.loads.load(r) * pf)
+     .set("loadsRedundant", (double)st.loadRedundant.load(r) * pf);
+  data.set("perFlip", per);
 }
 
 auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {

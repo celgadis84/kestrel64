@@ -254,6 +254,15 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   double cycles = (frac * wrote + (1.0 - frac) * killed) * double(npx) / T_CHUNK;
   u32 c = (u32)(u64)cycles;
   if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  if(auto& st = mem.rdpStats; st.on.load(std::memory_order_relaxed)) {
+    const auto r = std::memory_order_relaxed;
+    (cycleType() == 3 ? st.gclkFill : st.gclkPixel).fetch_add(c, r);
+    st.px[cycleType()].fetch_add(npx, r);
+    st.pxWritten.fetch_add(nWrite, r);
+    if(fbRead) st.pxImRd.fetch_add(npx, r);
+    if(zRead)  st.pxZCmp.fetch_add(npx, r);
+    st.pxZUpd.fetch_add(nZWrite, r);
+  }
   // Ocupacion del bus de RDRAM. Se deriva de la MISMA lista de transacciones que acaba de
   // usar el modelo de coste, asi que no hay ninguna constante nueva que calibrar: cada
   // transaccion mueve un chunk entero del buffer al que apunta (T_CHUNK pixeles del ancho
@@ -277,6 +286,10 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
 auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
   u32 c = (u32)((bytes + 7) / 8);
   if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  if(mem.rdpStats.on.load(std::memory_order_relaxed)) {
+    mem.rdpStats.gclkTmem.fetch_add(c, std::memory_order_relaxed);
+    mem.rdpStats.loadBytes.fetch_add(bytes, std::memory_order_relaxed);
+  }
   mem.ramBytesRdp.fetch_add(bytes, std::memory_order_relaxed);
   mem.rcp.dpc_tmem.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
@@ -291,10 +304,33 @@ auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
 // SYNC_FULL (PIPE_BUSY), pero no hay carga de TMEM ni trafico de RDRAM.
 auto SoftRdp::accountStall(Memory& mem, u32 gclk) -> void {
   if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  if(mem.rdpStats.on.load(std::memory_order_relaxed))
+    mem.rdpStats.gclkSync.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.dpc_clock.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.dpc_pipebusy.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.dpc_bufbusy.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.rdpGclk.fetch_add(gclk, std::memory_order_release);
+}
+
+// rdp.stats (ver RdpStats): cuenta el comando y mira la redundancia contra el estado de
+// ANTES de ejecutarlo. Solo lo llama el paseo que cobra, con las estadisticas encendidas.
+auto SoftRdp::statsCmd(Memory& mem, u32 op, u64 cmd) -> void {
+  auto& st = mem.rdpStats;
+  const auto r = std::memory_order_relaxed;
+  st.op[op].fetch_add(1, r);
+  if((op >= 0x08 && op <= 0x0f) || op == 0x24 || op == 0x25 || op == 0x36) {
+    st.primSince[0] = st.primSince[1] = st.primSince[2] = true;
+  } else if(op >= 0x26 && op <= 0x28) {          // SYNC_LOAD / PIPE / TILE
+    const u32 k = op == 0x26 ? 0 : op == 0x27 ? 1 : 2;
+    if(!st.primSince[k]) st.syncRedundant[k].fetch_add(1, r);
+    st.primSince[k] = false;
+  } else if(op == 0x29) {                        // SYNC_FULL drena todo
+    st.primSince[0] = st.primSince[1] = st.primSince[2] = false;
+  } else if(op == 0x2f) {
+    if(((u32)(cmd >> 32) & 0x00ff'ffff) == other_hi && (u32)cmd == other_lo) st.otherModesSame.fetch_add(1, r);
+  } else if(op == 0x3c) {
+    if(((u32)(cmd >> 32) & 0x00ff'ffff) == combine_hi && (u32)cmd == combine_lo) st.combineSame.fetch_add(1, r);
+  }
 }
 
 // Per-pixel depth test against the 16-bit z image. Opaque z-mode: the pixel wins
@@ -1654,6 +1690,8 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     if(wrtag::tag) wrtag::moveWinLo(0, cur);
     u64 cmd = fetch(cur);
     u32 op = (cmd >> 56) & 0x3f;
+    const bool st = charge && mem.rdpStats.on.load(std::memory_order_relaxed);
+    if(st) statsCmd(mem, op, cmd);
     if(ops) {
       hist[op]++;
       // alert on the first time we ever see a color-image set or a triangle
@@ -1677,6 +1715,14 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       cur += n * 8; executed++; continue;
     }
 
+    // Carga TMEM redundante (rdp.stats): TMEM+TLUT identicas antes y despues de la carga.
+    u8 snap[sizeof tmem + sizeof tlut];
+    const bool stLoad = st && (op == 0x30 || op == 0x33 || op == 0x34);
+    u64 stBytes0 = 0;
+    if(stLoad) {
+      std::memcpy(snap, tmem, sizeof tmem); std::memcpy(snap + sizeof tmem, tlut, sizeof tlut);
+      stBytes0 = mem.rdpStats.loadBytes.load(std::memory_order_relaxed);
+    }
     switch(op) {
     case 0x00: break;                                   // no-op
     case 0x26: accountStall(mem, 25); break;            // SYNC_LOAD: 25 GCLK fijos
@@ -1817,6 +1863,15 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       }
       break;
     default: break;                                     // sync/tlut/other → no-op for now
+    }
+    if(stLoad) {
+      auto& rs = mem.rdpStats;
+      rs.loads.fetch_add(1, std::memory_order_relaxed);
+      if(!std::memcmp(snap, tmem, sizeof tmem) && !std::memcmp(snap + sizeof tmem, tlut, sizeof tlut)) {
+        rs.loadRedundant.fetch_add(1, std::memory_order_relaxed);
+        rs.loadRedundantBytes.fetch_add(rs.loadBytes.load(std::memory_order_relaxed) - stBytes0,
+                                        std::memory_order_relaxed);
+      }
     }
     if(split) break;                  // el switch solo pudo salir de si mismo
     cur += 8; executed++;

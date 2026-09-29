@@ -9774,3 +9774,12 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   a 0.1332 exacto. Los triangulos del paseo siguen suponiendo que todo pasa (aproximacion).
 - Nueva `scripts/gate_quick.sh` (~1,5 min) por cambio; `thar0` como extra que exige 0.1332.
   Completo (gate_all + gate_prdp) al cerrar fase. Politica en CLAUDE.md.
+
+## 2026-09-30 (a) -- rdp.stats: histograma del RDP por ventana (PD64_pending P3)
+
+- `RdpStats` en Memory, escrito solo por el paseo que cobra cada tramo y solo encendido
+  (`rdp.stats.reset`); telemetria `rdp.stats`/`.reset`/`.off`, tool MCP `rdp_stats`.
+- Opcodes, GCLK pixel/fill/tmem/sync, pixeles por modo y IM_RD/Z_CMP/Z_UPD, SYNC_* sin
+  primitiva desde el anterior, cargas que dejan TMEM+TLUT identicas (instantanea 4,5 KB por
+  carga, solo encendido), SET_OTHER_MODES/SET_COMBINE repetidos; `perFlip`.
+- SM64 titulo: 186 SyncPipe/flip (~80 redundantes), 127 cargas/flip (~29 redundantes).

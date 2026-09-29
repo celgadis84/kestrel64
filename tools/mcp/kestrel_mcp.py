@@ -184,6 +184,21 @@ def rcp_registers() -> dict:
     return data
 
 
+def rdp_stats(action: str = "read") -> dict:
+    """RDP histogram over a window, for optimizing a game's display lists.
+
+    action: "reset" zeroes and starts counting, "read" returns the window so far,
+    "off" stops counting (zero cost when off). Returns per-opcode counts, GCLK split
+    into pixel/fill/tmem/sync, pixels per cycle mode (1cyc/2cyc/copy/fill, written,
+    imRd, zCmp, zUpd), redundancy (SYNC_* with no primitive since the previous one of
+    the same kind or SYNC_FULL; TMEM/TLUT loads leaving TMEM identical; repeated
+    identical SET_OTHER_MODES / SET_COMBINE) and `perFlip`: the same divided by
+    framebuffer swaps in the window. Works with SoftRDP and parallel-rdp alike."""
+    cmd = {"reset": "rdp.stats.reset", "off": "rdp.stats.off"}.get(action, "rdp.stats")
+    data, _ = query(cmd)
+    return data
+
+
 def controller_set(buttons="", stick_x: int = 0, stick_y: int = 0, polls: int = 6) -> dict:
     """Press the player-1 controller from here, overriding the host keyboard/gamepad.
 
@@ -407,6 +422,7 @@ def _serve_mcp():
     mcp.tool()(frame_advance)
     mcp.tool()(rewind_step)
     mcp.tool()(rcp_registers)
+    mcp.tool()(rdp_stats)
     mcp.tool()(rsp_registers)
     mcp.tool()(controller_set)
     mcp.tool()(controller_state)

@@ -92,6 +92,10 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
 - `rsp_registers(vpr)`: escalares, y los vectoriales si `vpr=True`.
 - `rcp_registers`: MI/SP/DPC/VI/AI/PI/SI. Sirve para ver si el RSP esta parado, si el RDP
   tiene FIFO pendiente, y el estado del VI.
+- `rdp_stats(action)`: histograma del RDP por ventana. `'reset'` (cero + encender) → dejar
+  correr → `'read'` → `'off'`. Cuenta por opcode, GCLK en pixel/fill/tmem/sync, pixeles por
+  modo de ciclo, SYNC_* y cargas TMEM redundantes, SET_OTHER_MODES/SET_COMBINE repetidos, y
+  `perFlip` (dividido por intercambios de framebuffer). Detalle en `PD64_pending.md` P3.
 - `breakpoint_add/del/list`, `run_until(addr, timeout_ms)`: se para en una PC. Con
   breakpoints armados la CPU pasa por el interprete y va mas lenta; quitarlos al acabar.
 

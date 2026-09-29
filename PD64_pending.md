@@ -80,7 +80,7 @@ RDRAM, reutilizar `LAT`/`ROW` del modelo de pixel) + transferencia. Buscar dato 
 (n64brew, Thar0 si tiene, MiSTer `RDP_*` VHDL como oraculo de ciclos). Si no hay oraculo,
 dejarlo documentado como estimacion y NO calibrar a ojo.
 
-## P3 — `rdp.stats`: histograma por frame (comando de telemetria + tool MCP) `[ABIERTO]`
+## P3 — `rdp.stats`: histograma por frame (comando de telemetria + tool MCP) `[HECHO 2026-09-30 COMMIT]`
 
 Lo que la optimizacion necesita ver sin volcar la lista entera:
 
@@ -98,6 +98,25 @@ Lo que la optimizacion necesita ver sin volcar la lista entera:
 **Hecho cuando**: en PD en nivel, la cuenta de `PipeSync` por frame y las cargas
 redundantes cuadran con lo medido a mano en `../perfect_dark/docs/perf/rdp-sync-dedup.md`
 (PipeSync/load 1,06 → 0,34 con sync-opt) y con el ~7 % de redundancia real de texturas.
+
+**Como se usa** (kestrel, 2026-09-30): tool MCP `rdp_stats(action)`:
+`"reset"` pone a cero y ENCIENDE, `"read"` devuelve la ventana, `"off"` apaga (apagado
+cuesta un test por comando). Telemetria cruda: `rdp.stats.reset` / `rdp.stats` /
+`rdp.stats.off`. Devuelve `ops` (cuenta por opcode con nombre), `gclk`
+{pixel, fill, tmem, sync, total}, `pixels` {1cyc, 2cyc, copy, fill, written, imRd, zCmp,
+zUpd}, `redundant` {syncLoad, syncPipe, syncTile, loads, loadBytes, loadRedundant,
+loadRedundantBytes, otherModesSame, combineSame} y `perFlip` (lo mismo / intercambios de
+framebuffer de la ventana; `flips`/`fields` = tamano de la ventana). Vale con SoftRDP y con
+parallel-rdp (sale del paseo de coste). Definiciones: SYNC_* redundante = ninguna primitiva
+(triangulo, TEXRECT, FILL_RECT) desde el anterior del mismo tipo o desde SYNC_FULL (la de
+rdp-sync-dedup.md); carga redundante = TMEM y TLUT identicas antes y despues de
+LOAD_BLOCK/LOAD_TILE/LOAD_TLUT; SET_OTHER_MODES/SET_COMBINE repetido = mismo valor que el
+vigente. Cada comando cuenta una vez (solo el paseo que cobra).
+Referencia SM64 titulo (build-prdp-static): 186 SyncPipe/flip de los que ~80 redundantes,
+127 cargas/flip de las que ~29 redundantes, ~424 k GCLK/flip.
+**Gates**: `gate_quick.sh thar0` ALL OK (systemtest 0/3721 0/2 0/6, sm64 `d35bd8aa`,
+prdp-jit `b5521b24`, Thar0 0.1332).
+**Pendiente del "hecho cuando"**: cuadrar contra rdp-sync-dedup.md en PD en nivel = P6.
 
 ## P4 — Metrica de "cuanto de GPU-bound" sin el profiler de host `[ABIERTO]`
 

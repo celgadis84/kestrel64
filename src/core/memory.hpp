@@ -245,6 +245,7 @@ struct Memory {
   // pintarian con el scissor equivocado. Dos decodificadores, cada uno viendo la misma
   // secuencia completa en orden, es lo unico que conserva la semantica.
   SoftRdp softCost;
+  RdpStats rdpStats;       // telemetria rdp.stats (ver RdpStats)
   Rsp rsp;                 // low-level RSP interpreter (M3.3), runs microcode
 
   // --- RCP threading (multihilo rebuild) -------------------------------------

@@ -21,6 +21,29 @@ struct Memory;
 
 struct StateVisitor;
 
+// Estadisticas del RDP para optimizar juegos (telemetria `rdp.stats`, PD64_pending P3). Las
+// escribe solo el paseo que COBRA un tramo (charge), asi que cada comando cuenta una vez, y
+// solo con `on`: apagadas cuestan un test por comando. Contadores atomicos relajados porque
+// el lector es el hilo de telemetria; el seguimiento de redundancia (prim*) lo toca solo el
+// hilo que cobra, en orden de FIFO.
+struct RdpStats {
+  std::atomic<bool> on{false};
+  std::atomic<u64> op[64]{};
+  // GCLK cobrados, repartidos: pixeles en 1/2 ciclos y COPY, pixeles en FILL, cargas de TMEM,
+  // paradas fijas de SYNC_LOAD/PIPE/TILE.
+  std::atomic<u64> gclkPixel{0}, gclkFill{0}, gclkTmem{0}, gclkSync{0};
+  std::atomic<u64> px[4]{};              // pixeles que entran al pipeline por modo de ciclo
+  std::atomic<u64> pxWritten{0}, pxImRd{0}, pxZCmp{0}, pxZUpd{0};
+  // Redundancia. Un SYNC_* es redundante si no hubo NINGUNA primitiva (triangulo, rect de
+  // textura, fill rect) desde el anterior del mismo tipo o desde el ultimo SYNC_FULL: no
+  // habia nada en vuelo que esperar, y la parada se paga igual (n64brew).
+  std::atomic<u64> syncRedundant[3]{};   // load, pipe, tile
+  std::atomic<u64> loads{0}, loadBytes{0}, loadRedundant{0}, loadRedundantBytes{0};
+  std::atomic<u64> otherModesSame{0}, combineSame{0};
+  bool primSince[3] = {true, true, true};
+  u32 viFlips0 = 0, viFields0 = 0;
+};
+
 struct SoftRdp {
   friend struct StateVisitor;   // savestate: lee/escribe el estado de pipeline privado
   // Execute the command list in RDRAM spanning [start, end) physical addresses.
@@ -52,9 +75,10 @@ struct SoftRdp {
   // espera -- y el emulador corre mas suelto de lo que jamas corrio la consola. En este
   // modo el bucle por pixel no se ejecuta: cada tramo aporta su ANCHURA de una vez, que es
   // la misma cuenta de pixeles que entrarian al pipeline, asi que el coste es O(altura)
-  // por primitiva en vez de O(area). Los pixeles se cobran como escritos: sin z-buffer
-  // fiable en RDRAM (lo tiene la GPU) no se puede saber cuales moriria en el test, y el
-  // hardware paga casi lo mismo por uno muerto que por uno escrito.
+  // por primitiva en vez de O(area). Los pixeles de TRIANGULO se cobran como escritos: saber
+  // cuales moririan en el test pediria interpolar la z pixel a pixel, O(area). Un FILL_RECT
+  // en 1/2 ciclos si se evalua (alpha constante, z de primitiva constante contra la z de
+  // RDRAM, solo lectura): Thar0 mide justo eso y sin ello se iba de 0.13 a 0.99 cyc/px.
   bool costOnly = false;
   // Cobrar o no los contadores del RDP (DPC_CLOCK/PIPEBUSY/BUFBUSY/TMEM y el reloj de coste
   // rdpGclk). El coste de un tramo se paga UNA vez: si delante ha ido un paseo solo-coste,
@@ -146,6 +170,7 @@ private:
     u32 sl = 0, tl = 0, sh = 0, th = 0;   // SET_TILE_SIZE (10.2 fixed)
   } tiles[8];
   u8  tmem[0x1000] = {};   // 4 KB texture memory
+  auto statsCmd(Memory& mem, u32 op, u64 cmd) -> void;     // rdp.stats: antes de ejecutar
   u16 tlut[256] = {};      // palette RAM (LOAD_TLUT); CI4/CI8 index into this
   u32 tlutMode() const { return (other_hi >> 14) & 3; }  // TEXTLUT: 0 none,2 RGBA16,3 IA16
 
