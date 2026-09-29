@@ -92,6 +92,9 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
 - `rsp_registers(vpr)`: escalares, y los vectoriales si `vpr=True`.
 - `rcp_registers`: MI/SP/DPC/VI/AI/PI/SI. Sirve para ver si el RSP esta parado, si el RDP
   tiene FIFO pendiente, y el estado del VI.
+- `sym_load(path)` / `sym_lookup(addr|name)`: simbolos del invitado desde un map de GNU ld
+  (o `--symbols <map>` al lanzar). Con ellos `profile_cpu` y `cpu_disasm` anaden `sym`
+  (`funcion+off`); `profile_cpu` ademas `va`, resuelta por el TLB si la pagina esta mapeada.
 - `rdp_stats(action)`: histograma del RDP por ventana. `'reset'` (cero + encender) → dejar
   correr → `'read'` → `'off'`. Cuenta por opcode, GCLK en pixel/fill/tmem/sync, pixeles por
   modo de ciclo, SYNC_* y cargas TMEM redundantes, SET_OTHER_MODES/SET_COMBINE repetidos, y

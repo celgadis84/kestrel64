@@ -69,6 +69,7 @@ private:
   auto cmdRunUntil(const json::Value& args, json::Value& data) -> void;
   auto cmdProfControl(const std::string& cmd, json::Value& data) -> void;
   auto cmdProfCpu(const json::Value& args, json::Value& data) -> void;
+  auto cmdSym(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
   auto cmdProfRsp(const json::Value& args, json::Value& data) -> void;
   auto cmdPad(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
 };

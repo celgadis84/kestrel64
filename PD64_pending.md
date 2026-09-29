@@ -134,13 +134,33 @@ guest en que el RDP esta ocupado (`rdpGclk` / GCLK de pared guest), y fraccion d
 instrucciones CPU dentro del bucle ocioso del kernel (el detector de ocio ya existe,
 ver GAPS.md). Con eso "81 % esperando al RDP" sale de un comando, no de un perfil.
 
-## P5 — Simbolos: cargar `pd.map` del build `[ABIERTO]`
+## P5 — Simbolos: cargar `pd.map` del build `[HECHO 2026-09-30 P5COMMIT]`
 
 **Por que**: `prof.cpu` da PCs fisicos en cubos de 16 B; traducir a funciones a mano es
 lento. Las ROM de las ramas de PD son `ntsc-final` y traen su `pd.map`.
 
 **Hacer**: `--symbols <pd.map>` (formato map de GNU ld) → `prof.cpu` y `cpu.disasm`
 devuelven `funcion+off`. Opcional: tool `sym_lookup name|addr`.
+
+**Cerrado 2026-09-30.** Uso:
+
+```sh
+kestrel64.exe <rom> --port 9130 --symbols ../perfect_dark/roms_v2/v2-03.map
+```
+
+- `profile_cpu`: cada cubo trae `sym` (`frametimeCalculate+0x44`) y `va` = la direccion por
+  la que se EJECUTA: se buscan primero las paginas que el TLB mapea sobre ese fisico (la ROM
+  matching corre lib/juego desde 0x70000000/0x7F000000) y luego KSEG0. `cpu_disasm`: `sym` por
+  instruccion. Sin simbolo: vacio (p.ej. vector de excepcion 0x180).
+- Solo se da nombre de CODIGO si la direccion cae en un tramo `.text` del map; una funcion
+  static sin simbolo sale como `objeto.o+off` (el `idleproc` de v2-03 = `boot.o`).
+- `sym_load(path)` (orden `sym.load`) carga en caliente; `sym_lookup(addr=..)` -> `sym`,
+  `code` (true si es .text), `base`; `sym_lookup(name=..)` -> `addr`.
+- `pdbench.py` ya lanza con `--symbols <map>`.
+- Probado: v2-03 (KSEG0, 6865 simbolos) `osGetCount`, `frametimeCalculate+0x44`, `mainProc+0x2ec`;
+  ref-stock (TLB, 9985) `idleproc` @0x700016c0, `__osException+0x30`, `_n_loadBuffer`;
+  `g_Vars+0x10` como dato. pdbench v2-03 da la fila de la tabla exacta.
+- Gates: `release.sh --quick` + `gate_quick.sh` ALL OK.
 
 ## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[HECHO 2026-09-30 f64c648]`
 

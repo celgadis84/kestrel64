@@ -43,6 +43,7 @@ add_executable(kestrel64
   src/net/tcp.cpp
   src/telemetry/server.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/video/present.cpp
   src/video/vifilter.cpp
   src/rdp/rdp.cpp
@@ -69,6 +70,7 @@ endif()
 add_executable(rsp_test EXCLUDE_FROM_ALL
   test/rsp_test.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/video/vifilter.cpp
@@ -88,6 +90,7 @@ endif()
 add_executable(save_test EXCLUDE_FROM_ALL
   test/save_test.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/video/vifilter.cpp
@@ -109,6 +112,7 @@ endif()
 add_executable(wildmem_test EXCLUDE_FROM_ALL
   test/wildmem_test.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/video/vifilter.cpp
@@ -130,6 +134,7 @@ endif()
 add_executable(watch_test EXCLUDE_FROM_ALL
   test/watch_test.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/video/vifilter.cpp
@@ -150,6 +155,7 @@ endif()
 add_executable(pif_test EXCLUDE_FROM_ALL
   test/pif_test.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/video/vifilter.cpp
@@ -170,6 +176,7 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   test/cheat_test.cpp
   src/core/cheats.cpp
   src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
   src/video/vifilter.cpp

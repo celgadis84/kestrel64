@@ -152,7 +152,8 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   `read_memory`/`write_memory` (`coherent=1` reads via CPU D-cache =
   no STALE kernel state), `capture_framebuffer` (VI→RGBA→PNG+histogram), hotpath profiler
   (`profile_start/stop/reset`, `profile_cpu` PC-bucket 16B, `profile_rsp` IMEM-slot),
-  cpu/rsp/rcp registers, disasm, breakpoints, `run_until`.
+  cpu/rsp/rcp registers, disasm, breakpoints, `run_until`, simbolos del invitado (`--symbols
+  <map GNU ld>` / `sym_load` / `sym_lookup`; `profile_cpu` y `cpu_disasm` dan `funcion+off`).
 - **When a capability is missing, ADD it** to the server — don't fall back to guessing.
 
 ### Ejecutar el emulador a mano (reglas de depuracion)

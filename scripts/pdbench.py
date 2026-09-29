@@ -89,7 +89,7 @@ def main():
 
     # SIN --run: arranca pausado y el warp se hace avanzando CAMPOS de video (frame_advance),
     # asi el instante en que se escribe g_MissionConfig es de INVITADO y lockstep repite.
-    proc = subprocess.Popen([a.exe, a.rom, "--port", str(a.port)], env=env,
+    proc = subprocess.Popen([a.exe, a.rom, "--port", str(a.port), "--symbols", mp], env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t0 = time.time()
     deadline = t0 + a.timeout

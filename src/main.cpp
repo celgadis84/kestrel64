@@ -8,6 +8,7 @@
 #include "core/runtime.hpp"
 #include "ui/menu.hpp"
 #include "ui/library.hpp"
+#include "telemetry/symbols.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -146,6 +147,14 @@ int main(int argc, char** argv) {
     std::string a = argv[i];
     if(a == "--port" && i + 1 < argc) { port = (kestrel::u16)std::atoi(argv[++i]); }
     else if(a == "--run") { freeRun = true; }  // start unpaused (default: paused for stepping)
+    // Map de GNU ld del invitado: prof.cpu / cpu.disasm / sym.lookup dan funcion+off
+    else if(a == "--symbols" && i + 1 < argc) {
+      std::string err;
+      if(kestrel::telemetry::globalSymbols().load(argv[++i], err))
+        std::fprintf(stderr, "[sym] %zu simbolos de %s\n", kestrel::telemetry::globalSymbols().count(), argv[i]);
+      else
+        std::fprintf(stderr, "[sym] %s\n", err.c_str());
+    }
     // --run solo significa "sin pausa", y ademas apaga la ventana porque nacio para el lote
     // (gates, bench, krom). --play es lo que quiere una persona: corriendo Y viendose.
     else if(a == "--play") { play = true; }

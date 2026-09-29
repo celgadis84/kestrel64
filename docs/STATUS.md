@@ -9801,3 +9801,12 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
 - `scripts/killown.sh`: `release.sh`/`pack.sh`/`pgo.sh` ya no hacen `taskkill //IM` (mataban
   las corridas de la otra sesion); solo mata exes con ruta dentro del repo.
 - Puertas: `release.sh --quick`, `gate_quick.sh thar0` ALL OK (Thar0 0.1332).
+
+## 2026-09-30 (c) -- simbolos del invitado desde un map de GNU ld (PD64_pending P5)
+
+- `src/telemetry/symbols.{hpp,cpp}`: `--symbols <map>` / orden `sym.load`; `sym.lookup`
+  addr->funcion+off o nombre->addr; `prof.cpu` y `cpu.disasm` anaden `sym`. Codigo solo si la
+  direccion cae en un `.text` de entrada (static sin simbolo = `objeto.o+off`). PC fisico ->
+  VA por las paginas del TLB (PD matching corre en 0x70000000) y si no KSEG0.
+- Tools MCP `sym_load`, `sym_lookup`. `pdbench.py` lanza con `--symbols`.
+- Puertas: `release.sh --quick`, `gate_quick.sh` ALL OK; pdbench v2-03 misma fila.

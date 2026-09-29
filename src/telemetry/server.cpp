@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "symbols.hpp"
 #include "../core/savestate.hpp"
 #include "../core/system.hpp"
 #include "../core/movie.hpp"
@@ -128,6 +129,8 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     cmdProfControl(cmd, data); done();
   } else if(cmd == "prof.cpu") {
     cmdProfCpu(args, data); done();
+  } else if(cmd == "sym.load" || cmd == "sym.lookup") {
+    if(cmdSym(cmd, args, data)) done(); else fail(data.get("msg").asString());
   } else if(cmd == "prof.rsp") {
     cmdProfRsp(args, data); done();
   } else if(cmd == "pad.set" || cmd == "pad.get") {
@@ -373,6 +376,7 @@ auto Server::cmdCpuDisasm(const json::Value& args, json::Value& data) -> bool {
   u32 count = args.has("count") ? args.get("count").asU32() : 16;
   if(count == 0 || count > 4096) count = 16;
   std::lock_guard<std::mutex> lk(system.coreMutex);
+  const Symbols& syms = globalSymbols();
   json::Value list = json::Value::array();
   for(u32 i = 0; i < count; i++) {
     u32 a = addr + i * 4;
@@ -381,6 +385,7 @@ auto Server::cmdCpuDisasm(const json::Value& args, json::Value& data) -> bool {
     e.set("addr", (u64)a);
     e.set("op", (u64)op);
     e.set("text", CPU::disasm(op, a));
+    if(syms.loaded()) { auto h = syms.code(a); if(h.ok) e.set("sym", Symbols::format(h)); }
     list.push(std::move(e));
   }
   data.set("addr", (u64)addr);
@@ -859,6 +864,12 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
     e.set("pct", 100.0 * (double)hot[k].first / (double)total);
     u32 op = system.memory.read32(0x8000'0000u | phys);    // first instr in the 16-byte bucket
     e.set("disasm", CPU::disasm(op, 0x8000'0000u | phys));
+    // Con --symbols / sym.load: funcion+off, y la VA por la que se ejecuta (TLB o KSEG0)
+    if(globalSymbols().loaded()) {
+      u32 va = 0;
+      auto h = globalSymbols().codePhys(c, phys, va);
+      if(h.ok) { e.set("sym", Symbols::format(h)); e.set("va", (u64)va); }
+    }
     list.push(e);
   }
   data.set("total", (u64)c.profTotal);
@@ -964,6 +975,37 @@ auto Server::cmdPad(const std::string& cmd, const json::Value& args, json::Value
   data.set("stick_x", (s64)sx);
   data.set("stick_y", (s64)sy);
   data.set("polls", (s64)polls);
+  return true;
+}
+
+// Simbolos del invitado (PD64_pending P5). sym.load {path} carga un map de GNU ld (tambien
+// `--symbols` al arrancar); sym.lookup {addr} -> funcion+off (codigo si cae en .text, si
+// no el simbolo mas cercano), sym.lookup {name} -> direccion.
+auto Server::cmdSym(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
+  Symbols& syms = globalSymbols();
+  if(cmd == "sym.load") {
+    std::string err;
+    if(!syms.load(args.get("path").asString(), err)) { data.set("msg", err); return false; }
+    data.set("path", syms.path());
+    data.set("symbols", (u64)syms.count());
+    return true;
+  }
+  if(!syms.loaded()) { data.set("msg", "no symbols loaded (--symbols <map> or sym.load)"); return false; }
+  if(args.has("name")) {
+    u32 va = 0;
+    std::string n = args.get("name").asString();
+    if(!syms.find(n, va)) { data.set("msg", "symbol not found: " + n); return false; }
+    data.set("name", n);
+    data.set("addr", (u64)va);
+    return true;
+  }
+  u32 va = args.get("addr").asU32();
+  auto h = syms.code(va);
+  bool isCode = h.ok;
+  if(!h.ok) h = syms.any(va);
+  data.set("addr", (u64)va);
+  data.set("code", isCode);
+  if(h.ok) { data.set("sym", Symbols::format(h)); data.set("base", (u64)h.addr); }
   return true;
 }
 

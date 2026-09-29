@@ -146,6 +146,25 @@ def cpu_disasm(addr, count: int = 16) -> dict:
     return data
 
 
+def sym_load(path: str) -> dict:
+    """Load guest symbols from a GNU ld map (e.g. a Perfect Dark pd.map). Same as
+    launching with `--symbols <map>`. Afterwards profile_cpu and cpu_disasm add a
+    `sym` field (function+offset) and sym_lookup works."""
+    data, _ = query("sym.load", path=str(path))
+    return data
+
+
+def sym_lookup(addr=None, name: str = "") -> dict:
+    """Guest symbol lookup. `addr` (virtual) -> `sym` function+offset (`code` true when
+    it falls in a .text section; otherwise the nearest symbol below, e.g. data);
+    `name` -> its `addr`. Needs sym_load or `--symbols` first."""
+    if name:
+        data, _ = query("sym.lookup", name=name)
+    else:
+        data, _ = query("sym.lookup", addr=_addr(addr))
+    return data
+
+
 def run_control(action: str) -> dict:
     """action = 'pause' | 'resume' | 'reset'."""
     if action not in ("pause", "resume", "reset"):
@@ -418,6 +437,8 @@ def _serve_mcp():
     mcp.tool()(cpu_registers)
     mcp.tool()(cpu_step)
     mcp.tool()(cpu_disasm)
+    mcp.tool()(sym_load)
+    mcp.tool()(sym_lookup)
     mcp.tool()(run_control)
     mcp.tool()(frame_advance)
     mcp.tool()(rewind_step)
