@@ -517,6 +517,7 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
     for(auto& a : st.op) a.store(0, r);
     for(auto& a : st.px) a.store(0, r);
     for(auto& a : st.syncRedundant) a.store(0, r);
+    for(auto& a : st.syncPure) a.store(0, r);
     for(auto* a : {&st.gclkPixel, &st.gclkFill, &st.gclkTmem, &st.gclkSync, &st.pxWritten,
                    &st.pxImRd, &st.pxZCmp, &st.pxZUpd, &st.loads, &st.loadBytes,
                    &st.loadRedundant, &st.loadRedundantBytes, &st.otherModesSame, &st.combineSame})
@@ -557,7 +558,9 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
   data.set("pixels", px);
   json::Value red = json::Value::object();
   red.set("syncLoad", st.syncRedundant[0].load(r)).set("syncPipe", st.syncRedundant[1].load(r))
-     .set("syncTile", st.syncRedundant[2].load(r)).set("loads", st.loads.load(r))
+     .set("syncTile", st.syncRedundant[2].load(r))
+     .set("syncLoadPure", st.syncPure[0].load(r)).set("syncPipePure", st.syncPure[1].load(r))
+     .set("syncTilePure", st.syncPure[2].load(r)).set("loads", st.loads.load(r))
      .set("loadBytes", st.loadBytes.load(r)).set("loadRedundant", st.loadRedundant.load(r))
      .set("loadRedundantBytes", st.loadRedundantBytes.load(r))
      .set("otherModesSame", st.otherModesSame.load(r)).set("combineSame", st.combineSame.load(r));

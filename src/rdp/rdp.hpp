@@ -38,9 +38,14 @@ struct RdpStats {
   // textura, fill rect) desde el anterior del mismo tipo o desde el ultimo SYNC_FULL: no
   // habia nada en vuelo que esperar, y la parada se paga igual (n64brew).
   std::atomic<u64> syncRedundant[3]{};   // load, pipe, tile
+  // Mas estricto: ni primitiva NI carga de TMEM (LOAD_BLOCK/TILE/TLUT) desde el anterior.
+  // El SYNC_PIPE tras un LOAD_BLOCK (macro gDPLoadTextureBlock) cae en syncRedundant pero
+  // no aqui: esto es lo que se puede quitar sin discutir (peticion PD-opt 2026-09-30).
+  std::atomic<u64> syncPure[3]{};
   std::atomic<u64> loads{0}, loadBytes{0}, loadRedundant{0}, loadRedundantBytes{0};
   std::atomic<u64> otherModesSame{0}, combineSame{0};
   bool primSince[3] = {true, true, true};
+  bool workSince[3] = {true, true, true};  // primitiva o carga de TMEM
   u32 viFlips0 = 0, viFields0 = 0;
 };
 

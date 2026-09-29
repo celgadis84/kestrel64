@@ -4848,6 +4848,24 @@ static auto rspSpinLen() -> u32 {
   return v;
 }
 
+// Ocupacion del RSP hasta AHORA: lo cobrado por tareas acabadas mas la parte en vuelo de
+// la actual (menos lo aparcado de ella). Lectura de tres valores sin candado: si la tarea
+// empieza o acaba entre medias, rspTaskT0Ns cambia y se reintenta.
+auto Memory::rspBusyNow() const -> u64 {
+  for(;;) {
+    u64 t0 = rspTaskT0Ns.load();
+    u64 busy = rspBusyNs.load();
+    u64 park0 = rspTaskPark0.load();
+    u64 park = rspParkNs.load();
+    if(rspTaskT0Ns.load() != t0) continue;
+    if(!t0) return busy;
+    u64 now = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+    u64 dt = now > t0 ? now - t0 : 0, slept = park - park0;
+    return busy + (dt > slept ? dt - slept : 0);
+  }
+}
+
 auto Memory::rspWorkerLoop() -> void {
   tlIsRspThread = true;
   pinToPhysicalCore(2);
@@ -4875,6 +4893,9 @@ auto Memory::rspWorkerLoop() -> void {
     // funnels through mmioWrite → rdpSubmit, so the RDP pipelines behind us.
     auto t0 = std::chrono::steady_clock::now();
     const u64 park0 = rspParkNs.load(std::memory_order_relaxed);
+    rspTaskPark0.store(park0);
+    rspTaskT0Ns.store((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        t0.time_since_epoch()).count() | 1);
     rsp.step(~0ull);   // start() ya corrio en el hilo CPU al escribir CLEAR_HALT
     // Ocupacion = tiempo DENTRO de la tarea menos lo que se paso dormido en el aparcamiento:
     // un hilo aparcado no esta trabajando. Ver rspParkNs.
@@ -4882,7 +4903,8 @@ auto Memory::rspWorkerLoop() -> void {
       u64 dt = (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                  std::chrono::steady_clock::now() - t0).count();
       u64 slept = rspParkNs.load(std::memory_order_relaxed) - park0;
-      rspBusyNs.fetch_add(dt > slept ? dt - slept : 0, std::memory_order_relaxed);
+      rspBusyNs.fetch_add(dt > slept ? dt - slept : 0);
+      rspTaskT0Ns.store(0);   // DESPUES de sumar: rspBusyNow() reintenta si ve el cambio
     }
     rspJobsRun.fetch_add(1, std::memory_order_relaxed);
     ev("sp.done", rcp.sp_pc, rcp.sp_status.load());

@@ -20,8 +20,7 @@ export PATH=/c/msys64/clang64/bin:$PATH
 BUILD=${BUILD:-build-prdp-static}
 
 # El .exe no se puede reenlazar mientras una copia corre: Windows tiene el fichero abierto.
-taskkill //F //IM kestrel64.exe >/dev/null 2>&1 || true
-taskkill //F //IM kestrel64-gui.exe >/dev/null 2>&1 || true
+sh "$(dirname "$0")/killown.sh"   # solo exes de este repo, no los de otra sesion
 
 # KESTREL_STATIC mete libc++/GLFW dentro del .exe: cero DLL que copiar y cero
 # "no se encontro glfw3.dll" en una maquina sin MSYS2.

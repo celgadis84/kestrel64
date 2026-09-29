@@ -907,7 +907,7 @@ auto System::run() -> void {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       winT0 = clock::now(); winInsn = 0; winRsp = rspNow();  // don't fold idle time into speed
       winRdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
-      winRspNs = memory.rspBusyNs.load(std::memory_order_relaxed);
+      winRspNs = memory.rspBusyNow();
       winWaitNs = memory.cpuWaitNs.load(std::memory_order_relaxed);
       winFlips = memory.rcp.viFlips;
       winRamCpu = cpu.ramCpuBytes; winRamRcp = memory.ramBytesRcp();
@@ -1235,7 +1235,7 @@ auto System::run() -> void {
                        pc(memory.paceBlockNs.load(std::memory_order_relaxed)),
                        pc(memory.spBarBlockNs.load(std::memory_order_relaxed)),
                        pc(memory.dpBarBlockNs.load(std::memory_order_relaxed)),
-                       pc(memory.rspBusyNs.load(std::memory_order_relaxed)),
+                       pc(memory.rspBusyNow()),
                        // Espera del RSP POR EL RDP. Cae DENTRO de "rsp ocupado": el worker
                        // tiene tarea, pero el tiempo se va en la barrera, no en emular.
                        pc(memory.dpBarRspNs.load(std::memory_order_relaxed)),
@@ -1369,7 +1369,7 @@ auto System::run() -> void {
       // Ocupacion en la misma ventana: nanosegundos de pared que cada worker paso DENTRO
       // de un trabajo, y cuantos intercambios de buffer hubo (= fps de verdad del juego).
       u64 rdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
-      u64 rspNs = memory.rspBusyNs.load(std::memory_order_relaxed);
+      u64 rspNs = memory.rspBusyNow();
       u64 witNs = memory.cpuWaitNs.load(std::memory_order_relaxed);
       u64 flips = memory.rcp.viFlips;
       rdpBusyPct.store((rdpNs - winRdpNs) / 1e9 / ws * 100.0, std::memory_order_relaxed);

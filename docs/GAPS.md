@@ -906,6 +906,20 @@ Por ahi va el orden nuevo:
   RDRAM -- CPU cacheada y sin cachear, DMA de RSP/PI/SI y el propio RDP -- y una sola que
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.
 
+### Coste del RDP: sin setup por primitiva ni por span (2026-09-30, sin oraculo)
+
+El modelo de coste del RDP (`SoftRdp::accountPixels` y compania, `docs/RDP-TIMING.md`) cobra
+pixeles por chunk de 8 con las transacciones de color/Z (IM_RD, Z_CMP, bancos, VI),
+cargas de TMEM y paradas de SYNC. Calibrado con la bateria de Thar0 (0,13 ciclos/px de
+rmse), que SOLO mide fill rects de pantalla completa. No hay coste de setup por triangulo
+(lectura de coeficientes de arista/sombra/textura/Z) ni por span (paso del caminante de
+aristas por linea). Con Perfect Dark a ~970 triangulos por fotograma eso casi seguro
+subestima el RDP: en Villa el modelo da ~54 % del fotograma y quitar el AA (-10,6 % GCLK)
+no mueve fps, cuando ares con su modelo (tambien sin calibrar) daba la CPU 81 % esperando
+al RCP. Bloqueado por oraculo: hace falta una ROM de medida tipo Thar0 (PIPEBUSY/BUFBUSY
+alrededor de N triangulos de tamanos y modos distintos) corrida en consola real.
+Ver `docs/baselines/pd-opt.md`.
+
 ### Fidelidad de temporizacion — las DMA no cuestan tiempo (parcial: SI hecho 2026-09-08)
 
 **SI: HECHO.** `Memory::siDma()` ya no termina en la misma instruccion que la arranco. Ahora

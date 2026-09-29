@@ -124,6 +124,11 @@ prdp-jit `b5521b24`, Thar0 0.1332).
 (docs/MCP-GUIA.md). Puede bastar; PD-opt lo validara en nivel real y si cuadra con el
 81 % se cierra P4 sin codigo. Lo que quedaria: poder resetear la ventana de medida.
 
+**Nota kestrel 2026-09-30**: `rdpBusyPct`/`rspBusyPct` son PARED del hilo anfitrion, no
+tiempo de invitado -> no sirven para "cuanto GPU-bound". Lo de invitado ya sale de
+`pdbench.py` (`rdp_ms_per_frame` / `frame_ms`). `rspBusyPct` > 100 % arreglado (P6) y
+recuerda: incluye el giro en citas con la CPU y la espera al RDP.
+
 **Hacer (si no basta)**: en `emu_status` (o `rdp.stats`) publicar por ventana: fraccion de tiempo
 guest en que el RDP esta ocupado (`rdpGclk` / GCLK de pared guest), y fraccion de
 instrucciones CPU dentro del bucle ocioso del kernel (el detector de ocio ya existe,
@@ -137,7 +142,7 @@ lento. Las ROM de las ramas de PD son `ntsc-final` y traen su `pd.map`.
 **Hacer**: `--symbols <pd.map>` (formato map de GNU ld) → `prof.cpu` y `cpu.disasm`
 devuelven `funcion+off`. Opcional: tool `sym_lookup name|addr`.
 
-## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[EN CURSO]`
+## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[HECHO 2026-09-30 (commit P6)]`
 
 **Por que**: el retail de `test_roms/` es PAL y su mapa no casa (PD-GAMEPLAY.md). Las
 ROMs de la optimizacion son `ntsc-final` (`../perfect_dark/build/ntsc-final/*.z64`,
@@ -155,6 +160,34 @@ ROMs de la optimizacion son `ntsc-final` (`../perfect_dark/build/ntsc-final/*.z6
 
 Ojo: las ramas cambian codigo → cambian direcciones → un savestate de una ROM no vale
 para otra. Por eso warp por simbolo, no savestate.
+
+**Cerrado 2026-09-30.** Uso:
+
+```sh
+R=../perfect_dark/roms_v2
+sh scripts/pdbench.sh --mode threaded $R/v2-03-collsq.z64=$R/v2-03.map ...   # fila por ROM
+python scripts/pdbench.py <rom> --map <map> [--stage villa|defection|0x..]     [--mode lockstep|threaded] [--skip 720] [--measure 2400] [--intro skip|keep] [--png out/x]
+```
+
+- Arranca PAUSADO y avanza por campos (`frame_advance`): titulo + 240 campos, warp, START
+  salta la intro (`--intro keep` la mide), 720 ticks, ventana de 2400 ticks. Todo en
+  bordes de campo de invitado: **dos lockstep = misma fila exacta; threaded (SPEEDMODE=hw,
+  SPLEAD=0) = lockstep**. Sale JSON (`per_frame`, `rdp_ms_per_frame`, `frame_ms`,
+  `rdp_frame_pct`, `rdp_stats` entero) + fila markdown.
+- **Pasar SIEMPRE `--map`** (en el .sh, `rom=map`): sin el cae al `pd.map` de
+  `build/ntsc-final` y en otra rama lee basura (avisa por stderr).
+- Columnas nuevas pedidas por PD-opt: `sync_pipe (a/b)` con b = ni primitiva NI carga de
+  TMEM desde el anterior (`rdp.stats` `redundant.syncPipePure`/`syncLoadPure`/
+  `syncTilePure`), `px IM_RD`/f y ms de RDP de INVITADO frente al fotograma.
+- Tabla con fecha y md5: `docs/baselines/pd-opt.md` (7 ROMs de `roms_v2`, Villa spawn).
+- Tambien arreglado de paso: `rspBusyPct` > 100 % (se cobraba la tarea entera a la ventana
+  donde acababa; `Memory::rspBusyNow()` suma la parte en vuelo) y `release.sh`/`pack.sh`/
+  `pgo.sh` ya no hacen `taskkill //IM` (mataban corridas de otra sesion): `scripts/killown.sh`
+  solo mata exes con ruta dentro del repo.
+- Gates: `gate_quick.sh thar0` ALL OK (rmse 0.1332), tras `release.sh --quick`.
+- Hallazgo para P4: el modelo de coste del RDP no cobra setup por primitiva ni por span
+  (sin oraculo HW de triangulos). En Villa da RDP ~54 % del fotograma y AA-off no mueve
+  fps. Anotado en `docs/GAPS.md` ("Coste del RDP: sin setup...").
 
 ## P7 — FILL cycle y contadores separados (menor para PD, anotado en RDP-TIMING.md) `[ABIERTO]`
 

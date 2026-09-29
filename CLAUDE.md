@@ -39,7 +39,9 @@ con el .exe de hace semanas, y el que el usuario ejecuta (`build-prdp-static/`) 
 justamente uno de los que se queda atras. Compilar un arbol suelto solo es legitimo como
 paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release.sh`.
 
-- **ALWAYS `taskkill //F //IM kestrel64.exe` before rebuild** (Windows locks the exe).
+- **NEVER `taskkill //IM kestrel64.exe`**: otra sesion (PD-opt) corre kestrel a la vez. Antes de
+  recompilar, `sh scripts/killown.sh` (solo mata exes con ruta dentro de ESTE repo; ya lo llaman
+  `release.sh`/`pack.sh`/`pgo.sh`). A mano: por PID o con `timeout`, y puerto propio (`--port`).
 - cmake binary lives in `/c/msys64/clang64/bin`.
 - `build/` = default (PRDP OFF). `build-prdp/` = configured `-DKESTREL_PRDP=ON`
   (parallel-rdp GPU backend). Default OFF so deterministic core never depends on GPU.
@@ -176,6 +178,9 @@ Medir en el menu no vale. `docs/PD-GAMEPLAY.md` tiene los dos caminos: navegar e
 `scripts/pad.py` (mando inyectado, pulsaciones contadas en lecturas del joybus) o escribir
 el nivel directo en RAM (`g_MissionConfig` 0x07dbd8 + `g_MainChangeToStageNum` 0x043c04;
 `g_StageNum` 0x043d60 vale 0x5A en el titulo y confirma que la ROM comparte mapa).
+Banco A/B reproducible de ROMs de PD (fps de invitado, GCLK, SYNC redundantes):
+`scripts/pdbench.sh` / `pdbench.py`, metodo y tabla en `docs/baselines/pd-opt.md`. Pasar
+SIEMPRE el `.map` de cada ROM (`rom=map`).
 
 ### MCP gotchas
 - `read_memory` inside a block-capture returns 0 — read `mem->rdram` directly instead.

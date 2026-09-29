@@ -320,12 +320,17 @@ auto SoftRdp::statsCmd(Memory& mem, u32 op, u64 cmd) -> void {
   st.op[op].fetch_add(1, r);
   if((op >= 0x08 && op <= 0x0f) || op == 0x24 || op == 0x25 || op == 0x36) {
     st.primSince[0] = st.primSince[1] = st.primSince[2] = true;
+    st.workSince[0] = st.workSince[1] = st.workSince[2] = true;
+  } else if(op == 0x30 || op == 0x33 || op == 0x34) {   // LOAD_TLUT / BLOCK / TILE
+    st.workSince[0] = st.workSince[1] = st.workSince[2] = true;
   } else if(op >= 0x26 && op <= 0x28) {          // SYNC_LOAD / PIPE / TILE
     const u32 k = op == 0x26 ? 0 : op == 0x27 ? 1 : 2;
     if(!st.primSince[k]) st.syncRedundant[k].fetch_add(1, r);
-    st.primSince[k] = false;
+    if(!st.workSince[k]) st.syncPure[k].fetch_add(1, r);
+    st.primSince[k] = st.workSince[k] = false;
   } else if(op == 0x29) {                        // SYNC_FULL drena todo
     st.primSince[0] = st.primSince[1] = st.primSince[2] = false;
+    st.workSince[0] = st.workSince[1] = st.workSince[2] = false;
   } else if(op == 0x2f) {
     if(((u32)(cmd >> 32) & 0x00ff'ffff) == other_hi && (u32)cmd == other_lo) st.otherModesSame.fetch_add(1, r);
   } else if(op == 0x3c) {

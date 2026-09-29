@@ -342,6 +342,12 @@ struct Memory {
   // DK64 marcaba rsp 92% de ocupacion con 2% de CPU real, y "rsp X Mips busy" salia dividido
   // por ese tiempo muerto. Se descuenta en rspWorkerLoop.
   std::atomic<u64>        rspParkNs{0};
+  // Tarea del RSP EN VUELO: instante de arranque (ns de steady_clock, 0 = ocioso) y
+  // rspParkNs en ese instante. rspBusyNs solo se suma al ACABAR la tarea; una tarea que
+  // cruza el borde de la ventana del medidor se cobraba entera a la ventana donde acaba
+  // y "rsp ocupado" salia por encima del 100 %. rspBusyNow() suma la parte en vuelo.
+  std::atomic<u64>        rspTaskT0Ns{0}, rspTaskPark0{0};
+  u64 rspBusyNow() const;
   std::atomic<u64>        rdpJobsRun{0}, rspJobsRun{0};
   std::atomic<u64>        cpuWaitNs{0};   // CPU thread blocked on an RCP worker
   // Escala de rcpRetire: lo llama el bucle de CPU tras CADA bloque del JIT y tras cada

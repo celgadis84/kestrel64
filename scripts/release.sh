@@ -39,9 +39,7 @@ done
 # Windows mantiene abierto el .exe que este corriendo y el enlazado falla con un error
 # ("permission denied") que no parece lo que es. Siempre antes de compilar.
 kill_exes() {
-  taskkill //F //IM kestrel64.exe      >/dev/null 2>&1 || true
-  taskkill //F //IM kestrel64-soft.exe >/dev/null 2>&1 || true
-  taskkill //F //IM kestrel64-gui.exe >/dev/null 2>&1 || true
+  sh "$(dirname "$0")/killown.sh"   # solo exes de este repo, no los de otra sesion
 }
 
 # Compilacion guiada por perfil: se usa SOLO si el perfil existe (scripts/pgo.sh lo genera y

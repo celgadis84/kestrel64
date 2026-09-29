@@ -9783,3 +9783,21 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   primitiva desde el anterior, cargas que dejan TMEM+TLUT identicas (instantanea 4,5 KB por
   carga, solo encendido), SET_OTHER_MODES/SET_COMBINE repetidos; `perFlip`.
 - SM64 titulo: 186 SyncPipe/flip (~80 redundantes), 127 cargas/flip (~29 redundantes).
+
+## 2026-09-30 (b) -- banco A/B de Perfect Dark reproducible (PD64_pending P6)
+
+- `scripts/pdbench.py` / `pdbench.sh`: arranca PAUSADO y avanza por campos (`frame_advance`),
+  warp por RAM con el `.map` de cada ROM, START contado en lecturas del joybus para saltar
+  la intro, ventana de 2400 ticks del juego. Dos lockstep = misma fila exacta; threaded con
+  `SPEEDMODE=hw` = lockstep. fps = contadores del propio juego; `rdp_ms_per_frame` = GCLK del
+  modelo / 62,5 MHz. Tabla de siete ROMs en `docs/baselines/pd-opt.md`.
+- `rdp.stats` `redundant.sync{Pipe,Load,Tile}Pure`: SYNC sin primitiva NI carga de TMEM desde
+  el anterior. PD Villa: sync_pipe 291/f, 182 sin primitiva, 61 puros; sync_load 0 puros.
+- Hallazgo: AA fuera en salas = -10,6 % GCLK y fps igual; el modelo da el RDP en ~54 % del
+  fotograma. El modelo no cobra setup por primitiva/span (sin oraculo HW) -> anotado en GAPS.
+- `rspBusyPct` > 100 %: la tarea se cobraba entera en la ventana donde acababa. Ahora
+  `Memory::rspBusyNow()` suma la parte en vuelo (t0 y aparcado al empezar, publicados por el
+  worker). Recordatorio: "ocupado" incluye el giro de las citas y la espera al RDP.
+- `scripts/killown.sh`: `release.sh`/`pack.sh`/`pgo.sh` ya no hacen `taskkill //IM` (mataban
+  las corridas de la otra sesion); solo mata exes con ruta dentro del repo.
+- Puertas: `release.sh --quick`, `gate_quick.sh thar0` ALL OK (Thar0 0.1332).

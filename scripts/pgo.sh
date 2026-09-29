@@ -36,7 +36,7 @@ merge() {
 }
 
 build_gen() {
-  taskkill //F //IM kestrel64.exe >/dev/null 2>&1 || true
+  sh "$(dirname "$0")/killown.sh"   # solo exes de este repo, no los de otra sesion
   echo "== arbol instrumentado =="
   cmake -S . -B build-pgogen -G Ninja -DCMAKE_BUILD_TYPE=Release -DKESTREL_PRDP=ON \
         -DKESTREL_PGO=gen >/dev/null
