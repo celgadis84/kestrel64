@@ -37,7 +37,7 @@ n64.dev / libdragon / MiSTer, `gate_all` + `gate_prdp` + statehash tras cada cam
   rmse 0,133 cyc/px) y contadores DPC que avanzan. Falta lo de abajo para que un
   A/B de ROM de PD de un numero fiable.
 
-## P1 — Coste fijo de los SYNC del RDP (bloqueante para medir `mods/rdp-sync-opt`) `[HECHO 2026-09-29 COMMIT]`
+## P1 — Coste fijo de los SYNC del RDP (bloqueante para medir `mods/rdp-sync-opt`) `[HECHO 2026-09-29 511e766]`
 
 **Hoy**: `src/rdp/rdp.cpp:1640` — `SYNC_LOAD/PIPE/TILE → no-op`. Un sync redundante
 cuesta 0 GCLK, asi que quitar syncs no mueve ningun contador.
