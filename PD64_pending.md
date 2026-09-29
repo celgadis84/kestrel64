@@ -80,7 +80,7 @@ RDRAM, reutilizar `LAT`/`ROW` del modelo de pixel) + transferencia. Buscar dato 
 (n64brew, Thar0 si tiene, MiSTer `RDP_*` VHDL como oraculo de ciclos). Si no hay oraculo,
 dejarlo documentado como estimacion y NO calibrar a ojo.
 
-## P3 — `rdp.stats`: histograma por frame (comando de telemetria + tool MCP) `[HECHO 2026-09-30 COMMIT]`
+## P3 — `rdp.stats`: histograma por frame (comando de telemetria + tool MCP) `[HECHO 2026-09-30 500edc9]`
 
 Lo que la optimizacion necesita ver sin volcar la lista entera:
 
@@ -137,7 +137,7 @@ lento. Las ROM de las ramas de PD son `ntsc-final` y traen su `pd.map`.
 **Hacer**: `--symbols <pd.map>` (formato map de GNU ld) → `prof.cpu` y `cpu.disasm`
 devuelven `funcion+off`. Opcional: tool `sym_lookup name|addr`.
 
-## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[ABIERTO]`
+## P6 — Banco A/B reproducible en nivel real (ROM ntsc-final) `[EN CURSO]`
 
 **Por que**: el retail de `test_roms/` es PAL y su mapa no casa (PD-GAMEPLAY.md). Las
 ROMs de la optimizacion son `ntsc-final` (`../perfect_dark/build/ntsc-final/*.z64`,
