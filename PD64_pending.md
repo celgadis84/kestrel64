@@ -118,7 +118,7 @@ Referencia SM64 titulo (build-prdp-static): 186 SyncPipe/flip de los que ~80 red
 prdp-jit `b5521b24`, Thar0 0.1332).
 **Pendiente del "hecho cuando"**: cuadrar contra rdp-sync-dedup.md en PD en nivel = P6.
 
-## P4 — Metrica de "cuanto de GPU-bound" sin el profiler de host `[HECHO 2026-09-30 COMMIT]`
+## P4 — Metrica de "cuanto de GPU-bound" sin el profiler de host `[HECHO 2026-09-30 74443f8]`
 
 **Nota PD-opt 2026-09-29**: `emu_status` ya trae `rdpBusyPct`/`rspBusyPct`/`cpuWaitPct`
 (docs/MCP-GUIA.md). Puede bastar; PD-opt lo validara en nivel real y si cuadra con el
