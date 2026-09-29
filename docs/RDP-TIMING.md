@@ -131,6 +131,13 @@ hardcoding away:
    which the model does not represent, so `0x144E9` for 320x240x32bpp is likely ~2x
    too slow.
 
+Update 2026-09-30 (PD64_pending P7): `DPC_CLOCK` now free-runs at the RCP clock from
+boot and is never stopped, not even by FREEZE (n64brew, "Reality Display
+Processor/Interface"); a write of DPC_STATUS bit 9 rebases it. Only BUF/PIPE/TMEM still
+accumulate modelled RDP work. Thar0's hardware data has Buf and Pipe equal within noise
+(-3..40 GCLK over ~80 k) for its single-fillrect case, so their equality is right there;
+they only diverge across FIFO gaps before SYNC_FULL, which is not modelled.
+
 Accepted for now and tracked here. The fix is separate per-counter accounting plus a
 FILL-cycle path in the cost model — and it needs its own hardware oracle, because
 Thar0's sweep never enters FILL mode.

@@ -69,7 +69,7 @@ paseo solo-coste que habia llevado Thar0 a 0.988 (ver docs/RDP-TIMING.md).
 **Pendiente del "hecho cuando"**: delta GCLK/frame `pd.z64` vs `mods/rdp-sync-opt` se mide
 con P3 (`rdp.stats`) + P6 (banco en nivel); lo cierra el primer numero de P6.
 
-## P2 — Coste de cargas de textura mas fiel `[ABIERTO]`
+## P2 — Coste de cargas de textura mas fiel `[BLOQUEADO: falta medida en consola del coste de LOAD_BLOCK/LOAD_TILE/LOAD_TLUT]`
 
 **Hoy**: `accountTmem` = 1 GCLK por 8 bytes, sin latencia de RDRAM ni coste fijo por
 comando. Las opts R1/R2/R3 quitan CARGAS enteras; si cada carga pequena cuesta casi
@@ -79,6 +79,24 @@ nada, el win sale infravalorado.
 RDRAM, reutilizar `LAT`/`ROW` del modelo de pixel) + transferencia. Buscar dato HW
 (n64brew, Thar0 si tiene, MiSTer `RDP_*` VHDL como oraculo de ciclos). Si no hay oraculo,
 dejarlo documentado como estimacion y NO calibrar a ojo.
+
+**Busqueda 2026-09-30 (kestrel)**: no hay oraculo publico.
+- n64brew "Reality Display Processor/Commands": ciclos solo para SYNC_* (25/50/33); de las
+  cargas solo "Load Block is the fastest way to move data from RDRAM into TMEM".
+- n64brew "Reality Display Processor/Pipeline": las cargas comparten recursos con el
+  pipeline de render, sin cifras.
+- Manual de programacion N64 cap. 13: LoadBlock "more memory-bandwidth efficient" que
+  LoadTile, sin cifras.
+- Thar0 (`../rdp-timing-tests`) solo mide rectangulos de relleno.
+- MiSTer: sus ciclos son los de su SDRAM/DDR3, no los de la RDRAM de la consola; no vale
+  como oraculo de latencia.
+
+Se queda en 1 GCLK por 8 bytes (documentado como estimacion en `accountTmem`). **Falta**:
+una ROM al estilo Thar0 que borre contadores, lance LOAD_BLOCK / LOAD_TILE / LOAD_TLUT de
+tamanos y formatos variados + SYNC_FULL, y lea `DPC_TMEM_BUSY` / `DPC_PIPE_BUSY` en consola
+real (TMEM_BUSY no cuenta las paradas por RDRAM: la diferencia con PIPE_BUSY da la latencia).
+Con esos datos se ajusta el fijo + transferencia. kestrel puede escribir la ROM; la medida
+tiene que salir de hardware.
 
 ## P3 — `rdp.stats`: histograma por frame (comando de telemetria + tool MCP) `[HECHO 2026-09-30 500edc9]`
 
@@ -247,11 +265,26 @@ python scripts/pdbench.py <rom> --map <map> [--stage villa|defection|0x..]     [
   (sin oraculo HW de triangulos). En Villa da RDP ~54 % del fotograma y AA-off no mueve
   fps. Anotado en `docs/GAPS.md` ("Coste del RDP: sin setup...").
 
-## P7 — FILL cycle y contadores separados (menor para PD, anotado en RDP-TIMING.md) `[ABIERTO]`
+## P7 — FILL cycle y contadores separados (menor para PD, anotado en RDP-TIMING.md) `[BLOQUEADO: falta oraculo HW del ciclo FILL; DPC_CLOCK hecho COMMIT]`
 
 `CLOCK = BUFBUSY = PIPEBUSY` identicos y FILL ~2x lento. PD borra con FILL cada frame:
 inflar el FILL sesga el reparto de P3. Separar contadores y dar a FILL su camino de
 64 bits/clock cuando haya oraculo HW.
+
+**Hecho (kestrel 2026-09-30)**: `DPC_CLOCK` corre libre al reloj del RCP (62,5 MHz) desde
+el arranque y no para nunca, ni con FREEZE (n64brew, "Reality Display Processor/Interface").
+Antes solo sumaba trabajo del RDP, igual que BUF/PIPE. Ahora es el reloj de invitado del
+lector desde el ultimo borrado (bit 9 de DPC_STATUS). Leer `DPC_CLOCK` alrededor de un
+fotograma da ya su duracion en ciclos del RCP.
+
+**Queda**:
+- `CMD_BUSY` / `PIPE_BUSY`: siguen iguales. Thar0 (consola real, un fillrect + SYNC_FULL)
+  da Buf y Pipe iguales dentro del ruido (diferencia -3..40 GCLK sobre ~80 k), asi que en
+  el caso medido ya cuadran. Solo se separan con huecos: PIPE_BUSY sigue contando mientras
+  el FIFO esta vacio esperando al RSP hasta el SYNC_FULL. Modelarlo pide el tiempo de
+  invitado entre comandos; sin oraculo de cuanto.
+- FILL a 64 bits/clock: Thar0 nunca entra en FILL. Bloqueado hasta medirlo en consola (la
+  misma ROM de P2 puede llevar casos FILL).
 
 ## Orden sugerido
 

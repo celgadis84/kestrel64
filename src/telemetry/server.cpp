@@ -630,7 +630,7 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   dp.set("start", (u64)r.dpc_start);
   dp.set("end", (u64)r.dpc_end);
   dp.set("current", (u64)r.dpc_current.load());
-  dp.set("clock", (u64)r.dpc_clock.load());
+  dp.set("clock", (u64)system.memory.dpcClockNow());
   dp.set("bufbusy", (u64)r.dpc_bufbusy.load());
   dp.set("pipebusy", (u64)r.dpc_pipebusy.load());
   dp.set("tmem", (u64)r.dpc_tmem.load());

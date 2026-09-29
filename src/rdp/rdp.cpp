@@ -274,7 +274,6 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
     double bytes = (double(nWrite) * double(rdB + wrB) + double(npx - nWrite) * double(rdB));
     mem.ramBytesRdp.fetch_add((u64)bytes, std::memory_order_relaxed);
   }
-  mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_pipebusy.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_bufbusy.fetch_add(c, std::memory_order_relaxed);
   // Publicacion para el regulador (ver Memory::rdpPace). release: el freno de la CPU lee
@@ -292,7 +291,6 @@ auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
   }
   mem.ramBytesRdp.fetch_add(bytes, std::memory_order_relaxed);
   mem.rcp.dpc_tmem.fetch_add(c, std::memory_order_relaxed);
-  mem.rcp.dpc_clock.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.dpc_bufbusy.fetch_add(c, std::memory_order_relaxed);
   mem.rcp.rdpGclk.fetch_add(c, std::memory_order_release);
 }
@@ -306,7 +304,6 @@ auto SoftRdp::accountStall(Memory& mem, u32 gclk) -> void {
   if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
   if(mem.rdpStats.on.load(std::memory_order_relaxed))
     mem.rdpStats.gclkSync.fetch_add(gclk, std::memory_order_relaxed);
-  mem.rcp.dpc_clock.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.dpc_pipebusy.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.dpc_bufbusy.fetch_add(gclk, std::memory_order_relaxed);
   mem.rcp.rdpGclk.fetch_add(gclk, std::memory_order_release);

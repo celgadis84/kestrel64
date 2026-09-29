@@ -992,7 +992,7 @@ auto Memory::mmioRead32(u32 a) -> u32 {
       return (dpcStatusFor(cartNow(), 0) & ~(kDpcViewSt | kDpcRunSt)) | vw.st;
     // Performance counters, 24-bit each. The RDP accumulates them per rasterized
     // span (see SoftRdp::accountPixels); games time the RDP with these.
-    case 0x10: return rcp.dpc_clock.load(std::memory_order_relaxed)    & 0xff'ffff;
+    case 0x10: return dpcClockNow();
     case 0x14: return rcp.dpc_bufbusy.load(std::memory_order_relaxed)  & 0xff'ffff;
     case 0x18: return rcp.dpc_pipebusy.load(std::memory_order_relaxed) & 0xff'ffff;
     case 0x1c: return rcp.dpc_tmem.load(std::memory_order_relaxed)     & 0xff'ffff;
@@ -1383,7 +1383,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       if(v & (1 << 6)) rcp.dpc_tmem.store(0, std::memory_order_relaxed);
       if(v & (1 << 7)) rcp.dpc_pipebusy.store(0, std::memory_order_relaxed);
       if(v & (1 << 8)) rcp.dpc_bufbusy.store(0, std::memory_order_relaxed);
-      if(v & (1 << 9)) rcp.dpc_clock.store(0, std::memory_order_relaxed);
+      if(v & (1 << 9)) rcp.dpc_clock.store((u32)insnsToRcpCycles(cartNow()), std::memory_order_relaxed);
       break;
     }
     }

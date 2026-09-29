@@ -77,11 +77,14 @@ struct Rcp {
   std::atomic<u64> dpcCurReads{0};
   u32 dpc_submitted = 0;   // hasta donde se ha encolado ya (vista del productor)
   std::atomic<u32> dpc_status{0};
-  // DPC performance counters (24-bit, free-running). The RDP worker accumulates
-  // them while rasterizing and the CPU reads/clears them, so they are atomic.
-  // DPC_STATUS write bits 6..9 clear TMEM/PIPE/BUF/CLOCK respectively.
+  // DPC performance counters (24-bit). The RDP worker accumulates BUF/PIPE/TMEM while
+  // rasterizing and the CPU reads/clears them, so they are atomic. DPC_STATUS write bits
+  // 6..9 clear TMEM/PIPE/BUF/CLOCK respectively.
+  // dpc_clock NO es un acumulador: DPC_CLOCK corre libre al reloj del RCP desde el arranque
+  // y no para nunca, ni con FREEZE (n64brew, Reality Display Processor/Interface). Aqui
+  // guarda el reloj del RCP (32 bits bajos) en el ultimo borrado; ver dpcClockNow().
   alignas(64) std::atomic<u32> dpc_clock{0}, dpc_bufbusy{0}, dpc_pipebusy{0}, dpc_tmem{0};
-  // El MISMO reloj GCLK que dpc_clock, pero monotono y fuera del alcance del invitado: el
+  // El MISMO reloj GCLK que dpc_pipebusy, pero monotono y fuera del alcance del invitado: el
   // juego puede poner a cero los contadores de rendimiento cuando quiera (bits 6..9 de
   // DPC_STATUS) y el regulador no puede depender de un contador que le borran debajo. Es la
   // medida de "cuanto trabajo de RDP se ha hecho ya" contra la que se frena la CPU, igual
@@ -1572,6 +1575,18 @@ public:
   // (instrucciones por campo x campos por segundo), igual que usToInsns pero sin pasar por
   // microsegundos enteros: un DMA corto del PI dura unos pocos us y redondearlo a us lo
   // dejaria en cero. 128 bits en el producto porque un DMA de 16 MB son ~2e8 ciclos.
+  // Inversa de rcpCyclesToInsns: instrucciones retiradas -> ciclos del RCP (62,5 MHz).
+  auto insnsToRcpCycles(u64 insns) const -> u64 {
+    const u64 d = viFieldInsns * (u64)viFieldHzMilli;
+    if(!d) return 0;
+    const unsigned __int128 n = (unsigned __int128)insns * 62'500'000'000ull;
+    return (u64)(n / d);
+  }
+  // DPC_CLOCK del lector: ciclos del RCP desde el ultimo borrado, 24 bits. Resta en 32 bits
+  // (modular) contra la base guardada en dpc_clock.
+  auto dpcClockNow() const -> u32 {
+    return ((u32)insnsToRcpCycles(cartNow()) - rcp.dpc_clock.load(std::memory_order_relaxed)) & 0xff'ffff;
+  }
   auto rcpCyclesToInsns(u64 cycles) const -> u64 {
     const unsigned __int128 n = (unsigned __int128)cycles * viFieldInsns * viFieldHzMilli;
     return (u64)(n / 62'500'000'000ull);

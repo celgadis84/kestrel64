@@ -9821,3 +9821,13 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
 - Hallazgo: PD v2 en Villa esta limitado por el RSP (1,178 M instr/fotograma = el
   fotograma entero, sin sondeo; perfil plano = trabajo real del ucode). RDP 54 %.
 - Puertas: `release.sh --quick`, `gate_quick.sh` ALL OK; pdbench v2-03 misma fila.
+
+## 2026-09-30 (e) -- DPC_CLOCK libre; P2 bloqueado sin oraculo (PD64_pending P2, P7)
+
+- `DPC_CLOCK` corre al reloj del RCP desde el arranque y no para (n64brew, RDP/Interface):
+  `Memory::dpcClockNow()` = reloj de invitado del lector en ciclos de 62,5 MHz menos la base
+  del ultimo borrado (bit 9 de DPC_STATUS). El RDP ya no le suma trabajo. BUF/PIPE/TMEM igual.
+- P2 (coste de cargas TMEM): sin oraculo publico (n64brew, manual, Thar0 solo fill, MiSTer
+  no es RDRAM real). Se queda 1 GCLK/8 B como estimacion; falta ROM + medida en consola.
+- P7: FILL a 64 bits/clock y la separacion BUF/PIPE por huecos, bloqueados sin oraculo.
+- Puertas: `gate_quick.sh krom thar0` ALL OK (krom regress=0, Thar0 0.1332).
