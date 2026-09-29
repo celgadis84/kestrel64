@@ -606,7 +606,8 @@ envflags:
 // the pc-window/pc-sample env vars (which are read lazily inside the prologue).
 auto CPU::refreshDebugArmed() -> void {
   debugArmed = bpAddr || bpTrace || trapWild || excTail || huftTrap ||
-               audioHook || maxInsn ||
+               audioHook || maxInsn || pcRingOn || profOn || g_intLog ||
+               (mem && mem->trapSpRegStore) ||
                std::getenv("KESTREL_PCLO") || std::getenv("KESTREL_PCSAMPLE");
 }
 
@@ -1267,6 +1268,7 @@ auto CPU::profEnable(bool on) -> void {
   if(on && profBuckets.empty()) profBuckets.assign(kProfBuckets, 0);
   if(on) { std::fill(profBuckets.begin(), profBuckets.end(), 0u); profTotal = 0; }
   profOn = on;
+  refreshDebugArmed();   // el muestreador cuelga de la guarda unica del prologo
 }
 
 auto CPU::profClear() -> void {
@@ -1290,7 +1292,7 @@ auto CPU::step() -> void {
     u32 status = (u32)cop0[C0_Status];
     // ie=1, exl=0, erl=0  ⇔  (status & 0b111) == 0b001, plus any unmasked pending IP.
     if((status & 0x7) == 0x1 && (cause & status & 0xff00)) deliverInterrupt();
-    if(g_intLog) {
+    if(debugArmed && g_intLog) {
       static u64 tick = 0;
       if((++tick & 0x3fffff) == 0) {   // ~every 4M steps
         u32 mi = mem ? (u32)mem->rcp.mi_intr : 0, mk = mem ? mem->rcp.mi_mask : 0;
@@ -1325,7 +1327,7 @@ auto CPU::step() -> void {
     fetchLineCache = fcacheable;
     fetchLineEpoch = xlatEpoch;
   }
-  if(profOn) {   // physical-PC hotpath sampler (MCP prof.*)
+  if(debugArmed && profOn) {   // physical-PC hotpath sampler (MCP prof.*)
     u32 pp = fpe & 0x1fff'ffff;
     if(pp < (8u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; }
   }
@@ -1369,7 +1371,7 @@ auto CPU::step() -> void {
   inDelay = justBranched;   // next instruction is a delay slot iff this was a branch
   gpr[0] = 0;               // r0 stays hardwired
   retired++;
-  if(mem && mem->pendingTrap) {
+  if(debugArmed && mem && mem->pendingTrap) {
     mem->pendingTrap = false;
     std::fprintf(stderr, "[trap] %s  retired=%llu sp=0x%08x ra=0x%08x\n",
                  mem->trapMsg.c_str(), (unsigned long long)retired, (u32)gpr[29], (u32)gpr[31]);
@@ -1916,23 +1918,6 @@ auto CPU::execute(u32 op) -> void {
    // las instrucciones que llevaron hasta el. Se colapsa el giro sobre la misma PC.
    if(pcRingIdx == 0 || pcRing[(pcRingIdx - 1) % kPcRing] != curPc) {
      pcRing[pcRingIdx % kPcRing] = curPc; opRing[pcRingIdx % kPcRing] = op; pcRingIdx++; }
-  if(retired>=8195000 && retired<=8225000){
-    if((u32)curPc==0x8001aa64){ u32 v0=(u32)gpr[2]; memAbort=false;
-      u32 c=mem?mem->read32((v0+12)&0x1fffffff):0,d=mem?mem->read32((v0+16)&0x1fffffff):0; memAbort=false;
-      std::fprintf(stderr,"[box] v0=0x%08x [v0+12]=0x%08x [v0+16]=0x%08x ret=%llu\n",v0,c,d,(unsigned long long)retired); }
-    if((u32)curPc==0x8001aaac){ std::fprintf(stderr,"[preSD LDLR] at64=0x%016llx ret=%llu\n",(unsigned long long)gpr[1],(unsigned long long)retired); }
-    if((u32)curPc==0x8001aab0){ std::fprintf(stderr,"[postSD at] at64=0x%016llx ret=%llu\n",(unsigned long long)gpr[1],(unsigned long long)retired); }
-    if((u32)curPc==0x8001aabc){ u32 t6=(u32)gpr[14]; memAbort=false; u32 m0=mem?mem->read32((t6+0)&0x1fffffff):0,m4=mem?mem->read32((t6+4)&0x1fffffff):0; memAbort=false;
-      std::fprintf(stderr,"[preJAL] t6=0x%08x [t6+0]=0x%08x [t6+4]=0x%08x at64=0x%016llx ret=%llu\n",t6,m0,m4,(unsigned long long)gpr[1],(unsigned long long)retired); }
-  }
-   if((u32)curPc==0x8001037c || (u32)curPc==0x800103cc) {   // disc-load / disc-branch probe
-    if(retired>=8195000 && retired<=8225000 && (u32)curPc==0x8001037c){
-      u32 t6=(u32)gpr[14]; memAbort=false;
-      u32 m0=mem?mem->read32((t6+0)&0x1fffffff):0, m4=mem?mem->read32((t6+4)&0x1fffffff):0;
-      u32 m8=mem?mem->read32((t6+8)&0x1fffffff):0, mc=mem?mem->read32((t6+12)&0x1fffffff):0; memAbort=false;
-      std::fprintf(stderr,"[disc@%08x] t6=0x%08x expected[0..16]=%08x %08x %08x %08x ret=%llu\n",(u32)curPc,t6,m0,m4,m8,mc,(unsigned long long)retired);
-    }
-   }
   }  // end pcRingOn debug block
   // 64-bit doubleword ops + LWU raise Reserved Instruction in 32-bit non-kernel mode.
   // Bitmask test over the primary opcode replaces a second full switch-dispatch per

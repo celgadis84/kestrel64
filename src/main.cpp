@@ -13,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <csignal>
+#include <filesystem>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -254,6 +255,12 @@ int main(int argc, char** argv) {
     // %p = pid, para que dos capturas seguidas no se pisen. La carpeta es la que lee
     // scripts/pgo.sh --merge.
     std::string out = "pgo/raw/" + pgoName + "-%p.profraw";
+    // El tiempo de ejecucion de la instrumentacion NO crea la carpeta: si no existe, al salir
+    // dice "Failed to write file ... No such file or directory" y la partida entera se pierde
+    // -- y lo dice al SALIR, cuando ya no hay nada que hacer. Se crea aqui, al arrancar, que
+    // es el unico momento en que enterarse sirve de algo. Antes esto lo hacia solo el
+    // lanzador, asi que capturar a mano o con el .exe suelto del paquete no escribia nada.
+    std::filesystem::create_directories("pgo/raw");
     __llvm_profile_set_filename(out.c_str());
     // Los contadores traen ya lo que costo arrancar (biblioteca, dialogos, carga de la ROM).
     // Eso no es el codigo caliente que se quiere colocar bien, asi que se tiran y el perfil

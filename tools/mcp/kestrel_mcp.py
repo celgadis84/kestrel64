@@ -20,8 +20,10 @@ import struct
 import threading
 import argparse
 
-HOST = "127.0.0.1"
-PORT = 9128
+import os
+
+HOST = os.environ.get("KESTREL_TELEMETRY_HOST", "127.0.0.1")
+PORT = int(os.environ.get("KESTREL_TELEMETRY_PORT", "9128"))
 
 _lock = threading.Lock()
 _sock = None
@@ -343,6 +345,23 @@ def profile_rsp(top: int = 20) -> dict:
     return _snapshot("prof.rsp", top=int(top))
 
 
+def state_save(slot: int = 0) -> dict:
+    """Save a whole-machine savestate to `slot` (0..9), same file as the F5 key.
+
+    Served by the run loop at a safe point (RCP at rest), so it can take a moment.
+    Returns {slot, msg, path}; errors if the loop did not answer within 5 s."""
+    data, _ = query("state.save", slot=int(slot))
+    return data
+
+
+def state_load(slot: int = 0) -> dict:
+    """Load the savestate in `slot` (0..9), same file as the F7 key. Use it to jump
+    straight back to a reproducible point (e.g. inside a level) between experiments.
+    Returns {slot, msg, path}."""
+    data, _ = query("state.load", slot=int(slot))
+    return data
+
+
 def _selftest():
     print("status     :", json.dumps(emu_status(), indent=2)[:600])
     regs = memory_regions()
@@ -401,6 +420,8 @@ def _serve_mcp():
     mcp.tool()(profile_reset)
     mcp.tool()(profile_cpu)
     mcp.tool()(profile_rsp)
+    mcp.tool()(state_save)
+    mcp.tool()(state_load)
     mcp.run()
 
 

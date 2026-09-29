@@ -7,7 +7,8 @@ emulators (ares, cen64) hit an architectural ceiling.
 
 Live status: `docs/STATUS.md`. Backlog de huecos y pendientes: `docs/GAPS.md` (lo que
 falta frente a ares/PJ64/mupen + pendientes propios, ordenado; se actualiza al cerrar
-cada punto). Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
+cada punto). Peticiones de la optimizacion de Perfect Dark al emulador:
+`PD64_pending.md` (P1..P7, tachar al cerrar). Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
 `docs/TEXTURE-FORMATS.md`, `docs/parallel-rdp-integration.md`, `docs/VI-CLOCK.md`,
 `docs/RSP-JIT.md`, `docs/ROMS-COMPRIMIDAS.md`.
 
@@ -72,14 +73,11 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
     con `--pgo-capture`; se juega un nivel, se sale normal y el `.profraw` cae en `pgo/raw/`.
     `sh scripts/pgo.sh --merge` fusiona lo que haya ahi sin volver a correr nada. Varias
     capturas se suman. `KESTREL_PGO_NAME` etiqueta una.
-  - **Desde la interfaz**: opcion `pgocap` ("Grabar perfil de compilacion (PGO)", grupo
-    depuracion) tanto en el lanzador como en el menu de la ventana. No es una variable de
-    entorno: quien la lee relanza el binario INSTRUMENTADO (`build-pgogen/kestrel64.exe` en
-    arbol de desarrollo, `kestrel64-pgo.exe` al lado del lanzador si esta instalado) con
-    `--pgo-capture` y con la carpeta de trabajo en la raiz del proyecto, que es donde cae
-    `pgo/raw/`. Si ese binario no existe, avisa con como compilarlo y se apaga sola. El
-    paquete NO lo trae (va 1,24x mas lento): hay que compilarlo con `sh scripts/pgo.sh
-    --capture` o `cmake -DKESTREL_PGO=gen`.
+  - **Solo desarrollo, NO en la interfaz** (retirado 2026-09-29): la opcion `pgocap` del
+    lanzador/menu se quito. El perfil es UNO global, horneado al compilar el paquete; el
+    usuario final no tiene compilador, asi que capturar desde `dist/` no servia de nada, y
+    recompilar por juego no tiene sentido. El `.profdata` no contiene nada del juego (solo
+    contadores de funciones/ramas de kestrel; comprobado: 0 cadenas de ROM).
   - El binario instrumentado va **1,24x mas lento** (PD en juego 7377 contra 5951 ms), o sea
     0,90x tiempo real en el juego mas apretado. Se juega para capturar; NO se distribuye.
   - Un perfil viejo no rompe nada (clang avisa y sigue, con `-Wno-profile-instr-out-of-date`),

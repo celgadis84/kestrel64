@@ -185,7 +185,6 @@ static const Option kOpt_batch[] = {
 };
 
 static const Option kOpt_debug[] = {
-  {"pgocap", nullptr, "Grabar perfil de compilacion (PGO)", OType::Bool, "0", "Lanza el binario INSTRUMENTADO y apunta que codigo del emulador se usa de verdad mientras juegas. Al salir deja pgo/raw/<rom>.profraw; luego 'sh scripts/pgo.sh --merge' y 'sh scripts/release.sh' recompilan el emulador colocado para lo que TU juegas (medido: -4 a -9 % de tiempo de pared). El binario instrumentado va 1,24x mas lento y hay que compilarlo antes con 'sh scripts/pgo.sh --capture' o 'cmake -DKESTREL_PGO=gen'.", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"bp", "KESTREL_BP", "Punto de ruptura (PC hex)", OType::Hex, "", "", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"bptrace", "KESTREL_BPTRACE", "Traza en el punto de ruptura", OType::Bool, "0", "", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"watch", "KESTREL_WATCH", "Punto de vigilancia de escritura (addr)", OType::Hex, "", "", false, false, false, 0, 0, 0, nullptr, 0, false},
