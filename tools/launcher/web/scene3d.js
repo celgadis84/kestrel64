@@ -424,6 +424,12 @@ function mountCarousel(host, opts) {
     if (sl.item === sel && opts.onLaunch) opts.onLaunch(sl.item);
     else if (opts.onSelect) opts.onSelect(sl.item);
   });
+  canvas.addEventListener("contextmenu", e => {
+    const sl = slotOf(sc.pick(e.clientX, e.clientY));
+    if (!sl || sl.item < 0 || !opts.onMenu) return;
+    e.preventDefault();
+    opts.onMenu(sl.item, e.clientX, e.clientY);
+  });
   // La rueda del raton mueve de uno en uno; en la pared, de fila en fila.
   let accum = 0;
   canvas.addEventListener("wheel", e => {

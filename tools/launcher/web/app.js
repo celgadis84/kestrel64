@@ -472,6 +472,7 @@ function r3D(st, list, layout) {
       items: items3d(list), mode: layout, index: SEL,
       onSelect: i => { SEL = i; if (LIB3D) LIB3D.setIndex(i); updateDock(); },
       onLaunch: () => activate(),
+      onMenu: (i, x, y) => gameMenu(i, x, y),
     });
   if (!LIB3D) {                                   // navegador sin WebGL
     LIB3D_KEY = "";
@@ -493,6 +494,7 @@ function card(r, i, list) {
   const img = $("img", d);
   img.src = artUrl(r);
   img.onerror = () => { img.outerHTML = `<div class="ph">${r.title}</div>`; };
+  d.dataset.idx = list.indexOf(r);
   d.onclick = () => pick(list.indexOf(r));
   d.ondblclick = launch;
   return d;
@@ -537,6 +539,7 @@ function rCover(st, list) {
     im.src = artUrl(r);
     im.onload = () => { $(".face", d).appendChild(im); $(".refl", d).appendChild(im.cloneNode()); };
     im.onerror = () => { $(".face", d).innerHTML = `<div class="ph">${r.title}</div>`; };
+    d.dataset.idx = i;
     d.onclick = () => (i === SEL ? activate() : pick(i));
     tr.appendChild(d);
   });
@@ -570,6 +573,7 @@ function rWheel(st, list) {
     const d = document.createElement("div");
     d.className = "wl";
     d.textContent = r.title;
+    d.dataset.idx = i;
     d.onclick = () => (i === SEL ? activate() : pick(i));
     tr.appendChild(d);
   });
@@ -608,6 +612,7 @@ function rList(st, list) {
     tr.innerHTML = `<td>${r.title}</td><td>${r.file}</td><td>${h.cart || "?"}</td>
       <td>${h.region_label || "?"}</td><td>${h.fmt || "?"}</td><td>${h.mb || "?"}</td>
       <td style="color:var(--dim2)">${h.crc || ""}</td>`;
+    tr.dataset.idx = i;
     tr.onclick = () => pick(i);
     tr.ondblclick = launch;
     tb.appendChild(tr);
@@ -672,6 +677,53 @@ function updateDock() {
   $("#launch").disabled = !BUILDS.length;
   $("#dock-card").disabled = false;
 }
+
+/* ============================================================ menu contextual */
+/* El menu del navegador (atras, imprimir, inspeccionar...) no pinta nada en un lanzador.
+   Fuera; en su lugar, sobre un juego, lo que se puede hacer con ESE juego. En campos de
+   texto se deja el nativo: ahi si sirve (copiar, pegar). */
+function gameMenu(i, x, y) {
+  const r = filtered()[i];
+  if (!r) return;
+  if (i !== SEL) pick(i);
+  const m = $("#ctxmenu");
+  const acts = [
+    ["Jugar", launch, !BUILDS.length],
+    ["Ficha", () => openCard("info")],
+    ["Manual", () => openCard("manual")],
+    ["Trucos", () => openCard("cheats")],
+    ["Partidas", () => openCard("saves")],
+    null,
+    ["Copiar ruta", () => navigator.clipboard.writeText(r.path)
+       .then(() => toast("Ruta copiada"), () => toast("No se pudo copiar", true))],
+  ];
+  m.innerHTML = `<div class="ctx-t">${r.title}</div>`;
+  acts.forEach(a => {
+    if (!a) { m.insertAdjacentHTML("beforeend", `<hr>`); return; }
+    const b = document.createElement("button");
+    b.textContent = a[0];
+    b.disabled = !!a[2];
+    b.onclick = () => { ctxClose(); a[1](); };
+    m.appendChild(b);
+  });
+  m.classList.add("on");
+  const w = m.offsetWidth, h = m.offsetHeight;
+  m.style.left = Math.min(x, innerWidth - w - 6) + "px";
+  m.style.top = Math.min(y, innerHeight - h - 6) + "px";
+}
+function ctxClose() { $("#ctxmenu").classList.remove("on"); }
+
+document.addEventListener("contextmenu", e => {
+  if (e.defaultPrevented) return;                 // ya lo atendio la escena 3D
+  if (e.target.closest("input, textarea, [contenteditable]")) return;
+  e.preventDefault();
+  const it = e.target.closest("[data-idx]");
+  if (it && $("#stage").contains(it)) gameMenu(+it.dataset.idx, e.clientX, e.clientY);
+  else ctxClose();
+});
+document.addEventListener("pointerdown", e => { if (!e.target.closest("#ctxmenu")) ctxClose(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") ctxClose(); }, true);
+addEventListener("blur", ctxClose);
 
 /* ==================================================================== lanzar */
 async function launch() {

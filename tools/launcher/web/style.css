@@ -593,3 +593,15 @@ a.btn{text-decoration:none;display:inline-block}
 #card-path{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 @media (max-width:760px){.cardwrap{flex-direction:column}.cardside{flex:none;border-right:0;
   border-bottom:1px solid var(--line)}.cgrid{grid-template-columns:1fr}}
+
+/* ------------------------------------------------------------- menu contextual */
+#ctxmenu{position:fixed;z-index:60;min-width:180px;display:none;flex-direction:column;
+  background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:5px;
+  box-shadow:0 10px 30px rgba(0,0,0,.45)}
+#ctxmenu.on{display:flex}
+#ctxmenu .ctx-t{font-size:12px;color:var(--dim);padding:5px 10px 6px;max-width:260px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ctxmenu button{all:unset;cursor:pointer;padding:7px 10px;border-radius:6px;font-size:13.5px}
+#ctxmenu button:hover{background:var(--panel2)}
+#ctxmenu button:disabled{opacity:.4;cursor:default;background:none}
+#ctxmenu hr{border:0;border-top:1px solid var(--line);margin:4px 2px}
