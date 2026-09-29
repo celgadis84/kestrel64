@@ -84,6 +84,8 @@ struct SoftRdp {
   // the model and scripts/rdptiming.py for its calibration against hardware.
   auto accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void;
   auto accountTmem(Memory& mem, u64 bytes) -> void;
+  // Coste fijo de un comando que para el pipeline sin tocar RDRAM ni TMEM (SYNC_LOAD/PIPE/TILE).
+  auto accountStall(Memory& mem, u32 gclk) -> void;
 
 private:
   // --- pipeline state (persists across command lists, like the real RDP) ------
@@ -172,6 +174,7 @@ private:
   }
 
   auto depthTest(Memory& mem, int x, int y, s32 d) -> bool;   // Z_CMP / Z_UPD on one pixel
+  auto depthPasses(Memory& mem, int x, int y, s32 d) const -> bool;   // Z_CMP only, read-only
   // Escritura al color image SIN el test de scissor: la usan los llamadores que ya lo han
   // hecho (blendPixel entra por su propio test y luego escribe hasta tres veces). El test
   // seguia repitiendose en cada eslabon de coverPixel -> blendPixel -> putPixel.

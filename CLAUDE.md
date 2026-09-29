@@ -98,7 +98,14 @@ python scripts/validate.py krom                       # 371-ROM RDP accuracy vs 
 python scripts/validate.py bench      --mode <mode>   # wall clock for N VI fields (speed)
 sh scripts/gate_all.sh                                # las cinco modalidades + krom, un log
 sh scripts/gate_prdp.sh                               # backend GPU (parallel-rdp), exe de build-prdp
+sh scripts/gate_quick.sh [krom] [lock] [phys] [thar0] # puerta RAPIDA por cambio (~1,5 min)
 ```
+
+**Politica de puertas (usuario, 2026-09-29)**: por cada cambio basta `gate_quick.sh` (systemtest
+threaded-jit + sm64 interp + sm64 prdp-jit sobre los exe STATIC) mas los extras que toquen al
+cambio (`thar0` si toca coste RDP, `krom` si toca rasterizador, `lock`/`phys` si toca CPU/RCP;
+statehash si toca citas RCP). `gate_all` + `gate_prdp` completos SOLO al cerrar fase o bloque
+de puntos. Probar mas que implementar no compensa.
 
 `gate_all.sh` es el oraculo determinista y corre sobre SoftRDP, que no depende de que
 haya GPU. `gate_prdp.sh` corre el mismo material con `KESTREL_PRDP=1` contra el exe de

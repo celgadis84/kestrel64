@@ -37,7 +37,7 @@ n64.dev / libdragon / MiSTer, `gate_all` + `gate_prdp` + statehash tras cada cam
   rmse 0,133 cyc/px) y contadores DPC que avanzan. Falta lo de abajo para que un
   A/B de ROM de PD de un numero fiable.
 
-## P1 — Coste fijo de los SYNC del RDP (bloqueante para medir `mods/rdp-sync-opt`) `[EN CURSO]`
+## P1 — Coste fijo de los SYNC del RDP (bloqueante para medir `mods/rdp-sync-opt`) `[HECHO 2026-09-29 COMMIT]`
 
 **Hoy**: `src/rdp/rdp.cpp:1640` — `SYNC_LOAD/PIPE/TILE → no-op`. Un sync redundante
 cuesta 0 GCLK, asi que quitar syncs no mueve ningun contador.
@@ -54,6 +54,20 @@ solo si `charge`. Contar por tipo (ver P3).
 empeora, el modelo de pixel estaba absorbiendo el coste del sync y hay que re-ajustar,
 anotarlo); `pd.z64` (base) vs `mods/rdp-sync-opt` dan delta de GCLK/frame > 0 en el
 mismo tramo.
+
+**Como se usa** (kestrel, 2026-09-29): automatico, sin variable. `SoftRdp::accountStall`
+(`src/rdp/rdp.cpp`) cobra 25/50/33 GCLK por cada SYNC_LOAD/PIPE/TILE, redundante o no, en
+`DPC_CLOCK`, `DPC_PIPEBUSY`, `DPC_BUFBUSY` (el comando sigue en el FIFO mientras para) y en
+`rdpGclk` (el regulador: el RDP tarda mas en guest, la CPU espera mas). Se ve en
+`rcp_registers` (dp.clock/pipebusy/bufbusy) y en `emu_status` (`rdpBusyPct`). Solo cuando
+`charge` (el coste se paga una vez: paseo solo-coste o el que pinta). SYNC_FULL sin numero
+fijo (espera de verdad; lo modela el drenado ya existente). Vale igual con SoftRDP y con
+parallel-rdp (el coste sale del paseo de SoftRdp en los dos).
+**Gates**: `gate_quick.sh thar0` ALL OK (systemtest 0/3721 0/2 0/6, sm64 `d35bd8aa`,
+prdp-jit `b5521b24`, Thar0 rmse 0.1332 = sin cambio). De paso se arreglo una regresion del
+paseo solo-coste que habia llevado Thar0 a 0.988 (ver docs/RDP-TIMING.md).
+**Pendiente del "hecho cuando"**: delta GCLK/frame `pd.z64` vs `mods/rdp-sync-opt` se mide
+con P3 (`rdp.stats`) + P6 (banco en nivel); lo cierra el primer numero de P6.
 
 ## P2 — Coste de cargas de textura mas fiel `[ABIERTO]`
 

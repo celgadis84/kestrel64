@@ -48,6 +48,21 @@ rmse/mae/worst in cycles per pixel. Takes ~97 s.
 n=100/100 matched  rmse=0.1332  mae=0.1137  max=0.2992 cyc/px
 ```
 
+`sh scripts/gate_quick.sh thar0` runs it against `build-static/` and fails unless rmse is
+exactly 0.1332.
+
+2026-09-29: the cost-only walk (`SoftRdp::costOnly`, added in b91848b, which runs the FIFO
+span before the painting walk and pays the cost) had silently taken this to
+**rmse 0.988**: its FILL_RECTANGLE shortcut charged every pixel as written, so the
+"Z Fail" configurations (prim depth, Z_CMP fails) paid color+depth writes they never do
+on hardware (+2.7 cyc/px), and "Alpha Compare" paid writes for a rect whose constant alpha
+fails the compare (+0.74). The fix evaluates both in the cost walk: the rect's colour and
+depth are constants, so alpha compare is one evaluation and the depth test is a read-only
+compare against the z image per pixel (`depthPasses`). Triangles in the cost walk still
+assume every rasterized pixel passes (approximation; exact would need the full depth
+interpolation, O(area)). The fixed SYNC_LOAD/PIPE/TILE stalls (PD64_pending P1) leave
+Thar0 unchanged: the test lists carry no syncs inside the measured window.
+
 0.133 rmse is the *same residual the fitted model itself has* against the hardware
 numbers — i.e. the emulator now reproduces the model as well as the model reproduces
 hardware, and closing the rest means a better model, not a better implementation.

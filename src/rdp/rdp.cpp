@@ -284,9 +284,32 @@ auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
   mem.rcp.rdpGclk.fetch_add(c, std::memory_order_release);
 }
 
+// SYNC_LOAD/PIPE/TILE paran el pipeline un numero FIJO de GCLK (n64brew, RDP Commands:
+// "stalls the RDP pipeline for exactly 25/50/33 GCLK cycles", "does not wait on any
+// particular internal signal(s)": uno redundante paga el coste entero). Durante la parada el
+// comando sigue en el FIFO (CMD_BUSY -> dpc_bufbusy) y el pipeline esta activo hasta el
+// SYNC_FULL (PIPE_BUSY), pero no hay carga de TMEM ni trafico de RDRAM.
+auto SoftRdp::accountStall(Memory& mem, u32 gclk) -> void {
+  if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  mem.rcp.dpc_clock.fetch_add(gclk, std::memory_order_relaxed);
+  mem.rcp.dpc_pipebusy.fetch_add(gclk, std::memory_order_relaxed);
+  mem.rcp.dpc_bufbusy.fetch_add(gclk, std::memory_order_relaxed);
+  mem.rcp.rdpGclk.fetch_add(gclk, std::memory_order_release);
+}
+
 // Per-pixel depth test against the 16-bit z image. Opaque z-mode: the pixel wins
 // when its depth is nearer (strictly less) than the stored depth. On a pass with
 // Z_UPDATE the new depth is written back. Returns whether the colour is drawn.
+// Solo el Z_CMP, sin escribir (lo usa el paseo solo-coste).
+auto SoftRdp::depthPasses(Memory& mem, int x, int y, s32 d) const -> bool {
+  const auto& m = mem.rdram;
+  if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
+  u32 zoff = zi_addr + (u32(y) * ci_width + u32(x)) * 2;
+  if(zoff + 1 >= m.size()) return false;
+  u32 old = zDecode(((u16)m[zoff] << 8) | m[zoff + 1]);
+  return !((other_lo & 0x10) && (u32)d >= old);
+}
+
 auto SoftRdp::depthTest(Memory& mem, int x, int y, s32 d) -> bool {
   auto& m = mem.rdram;
   if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
@@ -558,7 +581,26 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   // exactamente lo que entra al pipeline. Un relleno solo toca el z si corre en 1/2 ciclos
   // con Z_UPDATE; en FILL/COPY el z ni se mira.
   if(costOnly) {
-    accountPixels(mem, npx, npx, (pipeMode && (other_lo & 0x20) && zi_addr) ? npx : 0);
+    // Con Z de primitiva (Z_SOURCE_SEL) y Z_CMP el relleno se come pixeles: los que fallan
+    // no escriben ni color ni z. La z es constante, asi que el test se hace de verdad y solo
+    // leyendo el z-buffer (el paseo solo-coste va antes que el que pinta; ningun pixel del
+    // rect se toca dos veces). Sin esto un relleno con Z que falla se cobraba como si pasara
+    // (Thar0 "Z Fail": +2,7 cyc/px).
+    // Lo mismo con el alpha compare: el color del rect es constante, se evalua una vez igual
+    // que en el camino que pinta (Thar0 "Alpha Compare": +0,74 cyc/px).
+    u64 pass = npx;
+    if(pipeMode && (other_lo & 1)) {
+      bool combProg = (combine_hi | combine_lo) != 0;
+      u32 flatTexel = combProg ? 0xffffffff : 0;
+      u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : blend_color;
+      if((c & 0xff) < (blend_color & 0xff)) pass = 0;
+    }
+    if(pass && pipeMode && (other_lo & 4) && (other_lo & 0x10) && zi_addr) {
+      pass = 0;
+      for(int y = y0; y < y1; y++)
+        for(int x = x0; x < x1; x++) pass += depthPasses(mem, x, y, (s32)prim_z);
+    }
+    accountPixels(mem, npx, pass, (pipeMode && (other_lo & 0x20) && zi_addr) ? pass : 0);
     return;
   }
   for(int y = y0; y < y1; y++) {
@@ -1637,7 +1679,9 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
 
     switch(op) {
     case 0x00: break;                                   // no-op
-    case 0x26: case 0x27: case 0x28: break;             // SYNC_LOAD/PIPE/TILE → no-op here
+    case 0x26: accountStall(mem, 25); break;            // SYNC_LOAD: 25 GCLK fijos
+    case 0x27: accountStall(mem, 50); break;            // SYNC_PIPE: 50 GCLK fijos
+    case 0x28: accountStall(mem, 33); break;            // SYNC_TILE: 33 GCLK fijos
     case 0x29: {
       static const bool sfLog = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
       if(sfLog) { std::fprintf(stderr, "[dpsync] at=%06x span=%06x..%06x xbus=%u\n", cur, start & 0x00ffffffu, end, (unsigned)xbus); std::fflush(stderr); }

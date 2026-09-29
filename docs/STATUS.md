@@ -9760,3 +9760,17 @@ para cerrarlo de verdad: que la eleccion diario/cita no dependa de lo que el RDP
 en hora de anfitrion (marcar las paginas y que el consumidor del FIFO consulte el diario, como
 ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue siendo
 `SPLEAD=0`, que es lo que fijan las puertas.
+
+## 2026-09-29 (a) -- Coste fijo de los SYNC del RDP (PD64_pending P1) y el paseo solo-coste volvia a cobrar Z Fail
+
+- SYNC_LOAD/PIPE/TILE cobran 25/50/33 GCLK fijos (n64brew: "stalls the RDP pipeline for
+  exactly N GCLK", no espera ninguna senal, asi que un sync redundante paga entero) en
+  DPC_CLOCK/PIPEBUSY/BUFBUSY y `rdpGclk`, solo con `charge`. `SoftRdp::accountStall`.
+- Al verificar Thar0 salio rmse **0.988** (doc: 0.1332) ANTES y DESPUES del cambio: regresion
+  vieja del paseo solo-coste (b91848b). Su atajo de FILL_RECTANGLE cobraba todos los pixeles
+  como escritos, asi que "Z Fail" (+2,7 cyc/px) y "Alpha Compare" (+0,74) pagaban escrituras
+  que el HW no hace. Arreglo: el paseo evalua alpha compare (color constante, una vez) y el
+  test de profundidad de solo lectura (`depthPasses`, z de primitiva constante). Thar0 vuelve
+  a 0.1332 exacto. Los triangulos del paseo siguen suponiendo que todo pasa (aproximacion).
+- Nueva `scripts/gate_quick.sh` (~1,5 min) por cambio; `thar0` como extra que exige 0.1332.
+  Completo (gate_all + gate_prdp) al cerrar fase. Politica en CLAUDE.md.
