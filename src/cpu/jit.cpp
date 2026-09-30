@@ -469,6 +469,16 @@ struct ColdCall {
 };
 static const bool g_jitCold = !std::getenv("KESTREL_JIT_NOCOLD");
 static std::vector<ColdCall>* g_cold = nullptr;    // lo arma compileBlock
+// Lo mismo para el camino lento de las mem-ops con camino rapido (KESTREL_JIT_NOCOLDMEM=1 lo
+// apaga): ~55 B de ajuste de reloj, CALL, salida por bail y salida por MMIO por cada load o
+// store, y las mem-ops son de lejos lo mas frecuente del bloque. Todas las fallas del camino
+// rapido dejan RDX (direccion) y R9 (dato del store) intactos, que es lo que lee el CALL.
+struct ColdMem {
+  usize fails[12]; int nFail; u32 opsBefore; s32 pendOff; u32 rt; void* fn;
+  RcSnap snap, mmioSnap; usize cont; u32 idx;
+};
+static const bool g_jitColdMem = !std::getenv("KESTREL_JIT_NOCOLDMEM");
+static std::vector<ColdMem>* g_coldMem = nullptr;  // lo arma compileBlock
 
 static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore,
                       RcSnap& snap, u32 opsBefore, s32 pendOff,
@@ -663,6 +673,20 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
           default: e.bswap64(R8); e.mov_m_r(RCX, D, R8); break;
         }
       }
+    }
+    // Seccion fria (ver ColdMem): solo en el sitio principal, que es el que pide salida MMIO.
+    if(g_jitColdMem && g_coldMem && mmioSite && mmioExit) {
+      ColdMem cm{};
+      for(int i = 0; i < nFail; i++) cm.fails[i] = fastFail[i];
+      cm.nFail = nFail; cm.opsBefore = opsBefore; cm.pendOff = pendOff; cm.rt = rt; cm.fn = fn;
+      cm.snap = rc.snap();
+      if(!isStore && !isFp) rc.forget(rt);
+      cm.mmioSnap = rc.snap();
+      cm.cont = e.buf.used; cm.idx = 0;         // idx lo pone el llamador
+      g_coldMem->push_back(cm);
+      snap = cm.snap; bailSite = 0; *mmioSite = 0;
+      if(isFp && g_fpKnow) g_fk.cu1 = true;
+      return true;
     }
     fastDone = e.jmp_rel32_placeholder(); hasFast = true;
   }
@@ -2043,6 +2067,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   const s32 ilkHtOff = (s32)offsetof(CPU, ilkHits),    ilkStOff = (s32)offsetof(CPU, ilkStall);
   const s32 stlOff   = (s32)offsetof(CPU, stallCycles), stlTOff = (s32)offsetof(CPU, stallTotal);
   struct IlkUndo { u8 shifts = 0; bool known = false; u64 prev = 0; u32 hits = 0; };
+  std::vector<IlkUndo> coldMemUndo;              // paralelo a coldMems
   bool ilkKnown = false; u64 ilkPrev = 0;          // lo que deja la op anterior, si se sabe
   IlkUndo ilkUndo;                                 // como deshacer las fronteras ya emitidas
   std::vector<IlkUndo> bailUndo;
@@ -2057,7 +2082,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   struct IcChk { usize at, j1, j2, cont; u32 base; u32 idx; RcSnap snap; IlkUndo undo; };
   std::vector<ColdCall> coldCalls;
   g_cold = &coldCalls;
-  struct ColdOff { ~ColdOff() { g_cold = nullptr; } } coldOff;
+  std::vector<ColdMem> coldMems;
+  g_coldMem = &coldMems;
+  struct ColdOff { ~ColdOff() { g_cold = nullptr; g_coldMem = nullptr; } } coldOff;
   std::vector<IcChk> icChks;
   auto icChk = [&](u32 a, u32 idx) {
     if(!icExact || (a != phys && (a & 0x1f))) return;
@@ -2372,7 +2399,8 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     c.jitCache->buf.used = before;
     usize site; bool isStore; RcSnap msnap, mmsnap; usize msite = 0;
     if(emitMemOp(e, rc, op, site, isStore, msnap, b.nOps, pendOff, &msite, true, &mmsnap)) {
-      bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap); bailUndo.push_back(ilkUndo);
+      if(site) { bailSites.push_back(site); bailIdx.push_back(b.nOps); bailSnap.push_back(msnap); bailUndo.push_back(ilkUndo); }
+      else { coldMems.back().idx = b.nOps; coldMemUndo.push_back(ilkUndo); }   // seccion fria
       // Retira ESTA op y sale: el acceso ya tuvo efecto (b.nOps aun no se ha incrementado).
       if(msite) { mmioSites.push_back(msite); mmioIdx.push_back(b.nOps + 1); mmioSnap.push_back(mmsnap); }
       b.hasMem = true; if(isStore) b.hasStore = true;
@@ -2741,6 +2769,24 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       mmioSites.push_back(e.jcc_rel32_placeholder(0x85)); mmioIdx.push_back(k.idx); mmioSnap.push_back(k.snap);
     }
     if(k.rcg) emitRcGuest(e);
+    usize back = e.jmp_rel32_placeholder();
+    e.patchRel32To(back, k.cont);
+  }
+  g_coldMem = nullptr;
+  for(usize j = 0; j < coldMems.size(); j++) {
+    const ColdMem& k = coldMems[j];
+    for(int i = 0; i < k.nFail; i++) e.patchRel32(k.fails[i]);
+    if(k.opsBefore) e.add_m32_imm32(RBX, k.pendOff, k.opsBefore);
+    e.mov_r_r(RCX, RBX);
+    e.mov_r_imm32(R8, k.rt);
+    e.mov_r_imm64(RAX, (u64)k.fn);
+    e.call_reg(RAX);
+    if(k.opsBefore) e.add_m32_imm32(RBX, k.pendOff, (u32)-(s32)k.opsBefore);
+    e.test_al_al();
+    bailSites.push_back(e.je_rel32_placeholder());
+    bailIdx.push_back(k.idx); bailSnap.push_back(k.snap); bailUndo.push_back(coldMemUndo[j]);
+    e.cmp_al_imm8(1);
+    mmioSites.push_back(e.jne_rel32_placeholder()); mmioIdx.push_back(k.idx + 1); mmioSnap.push_back(k.mmioSnap);
     usize back = e.jmp_rel32_placeholder();
     e.patchRel32To(back, k.cont);
   }
