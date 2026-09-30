@@ -2494,6 +2494,18 @@ extern "C" u8 kestrel_jitCACHE(void* cpu, u32 op, u32 off) {
   return 0;                        // salida de control, con la op contada como retirada
 }
 
+// MTC0 Status que el dynarec no pudo hacer en linea (puede dejar una interrupcion lista, o
+// cambia modo/EXL/CU/FR): la op entera por el interprete y salida de control detras de ella,
+// para que el conductor re-muestree interrupciones antes de la siguiente.
+extern "C" u8 kestrel_jitMTC0S(void* cpu, u32 op, u32 off) {
+  auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
+  if(!c->jitInterpOp(op, off)) return 0;   // vectorizo (COP0 inutilizable): estado ya correcto
+  u64 va = c->pc + off;
+  c->pc = va + 4; c->nextPc = va + 8;
+  c->inDelay = false; c->justBranched = false;
+  return 0;
+}
+
 auto CPU::jitInterpOp(u32 op, u32 off) -> u8 {
   u64 va      = pc + off;
   u64 savedPc = pc, savedNext = nextPc, savedCur = curPc;

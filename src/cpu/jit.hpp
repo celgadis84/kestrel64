@@ -143,6 +143,10 @@ public:
   auto shift64_cl(u8 digit, Reg dst) -> void { rex(true,0,0,dst); buf.emit(0xD3); modrm(3,digit,dst); }
   // not r64
   auto not64(Reg dst) -> void { rex(true,0,0,dst); buf.emit(0xF7); modrm(3,2,dst); }
+  // Grupo 3 (F7 /ext) sobre un registro: /4 mul, /5 imul, /6 div, /7 idiv (RDX:RAX implicitos).
+  auto f7grp(bool w, u8 ext, Reg r) -> void { if(w || (r & 8)) rex(w,0,0,r); buf.emit(0xF7); modrm(3,ext,r); }
+  auto cdq() -> void { buf.emit(0x99); }
+  auto cqo() -> void { buf.emit(0x48); buf.emit(0x99); }
   // cmp r64, [rbx+off]
   auto cmp64_rm(Reg dst, u8 gi) -> void { rex(true,dst,0,RBX); buf.emit(0x3B); memOperand(dst, RBX, goff(gi)); }
   // cmp r64, imm32 (sign-extended)
@@ -337,6 +341,10 @@ public:
   auto mulsd(u8 d, u8 s)    -> void { sse_rr(0xF2, 0x59, d, s); }
   auto divsd(u8 d, u8 s)    -> void { sse_rr(0xF2, 0x5E, d, s); }
   auto divss(u8 d, u8 s)    -> void { sse_rr(0xF3, 0x5E, d, s); }
+  auto addss(u8 d, u8 s)    -> void { sse_rr(0xF3, 0x58, d, s); }
+  auto subss(u8 d, u8 s)    -> void { sse_rr(0xF3, 0x5C, d, s); }
+  auto sqrtss(u8 d, u8 s)   -> void { sse_rr(0xF3, 0x51, d, s); }
+  auto sqrtsd(u8 d, u8 s)   -> void { sse_rr(0xF2, 0x51, d, s); }
   // cvtsi2sd xmm, r32 (entero de 32 con signo: siempre exacto)
   auto cvtsi2sd_r32(u8 x, u8 r) -> void { sse_rr(0xF2, 0x2A, x, r); }
   // cvtsd2si / cvttsd2si r64, xmm  (F2 REX.W 0F 2D/2C): fuera de rango da 0x8000000000000000

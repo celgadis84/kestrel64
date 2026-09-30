@@ -421,6 +421,7 @@ extern "C" u8 kestrel_jitDIVS (void*, u32, u32);   extern "C" u8 kestrel_jitDIVD
 extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
 extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
 extern "C" u8 kestrel_jitInterpDelay(void*, u32, u32); extern "C" u8 kestrel_jitCACHE(void*, u32, u32);
+extern "C" u8 kestrel_jitMTC0S(void*, u32, u32);
 extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
 extern "C" u8 kestrel_jitMULS(void*, u32, u32); extern "C" u8 kestrel_jitADDD(void*, u32, u32);
 extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(void*, u32, u32);
@@ -739,6 +740,7 @@ static auto emitTrapAlu(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSna
 // Los desplazamientos de x86 en 64 bits enmascaran la cuenta a &63, igual que MIPS, asi que
 // DSLLV/DSRLV/DSRAV no necesitan mascara explicita. DADD/DSUB (con trampa de desbordamiento)
 // NO entran: ademas de la guardia necesitarian el bail de overflow.
+static auto emitMulDiv(Emitter& e, RegCache& rc, u32 funct, u32 rs, u32 rt) -> void;
 static auto emitAlu64(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& snap) -> bool {
   static const int off = std::getenv("KESTREL_JIT_NOALU64") ? 1 : 0;   // bisector A/B
   if(off) return false;
@@ -755,6 +757,7 @@ static auto emitAlu64(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap&
       case 0x2d: case 0x2f:                                    // DADDU / DSUBU
       case 0x38: case 0x3a: case 0x3b:                         // DSLL / DSRL / DSRA
       case 0x3c: case 0x3e: case 0x3f: break;                  // DSLL32 / DSRL32 / DSRA32
+      case 0x1c: case 0x1d: case 0x1e: case 0x1f: break;       // DMULT/DMULTU/DDIV/DDIVU -> HI/LO
       default: return false;
     }
     dst = rd;
@@ -763,6 +766,7 @@ static auto emitAlu64(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap&
   e.test_m8_imm(RBX, stOff, 0x18);                             // Status[4:3] = KSU
   bailSite = e.jne_rel32_placeholder();                        // no-kernel -> lo resuelve el interprete
   snap = rc.snap();
+  if(!isImm && funct >= 0x1c && funct <= 0x1f) { emitMulDiv(e, rc, funct, rs, rt); return true; }
   if(!dst) return true;                                        // destino $0: la op no deja rastro
   if(isImm) { rc.ld64(RAX, rs); e.alu64_imm(0, RAX, (u32)simm); }
   else switch(funct) {
@@ -931,7 +935,7 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
   u32 ft = (op >> 16) & 31, fs = (op >> 11) & 31, fd = (op >> 6) & 31;
   if(fmt != 0x10 && fmt != 0x11 && fmt != 0x14) return false;
   bool S = fmt == 0x10, D = fmt == 0x11, W = fmt == 0x14;
-  bool arith = !W && fn <= 3;
+  bool arith = !W && fn <= 4;                                              // ADD/SUB/MUL/DIV/SQRT
   bool mov = !W && fn == 6, absneg = !W && (fn == 5 || fn == 7), cmp = !W && fn >= 0x30;
   bool toW = !W && ((fn >= 0x0c && fn <= 0x0f) || fn == 0x24);          // ROUND/TRUNC/CEIL/FLOOR/CVT .W
   bool f2f = (S && fn == 0x21) || (D && fn == 0x20) || (W && (fn == 0x20 || fn == 0x21));
@@ -1106,6 +1110,17 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
     return true;
   }
 
+  // Cola del camino con banderas: resultado en R9 (32 o 64 bits segun S), MXCSR con las
+  // banderas de la op. Cualquiera salvo PE, o un resultado que no sea normal-o-cero, al CALL.
+  auto flagsTail = [&] {
+    e.stmxcsr_rsp(40);
+    e.test_rsp32_imm(40, 0x1F);
+    b.add(e.jcc_rel32_placeholder(0x85));
+    if(S) emitPlain32(e, R9, RCX, b); else emitPlain64(e, R9, RCX, RDX, b);
+    causeStore([&] { e.test_rsp32_imm(40, 0x20); });
+    e.mov_m_r(RBX, fpr(fd), R9);
+  };
+  usize big = 0;
   if(S && fn <= 2) {
     // ADD/SUB/MUL.S: el resultado exacto cabe en doble (producto siempre; suma/resta con
     // |ea-eb| <= 28 o un operando cero), y redondearlo una vez a simple da el bit del guest.
@@ -1120,40 +1135,50 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
       e.alu32_rr(0x2B, R8, R9);                    // sub r8d, r9d
       e.alu32_imm(0, R8, 28);
       e.alu32_imm(7, R8, 56);
-      b.add(e.jcc_rel32_placeholder(0x87));        // ja -> CALL
+      big = e.jcc_rel32_placeholder(0x87);         // ja -> op nativa con banderas
       e.patchRel32(z1); e.patchRel32(z2);
     }
     e.movd_x_r32(0, RAX); e.cvtss2sd(0, 0);
     e.movd_x_r32(1, RDX); e.cvtss2sd(1, 1);
     if(fn == 0) e.addsd(0, 1); else if(fn == 1) e.subsd(0, 1); else e.mulsd(0, 1);
     roundTail();
+    if(fn == 2) return true;
+    // Exponentes muy separados: la suma exacta no cabe en doble, pero el RC ya es el del
+    // invitado y la op nativa en simple redondea igual. Banderas del MXCSR a cero (salvo el
+    // RC), la op, y las mismas reglas que DIV.S: cualquier bandera salvo PE al CALL.
+    usize done = e.jmp_rel32_placeholder();
+    e.patchRel32(big);
+    e.stmxcsr_rsp(40);
+    e.ld32_rsp(RCX, 40); e.alu32_imm(4, RCX, ~0x3Fu); e.st32_rsp(RCX, 40);
+    e.ldmxcsr_rsp(40);
+    e.movd_x_r32(0, RAX); e.movd_x_r32(1, RDX);
+    if(fn == 0) e.addss(0, 1); else e.subss(0, 1);
+    e.movd_r32_x(R9, 0);
+    flagsTail();
+    e.patchRel32(done);
     return true;
   }
 
-  // DIV.S y ADD/SUB/MUL/DIV.D: la op en su formato nativo con las banderas del MXCSR limpias.
+  // DIV.S, SQRT.S/D y ADD/SUB/MUL/DIV.D: la op en su formato nativo con las banderas del MXCSR
+  // limpias. SQRT de un negativo (no cero) levanta IE -> al CALL; sqrt(-0) = -0 sin banderas.
   // Cualquier bandera salvo PE (invalida, cero, overflow, underflow, denormal) o un resultado
   // que no sea normal-o-cero -> al CALL; PE es el Inexact del invitado.
   syncRc(-1, true);
   if(S) {
     e.mov_r32_m(RAX, RBX, fpr(fs)); e.mov_r32_m(RDX, RBX, fpr(ft));
-    emitPlain32(e, RAX, R8, b); emitPlain32(e, RDX, R8, b);
+    emitPlain32(e, RAX, R8, b); if(fn != 4) emitPlain32(e, RDX, R8, b);
     e.movd_x_r32(0, RAX); e.movd_x_r32(1, RDX);
-    e.divss(0, 1);
+    if(fn == 4) e.sqrtss(0, 0); else e.divss(0, 1);
     e.movd_r32_x(R9, 0);
   } else {
     e.mov_r_m(RAX, RBX, fpr(fs)); e.mov_r_m(RDX, RBX, fpr(ft));
-    emitPlain64(e, RAX, R8, RCX, b); emitPlain64(e, RDX, R8, RCX, b);
+    emitPlain64(e, RAX, R8, RCX, b); if(fn != 4) emitPlain64(e, RDX, R8, RCX, b);
     e.movq_x_r64(0, RAX); e.movq_x_r64(1, RDX);
     if(fn == 0) e.addsd(0, 1); else if(fn == 1) e.subsd(0, 1);
-    else if(fn == 2) e.mulsd(0, 1); else e.divsd(0, 1);
+    else if(fn == 2) e.mulsd(0, 1); else if(fn == 3) e.divsd(0, 1); else e.sqrtsd(0, 0);
     e.movq_r64_x(R9, 0);
   }
-  e.stmxcsr_rsp(40);
-  e.test_rsp32_imm(40, 0x1F);
-  b.add(e.jcc_rel32_placeholder(0x85));
-  if(S) emitPlain32(e, R9, RCX, b); else emitPlain64(e, R9, RCX, RDX, b);
-  causeStore([&] { e.test_rsp32_imm(40, 0x20); });
-  e.mov_m_r(RBX, fpr(fd), R9);
+  flagsTail();
   return true;
 }
 
@@ -1228,6 +1253,51 @@ static auto emitFpMove(Emitter& e, u32 op, FpBails& b) -> bool {
   return false;
 }
 
+// MTC0 Status en linea, SIN cerrar el bloque. Es la mitad de __osDisableInt / __osRestoreInt
+// de libultra (mfc0 / and ~IE / mtc0), lo que mas cede el bloque en SM64 tras CACHE. Escribir
+// Status solo obliga a salir si puede dejar una interrupcion LISTA para tomarse, y eso exige
+// IE=1 con EXL=ERL=0 tras la escritura. El camino en linea se limita a:
+//  - que solo cambien IE e IM (bits 0 y 8-15): modo, EXL/ERL, CU, FR, BEV... al CALL. Asi no
+//    cambia la traduccion (xlatEpoch no se toca), ni el privilegio, ni el rastro de EXL;
+//  - modo kernel antes (KSU=0, o EXL/ERL puestos): si no, COP0 inutilizable = excepcion;
+//  - interrupciones CERRADAS despues (IE=0, o EXL/ERL puestos), o abiertas sin ninguna
+//    pendiente habilitada: Cause & IM == 0. Cause lo refresca el conductor/prologo de cada
+//    eslabon (MI + timer), y dentro del bloque no vence nada -- el permiso de la cadena se
+//    corta antes de cualquier plazo y del borde de Compare --, asi que ese Cause es el de
+//    ESTA instruccion.
+// Lo demas va a kestrel_jitMTC0S, que hace la op entera y sale del bloque detras de ella para
+// que el conductor re-muestree interrupciones, como hacia el MTC0 terminal. Pisa RAX/RCX/RDX.
+static const bool g_c0Inline = !std::getenv("KESTREL_JIT_NOC0INLINE");
+static auto isMtc0Status(u32 op) -> bool {
+  return (op >> 26) == 0x10 && ((op >> 21) & 31) == 4 && ((op >> 11) & 31) == (u32)CPU::C0_Status;
+}
+static auto emitMtc0Status(Emitter& e, u32 op, FpBails& b) -> void {
+  const s32 stOff = (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status);
+  e.mov_r32_m(RAX, RBX, (s32)(8u * ((op >> 16) & 31)));    // nuevo (32 bits bajos de gpr[rt])
+  e.mov_r32_m(RCX, RBX, stOff);                            // viejo
+  e.mov_r_r32(RDX, RAX);
+  e.alu32_rr(0x33, RDX, RCX);                              // xor edx, ecx
+  e.test_r32_imm(RDX, ~0x0000'FF01u);
+  b.add(e.jcc_rel32_placeholder(0x85));                    // cambia algo mas que IE/IM
+  e.test_r32_imm(RCX, 0x6);
+  usize kern = e.jcc_rel32_placeholder(0x85);              // EXL/ERL -> kernel
+  e.test_r32_imm(RCX, 0x18);
+  b.add(e.jcc_rel32_placeholder(0x85));                    // KSU != 0 -> CU0 / excepcion
+  e.patchRel32(kern);
+  e.test_r32_imm(RAX, 0x1);
+  usize shut = e.jcc_rel32_placeholder(0x84);              // IE=0 -> cerradas
+  e.test_r32_imm(RAX, 0x6);
+  usize shut2 = e.jcc_rel32_placeholder(0x85);             // EXL/ERL -> cerradas
+  e.mov_r32_m(RDX, RBX, (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Cause));
+  e.alu32_rr(0x23, RDX, RAX);                              // and edx, eax
+  e.test_r32_imm(RDX, 0xFF00);
+  b.add(e.jcc_rel32_placeholder(0x85));                    // abiertas con IP & IM -> al CALL
+  e.patchRel32(shut); e.patchRel32(shut2);
+  e.movsxd(RAX, RAX);
+  e.mov_m_r(RBX, stOff, RAX);
+  e.mov_m_r(RBX, (s32)offsetof(CPU, cop0Unused), RAX);    // latch del bus de datos de COP0
+}
+
 extern u64 g_helperCnt[8192];
 static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite,
                          RcSnap& snap, bool delay = false, bool cop0Term = false) -> bool {
@@ -1235,7 +1305,8 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   bool ok = false;
   switch(OP) {
     // MTC0 y las de funcion COP0 (ERET / TLBR / TLBWI / TLBP), todas TERMINALES.
-    case 0x10: ok = cop0Term && (((op >> 21) & 31) == 4 || ((op >> 21) & 31) == 0x10); break;
+    case 0x10: ok = (cop0Term && (((op >> 21) & 31) == 4 || ((op >> 21) & 31) == 0x10))
+                    || (!delay && isMtc0Status(op)); break;
     case 0x11: ok = ((op >> 21) & 31) != 8; break;                   // COP1 salvo BC1x
     case 0x31: case 0x35: case 0x39: case 0x3d: ok = true; break;    // LWC1/LDC1/SWC1/SDC1
     case 0x22: case 0x26: case 0x2a: case 0x2e: ok = true; break;    // LWL/LWR/SWL/SWR
@@ -1277,6 +1348,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   void* fn = (void*)&jitInterpThunk;
   if(delay)           fn = (void*)&kestrel_jitInterpDelay;
   else if(OP == 0x2f) fn = (void*)&kestrel_jitCACHE;
+  else if(OP == 0x10 && isMtc0Status(op)) fn = (void*)&kestrel_jitMTC0S;
   else if(OP == 0x11) switch((op >> 21) & 31) {
     case 0x00: fn = (void*)&kestrel_jitMFC1;  break;
     case 0x01: fn = (void*)&kestrel_jitDMFC1; break;
@@ -1320,7 +1392,10 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   // FPU en linea: si la op lo admite, el caso comun va aqui y salta por encima del CALL; los
   // rendimientos caen en el CALL de abajo, que hace la op completa.
   usize fpDone = ~(usize)0;
-  if(g_fpInline && !delay && OP == 0x11) {
+  // Tambien en ranura de retardo: el camino en linea no levanta excepcion (lo que podria
+  // cae al CALL, que ahi es kestrel_jitInterpDelay con EPC/BD bien puestos) y solo pisa
+  // registros volatiles, como el propio CALL; la condicion del salto vive en R15.
+  if(g_fpInline && OP == 0x11) {
     FpBails bails;
     bool fmtOp = ((op >> 21) & 31) >= 16;
     if(fmtOp ? emitFpInline(e, op, bails) : emitFpMove(e, op, bails)) {
@@ -1328,10 +1403,16 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
       for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
     }
   }
+  if(g_c0Inline && !delay && OP == 0x10 && isMtc0Status(op)) {
+    FpBails bails;
+    emitMtc0Status(e, op, bails);
+    fpDone = e.jmp_rel32_placeholder();
+    for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
+  }
   if(g_xStats) {                          // censo dinamico de llamadas al trampolin
     u32 rsF = (op >> 21) & 31;
     u32 k = OP == 0x11 ? 4096u + rsF * 64u + (rsF >= 16 ? (op & 63) : 0u)
-                       : OP * 64u + (OP == 0 ? (op & 63) : 0u);
+                       : OP * 64u + (OP == 0 ? (op & 63) : OP == 0x10 ? (rsF < 16 ? rsF : 32u + (op & 31)) : 0u);
     e.mov_r_imm64(RAX, (u64)&g_helperCnt[k & 8191]);
     e.add_m64_imm32(RAX, 0, 1);
   }
@@ -1378,6 +1459,61 @@ static auto emitMulDivCharge(Emitter& e, u32 total) -> void {
   e.add_m64_imm32(RBX, (s32)offsetof(CPU, stallTotal),   total - 1);
   e.add_m64_imm32(RBX, (s32)offsetof(CPU, mulDivStall),  total - 1);
 }
+
+static auto emitMulDiv(Emitter& e, RegCache& rc, u32 funct, u32 rs, u32 rt) -> void {
+  const s32 hiOff = (s32)offsetof(CPU, hi), loOff = (s32)offsetof(CPU, lo);
+  // --- DIV/DIVU/DDIV/DDIVU y DMULT/DMULTU ------------------------------------------------
+  // idiv/div x86 lanzan #DE en div-por-0 y en MIN/-1, que en el VR4300 son casos DEFINIDOS
+  // (no-trap): div-por-0 da lo = a<0 ? 1 : -1 (DIVU/DDIVU: todo unos) y hi = a; MIN/-1 da
+  // lo = MIN, hi = 0. Esos dos van por guardas en el codigo emitido, el resto por la
+  // instruccion nativa. Los operandos se cargan ANTES de ramificar: la cache de registros
+  // no puede cambiar de estado dentro de una rama. Mismo coste que el interprete.
+  if(funct != 0x1c && funct != 0x1d) {           // DIV DIVU DDIV DDIVU
+    bool w = funct >= 0x1e, sg = !(funct & 1);
+    emitMulDivCharge(e, w ? 69 : 37);
+    if(w) { rc.ld64(RAX, rs); rc.ld64(RCX, rt); }
+    else  { rc.ld32(RAX, rs); rc.ld32(RCX, rt); }
+    if(w) e.cmp64_imm(RCX, 0); else e.alu32_imm(7, RCX, 0);
+    usize zero = e.jcc_rel32_placeholder(0x84);
+    usize ovf = 0;
+    if(sg) {
+      if(w) e.cmp64_imm(RCX, 0xFFFF'FFFFu); else e.alu32_imm(7, RCX, 0xFFFF'FFFFu);
+      usize norm = e.jcc_rel32_placeholder(0x85);
+      if(w) { e.mov_r_imm64(RDX, 1ull << 63); e.cmp64_rr(RAX, RDX); }
+      else  e.alu32_imm(7, RAX, 0x8000'0000u);
+      ovf = e.jcc_rel32_placeholder(0x84);
+      e.patchRel32(norm);
+    }
+    if(sg) { if(w) e.cqo(); else e.cdq(); }
+    else e.alu32_rr(0x33, RDX, RDX);              // xor edx, edx
+    e.f7grp(w, sg ? 7 : 6, RCX);
+    if(!w) { e.movsxd(RAX, RAX); e.movsxd(RDX, RDX); }
+    e.mov_m_r(RBX, loOff, RAX); e.mov_m_r(RBX, hiOff, RDX);
+    usize done = e.jmp_rel32_placeholder();
+    e.patchRel32(zero);                            // b == 0: hi = a, lo segun signo
+    if(!w) e.movsxd(RAX, RAX);
+    e.mov_m_r(RBX, hiOff, RAX);
+    if(sg) { e.shift64_imm(7, RAX, 63); e.alu64_rr(0x03, RAX, RAX); e.not64(RAX); }  // ~(2*(a>>63))
+    else     e.mov_r_imm64(RAX, ~0ull);
+    e.mov_m_r(RBX, loOff, RAX);
+    if(sg) {
+      usize out = e.jmp_rel32_placeholder();
+      e.patchRel32(ovf);                           // MIN / -1: lo = MIN, hi = 0
+      if(!w) e.movsxd(RAX, RAX);
+      e.mov_m_r(RBX, loOff, RAX);
+      e.alu32_rr(0x33, RAX, RAX); e.mov_m_r(RBX, hiOff, RAX);
+      e.patchRel32(out);
+    }
+    e.patchRel32(done);
+    return; }
+  {                                                // DMULT DMULTU: 64x64 -> 128 en RDX:RAX
+    emitMulDivCharge(e, 8);
+    rc.ld64(RAX, rs); rc.ld64(RCX, rt);
+    e.f7grp(true, funct == 0x1c ? 5 : 4, RCX);
+    e.mov_m_r(RBX, loOff, RAX); e.mov_m_r(RBX, hiOff, RDX);
+  }
+}
+
 
 static auto emitSafeOp(Emitter& e, RegCache& rc, u32 op) -> bool {
   u32 OP = op >> 26;
@@ -1445,9 +1581,12 @@ static auto emitSafeOp(Emitter& e, RegCache& rc, u32 op) -> bool {
           e.mov_r_r(RDX,RAX); e.movsxd(RDX,RDX); e.mov_m_r(RBX,loOff,RDX);
           e.shift64_imm(5,RAX,32); e.movsxd(RAX,RAX); e.mov_m_r(RBX,hiOff,RAX);
           return true; }
-        // NOTA: DIV/DIVU NO se JITean: idiv x86 lanza #DE en div-por-0 y en 0x80000000/-1, que en
-        // VR4300 son casos DEFINIDOS (no-trap). Emularlos exigiría saltos-guardia en el código
-        // generado; terminan el bloque → el intérprete los ejecuta con la semántica correcta.
+        // DIV/DIVU: ver emitMulDiv (guardas de div-por-0 y MIN/-1). Las de 64 bits van por
+        // emitAlu64, que pone la guarda de modo (RI fuera de kernel sin UX/SX).
+        case 0x1a: case 0x1b: {
+          static const bool noDiv = std::getenv("KESTREL_JIT_NODIV") != nullptr;   // A/B
+          if(noDiv) return false;
+          emitMulDiv(e, rc, funct, rs, rt); return true; }
         // --- MOVZ/MOVN: mueve rs→rd si rt==0 / rt!=0, si no rd intacto (cmov 64b) ----------
         // No mode-gated (conditional-move ISA, disponibles en todos los modos; systemtest OK).
         case 0x0a: /*MOVZ*/ if(!rd) return true; rc.ld64(RAX, rd); rc.ld64(RCX, rs); rc.ld64(RDX, rt); e.cmp64_imm(RDX,0); e.cmovz(RAX,RCX); store64(rd); return true;
@@ -3128,7 +3267,7 @@ auto CPU::jitTryBlock() -> u32 {
         std::fprintf(stderr, " OP%02x=%llu", o, (unsigned long long)jit::g_compFailDelay[o]);
       for(int o = 0; o < 64; o++) if(jit::g_compFailDelaySpec[o] > 5000)
         std::fprintf(stderr, " SPEC%02x=%llu", o, (unsigned long long)jit::g_compFailDelaySpec[o]);
-      { // top 16 de llamadas dinamicas al trampolin (k: OP*64+funct, COP1 4096+rs*64+fn)
+      { // top 16 de llamadas dinamicas al trampolin (k: OP*64+funct, COP0 fn=rs o 32+funct CO, COP1 4096+rs*64+fn)
         std::fprintf(stderr, "\n[helper]");
         static u64 cp[8192]; for(int i = 0; i < 8192; i++) cp[i] = jit::g_helperCnt[i];
         for(int t = 0; t < 16; t++) { int bi = 0; for(int i = 1; i < 8192; i++) if(cp[i] > cp[bi]) bi = i;
