@@ -879,6 +879,356 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 // el bloque justo despues: escribir Status/Cause puede dejar una interrupcion lista, y el
 // bloque no vuelve a mirarlas hasta salir, asi que seguir emitiendo ops detras retrasaria la
 // entrega. El llamante excluye ademas Count y Compare (ver compileBlock).
+// ---- FPU en linea --------------------------------------------------------------------------
+// El caso comun de las ops de formato mas frecuentes se resuelve en el propio bloque, sin CALL:
+// ADD/SUB/MUL.S (misma aritmetica que CPU::jitCop1Alu: exacta en doble, UN redondeo a simple,
+// Inexact por comparacion), MOV.S/D, ABS/NEG.S/D y C.cond.S/D. Cualquier cosa fuera del caso
+// comun salta al CALL de siempre, que hace la op entera -- el camino en linea no escribe NADA
+// del invitado hasta haber pasado todas sus comprobaciones, asi que rendirse es seguro en
+// cualquier punto. Lo que se exige:
+//   - CU1 (Status bit 29), y FR=1 si fs es impar (con FR=0 el campo fuente se alinea a par:
+//     caso raro, al CALL).
+//   - Aritmetica: redondeo del invitado RN y el del anfitrion tambien (MXCSR.RC == 0; el
+//     interprete lo deja en el ultimo modo del invitado, y el CALL lo repone), y el Enable de
+//     Inexact apagado. Operandos normales o cero; resultado exacto en rango normal o cero.
+//   - ABS/NEG/C.cond: operandos normales o cero (NaN, infinito o subnormal -> CALL).
+// Solo con los cobros opcionales apagados (KESTREL_FPU, KESTREL_INTERLOCK), sin oraculo
+// (KESTREL_FPORACLE) y sin KESTREL_JIT_NOFPINLINE: los tres dependen de que la op pase por el
+// trampolin. Nunca en ranura de retardo (ese camino usa su propio trampolin).
+static const bool g_fpInline = !std::getenv("KESTREL_JIT_NOFPINLINE") && !std::getenv("KESTREL_FPORACLE")
+                               && CPU::fpuFromEnv() == 0 && CPU::ilkFromEnv() == 0;
+
+struct FpBails { usize at[16]; u32 n = 0; auto add(usize a) -> void { at[n++] = a; } };
+
+// Normal o cero en simple (x en r32, destruye t): t = x & 0x7fffffff; t == 0, o bien
+// t - 0x800000 < 0x7f000000 (exponente 1..254). Si no, al CALL.
+static auto emitPlain32(Emitter& e, Reg x, Reg t, FpBails& b) -> void {
+  e.mov_r_r32(t, x);
+  e.alu32_imm(4, t, 0x7fff'ffffu);
+  usize z = e.jcc_rel32_placeholder(0x84);
+  e.alu32_imm(5, t, 0x0080'0000u);
+  e.alu32_imm(7, t, 0x7f00'0000u);
+  b.add(e.jcc_rel32_placeholder(0x83));         // jae -> CALL
+  e.patchRel32(z);
+}
+// Lo mismo en doble (x en r64, destruye t y u): t = x << 1 (fuera el signo); t == 0, o bien
+// t - 2^53 < 0x7fe << 53 (exponente 1..2046).
+static auto emitPlain64(Emitter& e, Reg x, Reg t, Reg u, FpBails& b) -> void {
+  e.mov_r_r(t, x);
+  e.shift64_imm(4, t, 1);
+  usize z = e.jcc_rel32_placeholder(0x84);
+  e.mov_r_imm64(u, 1ull << 53);
+  e.alu64_rr(0x2B, t, u);
+  e.mov_r_imm64(u, 0x7feull << 53);
+  e.cmp64_rr(t, u);
+  b.add(e.jcc_rel32_placeholder(0x83));
+  e.patchRel32(z);
+}
+
+// Emite el camino en linea de `op` si lo tiene. Devuelve false (sin emitir nada) si no.
+static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
+  u32 fmt = (op >> 21) & 31, fn = op & 63;
+  u32 ft = (op >> 16) & 31, fs = (op >> 11) & 31, fd = (op >> 6) & 31;
+  if(fmt != 0x10 && fmt != 0x11 && fmt != 0x14) return false;
+  bool S = fmt == 0x10, D = fmt == 0x11, W = fmt == 0x14;
+  bool arith = !W && fn <= 3;
+  bool mov = !W && fn == 6, absneg = !W && (fn == 5 || fn == 7), cmp = !W && fn >= 0x30;
+  bool toW = !W && ((fn >= 0x0c && fn <= 0x0f) || fn == 0x24);          // ROUND/TRUNC/CEIL/FLOOR/CVT .W
+  bool f2f = (S && fn == 0x21) || (D && fn == 0x20) || (W && (fn == 0x20 || fn == 0x21));
+  if(!arith && !mov && !absneg && !cmp && !toW && !f2f) return false;
+
+  const s32 stOff  = (s32)offsetof(CPU, cop0) + 12 * 8 + 3;   // byte alto de Status (32b)
+  const s32 fcrOff = (s32)offsetof(CPU, fcr31);
+  const s32 fprOff = (s32)offsetof(CPU, fpr);
+  auto fpr = [&](u32 i) { return fprOff + (s32)(i * 8); };
+
+  e.test_m8_imm(RBX, stOff, 0x20);                 // CU1
+  b.add(e.jcc_rel32_placeholder(0x84));
+  if(fs & 1) { e.test_m8_imm(RBX, stOff, 0x04);    // FR
+               b.add(e.jcc_rel32_placeholder(0x84)); }
+
+  if(mov) {                                        // copia cruda de 64 bits, FCSR intacto
+    e.mov_r_m(RAX, RBX, fpr(fs));
+    e.mov_m_r(RBX, fpr(fd), RAX);
+    return true;
+  }
+
+  if(absneg) {
+    if(S) {
+      e.mov_r32_m(RAX, RBX, fpr(fs));
+      emitPlain32(e, RAX, RCX, b);
+      if(fn == 5) e.alu32_imm(4, RAX, 0x7fff'ffffu); else e.alu32_imm(6, RAX, 0x8000'0000u);
+    } else {
+      e.mov_r_m(RAX, RBX, fpr(fs));
+      emitPlain64(e, RAX, RCX, RDX, b);
+      if(fn == 5) { e.shift64_imm(4, RAX, 1); e.shift64_imm(5, RAX, 1); }
+      else        { e.mov_r_imm64(RCX, 1ull << 63); e.xor_r_r(RAX, RCX); }
+    }
+    e.mov_r32_m(RCX, RBX, fcrOff);                 // Cause a cero, sin excepcion posible
+    e.alu32_imm(4, RCX, ~0x0003'F000u);
+    e.mov_m_r32(RBX, fcrOff, RCX);
+    e.mov_m_r(RBX, fpr(fd), RAX);                  // .S: alto a cero (el load de 32 extiende)
+    return true;
+  }
+
+  if(cmp) {
+    if(S) {
+      e.mov_r32_m(RAX, RBX, fpr(fs)); e.mov_r32_m(RDX, RBX, fpr(ft));
+      emitPlain32(e, RAX, RCX, b); emitPlain32(e, RDX, RCX, b);
+      e.movd_x_r32(0, RAX); e.movd_x_r32(1, RDX); e.ucomiss(0, 1);
+    } else {
+      e.mov_r_m(RAX, RBX, fpr(fs)); e.mov_r_m(RDX, RBX, fpr(ft));
+      emitPlain64(e, RAX, RCX, R8, b); emitPlain64(e, RDX, RCX, R8, b);
+      e.movq_x_r64(0, RAX); e.movq_x_r64(1, RDX); e.ucomisd(0, 1);
+    }
+    // Ordenados: CF = menor, ZF = igual. c = (fn&4 && menor) | (fn&2 && igual).
+    // El setcc va JUSTO tras el ucomis (todo lo demas pisa los flags) y luego se extiende.
+    u32 m = fn & 6;
+    if(m) { e.setcc(m == 4 ? 0x92 : m == 2 ? 0x94 : 0x96, RAX);   // setb / sete / setbe
+            e.movzx_r8(RAX, RAX); e.shift32_imm(4, RAX, 23); }
+    e.mov_r32_m(RCX, RBX, fcrOff);                 // Cause a cero y C = resultado
+    e.alu32_imm(4, RCX, ~(0x0003'F000u | 0x0080'0000u));
+    if(m) e.alu32_rr(0x0B, RCX, RAX);              // or ecx, eax
+    e.mov_m_r32(RBX, fcrOff, RCX);
+    return true;
+  }
+
+  // Modo de redondeo del anfitrion. El resultado lo da la unidad SSE con el RC del MXCSR, asi
+  // que basta con que sea el que pide la op: `fixed` >= 0 es un RC x86 fijo (ROUND/CEIL/FLOOR),
+  // -1 el del invitado. MIPS rm 0/1/2/3 = RN/RZ/RP/RM -> x86 RC 0/3/2/1 = rm ^ ((rm&1)<<1).
+  // Los helpers (CVT, TRUNC, jitCop1Alu) dejan el MXCSR en el modo que usaron; se reescribe
+  // solo si difiere, como mx::prepRc. Con `clr` se exigen ademas las banderas de excepcion
+  // limpias (camino que deduce el Inexact de PE). Con Enable I armado todo Inexact es trampa:
+  // se cede antes de mirar nada. Pisa RAX/RCX/RDX.
+  auto syncRc = [&](int fixed, bool clr) {
+    e.mov_r32_m(RCX, RBX, fcrOff);
+    e.test_r32_imm(RCX, 0x80);
+    b.add(e.jcc_rel32_placeholder(0x85));
+    if(fixed < 0) {
+      e.alu32_imm(4, RCX, 3);
+      e.mov_r_r32(RDX, RCX); e.alu32_imm(4, RDX, 1); e.shift32_imm(4, RDX, 1);
+      e.alu32_rr(0x33, RCX, RDX);                  // xor ecx, edx
+      e.shift32_imm(4, RCX, 13);                   // RC en los bits 13-14
+    } else e.mov_r_imm32(RCX, (u32)fixed << 13);
+    u32 m = clr ? 0x603Fu : 0x6000u;
+    e.stmxcsr_rsp(40);                             // [rsp+40]: libre (la sombra es 0..31)
+    e.ld32_rsp(RAX, 40);
+    e.mov_r_r32(RDX, RAX); e.alu32_imm(4, RDX, m);
+    e.alu32_rr(0x3B, RDX, RCX);                    // cmp edx, ecx
+    usize ok = e.jcc_rel32_placeholder(0x84);
+    e.alu32_imm(4, RAX, ~m); e.alu32_rr(0x0B, RAX, RCX);
+    e.st32_rsp(RAX, 40);
+    e.ldmxcsr_rsp(40);
+    e.patchRel32(ok);
+  };
+  // Cause a cero y, si `inexact` deja ZF=0, Cause I + Flag I pegajosa. Pisa RCX.
+  auto causeStore = [&](auto&& inexact) {
+    e.mov_r32_m(RCX, RBX, fcrOff);
+    e.alu32_imm(4, RCX, ~0x0003'F000u);
+    inexact();
+    usize ex = e.jcc_rel32_placeholder(0x84);      // ZF=1 -> exacto
+    e.alu32_imm(1, RCX, 0x1004u);
+    e.patchRel32(ex);
+    e.mov_m_r32(RBX, fcrOff, RCX);
+  };
+  auto clearCause = [&] {
+    e.mov_r32_m(RCX, RBX, fcrOff);
+    e.alu32_imm(4, RCX, ~0x0003'F000u);
+    e.mov_m_r32(RBX, fcrOff, RCX);
+  };
+  // xmm0 = valor EXACTO en doble -> simple con un unico redondeo (el RC ya es el del
+  // invitado). Fuera de [2^-126, maxfloat] (y no cero) no sabemos deducir Overflow/Underflow
+  // -- con redondeo hacia cero un desbordamiento da el maximo finito --: al CALL. El Inexact
+  // sale de comparar el simple devuelto a doble con el exacto.
+  auto roundTail = [&] {
+    e.movq_r64_x(RAX, 0);
+    e.shift64_imm(4, RAX, 1);
+    usize z = e.jcc_rel32_placeholder(0x84);
+    e.mov_r_imm64(RCX, 0x3810'0000'0000'0000ull << 1);
+    e.alu64_rr(0x2B, RAX, RCX);
+    e.mov_r_imm64(RCX, (0x47EF'FFFF'E000'0000ull - 0x3810'0000'0000'0000ull) << 1);
+    e.cmp64_rr(RAX, RCX);
+    b.add(e.jcc_rel32_placeholder(0x87));
+    e.patchRel32(z);
+    e.cvtsd2ss(2, 0);
+    e.cvtss2sd(3, 2);
+    e.movd_r32_x(R9, 2);
+    causeStore([&] { e.ucomisd(3, 0); });
+    e.mov_m_r(RBX, fpr(fd), R9);                   // 32 bits extendidos con cero
+  };
+  // Fuente en xmm0 como doble, comprobada normal-o-cero en su formato nativo (un subnormal
+  // simple se ensancharia a un doble NORMAL; el VR4300 lo manda a Unimplemented).
+  auto loadSrcD = [&] {
+    if(S) { e.mov_r32_m(RAX, RBX, fpr(fs)); emitPlain32(e, RAX, RCX, b);
+            e.movd_x_r32(0, RAX); e.cvtss2sd(0, 0); }
+    else  { e.mov_r_m(RAX, RBX, fpr(fs)); emitPlain64(e, RAX, RCX, RDX, b);
+            e.movq_x_r64(0, RAX); }
+  };
+
+  if(f2f) {
+    if(W) {                                        // CVT.S.W / CVT.D.W: todo int32 es valido
+      if(fn == 0x20) syncRc(-1, false);
+      e.mov_r32_m(RAX, RBX, fpr(fs));
+      e.cvtsi2sd_r32(0, RAX);                      // exacto en doble
+      if(fn == 0x20) { roundTail(); return true; }
+      e.movq_r64_x(RAX, 0); clearCause(); e.mov_m_r(RBX, fpr(fd), RAX);
+      return true;
+    }
+    if(S) {                                        // CVT.D.S: ensanchar es siempre exacto
+      loadSrcD();
+      e.movq_r64_x(RAX, 0); clearCause(); e.mov_m_r(RBX, fpr(fd), RAX);
+      return true;
+    }
+    syncRc(-1, false);                             // CVT.S.D: puede redondear
+    loadSrcD();
+    roundTail();
+    return true;
+  }
+
+  if(toW) {
+    // A entero de 32 bits: cvt(t)sd2si de 64 da el valor exacto redondeado (o el indefinido
+    // 2^63 si no cabe); fuera de int32 el VR4300 levanta Unimplemented -> al CALL.
+    bool trunc = fn == 0x0d;
+    if(trunc) {                                    // cvttsd2si ignora el RC: solo Enable I
+      e.mov_r32_m(RCX, RBX, fcrOff);
+      e.test_r32_imm(RCX, 0x80);
+      b.add(e.jcc_rel32_placeholder(0x85));
+    } else syncRc(fn == 0x0c ? 0 : fn == 0x0e ? 2 : fn == 0x0f ? 1 : -1, false);
+    loadSrcD();
+    e.cvtsd2si64(RAX, 0, trunc);
+    e.movsxd(RCX, RAX);
+    e.cmp64_rr(RCX, RAX);
+    b.add(e.jcc_rel32_placeholder(0x85));
+    e.mov_r_r32(R9, RAX);                          // (u64)(u32)(s32)r
+    e.cvtsi2sd_r32(1, RAX);
+    causeStore([&] { e.ucomisd(1, 0); });
+    e.mov_m_r(RBX, fpr(fd), R9);
+    return true;
+  }
+
+  if(S && fn <= 2) {
+    // ADD/SUB/MUL.S: el resultado exacto cabe en doble (producto siempre; suma/resta con
+    // |ea-eb| <= 28 o un operando cero), y redondearlo una vez a simple da el bit del guest.
+    syncRc(-1, false);
+    e.mov_r32_m(RAX, RBX, fpr(fs)); e.mov_r32_m(RDX, RBX, fpr(ft));
+    emitPlain32(e, RAX, R8, b); emitPlain32(e, RDX, R8, b);
+    if(fn != 2) {
+      e.mov_r_r32(R8, RAX); e.shift32_imm(5, R8, 23); e.alu32_imm(4, R8, 0xff);
+      usize z1 = e.jcc_rel32_placeholder(0x84);
+      e.mov_r_r32(R9, RDX); e.shift32_imm(5, R9, 23); e.alu32_imm(4, R9, 0xff);
+      usize z2 = e.jcc_rel32_placeholder(0x84);
+      e.alu32_rr(0x2B, R8, R9);                    // sub r8d, r9d
+      e.alu32_imm(0, R8, 28);
+      e.alu32_imm(7, R8, 56);
+      b.add(e.jcc_rel32_placeholder(0x87));        // ja -> CALL
+      e.patchRel32(z1); e.patchRel32(z2);
+    }
+    e.movd_x_r32(0, RAX); e.cvtss2sd(0, 0);
+    e.movd_x_r32(1, RDX); e.cvtss2sd(1, 1);
+    if(fn == 0) e.addsd(0, 1); else if(fn == 1) e.subsd(0, 1); else e.mulsd(0, 1);
+    roundTail();
+    return true;
+  }
+
+  // DIV.S y ADD/SUB/MUL/DIV.D: la op en su formato nativo con las banderas del MXCSR limpias.
+  // Cualquier bandera salvo PE (invalida, cero, overflow, underflow, denormal) o un resultado
+  // que no sea normal-o-cero -> al CALL; PE es el Inexact del invitado.
+  syncRc(-1, true);
+  if(S) {
+    e.mov_r32_m(RAX, RBX, fpr(fs)); e.mov_r32_m(RDX, RBX, fpr(ft));
+    emitPlain32(e, RAX, R8, b); emitPlain32(e, RDX, R8, b);
+    e.movd_x_r32(0, RAX); e.movd_x_r32(1, RDX);
+    e.divss(0, 1);
+    e.movd_r32_x(R9, 0);
+  } else {
+    e.mov_r_m(RAX, RBX, fpr(fs)); e.mov_r_m(RDX, RBX, fpr(ft));
+    emitPlain64(e, RAX, R8, RCX, b); emitPlain64(e, RDX, R8, RCX, b);
+    e.movq_x_r64(0, RAX); e.movq_x_r64(1, RDX);
+    if(fn == 0) e.addsd(0, 1); else if(fn == 1) e.subsd(0, 1);
+    else if(fn == 2) e.mulsd(0, 1); else e.divsd(0, 1);
+    e.movq_r64_x(R9, 0);
+  }
+  e.stmxcsr_rsp(40);
+  e.test_rsp32_imm(40, 0x1F);
+  b.add(e.jcc_rel32_placeholder(0x85));
+  if(S) emitPlain32(e, R9, RCX, b); else emitPlain64(e, R9, RCX, RDX, b);
+  causeStore([&] { e.test_rsp32_imm(40, 0x20); });
+  e.mov_m_r(RBX, fpr(fd), R9);
+  return true;
+}
+
+// Movimientos COP1 en linea (MFC1/DMFC1/CFC1/MTC1/DMTC1/CTC1): copia exacta de jitCop1Move
+// y jitCTC1w. Con FR=0 un registro impar de 32 bits es la mitad ALTA del par (fpr[i-1]+4) y
+// uno de 64 bits es el par entero; con FR=1 es el propio registro. Los gpr ya estan volcados
+// (volcado dirigido de emitInterpOp) y el que se escribe se olvida al salir. Rendimientos:
+// CU1=0 (Coprocessor Unusable) y una CTC1 que arma trampa -> trampolin.
+static auto emitFpMove(Emitter& e, u32 op, FpBails& b) -> bool {
+  u32 rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
+  if(rs == 3 || rs > 6) return false;
+  const s32 stOff  = (s32)offsetof(CPU, cop0) + 12 * 8 + 3;
+  const s32 fcrOff = (s32)offsetof(CPU, fcr31);
+  const s32 fprOff = (s32)offsetof(CPU, fpr);
+  const s32 gOff   = (s32)(rt * 8);                // RBX == &gpr[0]
+  e.test_m8_imm(RBX, stOff, 0x20);                 // CU1
+  b.add(e.jcc_rel32_placeholder(0x84));
+  // Emite `body(disp)` con el desplazamiento del registro FPU segun FR (impar: dos ramas).
+  auto fprSel = [&](bool w64, auto&& body) {
+    s32 d1 = fprOff + (s32)(rd * 8);               // FR=1, o par
+    if(!(rd & 1)) { body(d1); return; }
+    s32 d0 = fprOff + (s32)((rd & ~1u) * 8) + (w64 ? 0 : 4);   // FR=0 impar
+    e.test_m8_imm(RBX, stOff, 0x04);
+    usize fr0 = e.jcc_rel32_placeholder(0x84);
+    body(d1);
+    usize end = e.jmp_rel32_placeholder();
+    e.patchRel32(fr0);
+    body(d0);
+    e.patchRel32(end);
+  };
+  switch(rs) {
+    case 0:                                        // MFC1
+      if(!rt) return true;
+      fprSel(false, [&](s32 d) { e.mov_r32_m(RAX, RBX, d); });
+      e.movsxd(RAX, RAX); e.mov_m_r(RBX, gOff, RAX);
+      return true;
+    case 1:                                        // DMFC1
+      if(!rt) return true;
+      fprSel(true, [&](s32 d) { e.mov_r_m(RAX, RBX, d); });
+      e.mov_m_r(RBX, gOff, RAX);
+      return true;
+    case 2:                                        // CFC1
+      if(!rt) return true;
+      if(rd == 31 || rd == 0) {
+        e.mov_r32_m(RAX, RBX, rd ? fcrOff : (s32)offsetof(CPU, fcr0));
+        e.movsxd(RAX, RAX);
+      } else e.xor_r_r(RAX, RAX);
+      e.mov_m_r(RBX, gOff, RAX);
+      return true;
+    case 4:                                        // MTC1: 32 bits, la otra mitad intacta
+      e.mov_r32_m(RAX, RBX, gOff);
+      fprSel(false, [&](s32 d) { e.mov_m_r32(RBX, d, RAX); });
+      return true;
+    case 5:                                        // DMTC1
+      e.mov_r_m(RAX, RBX, gOff);
+      fprSel(true, [&](s32 d) { e.mov_m_r(RBX, d, RAX); });
+      return true;
+    case 6:                                        // CTC1: solo FCR31 es escribible
+      if(rd != 31) return true;
+      e.mov_r32_m(RAX, RBX, gOff);
+      e.alu32_imm(4, RAX, 0x0183'FFFFu);
+      e.test_r32_imm(RAX, 1u << 17);               // E: Unimplemented siempre habilitada
+      b.add(e.jcc_rel32_placeholder(0x85));
+      e.mov_r_r32(RCX, RAX);
+      e.shift32_imm(5, RCX, 5);                    // Enable (bits 7-11) frente a Cause (12-16)
+      e.alu32_rr(0x23, RCX, RAX);
+      e.test_r32_imm(RCX, 0x0F80u);
+      b.add(e.jcc_rel32_placeholder(0x85));
+      e.mov_m_r32(RBX, fcrOff, RAX);
+      return true;
+  }
+  return false;
+}
+
+extern u64 g_helperCnt[8192];
 static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite,
                          RcSnap& snap, bool delay = false, bool cop0Term = false) -> bool {
   u32 OP = op >> 26;
@@ -967,6 +1317,24 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     } break;
     default: break;
   }
+  // FPU en linea: si la op lo admite, el caso comun va aqui y salta por encima del CALL; los
+  // rendimientos caen en el CALL de abajo, que hace la op completa.
+  usize fpDone = ~(usize)0;
+  if(g_fpInline && !delay && OP == 0x11) {
+    FpBails bails;
+    bool fmtOp = ((op >> 21) & 31) >= 16;
+    if(fmtOp ? emitFpInline(e, op, bails) : emitFpMove(e, op, bails)) {
+      fpDone = e.jmp_rel32_placeholder();
+      for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
+    }
+  }
+  if(g_xStats) {                          // censo dinamico de llamadas al trampolin
+    u32 rsF = (op >> 21) & 31;
+    u32 k = OP == 0x11 ? 4096u + rsF * 64u + (rsF >= 16 ? (op & 63) : 0u)
+                       : OP * 64u + (OP == 0 ? (op & 63) : 0u);
+    e.mov_r_imm64(RAX, (u64)&g_helperCnt[k & 8191]);
+    e.add_m64_imm32(RAX, 0, 1);
+  }
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX)
   e.mov_r_imm32(RDX, op);                 // arg1 = op
   e.mov_r_imm32(R8, off);                 // arg2 = offset de la op en el bloque
@@ -974,6 +1342,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   e.call_reg(RAX);
   e.test_al_al();
   exitSite = e.je_rel32_placeholder();    // al==0 → salida de control (la op ya tuvo efecto)
+  if(fpDone != ~(usize)0) e.patchRel32(fpDone);
   snap = rc.snap();                       // lo sucio aqui lo escribe el stub de salida
   // Olvidar SOLO el gpr que el helper escribe, no la cache entera. Las ranuras del cache
   // (RSI/RDI/R13/R14/R15) son callee-saved en Win64: sobreviven al CALL intactas, asi que
@@ -1114,6 +1483,7 @@ auto opSelfTest(u32 op, u64 rsVal, u64 rtVal, u32 dst) -> u64 {
 // Diagnóstico: histograma del opcode del LEADER cuando el bloque no compila (nOps==0).
 // Dice si el compile-fail steady lo dominan branches vs mult/div/cop/etc → decide el diseño.
 u64 g_compFailOp[64] = {0};
+u64 g_helperCnt[8192] = {0};   // KESTREL_JIT_STATS: llamadas al trampolin por op
 // Cuando el LIDER no compilable es un salto, lo que suele fallar es su RANURA DE RETARDO:
 // el salto se absorbe con ella o no se absorbe. Censo por opcode de la ranura (solo stats).
 u64 g_compFailDelay[64] = {0};
@@ -2255,7 +2625,7 @@ static u64 g_compiles = 0, g_compClears = 0, g_compDead = 0, g_deadProceed = 0; 
 static u64 g_guardWhy[4] = {};
 static u64 g_guardOps[4] = {};   // ops concedidas, para ver el GRANO del permiso
 static u64 g_guardHist[16] = {};  // histograma log2 del permiso concedido   // 0=borde de timer 1=ventana de campo 2=regulador 3=tope
-namespace jit { extern u64 g_compFailDelay[64], g_compFailDelaySpec[64]; }
+namespace jit { extern u64 g_compFailDelay[64], g_compFailDelaySpec[64]; extern u64 g_helperCnt[8192]; }
 namespace jit { extern u64 g_compFailOp[64], g_compFailSpecial[64], g_compFailRegimm[32];
                 extern u64 g_endOp[64], g_endSpecial[64], g_endRegimm[32];
                 extern u64 g_compFailCop[2][32]; extern u64 g_compFailC0Rd[2][32]; }
@@ -2758,6 +3128,14 @@ auto CPU::jitTryBlock() -> u32 {
         std::fprintf(stderr, " OP%02x=%llu", o, (unsigned long long)jit::g_compFailDelay[o]);
       for(int o = 0; o < 64; o++) if(jit::g_compFailDelaySpec[o] > 5000)
         std::fprintf(stderr, " SPEC%02x=%llu", o, (unsigned long long)jit::g_compFailDelaySpec[o]);
+      { // top 16 de llamadas dinamicas al trampolin (k: OP*64+funct, COP1 4096+rs*64+fn)
+        std::fprintf(stderr, "\n[helper]");
+        static u64 cp[8192]; for(int i = 0; i < 8192; i++) cp[i] = jit::g_helperCnt[i];
+        for(int t = 0; t < 16; t++) { int bi = 0; for(int i = 1; i < 8192; i++) if(cp[i] > cp[bi]) bi = i;
+          if(!cp[bi]) break;
+          if(bi >= 4096) std::fprintf(stderr, " C1.rs%02x.fn%02x=%llu", (bi - 4096) / 64, bi & 63, (unsigned long long)cp[bi]);
+          else std::fprintf(stderr, " OP%02x.fn%02x=%llu", bi / 64, bi & 63, (unsigned long long)cp[bi]);
+          cp[bi] = 0; } }
       std::fprintf(stderr, "\n[compfailcop]");
       for(int k = 0; k < 2; k++) for(int r = 0; r < 32; r++) if(jit::g_compFailCop[k][r] > 10000)
         std::fprintf(stderr, " COP%d.rs%02x=%llu", k, r, (unsigned long long)jit::g_compFailCop[k][r]);

@@ -952,6 +952,7 @@ public:
   // en ese caso pc/nextPc ya describen el punto de reanudación correcto.
   auto jitInterpOp(u32 op, u32 off) -> u8;
   auto jitCTC1w(u32 op, u32 off) -> u8;
+  auto jitCacheFast(u32 op, u32 off) -> bool;   // CACHE en modo kernel sobre KSEG0/KSEG1
 private:
   auto takeException(u32 excCode, bool tlbRefill = false, bool xtlb = false) -> void;
   // Coprocessor Unusable (ExcCode 11) with the Cause CE field set to the cop number.

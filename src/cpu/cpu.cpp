@@ -2467,9 +2467,25 @@ extern "C" u8 kestrel_jitInterpDelay(void* cpu, u32 op, u32 off) {
 // I-cache CIERRA el bloque y el driver revalida en la siguiente entrada. Las masivas son
 // las de D-cache: osWritebackDCache / osInvalDCache barren la cache en bucles de tres ops,
 // y con CACHE fuera del conjunto compilable esos bucles caian enteros al interprete.
+// CACHE sobre KSEG0/KSEG1 en modo kernel: el caso de osWritebackDCache/osInvalDCache, que
+// recorren el buffer linea a linea (en SM64 es lo que mas cede el bloque tras la FPU). Ahi no
+// hay excepcion posible -- ni privilegio (kernel), ni TLB (segmento sin mapear) -- y
+// translate() no aporta nada: cacheOp solo mira los 29 bits bajos. Se salta el montaje de
+// contexto de jitInterpOp y el despacho de execute(), pero con el mismo reloj (jitPending),
+// porque una I-cache Hit_Writeback asienta DMA. Con la traza de pc armada, al camino lento.
+auto CPU::jitCacheFast(u32 op, u32 off) -> bool {
+  if(pcRingOn || cpuMode() != 0) return false;
+  u64 a = gpr[(op >> 21) & 31] + (u64)(s64)(s16)(op & 0xFFFF);
+  u64 seg = a >> 29;
+  if(seg != 0x7'FFFF'FFFCull && seg != 0x7'FFFF'FFFDull) return false;
+  jitPending += off >> 2;
+  cacheOp((op >> 16) & 0x1f, a);
+  jitPending -= off >> 2;
+  return true;
+}
 extern "C" u8 kestrel_jitCACHE(void* cpu, u32 op, u32 off) {
   auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
-  u8 r = c->jitInterpOp(op, off);
+  u8 r = c->jitCacheFast(op, off) ? 1 : c->jitInterpOp(op, off);
   if(!r) return 0;                 // vectorizo (TLB sobre la direccion): estado ya correcto
   if((op >> 16) & 1) return 1;     // D-cache: sin efecto sobre el codigo, el bloque sigue
   u64 va = c->pc + off;            // I-cache: jitInterpOp restauro pc a la entrada del bloque

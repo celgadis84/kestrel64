@@ -319,6 +319,45 @@ public:
   // movsx r64, r8 / movsx r64, r16 -- LB y LH extienden en signo a los 64 bits del gpr.
   auto movsx64_8(Reg dst, Reg src)  -> void { rex(true,dst,0,src); buf.emit(0x0F); buf.emit(0xBE); modrm(3,dst,src); }
   auto movsx64_16(Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(0x0F); buf.emit(0xBF); modrm(3,dst,src); }
+  // ---- SSE escalar para la FPU en linea ---------------------------------------
+  // Solo xmm0-7 (sin REX.R/B de xmm): el prefijo obligatorio (66/F2/F3) va ANTES del REX.
+  auto sse_rr(u8 pfx, u8 opc, u8 x, u8 rm) -> void {
+    if(pfx) buf.emit(pfx);
+    if(rm & 8) rex(false, x, 0, rm);
+    buf.emit(0x0F); buf.emit(opc); modrm(3, x, rm);
+  }
+  auto movd_x_r32(u8 x, Reg r) -> void { sse_rr(0x66, 0x6E, x, r); }          // movd xmm, r32
+  auto movd_r32_x(Reg r, u8 x) -> void { sse_rr(0x66, 0x7E, x, r); }          // movd r32, xmm
+  auto movq_x_r64(u8 x, Reg r) -> void { buf.emit(0x66); rex(true, x, 0, r); buf.emit(0x0F); buf.emit(0x6E); modrm(3, x, r); }
+  auto movq_r64_x(Reg r, u8 x) -> void { buf.emit(0x66); rex(true, x, 0, r); buf.emit(0x0F); buf.emit(0x7E); modrm(3, x, r); }
+  auto cvtss2sd(u8 d, u8 s) -> void { sse_rr(0xF3, 0x5A, d, s); }
+  auto cvtsd2ss(u8 d, u8 s) -> void { sse_rr(0xF2, 0x5A, d, s); }
+  auto addsd(u8 d, u8 s)    -> void { sse_rr(0xF2, 0x58, d, s); }
+  auto subsd(u8 d, u8 s)    -> void { sse_rr(0xF2, 0x5C, d, s); }
+  auto mulsd(u8 d, u8 s)    -> void { sse_rr(0xF2, 0x59, d, s); }
+  auto divsd(u8 d, u8 s)    -> void { sse_rr(0xF2, 0x5E, d, s); }
+  auto divss(u8 d, u8 s)    -> void { sse_rr(0xF3, 0x5E, d, s); }
+  // cvtsi2sd xmm, r32 (entero de 32 con signo: siempre exacto)
+  auto cvtsi2sd_r32(u8 x, u8 r) -> void { sse_rr(0xF2, 0x2A, x, r); }
+  // cvtsd2si / cvttsd2si r64, xmm  (F2 REX.W 0F 2D/2C): fuera de rango da 0x8000000000000000
+  auto cvtsd2si64(u8 r, u8 x, bool trunc) -> void {
+    buf.emit(0xF2); rex(true, r, 0, x); buf.emit(0x0F); buf.emit(trunc ? 0x2C : 0x2D); modrm(3, r, x);
+  }
+  auto ucomisd(u8 a, u8 b)  -> void { sse_rr(0x66, 0x2E, a, b); }
+  auto ucomiss(u8 a, u8 b)  -> void { sse_rr(0,    0x2E, a, b); }
+  // stmxcsr [rsp+disp8]:  0F AE /3, SIB base=RSP
+  // ldmxcsr [rsp+disp8]:  0F AE /2, SIB base=RSP
+  auto ldmxcsr_rsp(u8 disp) -> void { buf.emit(0x0F); buf.emit(0xAE); buf.emit(0x54); buf.emit(0x24); buf.emit(disp); }
+  // mov r32, [rsp+disp8] / mov [rsp+disp8], r32  (r < 8)
+  auto ld32_rsp(Reg dst, u8 disp) -> void { buf.emit(0x8B); modrm(1, dst, RSP); buf.emit(0x24); buf.emit(disp); }
+  auto st32_rsp(Reg src, u8 disp) -> void { buf.emit(0x89); modrm(1, src, RSP); buf.emit(0x24); buf.emit(disp); }
+  auto stmxcsr_rsp(u8 disp) -> void { buf.emit(0x0F); buf.emit(0xAE); buf.emit(0x5C); buf.emit(0x24); buf.emit(disp); }
+  // test dword [rsp+disp8], imm32:  F7 /0, SIB base=RSP
+  auto test_rsp32_imm(u8 disp, u32 imm) -> void { buf.emit(0xF7); buf.emit(0x44); buf.emit(0x24); buf.emit(disp); imm32(imm); }
+  // test r32, imm32:  F7 /0
+  auto test_r32_imm(Reg r, u32 imm) -> void { if(r & 8) rex(false, 0, 0, r); buf.emit(0xF7); modrm(3, 0, r); imm32(imm); }
+  // jcc rel32 generico (cc = segundo byte: 0x84 je, 0x85 jne, 0x87 ja, 0x83 jae, 0x82 jb...)
+  auto jcc_rel32_placeholder(u8 cc) -> usize { buf.emit(0x0F); buf.emit(cc); usize at = buf.used; imm32(0); return at; }
   // Reserva 8 bytes alineados para una ranura de enlace; devuelve su offset en el buffer.
   auto reserveSlot() -> usize {
     while(buf.used & 7) buf.emit(0x90);
