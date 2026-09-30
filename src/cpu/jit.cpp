@@ -475,8 +475,16 @@ static std::vector<ColdCall>* g_cold = nullptr;    // lo arma compileBlock
 // rapido dejan RDX (direccion) y R9 (dato del store) intactos, que es lo que lee el CALL.
 struct ColdMem {
   usize fails[12]; int nFail; u32 opsBefore; s32 pendOff; u32 rt; void* fn;
-  RcSnap snap, mmioSnap; usize cont; u32 idx;
+  RcSnap snap, mmioSnap; usize cont; u32 idx; bool newKsu;
 };
+// KSU conocido por bloque (KESTREL_JIT_NOKSUKNOW=1 lo apaga, A/B). El camino rapido de las
+// mem-ops exige Status.KSU == 0; dentro de un bloque KSU solo cambia por MTC0 Status (una
+// excepcion saca del bloque), asi que tras la primera comprobacion las siguientes sobran.
+// La op que la ESTRENA la revalida en su camino lento (seccion fria): si al volver del
+// ayudante KSU != 0, sale del bloque detras de la op retirada. Se olvida en cada op COP0
+// interpretada (MTC0) y en la ranura de retardo no se estrena.
+static const bool g_ksuKnow = !std::getenv("KESTREL_JIT_NOKSUKNOW");
+static bool g_ksu0 = false;
 static const bool g_jitColdMem = !std::getenv("KESTREL_JIT_NOCOLDMEM");
 static std::vector<ColdMem>* g_coldMem = nullptr;  // lo arma compileBlock
 
@@ -598,8 +606,10 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
       e.test_al_imm8((u8)(fsz - 1));                  // desalineada: el interprete vectoriza
       fastFail[nFail++] = e.jne_rel32_placeholder();
     }
-    e.test_m8_imm(RBX, stOff, 0x18);                  // KSU!=0: traduccion general (KX=1 = ckseg0, mismo AND)
-    fastFail[nFail++] = e.jne_rel32_placeholder();
+    if(!g_ksu0) {                                     // ya visto en el bloque (ver g_ksu0)
+      e.test_m8_imm(RBX, stOff, 0x18);                // KSU!=0: traduccion general (KX=1 = ckseg0, mismo AND)
+      fastFail[nFail++] = e.jne_rel32_placeholder();
+    }
     e.cmp_r32_m(RAX, RBX, szOff);                     // fisica fuera de RDRAM (o sin bus): MMIO
     fastFail[nFail++] = e.jae_rel32_placeholder();
     if(st) {
@@ -683,6 +693,8 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
       if(!isStore && !isFp) rc.forget(rt);
       cm.mmioSnap = rc.snap();
       cm.cont = e.buf.used; cm.idx = 0;         // idx lo pone el llamador
+      cm.newKsu = g_ksuKnow && !g_ksu0;
+      if(g_ksuKnow) g_ksu0 = true;
       g_coldMem->push_back(cm);
       snap = cm.snap; bailSite = 0; *mmioSite = 0;
       if(isFp && g_fpKnow) g_fk.cu1 = true;
@@ -1409,6 +1421,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
                          usize* retSite = nullptr, RcSnap* retSnap = nullptr) -> bool {
   if(retSite) *retSite = 0;
   u32 OP = op >> 26;
+  if(OP == 0x10 || delay) g_ksu0 = false;   // MTC0 puede cambiar KSU (ver g_ksu0)
   bool ok = false;
   switch(OP) {
     // MTC0 y las de funcion COP0 (ERET / TLBR / TLBWI / TLBP), todas TERMINALES.
@@ -2353,6 +2366,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   };
 
   g_fk = FpKnow{};
+  g_ksu0 = false;
   g_fkMayFr = ((u32)c.cop0[CPU::C0_Status] >> 26) & 1;
   g_fkMayRc = !(c.fcr31 & 0x80);
   for(u32 i = 0; i < kMaxOps; i++) {
@@ -2787,6 +2801,10 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     bailIdx.push_back(k.idx); bailSnap.push_back(k.snap); bailUndo.push_back(coldMemUndo[j]);
     e.cmp_al_imm8(1);
     mmioSites.push_back(e.jne_rel32_placeholder()); mmioIdx.push_back(k.idx + 1); mmioSnap.push_back(k.mmioSnap);
+    if(k.newKsu) {                             // revalidar el KSU que estrena (ver g_ksu0)
+      e.test_m8_imm(RBX, (s32)(offsetof(CPU, cop0) + 8u * (u32)CPU::C0_Status), 0x18);
+      mmioSites.push_back(e.jne_rel32_placeholder()); mmioIdx.push_back(k.idx + 1); mmioSnap.push_back(k.mmioSnap);
+    }
     usize back = e.jmp_rel32_placeholder();
     e.patchRel32To(back, k.cont);
   }
