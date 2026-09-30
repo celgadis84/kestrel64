@@ -24,10 +24,13 @@ if(KESTREL_PRDP)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/parallel_rdp.cmake)
 endif()
 
-# Enlazado autocontenido para el paquete que se publica (ver docs/distribucion.md). OFF por
-# defecto: los builds de desarrollo enlazan bastante mas rapido en dinamico, y el .exe que
-# usan los gates no necesita moverse de esta maquina.
-option(KESTREL_STATIC "Link libc++/GLFW statically (self-contained .exe)" OFF)
+# Enlazado autocontenido (ver docs/distribucion.md). SIEMPRE estatico en Windows salvo que se
+# pida lo contrario con KESTREL_DYNAMIC=ON: un .exe dinamico necesita libc++.dll/glfw3.dll de
+# C:/msys64/clang64/bin en el PATH y, lanzado desde el Explorador o el lanzador, muere con
+# rc=127 (0xC0000135) sin decir nada. Paso varias veces con build/ y build-prdp/; enlazar un
+# poco mas lento sale mas barato. KESTREL_STATIC queda solo por compatibilidad con scripts.
+option(KESTREL_STATIC "Link libc++/GLFW statically (self-contained .exe)" ON)
+option(KESTREL_DYNAMIC "Opt out: link libc++/GLFW as DLLs (needs clang64/bin in PATH)" OFF)
 
 add_executable(kestrel64
   src/main.cpp
@@ -275,7 +278,7 @@ if(WIN32)
   # comdlg32: el dialogo de "elige una ROM" cuando se abre el .exe desde el Explorador.
   # comctl32: las barras deslizantes de los numericos acotados del dialogo de opciones.
   target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32 comctl32 shell32 ole32)
-  if(KESTREL_STATIC AND NOT MSVC)
+  if(NOT KESTREL_DYNAMIC AND NOT MSVC)
     # Un unico .exe sin DLL propias. Por defecto, libc++ y GLFW quedan como DLL y viven en
     # C:/msys64/clang64/bin: dentro de la shell de MSYS2 el PATH las encuentra, pero el
     # Explorador arranca el proceso sin ese PATH y Windows aborta con "no se encontro
@@ -287,6 +290,13 @@ if(WIN32)
     target_link_options(kestrel64 PRIVATE -static)
     # GLFW estatico deja de arrastrar sus dependencias por si mismo: se nombran aqui.
     target_link_libraries(kestrel64 PRIVATE shell32 ole32 uuid imm32 setupapi version cfgmgr32)
+    # Candado: si algo vuelve a colar una DLL de clang64, el build falla aqui y no en la cara
+    # del usuario al lanzar.
+    if(CMAKE_OBJDUMP)
+      add_custom_command(TARGET kestrel64 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -DOBJDUMP=${CMAKE_OBJDUMP} -DEXE=$<TARGET_FILE:kestrel64>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_static.cmake VERBATIM)
+    endif()
   endif()
 else()
   find_package(Threads REQUIRED)

@@ -8,8 +8,9 @@
 # la secuencia completa, escrita una vez, para no volver a deducirla.
 #
 # Que sale:
-#   build/                     exe SoftRDP dinamico  (oraculo determinista de las puertas)
-#   build-prdp/                exe parallel-RDP dinamico (puerta de GPU)
+#   build/                     exe SoftRDP  (oraculo determinista de las puertas)
+#   build-prdp/                exe parallel-RDP (puerta de GPU)
+#   (desde 2026-09-30 TODOS estaticos: arrancan sin clang64 en el PATH; ver CMakeLists)
 #   build-prdp-static/         exe parallel-RDP ESTATICO = el que se distribuye
 #   build-static/              exe SoftRDP ESTATICO      = el que se distribuye tambien
 #   dist/                      kestrel64.exe (GPU) + kestrel64-soft.exe (CPU)
@@ -45,8 +46,11 @@ kill_exes() {
 # Compilacion guiada por perfil: se usa SOLO si el perfil existe (scripts/pgo.sh lo genera y
 # se commitea). Vale un 4-9 % de pared en los tres juegos y no cambia el invitado -- el
 # statehash sale identico. Sin el fichero, todo compila como siempre.
+# Dos perfiles (ver scripts/pgo.sh): el comercial es local y no se sube; si esta, manda.
 PGO=""
-[ -f pgo/kestrel.profdata ] && PGO="-DKESTREL_PGO=use"
+[ -f pgo/kestrel.profdata ] && PGO="-DKESTREL_PGO=use -DKESTREL_PGO_DATA=$(cygpath -m "$PWD")/pgo/kestrel.profdata"
+[ -f pgo/local/kestrel-commercial.profdata ] &&   PGO="-DKESTREL_PGO=use -DKESTREL_PGO_DATA=$(cygpath -m "$PWD")/pgo/local/kestrel-commercial.profdata"
+[ -n "$PGO" ] && echo "PGO: ${PGO##*=}"
 
 conf() { # conf <dir> <opciones de cmake...>
   d=$1; shift

@@ -45,8 +45,12 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
 - cmake binary lives in `/c/msys64/clang64/bin`.
 - `build/` = default (PRDP OFF). `build-prdp/` = configured `-DKESTREL_PRDP=ON`
   (parallel-rdp GPU backend). Default OFF so deterministic core never depends on GPU.
-- `-DKESTREL_STATIC=ON` = self-contained `.exe` (libc++/GLFW inside, no DLLs) for the
-  published package; `sh scripts/dist.sh` stages `dist/` + zip. See `docs/distribucion.md`.
+- **TODOS los arboles enlazan estatico (desde 2026-09-30)**: libc++/GLFW dentro, solo
+  vulkan-1.dll del sistema. Un exe dinamico moria rc=127 sin clang64 en PATH (Explorador,
+  lanzador, python) -- paso repetidas veces. `cmake/check_static.cmake` (POST_BUILD) FALLA el
+  build si el exe importa libc++/libunwind/glfw3/libwinpthread. Opt-out solo a proposito:
+  `-DKESTREL_DYNAMIC=ON`. `KESTREL_STATIC` ya no decide nada. `sh scripts/dist.sh` stages
+  `dist/` + zip. See `docs/distribucion.md`.
 - **REGLA: cada generacion de .exe genera TODO** — los cuatro arboles, el lanzador grafico
   congelado, el zip portable y el instalador. Un solo comando, `sh scripts/release.sh`
   (`--gates` para pasar antes `gate_all` + `gate_prdp`, `--quick` para saltarse `build/` y

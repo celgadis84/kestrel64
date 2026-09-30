@@ -11,11 +11,16 @@
 # el statehash de las tres tandas sale identico al del binario sin PGO, y esto lo imprime.
 #
 # Uso:
-#   sh scripts/pgo.sh                    lote automatico: los tres juegos, y fusiona
+#   sh scripts/pgo.sh                    lote automatico LIBRE (homebrew + krom), y fusiona
+#   PGO_COMMERCIAL=1 sh scripts/pgo.sh   mismo, con PD/SM64/DK64 (solo para A/B)
 #   sh scripts/pgo.sh --capture "<rom>"  construye el instrumentado y lo LANZA para jugar
 #   sh scripts/pgo.sh --merge            fusiona lo que haya en pgo/raw (no corre nada)
 #
-# Sale: pgo/kestrel.profdata  (se commitea; los arboles lo usan SOLO si existe)
+# Salen DOS perfiles:
+#   pgo/kestrel.profdata                   lote LIBRE: el que se commitea y lleva el repo
+#   pgo/local/kestrel-commercial.profdata  PGO_COMMERCIAL=1 o --capture: juegos comerciales,
+#                                          NO se sube (pgo/local/ en .gitignore). Si existe,
+#                                          release.sh compila con el en vez del libre.
 #
 # Cuando rehacerlo: tras un cambio grande de codigo caliente. Un perfil viejo NO rompe nada
 # -- clang avisa con -Wno-profile-instr-out-of-date y sigue -- solo rinde menos.
@@ -27,11 +32,15 @@ set -e
 cd "$(dirname "$0")/.."
 export PATH=/c/msys64/clang64/bin:$PATH
 ROMS=${ROMS:-/e/Claude/N64/test_roms}
+OUT=pgo/kestrel.profdata
+if [ -n "$PGO_COMMERCIAL" ] || [ "$1" = "--capture" ]; then
+  OUT=pgo/local/kestrel-commercial.profdata; mkdir -p pgo/local
+fi
 
 merge() {
   ls pgo/raw/*.profraw >/dev/null 2>&1 || { echo "no hay nada en pgo/raw/"; exit 1; }
-  llvm-profdata merge -output=pgo/kestrel.profdata pgo/raw/*.profraw
-  ls -l pgo/kestrel.profdata
+  llvm-profdata merge -output="$OUT" pgo/raw/*.profraw
+  ls -l "$OUT"
   echo "listo. Ahora: sh scripts/release.sh   (los arboles lo cogen solos)"
 }
 
@@ -60,15 +69,27 @@ esac
 
 build_gen
 rm -rf pgo/raw; mkdir -p pgo/raw
-run() { # run <nombre> <rom> <flips>
+run() { # run <nombre> <rom> <VAR=tope>   tope: KESTREL_MAXFLIPS o KESTREL_MAXINSN
   echo "-- $1"
-  LLVM_PROFILE_FILE="$PWD/pgo/raw/$1-%p.profraw" KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 \
-  KESTREL_MAXFLIPS=$3 ./build-pgogen/kestrel64.exe --run "$ROMS/$2" 2>&1 \
+  env LLVM_PROFILE_FILE="$PWD/pgo/raw/$1-%p.profraw" KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 \
+      "$3" timeout 600 ./build-pgogen/kestrel64.exe --run "$ROMS/$2" 2>&1 \
     | tr -d '\0' | grep -oE "\[statehash\] [0-9a-f]+" || true
 }
-# Los tres perfiles del proyecto: PD es el caso apretado (en juego, desde la ranura 0),
-# SM64 el de arranque con mucha compilacion, DK64 el de RSP pesado.
-run PD   "Perfect Dark (Europe) (En,Fr,De,Es,It).n64" 1793
-run SM64 "Super Mario 64 (USA).z64"                   400
-run DK64 "Donkey Kong 64 (USA).n64"                   400
+if [ -n "$PGO_COMMERCIAL" ]; then
+  # Juegos comerciales (solo para comparar; el perfil que se commitea sale del lote libre).
+  run PD   "Perfect Dark (Europe) (En,Fr,De,Es,It).n64" KESTREL_MAXFLIPS=1793
+  run SM64 "Super Mario 64 (USA).z64"                   KESTREL_MAXFLIPS=400
+  run DK64 "Donkey Kong 64 (USA).n64"                   KESTREL_MAXFLIPS=400
+else
+  # Lote LIBRE (homebrew y pruebas con licencia abierta): lo que se entrena y se distribuye.
+  # junkrunner64 = juego 3D libdragon (CPU+RSP+RDP+audio), snapper64 = superficies RDP,
+  # n64-systemtest = CPU/COP0/COP1/TLB exhaustivo, krom = RSP vectorial y RDP 3D.
+  K=PeterLemon-N64
+  run junk      homebrew/junkrunner64.z64 KESTREL_MAXINSN=400000000
+  run snapper   snapper64.z64             KESTREL_MAXINSN=300000000
+  run systest   n64-systemtest.z64        KESTREL_MAXINSN=300000000
+  run niccc     $K/N64NICCC/N64NICCC.N64  KESTREL_MAXINSN=200000000
+  run rsp3d     $K/RSP/XBUS/RSPTrans3DRectangle/RSPTrans3DRectangle.N64 KESTREL_MAXINSN=100000000
+  run cube      $K/RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240.N64 KESTREL_MAXINSN=100000000
+fi
 merge
