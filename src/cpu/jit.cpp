@@ -1944,7 +1944,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     usize fastToSlow[5] = {0,0,0,0,0}; usize fastToBody = 0; int nSlow = 0;
     if(fastOk) {
       e.mov_r32_m(RAX, RBX, guardOff);            // eax = ops permitidas
-      e.alu32_imm(5, RAX, 0);                     // sub eax, K (placeholder)
+      e.alu32_imm_force(5, RAX, 0);               // sub eax, K (placeholder, imm32 fijo)
       kSubAt = c.jitCache->buf.used - 4;
       fastToSlow[nSlow++] = e.jb_rel32_placeholder();   // sin margen → trampolín
       e.mov_r_imm64(RDX, (u64)&c.mem->rcp.mi_intr);
@@ -2292,7 +2292,7 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       u32 tp; bool ttlb = false;
       if(!linkable(cands[k], tp, ttlb)) continue;
       if(havePrev) { e.patchRel32(prevJne); havePrev = false; }
-      e.mov_r_imm64(RDX, kNoLink);                        // guarda (desactivada al nacer)
+      e.mov_r_imm64_force(RDX, kNoLink);                  // guarda (desactivada al nacer)
       usize immAt = c.jitCache->buf.used - 8;
       e.cmp_r_r(RCX, RDX);
       prevJne = e.jne_rel32_placeholder(); havePrev = true;

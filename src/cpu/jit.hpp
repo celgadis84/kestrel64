@@ -10,6 +10,7 @@
 // Estado, etapas y perillas: docs/CORES-CPU-RSP.md §3.
 #include "../core/types.hpp"
 #include <cstddef>
+#include <cstdlib>
 #include <vector>
 #include <unordered_map>
 
@@ -70,7 +71,22 @@ public:
   }
 
   // --- instrucciones ---
+  // Codificaciones CORTAS (KESTREL_JIT_NOSHORTIMM=1 las apaga, A/B). El codigo emitido es
+  // grande (~170 B por op MIPS en los bloques calientes de DK64) y la seccion fria mostro que
+  // el frontal del anfitrion lo nota: un inmediato que cabe en 8 bits con signo va por la
+  // forma 83 /d ib (3-4 B menos), y un movabs cuyo valor cabe en 32 bits por mov r32 (sin
+  // signo) o C7 /0 id (con signo), 3-5 B menos. Mismo resultado y mismas banderas. Lo que se
+  // PARCHEA despues de emitido (K del prologo, guarda de enlace) usa las formas *_force.
+  static inline const bool shortImm = !std::getenv("KESTREL_JIT_NOSHORTIMM");
+  static auto fits8(u32 imm) -> bool { s32 v = (s32)imm; return v >= -128 && v <= 127; }
   auto mov_r_imm64(Reg dst, u64 imm) -> void {         // movabs dst, imm64
+    if(shortImm && imm <= 0xFFFFFFFFull) { mov_r_imm32(dst, (u32)imm); return; }
+    if(shortImm && (u64)(s64)(s32)imm == imm) {        // mov r/m64, imm32 (sext)
+      rex(true, 0, 0, dst); buf.emit(0xC7); modrm(3, 0, dst); imm32((u32)imm); return;
+    }
+    mov_r_imm64_force(dst, imm);
+  }
+  auto mov_r_imm64_force(Reg dst, u64 imm) -> void {   // movabs de 10 B siempre (se parchea)
     rex(true, 0, 0, dst); buf.emit((u8)(0xB8 + (dst & 7))); imm64(imm);
   }
   auto mov_r_m(Reg dst, Reg base, s32 disp) -> void {  // mov dst, [base+disp]
@@ -92,6 +108,7 @@ public:
     rex(true, src, 0, dst); buf.emit(0x31); modrm(3, src, dst);
   }
   auto add_r_imm32(Reg dst, s32 imm) -> void {         // add dst, imm32 (sign-ext)
+    if(shortImm && fits8((u32)imm)) { rex(true, 0, 0, dst); buf.emit(0x83); modrm(3, 0, dst); buf.emit((u8)imm); return; }
     rex(true, 0, 0, dst); buf.emit(0x81); modrm(3, 0, dst); imm32((u32)imm);
   }
   auto ret() -> void { buf.emit(0xC3); }
@@ -130,9 +147,14 @@ public:
   // 64-bit ALU: op r64, [rbx+off]
   auto alu64_rm(u8 opc, Reg dst, u8 gi) -> void { rex(true,dst,0,RBX); buf.emit(opc); memOperand(dst, RBX, goff(gi)); }
   // 32-bit ALU imm: op r32, imm32.  /digit: ADD=0 OR=1 AND=4 SUB=5 XOR=6
-  auto alu32_imm(u8 digit, Reg dst, u32 imm) -> void { if(dst & 8) rex(false,0,0,dst); buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
+  auto alu32_imm(u8 digit, Reg dst, u32 imm) -> void {
+    if(shortImm && fits8(imm)) { if(dst & 8) rex(false,0,0,dst); buf.emit(0x83); modrm(3,digit,dst); buf.emit((u8)imm); return; }
+    alu32_imm_force(digit, dst, imm); }
+  auto alu32_imm_force(u8 digit, Reg dst, u32 imm) -> void { if(dst & 8) rex(false,0,0,dst); buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
   // 64-bit ALU imm: op r64, imm32 (sign-extended to 64)
-  auto alu64_imm(u8 digit, Reg dst, u32 imm) -> void { rex(true,0,0,dst); buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
+  auto alu64_imm(u8 digit, Reg dst, u32 imm) -> void {
+    if(shortImm && fits8(imm)) { rex(true,0,0,dst); buf.emit(0x83); modrm(3,digit,dst); buf.emit((u8)imm); return; }
+    rex(true,0,0,dst); buf.emit(0x81); modrm(3,digit,dst); imm32(imm); }
   // 32-bit shift by imm8:  /digit SHL=4 SHR=5 SAR=7
   auto shift32_imm(u8 digit, Reg dst, u8 sa) -> void { if(dst & 8) rex(false,0,0,dst); buf.emit(0xC1); modrm(3,digit,dst); buf.emit(sa); }
   // 32-bit shift by CL
@@ -150,7 +172,7 @@ public:
   // cmp r64, [rbx+off]
   auto cmp64_rm(Reg dst, u8 gi) -> void { rex(true,dst,0,RBX); buf.emit(0x3B); memOperand(dst, RBX, goff(gi)); }
   // cmp r64, imm32 (sign-extended)
-  auto cmp64_imm(Reg dst, u32 imm) -> void { rex(true,0,0,dst); buf.emit(0x81); modrm(3,7,dst); imm32(imm); }
+  auto cmp64_imm(Reg dst, u32 imm) -> void { alu64_imm(7, dst, imm); }
   // setcc r8:  setl=0x9C setb=0x92 (into AL etc.)
   auto setcc(u8 cc, Reg r8) -> void { buf.emit(0x0F); buf.emit(cc); modrm(3,0,r8); }
   // setcc/test sobre un registro de 8 bits CUALQUIERA (incluido r8b-r15b, que necesitan REX.B;
@@ -232,10 +254,12 @@ public:
   // add qword [base+disp], imm32 (con signo):  REX.W 81 /0 id -- para contadores de 64 bits
   // (stallTotal, mulDivOps) sin arrastre entre mitades.
   auto add_m64_imm32(Reg base, s32 disp, u32 imm) -> void {
+    if(shortImm && fits8(imm)) { rex(true, 0, 0, base); buf.emit(0x83); memOperand(0, base, disp); buf.emit((u8)imm); return; }
     rex(true, 0, 0, base); buf.emit(0x81); memOperand(0, base, disp); imm32(imm);
   }
   // add dword [base+disp], imm32:  81 /0 id  (32-bit, sin REX) — acumula ops en jitPending.
   auto add_m32_imm32(Reg base, s32 disp, u32 imm) -> void {
+    if(shortImm && fits8(imm)) { buf.emit(0x83); memOperand(0, base, disp); buf.emit((u8)imm); return; }
     buf.emit(0x81); memOperand(0, base, disp); imm32(imm);
   }
   // jmp qword [rip+disp32]:  FF /4 con mod=00 rm=101 → FF 25 disp32. Salto indirecto a través
