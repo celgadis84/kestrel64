@@ -455,6 +455,21 @@ static bool g_fkMayFr = false, g_fkMayRc = false;  // estrenos permitidos (estad
 static FpKnow g_fkAfter;                           // lo que deja la op en curso (camino rapido)
 static bool g_fkNewFr = false, g_fkNewRc = false;  // hechos que estrena la op en curso
 
+// Seccion FRIA (KESTREL_JIT_NOCOLD=1 la apaga, A/B). Una op COP1 (o MTC0 Status) en linea
+// lleva detras su camino lento: CALL al ayudante, salida de control y la revalidacion de
+// FpKnow, ~160 B que casi nunca corren pero ocupan I-cache entre dos ops calientes. Con esto
+// se emiten al final del bloque (como los stubs de I-cache exacta) y el camino rapido sigue
+// de corrido sin su `jmp` por encima. Solo en el sitio principal del bucle: la ranura de
+// retardo tiene rollback propio y se queda en linea.
+struct FpBails { usize at[16]; u32 n = 0; auto add(usize a) -> void { at[n++] = a; } };
+struct ColdCall {
+  FpBails bails; u32 op, off; void* fn; u32 xk; bool xs;
+  bool newFr, newRc, rcg;          // revalidacion FpKnow que tocaba tras el CALL
+  RcSnap snap; usize cont; u32 idx;
+};
+static const bool g_jitCold = !std::getenv("KESTREL_JIT_NOCOLD");
+static std::vector<ColdCall>* g_cold = nullptr;    // lo arma compileBlock
+
 static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore,
                       RcSnap& snap, u32 opsBefore, s32 pendOff,
                       usize* mmioSite = nullptr, bool mmioExit = false,
@@ -927,7 +942,6 @@ extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 static const bool g_fpInline = !std::getenv("KESTREL_JIT_NOFPINLINE") && !std::getenv("KESTREL_FPORACLE")
                                && CPU::fpuFromEnv() == 0 && CPU::ilkFromEnv() == 0;
 
-struct FpBails { usize at[16]; u32 n = 0; auto add(usize a) -> void { at[n++] = a; } };
 
 // MXCSR.RC = modo del invitado, sin mirar Enable I ni banderas. Pisa RAX/RCX/RDX.
 static auto emitRcGuest(Emitter& e) -> void {
@@ -1462,6 +1476,9 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   // rendimientos caen en el CALL de abajo, que hace la op completa.
   usize fpDone = ~(usize)0;
   bool fpFmt = OP == 0x11 && ((op >> 21) & 31) >= 16, fpInl = false;
+  // Diferir el camino lento a la seccion fria (ver ColdCall).
+  const bool coldOk = g_jitCold && g_cold && !delay && retSite;
+  FpBails coldB; bool cold = false;
   // Tambien en ranura de retardo: el camino en linea no levanta excepcion (lo que podria
   // cae al CALL, que ahi es kestrel_jitInterpDelay con EPC/BD bien puestos) y solo pisa
   // registros volatiles, como el propio CALL; la condicion del salto vive en R15.
@@ -1470,21 +1487,57 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     bool fmtOp = ((op >> 21) & 31) >= 16;
     if(fmtOp ? emitFpInline(e, op, bails) : emitFpMove(e, op, bails)) {
       fpInl = fmtOp;
-      fpDone = e.jmp_rel32_placeholder();
-      for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
+      if(coldOk) { coldB = bails; cold = true; }
+      else {
+        fpDone = e.jmp_rel32_placeholder();
+        for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
+      }
     }
   }
   if(g_c0Inline && !delay && OP == 0x10 && isMtc0Status(op)) {
     FpBails bails;
     emitMtc0Status(e, op, bails);
-    fpDone = e.jmp_rel32_placeholder();
-    for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
+    if(coldOk) { coldB = bails; cold = true; }
+    else {
+      fpDone = e.jmp_rel32_placeholder();
+      for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
+    }
+  }
+  u32 xk = 0;
+  {
+    u32 rsF = (op >> 21) & 31;
+    xk = (OP == 0x11 ? 4096u + rsF * 64u + (rsF >= 16 ? (op & 63) : 0u)
+                     : OP * 64u + (OP == 0 ? (op & 63) : OP == 0x10 ? (rsF < 16 ? rsF : 32u + (op & 31)) : 0u)) & 8191;
+  }
+  if(cold) {
+    // El camino lento entero va a la seccion fria; aqui el rapido sigue de corrido.
+    ColdCall cc{};
+    cc.bails = coldB; cc.op = op; cc.off = off; cc.fn = fn; cc.xk = xk; cc.xs = g_xStats;
+    cc.newFr = cc.newRc = cc.rcg = false;
+    if(g_fpKnow && fpInl) { cc.newFr = g_fkNewFr; cc.newRc = g_fkNewRc; cc.rcg = g_fkAfter.rcg; }
+    else if(g_fpKnow && OP == 0x11 && !fpInl) {
+      // Movimiento COP1 sin revalidacion: el hecho de modo se pierde (ver abajo); nada que
+      // reponer en el camino lento.
+    }
+    exitSite = 0; *retSite = 0;
+    if(g_fpKnow) {
+      if(OP == 0x11) {
+        if(fpInl) g_fk = g_fkAfter;
+        else { g_fk.cu1 = true; if(fpFmt || ((op >> 21) & 31) == 6) g_fk.rcg = false; }
+      } else g_fk = FpKnow{};                  // MTC0 Status
+    }
+    cc.snap = rc.snap();
+    cc.cont = e.buf.used;
+    cc.idx = 0;                                // lo pone el llamador
+    g_cold->push_back(cc);
+    snap = cc.snap;
+    u32 wrGprC = 32;
+    if(OP == 0x11 && ((op >> 21) & 31) <= 2) wrGprC = (op >> 16) & 31;
+    if(wrGprC < 32) rc.forget(wrGprC);
+    return true;
   }
   if(g_xStats) {                          // censo dinamico de llamadas al trampolin
-    u32 rsF = (op >> 21) & 31;
-    u32 k = OP == 0x11 ? 4096u + rsF * 64u + (rsF >= 16 ? (op & 63) : 0u)
-                       : OP * 64u + (OP == 0 ? (op & 63) : OP == 0x10 ? (rsF < 16 ? rsF : 32u + (op & 31)) : 0u);
-    e.mov_r_imm64(RAX, (u64)&g_helperCnt[k & 8191]);
+    e.mov_r_imm64(RAX, (u64)&g_helperCnt[xk]);
     e.add_m64_imm32(RAX, 0, 1);
   }
   e.mov_r_r(RCX, RBX);                    // arg0 = cpu (== &gpr[0] == RBX)
@@ -2002,6 +2055,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
   const bool icExact = c.jitIcExact();
   auto fetchW = [&](u32 a) -> u32 { return icExact ? c.jitPeekWord(a) : c.jitFetchWord(a); };
   struct IcChk { usize at, j1, j2, cont; u32 base; u32 idx; RcSnap snap; IlkUndo undo; };
+  std::vector<ColdCall> coldCalls;
+  g_cold = &coldCalls;
+  struct ColdOff { ~ColdOff() { g_cold = nullptr; } } coldOff;
   std::vector<IcChk> icChks;
   auto icChk = [&](u32 a, u32 idx) {
     if(!icExact || (a != phys && (a & 0x1f))) return;
@@ -2325,7 +2381,8 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     c.jitCache->buf.used = before;
     usize isite; RcSnap isnap; usize rsite; RcSnap rsnap;
     if(emitInterpOp(e, rc, op, 4 * i, isite, isnap, false, false, &rsite, &rsnap)) {
-      interpSites.push_back(isite); interpIdx.push_back(b.nOps + 1); interpSnap.push_back(isnap);
+      if(isite) { interpSites.push_back(isite); interpIdx.push_back(b.nOps + 1); interpSnap.push_back(isnap); }
+      else coldCalls.back().idx = b.nOps + 1;  // camino lento en la seccion fria
       // Revalidacion FPU fallida en el camino lento: la op ya se hizo, se sale detras.
       if(rsite) { mmioSites.push_back(rsite); mmioIdx.push_back(b.nOps + 1); mmioSnap.push_back(rsnap); }
       // Conservador: la op puede tocar memoria y estado FPU → fuera del modo jitdiff puro.
@@ -2662,6 +2719,31 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     haveMain = true;
   }
 
+  // Seccion fria: caminos lentos de las ops COP1/MTC0 en linea (ver ColdCall).
+  g_cold = nullptr;
+  for(const ColdCall& k : coldCalls) {
+    for(u32 i = 0; i < k.bails.n; i++) e.patchRel32(k.bails.at[i]);
+    if(k.xs) { e.mov_r_imm64(RAX, (u64)&g_helperCnt[k.xk]); e.add_m64_imm32(RAX, 0, 1); }
+    e.mov_r_r(RCX, RBX);
+    e.mov_r_imm32(RDX, k.op);
+    e.mov_r_imm32(R8, k.off);
+    e.mov_r_imm64(RAX, (u64)k.fn);
+    e.call_reg(RAX);
+    e.test_al_al();
+    interpSites.push_back(e.je_rel32_placeholder()); interpIdx.push_back(k.idx); interpSnap.push_back(k.snap);
+    // Revalidacion FpKnow: si el hecho estrenado no se cumple, salir tras la op retirada.
+    if(k.newFr) {
+      e.test_m8_imm(RBX, (s32)offsetof(CPU, cop0) + 12 * 8 + 3, 0x04);
+      mmioSites.push_back(e.jcc_rel32_placeholder(0x84)); mmioIdx.push_back(k.idx); mmioSnap.push_back(k.snap);
+    }
+    if(k.newRc) {
+      e.test_m8_imm(RBX, (s32)offsetof(CPU, fcr31), 0x80);
+      mmioSites.push_back(e.jcc_rel32_placeholder(0x85)); mmioIdx.push_back(k.idx); mmioSnap.push_back(k.snap);
+    }
+    if(k.rcg) emitRcGuest(e);
+    usize back = e.jmp_rel32_placeholder();
+    e.patchRel32To(back, k.cont);
+  }
   // Stubs de I-cache exacta: rellenar y volver, o bail registrado como uno mas.
   for(const IcChk& k : icChks) {
     e.patchRel32(k.j1); e.patchRel32(k.j2);
