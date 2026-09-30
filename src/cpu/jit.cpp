@@ -434,6 +434,27 @@ extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(vo
 // `mmioExit`; en una ranura de retardo NO se pide, que el bloque ya termina en el salto que
 // la precede. Vale para cargas y para stores: leer DPC tambien arma. `mmioSnapOut` recoge la
 // instantanea del cache de registros con la que sale el stub (la de DESPUES de `forget`).
+// Conocimiento FPU del BLOQUE (KESTREL_JIT_NOFPKNOW=1 lo apaga, A/B). Cada op COP1 en linea
+// repetia las mismas guardas: CU1, FR (fuente impar) y la sincronia del MXCSR con el modo de
+// redondeo del invitado (con su comprobacion de Enable I). Dentro de un bloque esos hechos
+// solo cambian por MTC0 Status (CU1/FR) y CTC1 (modo y Enable I): una vez vistos en el camino
+// rapido de una op, las siguientes no los vuelven a mirar.
+//   El camino lento (CALL) se reune con el rapido, asi que tambien tiene que dejarlos ciertos:
+//   - CU1: si estaba a 0 el ayudante levanta Coprocessor Unusable y el bloque sale.
+//   - FR y Enable I: el ayudante no los cambia (CTC1 borra el hecho). Si la op los ESTRENA y
+//     en el camino lento no se cumplen, se sale del bloque detras de la op, ya retirada (la
+//     misma salida que la de MMIO: el conductor avanza pc).
+//   - Modo del MXCSR: los ayudantes lo dejan en el que usaron (TRUNC en RZ, por ejemplo); el
+//     camino lento lo repone al del invitado antes de reunirse.
+// Solo se estrenan FR=1 y Enable I=0 si el estado al COMPILAR ya es ese: asi un juego con
+// FR=0 no se pasa la vida saliendo de bloques.
+struct FpKnow { bool cu1 = false, fr1 = false, rcg = false; };
+static const bool g_fpKnow = !std::getenv("KESTREL_JIT_NOFPKNOW");
+static FpKnow g_fk;                                // cierto en el punto actual de la compilacion
+static bool g_fkMayFr = false, g_fkMayRc = false;  // estrenos permitidos (estado al compilar)
+static FpKnow g_fkAfter;                           // lo que deja la op en curso (camino rapido)
+static bool g_fkNewFr = false, g_fkNewRc = false;  // hechos que estrena la op en curso
+
 static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& isStore,
                       RcSnap& snap, u32 opsBefore, s32 pendOff,
                       usize* mmioSite = nullptr, bool mmioExit = false,
@@ -525,13 +546,15 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
     const s32 fpOff = (s32)(offsetof(CPU, fpr) + 8u * rt);
     if(isFp) {
       // CU1 claro = Coprocessor Unusable; la levanta el interprete con su CE exacto.
-      e.test_m8_imm(RBX, stOff + 3, 0x20);            // Status bit29 vive en el byte 3
-      fastFail[nFail++] = e.je_rel32_placeholder();
+      if(!g_fk.cu1) {                                 // ya visto en el bloque (ver FpKnow)
+        e.test_m8_imm(RBX, stOff + 3, 0x20);          // Status bit29 vive en el byte 3
+        fastFail[nFail++] = e.je_rel32_placeholder();
+      }
       // FR=1: los 32 registros son independientes y el acceso cae en fpr[rt]. FR=0: los pares
       // se juntan, y para rt PAR el destino sigue siendo fpr[rt] -- solo el IMPAR cambia (la
       // mitad alta del companero en 32 bits, el par entero en 64). Como la paridad se sabe al
       // compilar, la comprobacion de FR solo se emite para registros impares.
-      if(rt & 1) {
+      if((rt & 1) && !g_fk.fr1) {
         e.test_m8_imm(RBX, stOff + 3, 0x04);          // Status bit26 (FR)
         fastFail[nFail++] = e.je_rel32_placeholder();
       }
@@ -652,6 +675,8 @@ static auto emitMemOp(Emitter& e, RegCache& rc, u32 op, usize& bailSite, bool& i
                              e.cmp_al_imm8(1); *mmioSite = e.jne_rel32_placeholder(); }
   else if(mmioSite) *mmioSite = 0;
   if(hasFast) e.patchRel32(fastDone);     // el camino rapido se reune aqui
+  // Con CU1=0 el ayudante falla y el bloque sale por el bail: quien sigue, lo tiene a 1.
+  if(isFp && g_fpKnow) g_fk.cu1 = true;
   return true;
 }
 
@@ -904,6 +929,25 @@ static const bool g_fpInline = !std::getenv("KESTREL_JIT_NOFPINLINE") && !std::g
 
 struct FpBails { usize at[16]; u32 n = 0; auto add(usize a) -> void { at[n++] = a; } };
 
+// MXCSR.RC = modo del invitado, sin mirar Enable I ni banderas. Pisa RAX/RCX/RDX.
+static auto emitRcGuest(Emitter& e) -> void {
+  const s32 fcrOff = (s32)offsetof(CPU, fcr31);
+  e.mov_r32_m(RCX, RBX, fcrOff);
+  e.alu32_imm(4, RCX, 3);
+  e.mov_r_r32(RDX, RCX); e.alu32_imm(4, RDX, 1); e.shift32_imm(4, RDX, 1);
+  e.alu32_rr(0x33, RCX, RDX);
+  e.shift32_imm(4, RCX, 13);
+  e.stmxcsr_rsp(40);
+  e.ld32_rsp(RAX, 40);
+  e.mov_r_r32(RDX, RAX); e.alu32_imm(4, RDX, 0x6000u);
+  e.alu32_rr(0x3B, RDX, RCX);
+  usize ok = e.jcc_rel32_placeholder(0x84);
+  e.alu32_imm(4, RAX, ~0x6000u); e.alu32_rr(0x0B, RAX, RCX);
+  e.st32_rsp(RAX, 40);
+  e.ldmxcsr_rsp(40);
+  e.patchRel32(ok);
+}
+
 // Normal o cero en simple (x en r32, destruye t): t = x & 0x7fffffff; t == 0, o bien
 // t - 0x800000 < 0x7f000000 (exponente 1..254). Si no, al CALL.
 static auto emitPlain32(Emitter& e, Reg x, Reg t, FpBails& b) -> void {
@@ -946,10 +990,16 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
   const s32 fprOff = (s32)offsetof(CPU, fpr);
   auto fpr = [&](u32 i) { return fprOff + (s32)(i * 8); };
 
-  e.test_m8_imm(RBX, stOff, 0x20);                 // CU1
-  b.add(e.jcc_rel32_placeholder(0x84));
-  if(fs & 1) { e.test_m8_imm(RBX, stOff, 0x04);    // FR
+  const FpKnow k = g_fk;
+  FpKnow& a = g_fkAfter; a = k; a.cu1 = true;
+  g_fkNewFr = g_fkNewRc = false;
+  if(!k.cu1) { e.test_m8_imm(RBX, stOff, 0x20);    // CU1
                b.add(e.jcc_rel32_placeholder(0x84)); }
+  if((fs & 1) && !k.fr1) {
+    e.test_m8_imm(RBX, stOff, 0x04);               // FR
+    b.add(e.jcc_rel32_placeholder(0x84));
+    if(g_fkMayFr) { a.fr1 = true; g_fkNewFr = true; }
+  }
 
   if(mov) {                                        // copia cruda de 64 bits, FCSR intacto
     e.mov_r_m(RAX, RBX, fpr(fs));
@@ -1005,6 +1055,21 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
   // limpias (camino que deduce el Inexact de PE). Con Enable I armado todo Inexact es trampa:
   // se cede antes de mirar nada. Pisa RAX/RCX/RDX.
   auto syncRc = [&](int fixed, bool clr) {
+    if(fixed < 0 && k.rcg) {                       // modo e Enable I ya vistos en el bloque
+      if(clr) {                                    // solo hacen falta las banderas limpias
+        e.stmxcsr_rsp(40);
+        e.ld32_rsp(RAX, 40);
+        e.test_r32_imm(RAX, 0x3F);
+        usize ok = e.jcc_rel32_placeholder(0x84);
+        e.alu32_imm(4, RAX, ~0x3Fu);
+        e.st32_rsp(RAX, 40);
+        e.ldmxcsr_rsp(40);
+        e.patchRel32(ok);
+      }
+      return;
+    }
+    if(fixed < 0) { if(g_fkMayRc) { a.rcg = true; g_fkNewRc = true; } }
+    else a.rcg = false;
     e.mov_r32_m(RCX, RBX, fcrOff);
     e.test_r32_imm(RCX, 0x80);
     b.add(e.jcc_rel32_placeholder(0x85));
@@ -1094,9 +1159,11 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
     // 2^63 si no cabe); fuera de int32 el VR4300 levanta Unimplemented -> al CALL.
     bool trunc = fn == 0x0d;
     if(trunc) {                                    // cvttsd2si ignora el RC: solo Enable I
-      e.mov_r32_m(RCX, RBX, fcrOff);
-      e.test_r32_imm(RCX, 0x80);
-      b.add(e.jcc_rel32_placeholder(0x85));
+      if(!k.rcg) {
+        e.mov_r32_m(RCX, RBX, fcrOff);
+        e.test_r32_imm(RCX, 0x80);
+        b.add(e.jcc_rel32_placeholder(0x85));
+      }
     } else syncRc(fn == 0x0c ? 0 : fn == 0x0e ? 2 : fn == 0x0f ? 1 : -1, false);
     loadSrcD();
     e.cvtsd2si64(RAX, 0, trunc);
@@ -1194,12 +1261,12 @@ static auto emitFpMove(Emitter& e, u32 op, FpBails& b) -> bool {
   const s32 fcrOff = (s32)offsetof(CPU, fcr31);
   const s32 fprOff = (s32)offsetof(CPU, fpr);
   const s32 gOff   = (s32)(rt * 8);                // RBX == &gpr[0]
-  e.test_m8_imm(RBX, stOff, 0x20);                 // CU1
-  b.add(e.jcc_rel32_placeholder(0x84));
+  if(!g_fk.cu1) { e.test_m8_imm(RBX, stOff, 0x20); // CU1
+                  b.add(e.jcc_rel32_placeholder(0x84)); }
   // Emite `body(disp)` con el desplazamiento del registro FPU segun FR (impar: dos ramas).
   auto fprSel = [&](bool w64, auto&& body) {
     s32 d1 = fprOff + (s32)(rd * 8);               // FR=1, o par
-    if(!(rd & 1)) { body(d1); return; }
+    if(!(rd & 1) || g_fk.fr1) { body(d1); return; }
     s32 d0 = fprOff + (s32)((rd & ~1u) * 8) + (w64 ? 0 : 4);   // FR=0 impar
     e.test_m8_imm(RBX, stOff, 0x04);
     usize fr0 = e.jcc_rel32_placeholder(0x84);
@@ -1300,7 +1367,9 @@ static auto emitMtc0Status(Emitter& e, u32 op, FpBails& b) -> void {
 
 extern u64 g_helperCnt[8192];
 static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitSite,
-                         RcSnap& snap, bool delay = false, bool cop0Term = false) -> bool {
+                         RcSnap& snap, bool delay = false, bool cop0Term = false,
+                         usize* retSite = nullptr, RcSnap* retSnap = nullptr) -> bool {
+  if(retSite) *retSite = 0;
   u32 OP = op >> 26;
   bool ok = false;
   switch(OP) {
@@ -1392,6 +1461,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   // FPU en linea: si la op lo admite, el caso comun va aqui y salta por encima del CALL; los
   // rendimientos caen en el CALL de abajo, que hace la op completa.
   usize fpDone = ~(usize)0;
+  bool fpFmt = OP == 0x11 && ((op >> 21) & 31) >= 16, fpInl = false;
   // Tambien en ranura de retardo: el camino en linea no levanta excepcion (lo que podria
   // cae al CALL, que ahi es kestrel_jitInterpDelay con EPC/BD bien puestos) y solo pisa
   // registros volatiles, como el propio CALL; la condicion del salto vive en R15.
@@ -1399,6 +1469,7 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
     FpBails bails;
     bool fmtOp = ((op >> 21) & 31) >= 16;
     if(fmtOp ? emitFpInline(e, op, bails) : emitFpMove(e, op, bails)) {
+      fpInl = fmtOp;
       fpDone = e.jmp_rel32_placeholder();
       for(u32 i = 0; i < bails.n; i++) e.patchRel32(bails.at[i]);
     }
@@ -1423,6 +1494,33 @@ static auto emitInterpOp(Emitter& e, RegCache& rc, u32 op, u32 off, usize& exitS
   e.call_reg(RAX);
   e.test_al_al();
   exitSite = e.je_rel32_placeholder();    // al==0 → salida de control (la op ya tuvo efecto)
+  // Conocimiento FPU tras la op (ver FpKnow). El camino lento lo revalida antes de reunirse.
+  if(g_fpKnow) {
+    if(OP == 0x11) {
+      if(fpInl && !delay && retSite) {
+        const s32 stOff3 = (s32)offsetof(CPU, cop0) + 12 * 8 + 3;
+        usize fails[2]; int nf = 0;
+        if(g_fkNewFr) { e.test_m8_imm(RBX, stOff3, 0x04); fails[nf++] = e.jcc_rel32_placeholder(0x84); }
+        if(g_fkNewRc) { e.test_m8_imm(RBX, (s32)offsetof(CPU, fcr31), 0x80);
+                        fails[nf++] = e.jcc_rel32_placeholder(0x85); }
+        if(g_fkAfter.rcg) emitRcGuest(e);
+        if(nf) {
+          usize over = e.jmp_rel32_placeholder();
+          for(int i = 0; i < nf; i++) e.patchRel32(fails[i]);
+          *retSnap = rc.snap();
+          *retSite = e.jmp_rel32_placeholder();
+          e.patchRel32(over);
+        }
+        g_fk = g_fkAfter;
+      } else {
+        // Sin revalidacion: CU1 queda (si no, excepcion), FR no lo toca nadie, y el modo
+        // del MXCSR lo pueden cambiar el ayudante (formato) o CTC1.
+        g_fk.cu1 = true;
+        if(fpFmt || ((op >> 21) & 31) == 6) g_fk.rcg = false;
+      }
+      if(delay) g_fk = FpKnow{};
+    } else if(OP == 0x10) g_fk = FpKnow{};     // MTC0 Status: CU1/FR pueden cambiar
+  }
   if(fpDone != ~(usize)0) e.patchRel32(fpDone);
   snap = rc.snap();                       // lo sucio aqui lo escribe el stub de salida
   // Olvidar SOLO el gpr que el helper escribe, no la cache entera. Las ranuras del cache
@@ -2171,6 +2269,9 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
     branchExits.push_back(e.jmp_rel32_placeholder());
   };
 
+  g_fk = FpKnow{};
+  g_fkMayFr = ((u32)c.cop0[CPU::C0_Status] >> 26) & 1;
+  g_fkMayRc = !(c.fcr31 & 0x80);
   for(u32 i = 0; i < kMaxOps; i++) {
     u32 a = phys + 4 * i;
     if(a + 4 > c.mem->rdram.size()) break;
@@ -2222,9 +2323,11 @@ static auto compileBlock(CPU& c, u32 phys) -> Block {
       b.src.push_back(op); b.nOps++; continue;
     }
     c.jitCache->buf.used = before;
-    usize isite; RcSnap isnap;
-    if(emitInterpOp(e, rc, op, 4 * i, isite, isnap)) {
+    usize isite; RcSnap isnap; usize rsite; RcSnap rsnap;
+    if(emitInterpOp(e, rc, op, 4 * i, isite, isnap, false, false, &rsite, &rsnap)) {
       interpSites.push_back(isite); interpIdx.push_back(b.nOps + 1); interpSnap.push_back(isnap);
+      // Revalidacion FPU fallida en el camino lento: la op ya se hizo, se sale detras.
+      if(rsite) { mmioSites.push_back(rsite); mmioIdx.push_back(b.nOps + 1); mmioSnap.push_back(rsnap); }
       // Conservador: la op puede tocar memoria y estado FPU → fuera del modo jitdiff puro.
       b.hasMem = true; b.hasStore = true;
       b.src.push_back(op); b.nOps++; continue;
