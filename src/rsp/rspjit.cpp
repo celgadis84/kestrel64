@@ -399,7 +399,7 @@ enum : u8 { X_PMULLW = 0xD5, X_PMULHW = 0xE5, X_PCMPGTW = 0x65,
             X_PAND = 0xDB, X_PANDN = 0xDF, X_POR = 0xEB, X_PXOR = 0xEF,
             X_PADDW = 0xFD, X_PSUBW = 0xF9, X_PADDD = 0xFE, X_PSUBD = 0xFA,
             X_PCMPEQD = 0x76, X_PMULHUW = 0xE4, X_PACKSSDW = 0x6B,
-            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75, X_PSUBSW = 0xE9, X_PADDB = 0xFC, X_PSUBB = 0xF8, X_PCMPGTB = 0x64 };
+            X_PCMPGTD = 0x66, X_PCMPEQW = 0x75, X_PSUBSW = 0xE9, X_PADDB = 0xFC, X_PACKUSWB = 0x67, X_PSUBB = 0xF8, X_PCMPGTB = 0x64 };
 
 // VCL/VCH/VCR: las tres unicas en linea que no caben en xmm2..xmm5. El bloque que lleve
 // una salva xmm9..xmm13 en el prologo (callee-saved en Win64) y ahi tienen sitio.
@@ -1257,6 +1257,38 @@ auto emitVecRight(Ctx& c, u32 op) -> void {
   e.stx(0, rBX, c.VR(vt));
 }
 
+// SPV / SUV en linea, solo con elemento 0 u 8 (lo que usan los microcodigos). Guardan un
+// byte por banda: SPV el alto (banda >> 8), SUV la banda >> 7. Con elemento 8 el bucle del
+// interprete arranca en la mitad de "la otra", asi que SPV e=8 es SUV e=0 y al reves. Se
+// desplaza, se deja el byte bajo de cada banda (psllw+psrlw 8, para que packuswb no sature)
+// y se empaqueta a 8 bytes seguidos. Si los 8 bytes se salen de DMEM, al helper.
+auto emitVecPackStore(Ctx& c, u32 op) -> void {
+  E& e = c.e;
+  const u32 sub = op >> 11 & 0x1f, base = op >> 21 & 31, vt = op >> 16 & 31;
+  const u32 el = op >> 7 & 0xf;
+  s32 imm = (s32)(op & 0x7f); if(imm & 0x40) imm -= 0x80;
+  const bool high = (sub == 6) != (el == 8);
+
+  accFlush(c);
+
+  e.ld32(rAX, rBX, c.RG(base));
+  if(imm) e.alu_imm(D_ADD, rAX, (u32)(imm * 8));
+  e.alu_imm(D_AND, rAX, 0xfff);
+  e.alu_imm(D_CMP, rAX, 0xff8);
+  const usize slow = e.jcc8(CC_A);
+  e.add64_rr(rAX, rDI);
+  e.ldx(0, rBX, c.VR(vt));
+  if(high) e.psrlw_i(0, 8);
+  else { e.psrlw_i(0, 7); e.psllw_i(0, 8); e.psrlw_i(0, 8); }
+  e.sse_rr(X_PACKUSWB, 0, 0);
+  e.stq(0, rAX, 0);
+
+  const usize done = e.jmp8();
+  if(!e.patch8(slow)) { c.ok = false; return; }
+  emitCall(c, rspSwc2Entry(op), op);
+  if(!e.patch8(done)) c.ok = false;
+}
+
 auto emitVecMem(Ctx& c, u32 op, bool store) -> bool {
   E& e = c.e;
   // A/B: con KESTREL_RSPJIT_NOVECMEM todo vuelve al CALL de siempre. Se lee una vez, y en
@@ -1268,7 +1300,22 @@ auto emitVecMem(Ctx& c, u32 op, bool store) -> bool {
   const u32 sub = op >> 11 & 0x1f, base = op >> 21 & 31, vt = op >> 16 & 31;
   const u32 el = op >> 7 & 0xf;
   if(!offPack && !store && (sub == 6 || sub == 7)) { emitVecPack(c, op); return true; }
-  if(sub < 1 || sub > 4) return false;      // LBV y el resto de barajados (LHV/LFV/LTV)
+  if(!offPack && store && (sub == 6 || sub == 7) && (el == 0 || el == 8)) { emitVecPackStore(c, op); return true; }
+  if(sub == 0) {                            // LBV / SBV: un byte, ni envoltura ni alineacion
+    // El byte logico `el` del registro vive en el byte `el ^ 1` del almacen (cada banda de
+    // 16 bits esta en orden del anfitrion); en DMEM va tal cual, como en SB/LB.
+    accFlush(c);
+    e.ld32(rAX, rBX, c.RG(base));
+    s32 bimm = (s32)(op & 0x7f); if(bimm & 0x40) bimm -= 0x80;
+    if(bimm) e.alu_imm(D_ADD, rAX, (u32)bimm);
+    e.alu_imm(D_AND, rAX, 0xfff);
+    e.add64_rr(rAX, rDI);
+    const s32 vb = c.VR(vt) + (s32)(el ^ 1);
+    if(store) { e.movzx8_m(rCX, rBX, vb); e.st8(rCX, rAX, 0); }
+    else      { e.movzx8_m(rCX, rAX, 0);  e.st8(rCX, rBX, vb); }
+    return true;
+  }
+  if(sub < 1 || sub > 4) return false;      // barajados (LHV/LFV/LTV) y el resto
   if(el & 1) return false;                  // `vecFast` pide elemento par
   s32 imm = (s32)(op & 0x7f); if(imm & 0x40) imm -= 0x80;
   const u32 n = 2u << (sub - 1);            // 2, 4, 8 o 16 bytes

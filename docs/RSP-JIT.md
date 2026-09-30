@@ -658,7 +658,14 @@ mueve es quitar citas sin perder semantica (ver STATUS 2026-09-17, DMA SP->RDRAM
    tramos impares o que envuelven. **Censo** (`KESTREL_VUSTAT=1` con
    `KESTREL_RSPJIT=0`, SM64, 166,4 M instrucciones de microcodigo): LRV 0,60 %,
    LUV 0,55 %, LPV 0,40 % — **los tres ya van en linea** (ver mas abajo) — y
-   LTV/SPV/SUV/STV entre 0,01 y 0,07 % cada uno, que no pagan el emisor.
+   LTV/SPV/SUV/STV entre 0,01 y 0,07 % cada uno. Censo DK64 (300 flips): SBV
+   0,14 %, SUV 0,06 %, SPV 0,02 %. **LBV/SBV y SPV/SUV (elemento 0 u 8) ya van en
+   linea** (2026-09-30): LBV/SBV es un byte (`el ^ 1` en el almacen, sin envoltura);
+   SPV/SUV = `psrlw 8` o `psrlw 7` + quedarse el byte bajo + `packuswb` + `movq`, y
+   SPV e=8 es SUV e=0 (y al reves). A/B con `KESTREL_RSPJIT_NOVECMEM` /
+   `KESTREL_RSPJIT_NOVECPACK`. `--rspjitfuzz 300000` 0 diferencias; la red pesca
+   (`el ^ 1` -> `el`: 315 en 3000; `psrlw 7` -> `6`: 24 en 3000). Quedan por CALL
+   LHV/LFV/LTV, SHV/SFV/SRV/STV y SPV/SUV con otros elementos.
    (La nota anterior decia que en SM64 no aparecian: era falsa, nunca se habia
    corrido el censo.)
 2. **COP0 del RSP** (MFC0/MTC0 a los registros de SP y DP) — tambien por CALL, y
