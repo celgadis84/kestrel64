@@ -485,6 +485,8 @@ struct ColdMem {
 // interpretada (MTC0) y en la ranura de retardo no se estrena.
 static const bool g_ksuKnow = !std::getenv("KESTREL_JIT_NOKSUKNOW");
 static bool g_ksu0 = false;
+// Rango de roundTail por exponente (KESTREL_JIT_NOEXPRANGE=1 vuelve a la comparacion exacta).
+static const bool g_jitExpRange = !std::getenv("KESTREL_JIT_NOEXPRANGE");
 static const bool g_jitColdMem = !std::getenv("KESTREL_JIT_NOCOLDMEM");
 static std::vector<ColdMem>* g_coldMem = nullptr;  // lo arma compileBlock
 
@@ -1163,10 +1165,19 @@ static auto emitFpInline(Emitter& e, u32 op, FpBails& b) -> bool {
     e.movq_r64_x(RAX, 0);
     e.shift64_imm(4, RAX, 1);
     usize z = e.jcc_rel32_placeholder(0x84);
-    e.mov_r_imm64(RCX, 0x3810'0000'0000'0000ull << 1);
-    e.alu64_rr(0x2B, RAX, RCX);
-    e.mov_r_imm64(RCX, (0x47EF'FFFF'E000'0000ull - 0x3810'0000'0000'0000ull) << 1);
-    e.cmp64_rr(RAX, RCX);
+    if(g_jitExpRange) {
+      // Solo el exponente doble: [0x381, 0x47E) = [2^-126, 2^127). La franja [2^127,
+      // maxfloat] tambien iria en linea con la comparacion exacta, pero es rarisima y el CALL
+      // da el mismo resultado; a cambio, sin los dos movabs (-11 B por op FP aritmetica).
+      e.shift64_imm(5, RAX, 53);
+      e.alu32_imm(5, RAX, 0x381);
+      e.alu32_imm(7, RAX, 0x47E - 0x381 - 1);
+    } else {
+      e.mov_r_imm64(RCX, 0x3810'0000'0000'0000ull << 1);
+      e.alu64_rr(0x2B, RAX, RCX);
+      e.mov_r_imm64(RCX, (0x47EF'FFFF'E000'0000ull - 0x3810'0000'0000'0000ull) << 1);
+      e.cmp64_rr(RAX, RCX);
+    }
     b.add(e.jcc_rel32_placeholder(0x87));
     e.patchRel32(z);
     e.cvtsd2ss(2, 0);
