@@ -86,7 +86,7 @@ function mountPad(host, opts) {
   canvas._scene = sc;                    // la pagina de pruebas necesita la camara para proyectar
   sc.setMesh(MODELS.buildController());
   sc.gloss = 0.85;
-  const st = { yaw: 0, pitch: 0.42, dist: 26, min: 14, max: 46, tx: 0, ty: -0.2, tz: 0 };
+  const st = { yaw: 0, pitch: 0.82, dist: 29, min: 16, max: 50, tx: 0, ty: 0.4, tz: -0.6 };
   const p = pump(sc);
   const cam = orbit(canvas, sc, st, p.redraw);
 
@@ -154,7 +154,7 @@ function mountPad(host, opts) {
     select(id) { sel = id; recompute(); p.redraw(); },
     show() { startPoll(); p.redraw(); },
     hide() { stopPoll(); },
-    reset(yaw, pitch) { cam.reset(yaw === undefined ? 0 : yaw, pitch === undefined ? 0.42 : pitch); },
+    reset(yaw, pitch) { cam.reset(yaw === undefined ? 0 : yaw, pitch === undefined ? 0.82 : pitch); },
     destroy() { stopPoll(); if (ro) ro.disconnect(); sc.dispose(); canvas.remove(); },
   };
 }
@@ -192,11 +192,14 @@ function mountShelf(host, opts) {
   try { sc = new GL.Scene(canvas); } catch (e) { host.removeChild(canvas); return null; }
 
   const b = new GL.Builder();
-  // La caja de pie y el cartucho apoyado delante y a la derecha, girado un poco.
+  // La caja de pie y el cartucho apoyado delante y a la derecha, girado un poco. El
+  // cartucho es apaisado y mas bajo que la caja: su centro va a media altura suya sobre el
+  // mismo suelo que la base de la caja (y = -BOX.h / 2).
   b.push(M4.mul(M4.trans(-5.4, 0, 0), M4.rotY(-0.26)));
   b.merge(MODELS.buildBox());
   b.pop();
-  b.push(M4.mul(M4.mul(M4.trans(9.8, -0.9, 5.0), M4.rotY(0.50)), M4.rotX(-0.08)));
+  const cartY = -MODELS.BOX.h / 2 + MODELS.CART.h / 2 + 0.03;
+  b.push(M4.mul(M4.mul(M4.trans(9.6, cartY, 5.0), M4.rotY(0.50)), M4.rotX(-0.08)));
   b.merge(MODELS.buildCart(), "cart:");
   b.pop();
   sc.setMesh(b.build());

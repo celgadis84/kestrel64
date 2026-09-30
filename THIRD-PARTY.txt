@@ -56,6 +56,15 @@ de longitudes de comando del RDP. Son CITAS de comportamiento de hardware, que e
 un hecho y no una obra: no se ha copiado codigo de esos proyectos, y ninguno de
 ellos entra en el binario.
 
+Nota sobre los MODELOS 3D del lanzador (mando y cartucho). La geometria se genera en
+codigo (tools/launcher/web/models.js); sus medidas (contorno, alturas de las caras,
+posicion de los botones, silueta del cartucho) se tomaron de dos escaneos de carcasa
+para impresora 3D. Ninguna malla de ellos se incluye. Atribucion:
+   - Mando: "N64 Controller Shell" por LambBrainz, Thingiverse 5859650, CC BY 4.0
+     https://www.thingiverse.com/thing:5859650
+   - Cartucho: por jmsaltzman, Printables 87559, dominio publico
+     https://www.printables.com/model/87559
+
 
 ================================================================================
 Seccion A -- Licencia MIT (parallel-rdp, volk)

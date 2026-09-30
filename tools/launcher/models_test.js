@@ -75,17 +75,17 @@ function checkMesh(name, m, expectIds, bound) {
 const PAD_IDS = ["A", "B", "START", "Z", "L", "R", "CU", "CD", "CL", "CR",
                  "DU", "DD", "DL", "DR", "STICK"];
 
-checkMesh("mando",    MODELS.buildController(), PAD_IDS, [17.6, 9.4, 7.3]);
-checkMesh("cartucho", MODELS.buildCart(),       ["LABEL"], [9.3, 11.8, 2.5]);
-checkMesh("caja",     MODELS.buildBox(),        ["COVER", "BACK"], [13.5, 19.0, 3.0]);
+checkMesh("mando",    MODELS.buildController(), PAD_IDS, [16.0, 7.8, 17.5]);
+checkMesh("cartucho", MODELS.buildCart(),       ["LABEL"], [11.6, 7.64, 1.84]);
+checkMesh("caja",     MODELS.buildBox(),        ["COVER", "BACK"], [19.0, 13.3, 2.8]);
 
 // El estante junta caja y cartucho en una sola malla: si `merge` descoloca un tramo, la
 // seleccion por color senala la pieza equivocada, asi que se comprueba igual que las demas.
 {
   const bb = new GL.Builder();
-  bb.push(GL.M4.trans(-2.6, 0, 0)).merge(MODELS.buildBox()).pop();
-  bb.push(GL.M4.trans(5.4, -3.4, 3.2)).merge(MODELS.buildCart(), "cart:").pop();
-  checkMesh("estante", bb.build(), ["COVER", "BACK", "cart:LABEL"], [19.4, 19.0, 5.9]);
+  bb.push(GL.M4.trans(-5.4, 0, 0)).merge(MODELS.buildBox()).pop();
+  bb.push(GL.M4.trans(9.6, -2.8, 5.0)).merge(MODELS.buildCart(), "cart:").pop();
+  checkMesh("estante", bb.build(), ["COVER", "BACK", "cart:LABEL"], [30.3, 13.3, 7.3]);
 }
 
 /* Volumen firmado: si una primitiva tiene los triangulos al reves, el culling se come esa

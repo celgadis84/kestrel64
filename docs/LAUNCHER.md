@@ -232,17 +232,30 @@ funcionalidad no depende del 3D.
 
 ## Los modelos 3D
 
-Mando, cartucho y caja estan **dibujados en codigo** (`web/models.js`), con medidas del
-aparato real en centimetros: mando 17.3 cm de ancho, cartucho 8.8 x 11.4 x 2.1, caja de
-carton **19.0 x 13.3 x 2.8**. La caja va APAISADA: la de N64 de Norteamerica y Europa mide
-190 x 133 x 28 mm, mas ancha que alta -- la vertical es la de SNES. Estaba al reves (13.5 x
-19.0) y las caratulas, que son apaisadas, salian aplastadas de lado. Las medidas salen del
-modulo (`MODELS.BOX`, `CART`, `COVER`, `LABEL`) porque quien cuelga una imagen necesita saber
-a que proporcion recortarla. No hay ningun modelo descargado, y no por gusto: los modelos de
-N64 que circulan por los repositorios 3D o no son descargables o llevan licencias
-(`Editorial`, "todos los derechos reservados") que no permiten meterlos dentro de un
-programa que se reparte. Comprobado antes de escribir una linea, via
-`https://api.sketchfab.com/v3/models/<uid>` (campos `license` e `isDownloadable`).
+Mando, cartucho y caja estan **dibujados en codigo** (`web/models.js`), en centimetros:
+mando 16.0 x 15.4 cm en planta (17.5 de fondo con el cable), cartucho **11.6 x 7.64 x 1.84**
+(apaisado, techo en arco), caja de carton **19.0 x 13.3 x 2.8**. La caja va APAISADA: la de
+N64 de Norteamerica y Europa mide 190 x 133 x 28 mm, mas ancha que alta -- la vertical es la
+de SNES. Las medidas salen del modulo (`MODELS.BOX`, `CART`, `COVER`, `LABEL`) porque quien
+cuelga una imagen necesita saber a que proporcion recortarla; la pegatina del cartucho es
+5.5 x 6.4, mas alta que ancha.
+
+**De donde salen las medidas.** Del mando y del cartucho se midieron dos escaneos de carcasa
+para impresora 3D, y con esos numeros se levanto geometria nueva. Ninguna malla descargada
+entra en el repositorio ni en el programa: solo tablas de numeros medidas sobre ellas.
+
+| Pieza | Fuente | Autor | Licencia |
+|-------|--------|-------|----------|
+| mando | Thingiverse 5859650, "N64 Controller Shell" | LambBrainz | CC BY 4.0 |
+| cartucho | Printables 87559 | jmsaltzman | dominio publico |
+
+Lo medido (scripts de un solo uso, fuera del repo): el contorno en planta con la altura de
+la costura (`PAD_HALF`), las alturas de la cara de arriba y la de abajo en una rejilla de
+0,5 cm (`PAD_TOP`, `PAD_BOT`; con los agujeros rellenos por Laplace, gauss sigma 3, mediana
+3x3 y simetrizado en x), el centro y radio de cada agujero de boton (`PAD_HOLES`,
+`PAD_DPAD`, `PAD_STICK`, `PAD_Z`), las secciones de la bahia del Controller Pak (`BAY`) y,
+del cartucho, la media silueta frontal milimetro a milimetro (`CART_HALF`) y el rebaje de
+la pegatina. Antes era todo a ojo (tridente de tres cajas y domos) y no se parecia.
 
 `web/gl.js` es el motor: matrices columna, un constructor de mallas con pila de
 transformaciones, primitivas (caja redondeada, cilindro, esfera, extrusion de poligono),
@@ -253,11 +266,18 @@ falta uno, en la interfaz no se puede pinchar.
 
 ### La carcasa del mando es una sola pieza
 
-El mando no son tres cajas solapadas (eso se veia deforme). Es su **silueta real**: media
-planta a mano (`PAD_HALF`, la pala central, el entrante y la pala derecha hasta el canto de
-atras), espejada, suavizada con Catmull-Rom (`smoothPoly`, 30 puntos de control -> 128) y
-extruida con los cantos redondeados. Los tres mangos son secciones superelipticas que bajan,
-se estrechan y se curvan hacia el jugador, cosidas en un tubo (`handleRings` + `loft`).
+Una malla cerrada: el contorno medido suavizado con Catmull-Rom (tambien la altura de la
+costura), siete anillos de canto redondeado (radio 0.30) que suben de la costura a la cara
+de arriba y bajan a la de abajo, y las dos caras como **superficies de altura** sobre una
+triangulacion de Delaunay propia (Bowyer-Watson) del contorno encogido mas una rejilla de
+0,3 cm. La altura se lee de las tablas con interpolacion bicubica. `solid()` orienta la
+malla por el signo de su volumen y le da normales suaves; `tube()` hace lo mismo para la
+bahia. Cada boton lleva un hueco oscuro cuyo disco asoma sobre el punto mas alto de su
+borde, para que en las pendientes se vea un circulo y no una media luna.
+
+Dos trampas: en los entrantes cerrados (pala central contra laterales) un punto de control
+de mas hacia que la Catmull-Rom se cruzara y salian picos; y las bisectrices de `polyInset`
+cambian de golpe ahi, asi que se promedian con sus vecinas (`smoothDirs`).
 
 Primitivas nuevas que hacen falta para eso, todas en `gl.js`:
 
