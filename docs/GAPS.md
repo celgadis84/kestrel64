@@ -899,9 +899,11 @@ Por ahi va el orden nuevo:
 - Presentacion sin copia (zero-copy).
 - Sombra de MXCSR — 0,7 %.
 - Coste de llamada de `runFifo`.
-- **Seguimiento de paginas sucias para el rebobinado** (nuevo 2026-09-04). Hoy cada foto
-  para el RCP y recorre el estado ENTERO comparandolo: +45 % de pared con foto cada 2
-  campos, +24 % cada 6 (`docs/REWIND.md`). Con un mapa de paginas sucias la foto solo
+- **Seguimiento de paginas sucias para el rebobinado** (nuevo 2026-09-04). **Abaratado
+  2026-09-30 sin el mapa**: diferencia en caliente (`codec::DeltaSink`), la foto se compara
+  contra la anterior segun se recorre en vez de copiarse entera y compararse despues. SM64
+  foto cada 2 campos: 17 -> 4,8 ms por foto, +107 % -> **+28 %** de pared (`docs/REWIND.md`).
+  Lo que queda es recorrer ~16 MB por foto. Con un mapa de paginas sucias la foto solo
   miraria lo que cambio. No es corto: hay que cazar TODAS las vias de escritura a la
   RDRAM -- CPU cacheada y sin cachear, DMA de RSP/PI/SI y el propio RDP -- y una sola que
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.

@@ -18,6 +18,7 @@
 namespace kestrel {
 
 struct System;
+namespace rewind::codec { struct DeltaSink; }
 // Visitante del estado. Definido en savestate.cpp; es amigo de Rsp/SoftRdp/Memory para
 // poder leer y reescribir el estado privado de ejecucion (latch de ranura de retardo del
 // RSP, punteros de reanudacion del FIFO del RDP) sin abrirlo al resto del emulador.
@@ -35,6 +36,11 @@ auto loadState(System& sys, const std::string& path, std::string& err) -> bool;
 // saveState/loadState: RCP en reposo y coreMutex en manos del llamante.
 auto captureState(System& sys, std::vector<u8>& out) -> void;
 auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> bool;
+
+// Foto del rebobinado SIN foto: compara el estado vivo contra `cur` (la foto anterior) segun
+// se recorre, deja en `delta` la diferencia hacia atras y en `cur` la foto nueva. false si el
+// estado ya no mide lo que `cur` (entonces `cur` NO se ha tocado y toca captureState).
+auto captureDelta(System& sys, rewind::codec::DeltaSink& sink, std::vector<u8>& cur, std::vector<u8>& delta) -> bool;
 
 // Ruta de una ranura: la ROM con la extension cambiada a .stN, igual que el fichero de
 // guardado de la pila (.eep/.sra/.fla) vive al lado de la ROM.

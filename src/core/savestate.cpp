@@ -11,6 +11,7 @@
 #include "system.hpp"
 #include "memory.hpp"
 #include "movie.hpp"
+#include "rewind.hpp"
 #include "../cpu/cpu.hpp"
 #include "../cpu/jit.hpp"
 #include "../rsp/rsp.hpp"
@@ -42,13 +43,22 @@ constexpr u32 kVersion = 14;  // 14: plazos armados de VI y AI (viNextAt/aiNextA
 struct StateIO {
   bool writing = false;
   std::vector<u8>* out = nullptr;
+  // Escritura sin vector: con `sink` los bytes van a la diferencia en caliente del
+  // rebobinado; sin `out` ni `sink` solo se cuentan (para saber cuanto medira la foto).
+  rewind::codec::DeltaSink* sink = nullptr;
+  usize count = 0;
   const u8* in = nullptr;
   usize len = 0, pos = 0;
   bool bad = false;
 
   auto bytes(void* p, usize n) -> void {
     if(bad) { if(!writing) std::memset(p, 0, n); return; }
-    if(writing) { const u8* b = (const u8*)p; out->insert(out->end(), b, b + n); return; }
+    if(writing) {
+      if(out) { const u8* b = (const u8*)p; out->insert(out->end(), b, b + n); }
+      else if(sink) sink->feed(p, n);
+      else count += n;
+      return;
+    }
     if(pos + n > len) { bad = true; std::memset(p, 0, n); return; }
     std::memcpy(p, in + pos, n);
     pos += n;
@@ -372,6 +382,24 @@ auto captureState(System& sys, std::vector<u8>& out) -> void {
   io.writing = true;
   io.out = &out;
   visitAll(io, sys);
+}
+
+auto captureDelta(System& sys, rewind::codec::DeltaSink& sink, std::vector<u8>& cur, std::vector<u8>& delta) -> bool {
+  // Primero se cuenta: la diferencia en caliente pisa `cur` segun avanza, asi que un tamano
+  // distinto hay que verlo ANTES de empezar. Contar no copia nada, cuesta lo que un recorrido
+  // de la lista de campos (la RDRAM es un solo bloque).
+  Header h = makeHeader(sys);
+  StateIO cnt;
+  cnt.writing = true;
+  visitAll(cnt, sys);
+  if(sizeof(h) + cnt.count != cur.size()) return false;
+  sink.begin(cur, delta);
+  sink.feed(&h, sizeof(h));
+  StateIO io;
+  io.writing = true;
+  io.sink = &sink;
+  visitAll(io, sys);
+  return sink.finish();
 }
 
 auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> bool {

@@ -28,6 +28,18 @@ Medido en SM64, 200 intercambios de buffer, SoftRDP, sin video ni audio, dos tan
 | cada 2 campos | 6221 / 6563 ms | **+45 %** |
 | cada 6 campos | 5526 / 5420 ms | **+24 %** |
 
+**Actualizado 2026-09-30 (diferencia en caliente, ver abajo)**, SM64 400 intercambios,
+Parallel-RDP, Threaded+JIT, tres tandas intercaladas:
+
+| Rebobinado (cada 2 campos) | Pared | Frente a apagado | Por foto |
+|---|---|---|---|
+| apagado | 7243 / 7273 / 6896 ms | — | — |
+| foto entera + `makeDelta` (`KESTREL_REWIND_NOSINK=1`) | 15125 / 14979 / 14917 ms | +107 % | 12,4 + 4,5 ms |
+| diferencia en caliente (de fabrica) | 9414 / 9112 / 9023 ms | **+28 %** | **4,8 ms** |
+
+La tabla vieja de arriba se midio con SoftRDP y antes del reposo natural del RCP; la cifra
+que vale hoy es esta.
+
 Apagado no cuesta *nada*: una comparacion contra cero al cerrar cada campo. Encendido, cada
 foto paga tres cosas: **parar el RCP** (drenar la cola del RDP y terminar la tarea del RSP,
 que es el mismo serializado que en su dia costo un 13-15 % en Perfect Dark), **recorrer el
@@ -56,6 +68,30 @@ registros hasta cubrirla:  u32 iguales · u32 distintos · bytes de la vieja
 
 Los "iguales" se copian de la foto nueva en la misma posicion y los "distintos" van
 literales. La comparacion va por palabras de 4 bytes, que es como esta escrito el estado.
+
+### Diferencia en caliente (`codec::DeltaSink`, 2026-09-30)
+
+Perfilado en SM64, la foto costaba **12,4 ms en sacar el estado entero** (`captureState`:
+~16 MB copiados a un vector) y **4,5 ms en compararlo** (`makeDelta`), o sea dos pasadas
+completas y una copia que se tiraba. Ahora el visitante del estado escribe en un *sumidero*:
+`captureDelta` (`savestate.cpp`) recorre el estado vivo y cada trozo que sale se compara EN
+SU SITIO contra la foto anterior; lo distinto se apunta (los bytes VIEJOS) y se escribe
+encima. Al acabar, la foto anterior ya es la nueva y la diferencia esta hecha: una lectura
+del estado vivo, una de la foto, y solo se escribe lo que cambio. **4,8 ms por foto**.
+
+- El sumidero exige que el estado nuevo mida lo mismo que la foto (a mitad de camino la foto
+  ya esta pisada). `captureDelta` hace antes una pasada que solo CUENTA bytes -- barata, la
+  RDRAM es un bloque -- y si el tamano cambia cae al camino de siempre.
+- Los tramos salen por bytes, y un hueco igual de menos de 16 bytes dentro de un tramo
+  distinto se funde con el (dos cabeceras cuestan 16). El formato es el mismo y `applyDelta`
+  no cambia; la cinta sale algo mas pequena (SM64: 7,47 MB frente a 7,83 por los mismos 99
+  pasos).
+- `KESTREL_REWIND_RTT=1` sigue por el camino viejo: necesita la foto entera para recargarla.
+- `KESTREL_REWIND_NOSINK=1` vuelve al camino viejo para A/B. Las dos dan el MISMO estado
+  byte a byte (comprobado con `scripts/rewind_e2e.py` en SoftRDP y Parallel-RDP).
+
+Lo que queda es ancho de banda de memoria (~16 MB comparados por foto). Bajarlo mas pide el
+mapa de paginas sucias de `docs/GAPS.md`, con el riesgo que se explica alli.
 
 Medido en la pantalla de titulo de SM64 con foto cada 2 campos: **~79 KB por paso**, o sea
 que los 256 MB de fabrica dan unos 3400 pasos = ~6800 campos = **casi dos minutos** de
@@ -99,6 +135,13 @@ cobra siempre por el extremo VIEJO, que es el que no se va a pedir.
   ultimo es lo que prueba que el estado restaurado es el mismo, y no uno parecido: si algo del
   estado quedara viejo, el futuro que sale de el seria distinto.
 
+- `scripts/rewind_e2e.py` (dentro de `gate_all.sh`, ~10 s): corre 240 campos, rebobina 20
+  pasos, guarda el estado ENTERO, corre 40 campos y lo guarda; y lo repite. Los dos
+  rebobinados tienen que dar el mismo estado byte a byte (el segundo aterriza en una foto
+  tomada DESPUES del primer rebobinado, o sea que prueba tambien la cinta escrita tras
+  rebobinar) y las dos corridas de 40 campos tambien. Compara el estado y no el framebuffer,
+  que en el logo de SM64 no cambia en 40 campos con SoftRDP; y no compara con el estado
+  "en el campo 200" porque la foto cae al cerrar el campo y la pausa de `frame.advance` no.
 - **Ida y vuelta en cada foto** (`KESTREL_REWIND_RTT=1`, modo de gate `rewind-rtt` dentro de
   `gate_all.sh`): cada foto que se toma se vuelve a cargar en el acto sobre la maquina viva. Si
   el estado guardado se dejara algo, el futuro que sale de la carga seria distinto, y la puerta

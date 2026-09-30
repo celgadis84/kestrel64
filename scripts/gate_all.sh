@@ -15,6 +15,13 @@ for t in rsp_test save_test cheat_test archive_test wildmem_test rewind_test wat
     *) echo "$t: FALLO -> $out"; exit 1 ;;
   esac
 done
+# Rebobinado extremo a extremo (~10 s): rebobinar y volver a correr dos veces tiene que dar
+# el mismo estado entero byte a byte (diferencia en caliente + cinta escrita tras rebobinar).
+out=$($PY scripts/rewind_e2e.py --exe build/kestrel64.exe --port 9131 2>&1 | tail -1)
+case "$out" in
+  PASS) echo "rewind_e2e: PASS" ;;
+  *) echo "rewind_e2e: FALLO -> $out"; exit 1 ;;
+esac
 for m in interp jit jit-nolink threaded threaded-jit rspinterp rspnolink rewind-rtt phys phys-threaded; do
   $PY scripts/validate.py systemtest --mode $m
   $PY scripts/validate.py sm64 --mode $m

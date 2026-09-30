@@ -39,13 +39,26 @@ auto Engine::onField(System& sys) -> void {
   if(++sinceLast < interval) return;
   sinceLast = 0;
 
+  static const bool rtt = [] { const char* e = std::getenv("KESTREL_REWIND_RTT");
+                               return e && *e && std::strcmp(e, "0") != 0; }();
+  static const bool noSink = [] { const char* e = std::getenv("KESTREL_REWIND_NOSINK");
+                                  return e && *e && std::strcmp(e, "0") != 0; }();
+  // Camino normal: diferencia en caliente, sin sacar la foto entera (ver codec::DeltaSink).
+  // Medido en SM64: la foto entera + makeDelta eran 12,4 + 4,5 ms por foto. El RTT necesita
+  // la foto entera para recargarla, y un estado que cambia de tamano (un vecBlob que crece)
+  // cae al camino de siempre.
+  if(primed && !rtt && !noSink) {
+    std::vector<u8> d;
+    sink.pos = 0;
+    if(captureDelta(sys, sink, cur, d)) { push(std::move(d)); return; }
+    if(sink.pos) { clear(); sinceLast = 0; }   // no deberia pasar: `cur` a medio pisar no vale
+  }
+
   captureState(sys, scratch);
   // KESTREL_REWIND_RTT=1 (diagnostico): cada foto se vuelve a cargar al instante. Una maquina
   // determinista tiene que dar el mismo statehash que sin rebobinado: cualquier trozo de estado
   // de invitado que la foto no lleve (y que afterLoad reinicie) aparece como divergencia o
   // cuelgue en el primer campo en que importe.
-  static const bool rtt = [] { const char* e = std::getenv("KESTREL_REWIND_RTT");
-                               return e && *e && std::strcmp(e, "0") != 0; }();
   if(rtt) {
     std::string err;
     if(!restoreState(sys, scratch.data(), scratch.size(), err))
@@ -55,10 +68,13 @@ auto Engine::onField(System& sys) -> void {
 
   std::vector<u8> d;
   codec::makeDelta(scratch, cur, d);
+  cur.swap(scratch);
+  push(std::move(d));
+}
+
+auto Engine::push(std::vector<u8>&& d) -> void {
   used += d.size();
   deltas.push_back(std::move(d));
-  cur.swap(scratch);
-
   // El tope se cobra por el extremo VIEJO: lo que se pierde al llenarse es el pasado
   // lejano, no el reciente, que es justo lo que se va a pedir.
   while(used > budget && !deltas.empty()) {

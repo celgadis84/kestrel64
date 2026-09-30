@@ -122,6 +122,58 @@ auto main() -> int {
                   100.0 * (double)totalDelta / (double)totalOld);
   }
 
+  // Diferencia en caliente (DeltaSink): la nueva entra a trozos de tamano al azar, como la
+  // recorre el visitante del estado. Al acabar la base tiene que SER la nueva y la diferencia
+  // aplicada sobre ella devolver la vieja. Mismo tamano siempre: es lo que exige el sink.
+  {
+    std::mt19937 rng(777);
+    rewind::codec::DeltaSink sink;
+    u64 totalDelta = 0, totalOld = 0;
+    int bad = 0;
+    for(int it = 0; it < 2000 && !bad; it++) {
+      usize n = rng() % 8192;
+      std::vector<u8> vieja(n);
+      for(usize i = 0; i < n; i++) vieja[i] = (u8)rng();
+      std::vector<u8> nueva = vieja;
+      int patches = n ? (int)(rng() % 21) : 0;
+      for(int p = 0; p < patches; p++) {
+        usize off = rng() % n;
+        usize len = 1 + (rng() % 64);
+        if(off + len > n) len = n - off;
+        // A veces el parche deja bytes iguales dentro (huecos cortos que el sink funde).
+        for(usize i = 0; i < len; i++) if(rng() % 3) nueva[off + i] = (u8)rng();
+      }
+      if(it % 50 == 0) for(auto& x : nueva) x = (u8)rng();   // todo distinto
+      std::vector<u8> base = vieja, d, back;
+      sink.begin(base, d);
+      usize i = 0;
+      while(i < n) {
+        usize k = 1 + (rng() % 300);
+        if(i + k > n) k = n - i;
+        sink.feed(nueva.data() + i, k);
+        i += k;
+      }
+      if(!sink.finish()) { std::printf("FAIL sink it=%d finish\n", it); bad++; break; }
+      if(base != nueva) { std::printf("FAIL sink it=%d la base no es la nueva\n", it); bad++; break; }
+      if(!rewind::codec::applyDelta(base, d, back) || back != vieja) {
+        std::printf("FAIL sink it=%d (n=%zu) la vuelta no es la vieja\n", it, n); bad++; break;
+      }
+      totalDelta += d.size();
+      totalOld += n;
+    }
+    fails += bad;
+    if(!bad) std::printf("ok   2000 pares en caliente  (delta = %.1f%% de la foto)\n",
+                         totalOld ? 100.0 * (double)totalDelta / (double)totalOld : 0.0);
+    // De mas y de menos: se niega sin salirse de la base.
+    std::vector<u8> base = seq(64, 1), d, big = seq(65, 2);
+    sink.begin(base, d); sink.feed(big.data(), big.size());
+    if(sink.finish()) { std::printf("FAIL sink acepto un estado mas largo\n"); fails++; }
+    else std::printf("ok   sink rechaza estado mas largo\n");
+    sink.begin(base, d); sink.feed(big.data(), 10);
+    if(sink.finish()) { std::printf("FAIL sink acepto un estado mas corto\n"); fails++; }
+    else std::printf("ok   sink rechaza estado mas corto\n");
+  }
+
   // Diferencia corrupta: tiene que NEGARSE, no reventar ni devolver basura.
   {
     auto a = seq(256, 1); auto b = seq(256, 9);

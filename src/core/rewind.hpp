@@ -111,6 +111,77 @@ inline auto applyDelta(const std::vector<u8>& nueva, const std::vector<u8>& d, s
   return i == dst.size();
 }
 
+// Diferencia EN CALIENTE: la misma diferencia de `nueva` a `vieja`, pero sin tener la foto
+// nueva entera. `base` es la foto vieja; el estado vivo entra a trozos por feed() en el orden
+// en que se serializa, se compara contra `base` en su posicion, lo distinto se apunta (bytes
+// VIEJOS) y se reescribe sobre `base`. Al acabar, `base` ES la foto nueva y `out` la
+// diferencia hacia atras. Ahorra la copia entera del estado (~16 MB) y la segunda pasada de
+// makeDelta: una lectura del vivo, una de la vieja y solo se escribe lo que cambio.
+//
+// Los tramos no salen iguales que los de makeDelta (esa va por palabras alineadas, esta por
+// bytes y funde huecos iguales de menos de kGap bytes dentro de un tramo distinto), pero el
+// formato es el mismo y applyDelta no pide mas que tramos que cubran la foto vieja. Exige que
+// el estado nuevo mida EXACTAMENTE lo que la vieja: el llamante lo comprueba antes, porque a
+// mitad de camino `base` ya esta pisada y no se puede volver atras.
+struct DeltaSink {
+  static constexpr usize kGap = 16;   // hueco igual minimo que cierra un tramo distinto (2 cabeceras)
+  u8* base = nullptr;
+  usize baseLen = 0, pos = 0;
+  std::vector<u8>* out = nullptr;
+  usize same = 0, pendEq = 0;
+  std::vector<u8> diff;               // bytes viejos del tramo distinto abierto
+  bool overflow = false;
+
+  auto begin(std::vector<u8>& vieja, std::vector<u8>& o) -> void {
+    base = vieja.data(); baseLen = vieja.size(); pos = 0; out = &o;
+    same = 0; pendEq = 0; diff.clear(); overflow = false;
+    o.clear(); putU64(o, baseLen);
+  }
+  auto pair() -> void {
+    putU32(*out, (u32)same); putU32(*out, (u32)diff.size());
+    out->insert(out->end(), diff.begin(), diff.end());
+    diff.clear();
+  }
+  auto eq(usize n) -> void {
+    if(diff.empty()) { same += n; return; }
+    pendEq += n;
+    if(pendEq >= kGap) { pair(); same = pendEq; pendEq = 0; }
+  }
+  // n bytes distintos en base+pos (ya se ha avanzado el eq anterior).
+  auto ne(const u8* src, usize n) -> void {
+    if(pendEq) { diff.insert(diff.end(), base + pos - pendEq, base + pos); pendEq = 0; }
+    diff.insert(diff.end(), base + pos, base + pos + n);
+    std::memcpy(base + pos, src, n);
+  }
+  auto feed(const void* p, usize n) -> void {
+    if(overflow || pos + n > baseLen) { overflow = true; return; }
+    const u8* s = (const u8*)p;
+    usize i = 0;
+    while(i < n) {
+      const u8* b = base + pos;
+      usize j = i;
+      while(j + 1024 <= n && std::memcmp(s + j, b + j - i, 1024) == 0) j += 1024;
+      while(j + 32 <= n && std::memcmp(s + j, b + j - i, 32) == 0) j += 32;
+      while(j + 8 <= n && std::memcmp(s + j, b + j - i, 8) == 0) j += 8;
+      while(j < n && s[j] == b[j - i]) j++;
+      if(j > i) { eq(j - i); pos += j - i; i = j; }
+      if(i >= n) break;
+      b = base + pos;
+      usize k = i + 1;
+      while(k < n && s[k] != b[k - i]) k++;
+      ne(s + i, k - i); pos += k - i; i = k;
+    }
+  }
+  auto finish() -> bool {
+    if(overflow || pos != baseLen) return false;
+    if(!diff.empty()) {
+      pair();
+      if(pendEq) { same = pendEq; pair(); }
+    } else if(same) pair();
+    return true;
+  }
+};
+
 }  // namespace codec
 
 
@@ -141,6 +212,8 @@ struct Engine {
   u64 used = 0;                    // bytes que ocupan las diferencias
   u32 sinceLast = 0;               // campos desde la ultima foto
   bool primed = false;             // ya hay foto viva
+  codec::DeltaSink sink;           // diferencia en caliente, reutilizada
+  auto push(std::vector<u8>&& d) -> void;
 };
 
 }  // namespace rewind
