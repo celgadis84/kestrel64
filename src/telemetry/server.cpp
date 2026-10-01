@@ -752,6 +752,36 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
 // Dump the low-level RSP core: scalar GPRs, PC (into IMEM), running flag, and the
 // 32 vector registers as 8×u16 lanes each (hex). Lets us inspect a stuck/parked
 // microcode without a separate disassembler.
+// Resumen del modelo de ciclos del RSP (rsptiming.hpp): ventana desde el ultimo prof.reset /
+// prof.start (o el arranque), la ultima tarea terminada en BREAK y el reparto por OSTask.type.
+static auto rspTimingJson(const RspTiming& t) -> json::Value {
+  json::Value o = json::Value::object();
+  const u64 cyc = t.cycle - t.cyc0;
+  o.set("cycles", cyc);
+  o.set("insns", t.insns);
+  o.set("ipc", cyc ? (double)t.insns / (double)cyc : 0.0);
+  o.set("stalls", t.stalls);
+  o.set("pairs", t.pairs);
+  o.set("bubbles", t.bubbles);
+  o.set("dmaStall", t.dmaStall);
+  o.set("dmas", t.dmas);
+  o.set("tasks", t.tasks);
+  json::Value l = json::Value::object();
+  l.set("type", t.last.type); l.set("insns", t.last.insns); l.set("cycles", t.last.cycles);
+  l.set("stalls", t.last.stalls); l.set("pairs", t.last.pairs); l.set("bubbles", t.last.bubbles);
+  l.set("dmaStall", t.last.dmaStall);
+  o.set("lastTask", l);
+  json::Value by = json::Value::array();
+  for(u32 i = 0; i < 8; i++) if(t.typeN[i]) {
+    json::Value e = json::Value::object();
+    e.set("type", (u64)i); e.set("tasks", t.typeN[i]); e.set("cycles", t.typeCyc[i]); e.set("insns", t.typeIns[i]);
+    e.set("avgCycles", (double)t.typeCyc[i] / (double)t.typeN[i]);
+    by.push(e);
+  }
+  o.set("byType", by);
+  return o;
+}
+
 auto Server::cmdRspRegs(const json::Value& args, json::Value& data) -> void {
   std::lock_guard<std::mutex> lk(system.coreMutex);
   Rsp& s = system.memory.rsp;
@@ -759,6 +789,7 @@ auto Server::cmdRspRegs(const json::Value& args, json::Value& data) -> void {
   data.set("running", s.running);
   data.set("sp_status", (u64)system.memory.rcp.sp_status.load());
   data.set("sp_pc", (u64)system.memory.rcp.sp_pc);
+  if(s.tm) data.set("timing", rspTimingJson(*s.tm));   // KESTREL_RSP_TIMING=1
   json::Value g = json::Value::array();
   for(int i = 0; i < 32; i++) g.push(json::Value((u64)s.r[i]));
   data.set("gpr", g);
@@ -856,12 +887,14 @@ auto Server::cmdProfControl(const std::string& cmd, json::Value& data) -> void {
   if(cmd == "prof.start") {
     system.cpu.profEnable(true);
     system.memory.rsp.profOn = true; system.memory.rsp.profClear();
+    if(system.memory.rsp.tm) system.memory.rsp.tm->clearStats();
   } else if(cmd == "prof.stop") {
     system.cpu.profEnable(false);
     system.memory.rsp.profOn = false;
   } else {  // prof.reset
     system.cpu.profClear();
     system.memory.rsp.profClear();
+    if(system.memory.rsp.tm) system.memory.rsp.tm->clearStats();
   }
   data.set("profiling", system.cpu.profOn);
 }
@@ -933,21 +966,39 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   data.set("hot", list);
 }
 
+// Con KESTREL_RSP_TIMING=1 cada ranura lleva ademas `cycles` (ciclos del modelo de pipeline
+// cargados a esa instruccion: emision + paradas + burbuja + espera de DMA), `stalls` (paradas
+// RAW y store-tras-load) y `pairs` (veces que salio en pareja SU+VU), y `metric=cycles|stalls`
+// ordena por ellos. Ver src/rsp/rsptiming.hpp.
 auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
   u32 topN = args.has("top") ? args.get("top").asU32() : 20;
+  const std::string metric = args.has("metric") ? args.get("metric").asString() : "count";
   std::lock_guard<std::mutex> lk(system.coreMutex);
   Rsp& s = system.memory.rsp;
-  std::vector<std::pair<u32, u32>> hot;   // (count, imem slot)
-  for(u32 i = 0; i < 1024; i++) if(s.profPc[i]) hot.push_back({s.profPc[i], i});
+  const RspTiming* t = s.tm;
+  const u32* key = s.profPc;
+  if(t && metric == "cycles") key = t->slotCyc;
+  else if(t && metric == "stalls") key = t->slotStall;
+  else if(metric != "count") data.set("warn", std::string(t ? "metric desconocida, uso count" : "cycles/stalls piden KESTREL_RSP_TIMING=1"));
+  std::vector<std::pair<u32, u32>> hot;   // (clave, imem slot)
+  for(u32 i = 0; i < 1024; i++) if(key[i]) hot.push_back({key[i], i});
   std::sort(hot.begin(), hot.end(), [](auto& a, auto& b){ return a.first > b.first; });
 
   json::Value list = json::Value::array();
   u64 total = s.profTotal ? s.profTotal : 1;
   for(u32 k = 0; k < hot.size() && k < topN; k++) {
     json::Value e = json::Value::object();
-    e.set("imem", (u64)(hot[k].second << 2));   // IMEM byte address
-    e.set("count", (u64)hot[k].first);
-    e.set("pct", 100.0 * (double)hot[k].first / (double)total);
+    const u32 sl = hot[k].second;
+    e.set("imem", (u64)(sl << 2));   // IMEM byte address
+    e.set("count", (u64)s.profPc[sl]);
+    e.set("pct", 100.0 * (double)s.profPc[sl] / (double)total);
+    if(t) {
+      e.set("cycles", (u64)t->slotCyc[sl]);
+      e.set("stalls", (u64)t->slotStall[sl]);
+      e.set("pairs", (u64)t->slotPair[sl]);
+      const u64 tc = t->cycle - t->cyc0;
+      e.set("cyclesPct", 100.0 * (double)t->slotCyc[sl] / (double)(tc ? tc : 1));
+    }
     // Palabra que hay AHORA en ese hueco (big-endian). Cada tarea recarga el IMEM: si el
     // hueco lo comparten varios microcodigos, la palabra es la del ultimo cargado.
     const auto& im = system.memory.imem;
@@ -959,6 +1010,7 @@ auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
   data.set("total", (u64)s.profTotal);
   data.set("enabled", s.profOn);
   data.set("hot", list);
+  if(t) data.set("timing", rspTimingJson(*t));
 }
 
 // --- pad.set / pad.get -------------------------------------------------------

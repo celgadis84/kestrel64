@@ -9845,6 +9845,29 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-01 (c) -- modelo de ciclos del pipeline RSP (peticion n64-be)
+
+- `KESTREL_RSP_TIMING=1` (apagado por defecto): `src/rsp/rsptiming.hpp`, solo contabilidad.
+  Reglas = port de RSPL evalCost que usa `kestrel64-sdk/tools/rsp_cycles.py`: emision doble
+  SU+VU (sin RAW/WAW, sin saltos, no ranura de retardo, CFC2/CTC2 no con productor), latencias
+  4 (vector, LWC2, MTC2) / 3 (loads, MFC0/MFC2/CFC2), store a 2 ciclos de un load +1, salto
+  TOMADO +1 burbuja (el modelo estatico los cobra todos). VRCP/VRSQ/VMOV solo leen vt, VSAR nada.
+  La pareja se decide con la siguiente instruccion que de verdad se ejecuta.
+- DMA del SP (estimacion): `fin = max(ahora, fin anterior) + 10 + filas*ceil(bytes/8)`; MFC0
+  DMA_BUSY espera a que acaben, DMA_FULL a que quede uno. El emulador sigue completando el DMA
+  en el acto; solo se cobra la espera.
+- Encendido fuerza interprete del RSP y apaga el salto de bucles de espera (los dos fieles):
+  SM64 interp y threaded-jit con el modelo puesto dan `d35bd8aa` igual; systemtest 0/3721.
+- MCP: `profile_rsp` anade `cycles/cyclesPct/stalls/pairs` por ranura, `metric=cycles|stalls`,
+  y `timing`; `rsp_registers` trae `timing` {cycles, insns, ipc, stalls, pairs, bubbles,
+  dmaStall, dmas, tasks, lastTask, byType[{type,tasks,cycles,avgCycles}]}. prof.start/reset
+  ponen a cero la ventana.
+- Validado con `05_kgfx_cube` contra `rsp_cycles.py` (camino completo por ranura): tri_s3 108,1
+  contra 112 (3 saltos de culling no tomados + tick final del estatico = 4), vtx_loop 77,8/80,
+  tri_w2 78/80. kgfx: IPC 0,98, 147 tareas de ~44 k ciclos.
+- No hecho: que los ciclos muevan el reloj global (bandera aparte, futuro).
+- Puertas: `release.sh` RC=0 (120 s), `gate_quick.sh lock` ALL OK (82 s).
+
 ## 2026-10-01 (b) -- fallos de cache por PC en el profiler (PD64_pending P8)
 
 - `prof.cpu metric=exec|dmiss|imiss|dline` (bridge `profile_cpu(metric=...)`). `dmiss`/`imiss`

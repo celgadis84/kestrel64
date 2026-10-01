@@ -156,7 +156,9 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   `read_memory`/`write_memory` (`coherent=1` reads via CPU D-cache =
   no STALE kernel state), `capture_framebuffer` (VI→RGBA→PNG+histogram), hotpath profiler
   (`profile_start/stop/reset`, `profile_cpu` PC-bucket 16B -- `metric=dmiss|imiss|dline` = fallos
-  de D$/I$ por PC o por linea de datos, solo con `KESTREL_JIT=0` --, `profile_rsp` IMEM-slot),
+  de D$/I$ por PC o por linea de datos, solo con `KESTREL_JIT=0` --, `profile_rsp` IMEM-slot; con `KESTREL_RSP_TIMING=1`
+  modelo de ciclos del pipeline RSP (paradas + dual-issue SU/VU, `src/rsp/rsptiming.hpp`):
+  `cycles/stalls/pairs` por ranura, `metric=cycles|stalls`, y `timing` en `rsp_registers`),
   cpu/rsp/rcp registers, disasm, breakpoints, `run_until`, simbolos del invitado (`--symbols
   <map GNU ld>` / `sym_load` / `sym_lookup`; `profile_cpu` y `cpu_disasm` dan `funcion+off`).
 - **When a capability is missing, ADD it** to the server — don't fall back to guessing.

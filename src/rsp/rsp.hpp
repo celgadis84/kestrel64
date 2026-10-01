@@ -18,6 +18,7 @@
 // The vector math IS the hardware behaviour, transcribed rather than reinvented.
 
 #include "../core/types.hpp"
+#include "rsptiming.hpp"
 #include <thread>
 
 namespace kestrel {
@@ -93,6 +94,9 @@ struct Rsp {
   // viven al final del struct (ver profPc), para no meter una pagina fria entre los
   // GPR escalares y los registros vectoriales, que si son calientes los dos.
   bool profOn = false;
+  // Modelo de ciclos del pipeline (KESTREL_RSP_TIMING=1, ver rsptiming.hpp): solo
+  // contabilidad, no toca el reloj de invitado. nullptr = apagado.
+  RspTiming* tm = nullptr;
 
   // --- vector unit -----------------------------------------------------------
   R128 vpr[32];

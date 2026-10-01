@@ -293,7 +293,11 @@ def _write_png(path: str, w: int, h: int, rgba: bytes):
 
 def rsp_registers(vpr: bool = False) -> dict:
     """Low-level RSP core: pc (into IMEM), running flag, sp_status/sp_pc, 32 scalar
-    GPRs, and (when vpr=True) the 32 vector registers as 8×u16 lanes each."""
+    GPRs, and (when vpr=True) the 32 vector registers as 8×u16 lanes each.
+    With KESTREL_RSP_TIMING=1 also `timing`: pipeline-model cycles of the window since
+    profile_reset/start {cycles, insns, ipc, stalls, pairs, bubbles, dmaStall, dmas, tasks},
+    `lastTask` (last task ended by BREAK: type, insns, cycles, ...) and `byType` per
+    OSTask.type (tasks, cycles, avgCycles)."""
     data, _ = query("rsp.regs", vpr=bool(vpr))
     return data
 
@@ -378,13 +382,16 @@ def profile_cpu(top: int = 20, metric: str = "exec") -> dict:
     return _snapshot("prof.cpu", top=int(top), metric=str(metric))
 
 
-def profile_rsp(top: int = 20) -> dict:
+def profile_rsp(top: int = 20, metric: str = "count") -> dict:
     """Top RSP microcode hotpath by IMEM instruction address (exact per-instruction).
     Each entry: {imem, count, pct, word}. Also {total}. `word` is the instruction in
     that slot NOW (the last microcode loaded). Tells which microcode routine
     dominates RSP time (graphics vs audio vs custom). Momentarily pauses the core to
-    take a clean snapshot, then restores the prior run state."""
-    return _snapshot("prof.rsp", top=int(top))
+    take a clean snapshot, then restores the prior run state.
+    With KESTREL_RSP_TIMING=1 (pipeline cycle model: stalls + SU/VU dual issue; forces
+    the RSP interpreter) each entry adds {cycles, cyclesPct, stalls, pairs} and the reply a
+    `timing` summary; metric="cycles"|"stalls" sorts by them instead of executed count."""
+    return _snapshot("prof.rsp", top=int(top), metric=str(metric))
 
 
 def state_save(slot: int = 0) -> dict:

@@ -155,6 +155,10 @@ Rsp::Rsp() {
   // Salto del bucle de espera del FIFO (ver Rsp::idleSkip). KESTREL_RSPIDLE=0 lo apaga y el
   // md5 del framebuffer tiene que salir igual: es un atajo de anfitrion, no de semantica.
   { const char* v = std::getenv("KESTREL_RSPIDLE"); idleOn = !(v && v[0] == '0'); }
+  // Modelo de ciclos (rsptiming.hpp). Pide interprete (cada instruccion pasa por el) y sin
+  // salto de bucles de espera: una vuelta saltada no la veria el modelo. Los dos son atajos
+  // de anfitrion fieles (mismo md5/statehash), asi que la emulacion sale igual.
+  { const char* v = std::getenv("KESTREL_RSP_TIMING"); if(v && v[0] == '1') { tm = new RspTiming(); idleOn = false; } }
   // Dynarec del RSP. Por defecto encendido, igual que el de la CPU, y con el interprete
   // como oraculo: KESTREL_RSPJIT=0 lo apaga y el md5 del framebuffer tiene que salir igual.
   {
@@ -2139,6 +2143,7 @@ auto Rsp::start() -> void {
   halt = false; broke = false;
   inDelay = false; pendingTarget = 0;
   budget = kWatchdogQuantum;
+  if(tm) tm->taskBegin();
   hangTicks = 0;
 }
 
@@ -2277,7 +2282,8 @@ auto Rsp::step(u64 maxInsns) -> void {
     u64 chunk = maxInsns < budget ? maxInsns : budget;
     if(chunk > kRspTanda) chunk = kRspTanda;
     const bool prof = profOn;
-    const bool useJit = jitOn && jc && !prof;
+    RspTiming* const tim = tm;
+    const bool useJit = jitOn && jc && !prof && !tim;
     const bool jitStats = statsOn;
     const u8* const limp = imp;
     u64 c = chunk;
@@ -2332,7 +2338,9 @@ auto Rsp::step(u64 maxInsns) -> void {
       if(prof) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
       u32 nextpc = (pc + 4) & 0xfff;
       branch = false;
+      if(tim) tim->feed(op, pc, r[(op >> 16) & 31]);
       exec(op);
+      if(tim) tim->post(branch);
       // El `r[0] = 0` que habia aqui era una tienda por instruccion sin efecto: setR() es el
       // unico camino que escribe en r[] y ya ignora el registro 0, que es cableado a cero.
       if(inDelay)      { pc = pendingTarget; inDelay = false; }
@@ -2370,7 +2378,8 @@ auto Rsp::step(u64 maxInsns) -> void {
       // Reparto del coste del RSP por TIPO de tarea (OSTask.type en DMEM 0xFC0): con esto se
       // ve si el gasto se va en graficos o en audio. Solo contadores, sin efecto en el invitado.
       { u32 a = 0xfc0; u32 ty = ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3];
-        u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += ran; }
+        u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += ran;
+        if(tm) tm->taskEnd(ty); }
       static const bool tr = std::getenv("KESTREL_RSPTRACE") != nullptr;
       if(tr) { static unsigned n = 0; n++;
         auto dm = [&](u32 a){ a &= 0xffc;
@@ -2391,6 +2400,7 @@ auto Rsp::step(u64 maxInsns) -> void {
         if(mem->rcp.sp_intr_on_break.load(std::memory_order_acquire)) mem->raiseIntr(MI_SP);
       }
     }
+    if(tm) tm->flush();   // HALT de la CPU sin BREAK: la tarea no cuenta, el pendiente si
     running = false; brake = false; return;
   }
   if(budget == 0) {
