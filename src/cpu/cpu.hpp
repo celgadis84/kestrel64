@@ -623,6 +623,14 @@ struct CPU {
   bool  profOn = false;
   std::vector<u32> profBuckets;                                 // sized kProfBuckets on enable
   u64   profTotal = 0;
+  // Fallos de cache por PC (PD64_pending P8): mismo cubo de 16 B que profBuckets, pero
+  // contando el PC FISICO de la instruccion que provoco el fallo de D$ (load/store/CACHE)
+  // o de I$ (fetch), mas un histograma por LINEA de datos fallada (fisica >> 4). Se cuentan
+  // en las rutas frias de fallo (dcMiss/icFill). El PC lo apunta step() -> solo el
+  // interprete atribuye bien: el camino rapido del JIT ni siquiera pasa por la D$.
+  std::vector<u32> profDMiss, profIMiss, profDLine;
+  u64   profDMissTotal = 0, profIMissTotal = 0;
+  u32   profCurPhys = 0;
   auto  profEnable(bool on) -> void;                            // alloc + clear when enabling
   auto  profClear() -> void;
 

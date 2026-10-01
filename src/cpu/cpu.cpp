@@ -715,6 +715,11 @@ auto CPU::dcFlush(u32 idx) -> void {
 // tag de ultimo escritor y el punto de vigilancia.
 auto CPU::dcMiss(u32 idx, u32 base) -> void {
   dcMisses++;
+  if(__builtin_expect(profOn, 0) && !profDMiss.empty()) {   // P8: fallos de D$ por PC
+    profDMiss[profCurPhys >> kProfShift]++;
+    if(base < (8u << 20)) profDLine[base >> 4]++;
+    profDMissTotal++;
+  }
   chargeDcMiss();   // el relleno de linea paga la latencia de RDRAM (ver countTicks)
   DCacheLine& l = dcache[idx];
   u8* const ram = mem->rdram.data();
@@ -768,6 +773,10 @@ auto CPU::pokePhysCoherent(u32 phys, u32 size, u64 val) -> void {
 
 auto CPU::icFill(u32 idx, u32 base) -> void {
   icMisses++;
+  if(__builtin_expect(profOn, 0) && !profIMiss.empty()) {   // P8: fallos de I$ por PC
+    profIMiss[profCurPhys >> kProfShift]++;
+    profIMissTotal++;
+  }
   mem->dmaSettle(base, (u64)base + 32);
   ramCpuBytes += 32;
   chargeIcMiss();   // idem, con su propio coste: la linea de I son 8 palabras
@@ -1265,15 +1274,21 @@ auto CPU::unimplemented(u32 op) -> void {
 }
 
 auto CPU::profEnable(bool on) -> void {
-  if(on && profBuckets.empty()) profBuckets.assign(kProfBuckets, 0);
-  if(on) { std::fill(profBuckets.begin(), profBuckets.end(), 0u); profTotal = 0; }
+  if(on && profBuckets.empty()) {
+    profBuckets.assign(kProfBuckets, 0);
+    profDMiss.assign(kProfBuckets, 0);
+    profIMiss.assign(kProfBuckets, 0);
+    profDLine.assign(kProfBuckets, 0);
+  }
+  if(on) profClear();
   profOn = on;
   refreshDebugArmed();   // el muestreador cuelga de la guarda unica del prologo
 }
 
 auto CPU::profClear() -> void {
-  if(!profBuckets.empty()) std::fill(profBuckets.begin(), profBuckets.end(), 0u);
-  profTotal = 0;
+  for(auto* v : {&profBuckets, &profDMiss, &profIMiss, &profDLine})
+    if(!v->empty()) std::fill(v->begin(), v->end(), 0u);
+  profTotal = profDMissTotal = profIMissTotal = 0;
 }
 
 auto CPU::step() -> void {
@@ -1329,7 +1344,7 @@ auto CPU::step() -> void {
   }
   if(debugArmed && profOn) {   // physical-PC hotpath sampler (MCP prof.*)
     u32 pp = fpe & 0x1fff'ffff;
-    if(pp < (8u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; }
+    if(pp < (8u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; profCurPhys = pp; }
   }
   // pc/nextPc branch-delay model: fetch pc, advance, then default nextPc = pc+4.
   // While execute() runs, `pc` is the delay-slot address, so relative branches

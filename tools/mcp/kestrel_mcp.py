@@ -365,14 +365,17 @@ def _snapshot(cmd: str, **args) -> dict:
     return data
 
 
-def profile_cpu(top: int = 20) -> dict:
+def profile_cpu(top: int = 20, metric: str = "exec") -> dict:
     """Top CPU hotpath buckets by physical address (16-byte / 4-instruction
     resolution, so KSEG0 and TLB-mapped code that alias the same RDRAM merge).
     Each entry: {phys, kseg0, count, pct, disasm}. Also {total, resolutionBytes}.
+    metric: "exec" (instructions executed, default), "dmiss"/"imiss" (D$/I$ misses
+    charged to the PC that caused them), "dline" (D$ misses per 16-byte DATA line,
+    with its cache `set`). Miss metrics need the interpreter (KESTREL_JIT=0).
     Disasm shows the first instruction of the bucket — cross-reference with
     cpu_disasm(kseg0) to see the whole hot routine. Momentarily pauses the core to
     take a clean snapshot, then restores the prior run state."""
-    return _snapshot("prof.cpu", top=int(top))
+    return _snapshot("prof.cpu", top=int(top), metric=str(metric))
 
 
 def profile_rsp(top: int = 20) -> dict:

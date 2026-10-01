@@ -8,7 +8,7 @@ emulators (ares, cen64) hit an architectural ceiling.
 Live status: `docs/STATUS.md`. Backlog de huecos y pendientes: `docs/GAPS.md` (lo que
 falta frente a ares/PJ64/mupen + pendientes propios, ordenado; se actualiza al cerrar
 cada punto). Peticiones de la optimizacion de Perfect Dark al emulador:
-`PD64_pending.md` (P1..P7, tachar al cerrar). Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
+`PD64_pending.md` (P1..P8, tachar al cerrar). Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
 `docs/TEXTURE-FORMATS.md`, `docs/parallel-rdp-integration.md`, `docs/VI-CLOCK.md`,
 `docs/RSP-JIT.md`, `docs/ROMS-COMPRIMIDAS.md`.
 
@@ -155,7 +155,8 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   fixed variable and `mem.write` on the pad word is overwritten by the window loop),
   `read_memory`/`write_memory` (`coherent=1` reads via CPU D-cache =
   no STALE kernel state), `capture_framebuffer` (VI→RGBA→PNG+histogram), hotpath profiler
-  (`profile_start/stop/reset`, `profile_cpu` PC-bucket 16B, `profile_rsp` IMEM-slot),
+  (`profile_start/stop/reset`, `profile_cpu` PC-bucket 16B -- `metric=dmiss|imiss|dline` = fallos
+  de D$/I$ por PC o por linea de datos, solo con `KESTREL_JIT=0` --, `profile_rsp` IMEM-slot),
   cpu/rsp/rcp registers, disasm, breakpoints, `run_until`, simbolos del invitado (`--symbols
   <map GNU ld>` / `sym_load` / `sym_lookup`; `profile_cpu` y `cpu_disasm` dan `funcion+off`).
 - **When a capability is missing, ADD it** to the server — don't fall back to guessing.

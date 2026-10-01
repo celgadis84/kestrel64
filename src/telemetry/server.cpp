@@ -866,14 +866,28 @@ auto Server::cmdProfControl(const std::string& cmd, json::Value& data) -> void {
   data.set("profiling", system.cpu.profOn);
 }
 
+// metric: "exec" (por defecto, instrucciones ejecutadas por cubo de PC), "dmiss"/"imiss"
+// (fallos de D$/I$ atribuidos al PC que los provoco, mismo cubo) o "dline" (fallos de D$
+// por LINEA de datos de 16 B: que estructuras se pisan en la D$ direct-mapped de 8 KB).
+// Los fallos solo se atribuyen bien con el interprete (KESTREL_JIT=0): se avisa en "warn".
 auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   u32 topN = args.has("top") ? args.get("top").asU32() : 20;
+  const std::string metric = args.has("metric") ? args.get("metric").asString() : "exec";
   std::lock_guard<std::mutex> lk(system.coreMutex);
   CPU& c = system.cpu;
+  const std::vector<u32>* src = &c.profBuckets;
+  u64 mtotal = c.profTotal;
+  bool dline = false;
+  if(metric == "dmiss")      { src = &c.profDMiss; mtotal = c.profDMissTotal; }
+  else if(metric == "imiss") { src = &c.profIMiss; mtotal = c.profIMissTotal; }
+  else if(metric == "dline") { src = &c.profDLine; mtotal = c.profDMissTotal; dline = true; }
+  else if(metric != "exec")  { data.set("warn", std::string("metric desconocida, uso exec")); }
+  if(metric != "exec" && envFlag("KESTREL_JIT", true))
+    data.set("warn", std::string("JIT activo: los fallos de cache solo se atribuyen con KESTREL_JIT=0"));
   std::vector<std::pair<u32, u32>> hot;   // (count, bucket)
   hot.reserve(4096);
-  for(u32 i = 0; i < (u32)c.profBuckets.size(); i++)
-    if(c.profBuckets[i]) hot.push_back({c.profBuckets[i], i});
+  for(u32 i = 0; i < (u32)src->size(); i++)
+    if((*src)[i]) hot.push_back({(*src)[i], i});
   if(hot.size() > topN)
     std::partial_sort(hot.begin(), hot.begin() + topN, hot.end(),
                       [](auto& a, auto& b){ return a.first > b.first; });
@@ -881,9 +895,19 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
     std::sort(hot.begin(), hot.end(), [](auto& a, auto& b){ return a.first > b.first; });
 
   json::Value list = json::Value::array();
-  u64 total = c.profTotal ? c.profTotal : 1;
+  u64 total = mtotal ? mtotal : 1;
   for(u32 k = 0; k < hot.size() && k < topN; k++) {
     u32 phys = hot[k].second << CPU::kProfShift;
+    if(dline) {   // linea de DATOS: sin desensamblado; simbolo mas cercano si hay mapa
+      json::Value e = json::Value::object();
+      e.set("phys", (u64)phys);
+      e.set("kseg0", (u64)(0x8000'0000u | phys));
+      e.set("set", (u64)((phys >> 4) & 0x1ff));   // linea de la D$ (8 KB / 16 B = 512)
+      e.set("count", (u64)hot[k].first);
+      e.set("pct", 100.0 * (double)hot[k].first / (double)total);
+      list.push(e);
+      continue;
+    }
     json::Value e = json::Value::object();
     e.set("phys", (u64)phys);
     e.set("kseg0", (u64)(0x8000'0000u | phys));            // convenience VA for disasm/lookup
@@ -899,7 +923,11 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
     }
     list.push(e);
   }
-  data.set("total", (u64)c.profTotal);
+  data.set("metric", metric);
+  data.set("total", (u64)mtotal);
+  data.set("execTotal", (u64)c.profTotal);
+  data.set("dmissTotal", c.profDMissTotal);
+  data.set("imissTotal", c.profIMissTotal);
   data.set("enabled", c.profOn);
   data.set("resolutionBytes", (u64)(1u << CPU::kProfShift));
   data.set("hot", list);

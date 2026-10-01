@@ -9844,3 +9844,16 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   el hilo de CPU al ver subir `rt::tpakGen`. Estado guardado v15 (acepta v14).
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
+
+## 2026-10-01 (b) -- fallos de cache por PC en el profiler (PD64_pending P8)
+
+- `prof.cpu metric=exec|dmiss|imiss|dline` (bridge `profile_cpu(metric=...)`). `dmiss`/`imiss`
+  cargan cada fallo de D$/I$ al cubo de 16 B del PC FISICO que lo provoco (`dcMiss`/`icFill`,
+  PC apuntado por el muestreador de `step()`); `dline` = fallos de D$ por LINEA de datos
+  (fisica >> 4) con su `set` de la D$ (0..511): ahi se ven las estructuras que se pisan en la
+  D$ direct-mapped de 8 KB. Respuesta trae `dmissTotal`/`imissTotal`/`execTotal`.
+- Solo con el interprete (`KESTREL_JIT=0`): el camino rapido del JIT no pasa por la D$;
+  con JIT puesto la respuesta avisa en `warn`. Coste apagado: un bool en la ruta fria de fallo.
+- PD titulo, 6 s interp: 220 k fallos D$, 29,5 k I$; `dline` saca 0x521d0 <-> 0x3fe1d0 en el
+  set 29 (y sus vecinas en el 30) = conflicto real de la D$.
+- Puertas: `release.sh` RC=0, `gate_quick.sh lock phys` ALL OK.
