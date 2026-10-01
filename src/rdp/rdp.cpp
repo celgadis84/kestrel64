@@ -693,13 +693,9 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
   u64 w0 = w[0];
   bool leftMajor = (w0 >> 55) & 1;
-  double yl = sx((w0 >> 32) & 0x3fff, 14) / 4.0;   // bottom
-  double ym = sx((w0 >> 16) & 0x3fff, 14) / 4.0;   // middle
   double yh = sx((w0 >> 0)  & 0x3fff, 14) / 4.0;   // top
   auto fx = [](u64 v) { return (s32)(u32)v / 65536.0; };
-  double xl = fx(w[1] >> 32), dxldy = fx(w[1]);
   double xh = fx(w[2] >> 32), dxhdy = fx(w[2]);
-  double xm = fx(w[3] >> 32), dxmdy = fx(w[3]);
 
   // Rendering mode. In FILL cycle a triangle is painted with the packed FILL_COLOR
   // pixel (the bare-metal "Fill_Triangle" path). Otherwise, if the command carries a
@@ -799,21 +795,64 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   const TexFold texF   = foldOf(texTile);
   const bool    copyCy = cycleType() == 2;
   const bool    alphaCmpEn = (other_lo & 1) != 0;
-  int yTop = (int)std::ceil(yh), yBot = (int)std::ceil(yl);
-  yTop = std::max(yTop, sy0); yBot = std::min(yBot, sy1);
-  for(int y = yTop; y < yBot; y++) {
-    if(y < 0) continue;
-    double xA = xh + dxhdy * (y - yh);                                   // major (H) edge
-    double xB = (y < ym) ? xm + dxmdy * (y - yh) : xl + dxldy * (y - ym); // minor edge
-    double xLeft  = leftMajor ? xA : xB;
-    double xRight = leftMajor ? xB : xA;
-    if(xLeft > xRight) std::swap(xLeft, xRight);
-    int xs = std::max((int)std::ceil(xLeft), sx0);
-    int xe = std::min((int)std::ceil(xRight), sx1);
-    // Solo-coste: el tramo entero de una vez. Mismos `xs`/`xe` que el bucle largo, asi que
-    // la cuenta de pixeles es IDENTICA a la del rasterizado; lo unico que se salta es el
-    // trabajo por pixel (cobertura, textura, combinador, mezcla), que no cambia el coste.
-    if(costOnly) { int b = xs < 0 ? 0 : xs; if(xe > b) rasterPx += (u64)(xe - b); continue; }
+  // Recorrido de bordes en ENTERO, como el rasterizador del RDP. Oraculo: parallel-rdp
+  // `span_setup.comp` (decodificacion en rdp_device.cpp) y `compute_coverage()` de
+  // coverage.h. Antes iba en double con los bordes anclados en el `yh` FRACCIONARIO y la
+  // primera fila en ceil(yh); el HW ancla XH/XM en la scanline entera (yh & ~3, en cuartos)
+  // y XL en ym, evalua cada borde en las 4 sub-scanlines de la fila, recorta cada
+  // sub-scanline contra [yh, yl) y cuantiza x a 1/8 de pixel con un bit "sticky". Con el
+  // ancla desplazada, dos triangulos que comparten arista calculaban x distintas para ella
+  // y quedaban pixeles que no pintaba ninguno (costuras de fondo en los cubos de
+  // kestrel64-sdk 05_kgfx_cube, que parallel-rdp pinta limpios).
+  //   x: s15.16 crudo -> sext28 >> 1 = 16.15; dxdy: (crudo >> 2) = por sub-scanline.
+  auto sext = [](u32 v, int bits) -> s32 { return (s32)(v << (32 - bits)) >> (32 - bits); };
+  const s32 iYl = sext((u32)(w0 >> 32) & 0x3fff, 14), iYm = sext((u32)(w0 >> 16) & 0x3fff, 14),
+            iYh = sext((u32)w0 & 0x3fff, 14);
+  const s32 iXl = sext((u32)(w[1] >> 32), 28) >> 1, iDxl = sext((u32)w[1] >> 2, 28) >> 1;
+  const s32 iXh = sext((u32)(w[2] >> 32), 28) >> 1, iDxh = sext((u32)w[2] >> 2, 28) >> 1;
+  const s32 iXm = sext((u32)(w[3] >> 32), 28) >> 1, iDxm = sext((u32)w[3] >> 2, 28) >> 1;
+  const s32 yhBase = iYh & ~3;
+  const s32 subLo = std::max(iYh, sy0 * 4), subHi = std::min(iYl, sy1 * 4);
+  const s32 scLo = sx0 * 8, scHi = sx1 * 8;   // tijera en octavos de pixel
+  const bool aaOn = (other_lo & 0x08) != 0 && !g_noAA;   // mismo criterio que blendParams
+  auto quant = [&](s32 x) -> s32 { x = sext((u32)x, 27); return (x >> 12) | ((x & 0xfff) != 0); };
+  const int yFirst = std::max(subLo, 0) >> 2, yLast = (subHi - 1) >> 2;
+  for(int y = yFirst; y <= yLast && subHi > subLo; y++) {
+    s32 qL[4], qR[4];
+    bool anyValid = false;
+    for(int k = 0; k < 4; k++) {
+      const s32 ys = y * 4 + k;
+      const s32 eh = iXh + (ys - yhBase) * iDxh;
+      const s32 el = ys < iYm ? iXm + (ys - yhBase) * iDxm : iXl + (ys - iYm) * iDxl;
+      s32 L = quant(leftMajor ? eh : el), R = quant(leftMajor ? el : eh);
+      bool bad = (L >> 1) > (R >> 1) || ys < subLo || ys >= subHi;
+      L = std::min(std::max(L, scLo), scHi); R = std::min(std::max(R, scLo), scHi);
+      if(bad) { L = 0xffff; R = 0; } else anyValid = true;
+      qL[k] = L; qR[k] = R;
+    }
+    if(!anyValid) continue;
+    // Cobertura de 8 tomas: fila k en (x*8 + {0,4}) para k par y (x*8 + {2,6}) para k impar.
+    // Bit 0 = sub-scanline 0, columna 0: con AA apagado el pixel vive o muere con ella
+    // (shading.h: `if (!aa_enable && (coverage & 1) == 0) return false`).
+    auto coverage = [&](int x) -> u32 {
+      u32 c = 0;
+      for(int k = 0; k < 4; k++) {
+        const s32 a = x * 8 + ((k & 1) ? 2 : 0), b = a + 4;
+        if(a >= qL[k] && a < qR[k]) c |= 1u << k;
+        if(b >= qL[k] && b < qR[k]) c |= 16u << k;
+      }
+      return c;
+    };
+    const int xs = std::max(std::min(std::min(qL[0], qL[1]), std::min(qL[2], qL[3])) >> 3, 0);
+    const int xe = (std::max(std::max(qR[0], qR[1]), std::max(qR[2], qR[3])) >> 3) + 1;
+    // Solo-coste: misma decision de pixel que el bucle largo (la de la cobertura), asi que
+    // la cuenta es IDENTICA; se salta el trabajo por pixel (textura, combinador, mezcla).
+    if(costOnly) {
+      for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(aaOn ? c != 0 : (c & 1) != 0) rasterPx++; }
+      continue;
+    }
+    // Borde mayor en la fila (ancla de los atributos por x; los atributos siguen en double).
+    double xA = xh + dxhdy * (y - yh);
     // Values at the major edge for this scanline (start advances by Dc/De per +y).
     double eR = R + dRde * (y - yh), eG = G + dGde * (y - yh);
     double eB = B + dBde * (y - yh), eA = A + dAde * (y - yh);
@@ -832,12 +871,6 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     // sub-columns inside each pixel and the covered subsamples are counted. That gives
     // graded coverage on NEAR-HORIZONTAL edges too (a pure horizontal box misses those)
     // and quantises to 3-bit steps like the hardware. 4 sub-scanlines × 2 sub-columns = 8.
-    auto edgesAt = [&](double yy, double& L, double& R) {
-      double a = xh + dxhdy * (yy - yh);
-      double b = (yy < ym) ? xm + dxmdy * (yy - yh) : xl + dxldy * (yy - ym);
-      L = leftMajor ? a : b; R = leftMajor ? b : a;
-      if(L > R) std::swap(L, R);
-    };
 #if defined(__SSE4_1__)
     // Los cuatro canales de sombra (y el par S/T) son la MISMA cuenta con operandos
     // distintos: `e + d*dx`. Van por parejas en registros de dos `double`, con los mismos
@@ -860,50 +893,11 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       return (u32)_mm_cvtsi128_si32(_mm_shuffle_epi8(v, packRgba));
     };
 #endif
-    static const double subY[4] = {0.125, 0.375, 0.625, 0.875};
-    // Las dos tomas de cada sub-scanline NO estan en la misma columna: el RDP las alterna
-    // media cuarta de pixel fila a fila. En octavos de pixel las compensaciones son
-    // (0,4) en las filas pares y (2,6) en las impares, o sea 0 / 0,5 y 0,25 / 0,75.
-    // Oraculo: `compute_coverage()` de parallel-rdp (`xshift = u16x4(0,4,2,6) + (x<<3)`,
-    // comparado contra `xleft.xxyy` y luego `xleft.zzww`, con pesos (1,2,4,8) y
-    // (16,32,64,128)) y `raster_coverage.c` de softrdp, que documenta el mismo reparto.
-    // Con las cuatro filas en (0,25 / 0,75) los bordes casi verticales quedaban graduados
-    // en pasos que el hardware no da.
-    static const double subX[4][2] = {{0.0, 0.5}, {0.25, 0.75}, {0.0, 0.5}, {0.25, 0.75}};
-    // Las cuatro sub-scanlines no dependen de x: se evaluan UNA vez por linea, no por
-    // pixel. Y con el mayor de los bordes izquierdos y el menor de los derechos se
-    // reconoce el pixel enteramente dentro (cobertura 8/8) sin tocar los 8 subsamples,
-    // que es el caso comun en el interior del triangulo. Mismos comparadores => mismo
-    // recuento exacto que el bucle largo.
-    double sL[4], sR[4], Lmax = -1e30, Rmin = 1e30;
-    for(int sy = 0; sy < 4; sy++) {
-      edgesAt((double)y + subY[sy], sL[sy], sR[sy]);
-      if(sL[sy] > Lmax) Lmax = sL[sy];
-      if(sR[sy] < Rmin) Rmin = sR[sy];
-    }
     for(int x = xs; x < xe; x++) {
-      if(x < 0) continue;
+      const u32 cov = coverage(x);
+      if(aaOn ? cov == 0 : (cov & 1) == 0) continue;
       rasterPx++;      // DPC counters: pixel entered the pipeline (may still be killed)
-      int hits;
-      // La toma mas a la izquierda es la 0,0 y la mas a la derecha la 0,75: si esas dos
-      // caen dentro de TODAS las filas, las ocho estan dentro.
-      if((double)x >= Lmax && (double)x + 0.75 < Rmin) hits = 8;
-      else {
-        hits = 0;
-        for(int sy = 0; sy < 4; sy++)
-          for(int sx = 0; sx < 2; sx++) {
-            double px = (double)x + subX[sy][sx];
-            if(px >= sL[sy] && px < sR[sy]) hits++;
-          }
-      }
-      // Que un pixel EXISTA no se decide aqui. El hardware, con el antialias apagado, mira
-      // una sola toma y el pixel vive o muere con ella (`if (!aa_enable && (coverage & 1) ==
-      // 0) return false;` en `shading.h` de parallel-rdp); eso ya lo hace el recorte del
-      // tramo de arriba (`xs = ceil(xLeft)` con los bordes evaluados en la linea), y anadir
-      // aqui una segunda prueba con la toma de la sub-scanline 0 lo aplicaba DOS veces --
-      // medido: `RSPPlotTriangle` caia de 100,000 a 99,740 y `Cycle1FillZBufferTriangle` de
-      // 98,150 a 97,950. El escalonado de arriba solo cambia el reparto de `cvg`, que es lo
-      // que el borde suavizado usa cuando el juego SI pide antialias.
+      const int hits = __builtin_popcount(cov);
       if(fillMode) {   // raw packed fill color straight to the color image (no AA)
         if(ci_size == 3) wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, fill_color);
         else { u16 px = (x & 1) ? u16(fill_color & 0xffff) : u16(fill_color >> 16);

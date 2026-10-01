@@ -9845,6 +9845,21 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-02 -- SoftRDP: recorrido de bordes de triangulo en entero (costuras)
+
+- Reporte n64-be: costuras de fondo de 1 px en aristas compartidas (kestrel64-sdk
+  05_kgfx_cube / 03_cube), parallel-rdp limpio. Causa: el tramo se calculaba en double con
+  XH/XM anclados en el `yh` FRACCIONARIO y la primera fila en ceil(yh). El HW ancla XH/XM
+  en la scanline entera (`yh & ~3` en cuartos) y XL en ym, evalua las 4 sub-scanlines,
+  recorta cada una contra [yh, yl), cuantiza x a 1/8 px con bit sticky y decide el pixel
+  por la cobertura de 8 tomas (AA off: toma 0; AA on: alguna). Oraculo: parallel-rdp
+  `span_setup.comp` + `compute_coverage()` + `shading.h`, copiado en entero.
+- kgfx: pixeles de fondo donde prdp pinta 424 -> 35 (simetrico 36: silueta). SM64 titulo
+  contra prdp: close 86,23 % -> 87,24 %, exact 68,31 -> 68,50; las costuras del logo
+  desaparecen. Nuevo md5 SoftRDP sm64 `8c0b9ee6` (todos los modos soft iguales).
+- Atributos (shade/z/tex) siguen en double desde yh; pendiente pasarlos al mismo ancla.
+- Puertas: krom 371/371 regress=0, thar0 rmse=0.1332 sin cambio, gate_quick lock ALL OK.
+
 ## 2026-10-01 (c) -- modelo de ciclos del pipeline RSP (peticion n64-be)
 
 - `KESTREL_RSP_TIMING=1` (apagado por defecto): `src/rsp/rsptiming.hpp`, solo contabilidad.
