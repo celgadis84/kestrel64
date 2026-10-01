@@ -33,11 +33,14 @@ using kestrel::usize;
 // la consola, con la paleta y las limitaciones de la maquina. De ahi salen las cuatro
 // decisiones de las que cuelga todo lo demas:
 //
-//  1. La escena entera se dibuja en un lienzo de 384x216 y se sube a la ventana con
-//     StretchBlt en COLORONCOLOR (vecino mas cercano, cero suavizado) por un factor ENTERO.
-//     El pixel gordo es deliberado; el parecido sale de la proporcion, no de copiar tamanos.
-//  2. Tipografia de mapa de bits: la fuente "Terminal" de Windows (8x12 / 8x16, OEM), que es
-//     literalmente una fuente de consola de la epoca, pedida con NONANTIALIASED_QUALITY.
+//  1. La escena se MAQUETA en un lienzo logico de 384x216, pero se pinta a la resolucion
+//     real de la ventana: cada coordenada logica se multiplica por el factor de encaje k
+//     (fraccionario) y el lienzo de pixeles mide 384k x 216k. Hasta 2026-10-01 se pintaba a
+//     384x216 y se subia con StretchBlt vecino-mas-cercano: el pixel gordo era deliberado,
+//     pero a pantalla completa las caratulas quedaban hechas bloques y el usuario lo vio
+//     como defecto, no como estilo. La proporcion y la paleta siguen siendo las mismas.
+//  2. Tipografia de paso fijo (Consolas, suavizada) escalada con k; antes "Terminal" de
+//     trama, que no escala y salia a escalones.
 //  3. Paleta corta y plana, alto contraste, cero degradados de escritorio.
 //  4. Transiciones cortas y duras (~120 ms) y pitidos secos al mover y al elegir.
 //
@@ -70,7 +73,15 @@ constexpr int   kCarY  = 76;                      // altura del centro del carru
 constexpr float kReflFrac = 0.30f;                // trozo de caratula que se refleja
 constexpr float kReflTop  = 0.34f;                // opacidad del reflejo en la costura
 
-constexpr int kTexW = 184, kTexH = 132;    // tamano al que se normaliza toda caratula
+// Tamano al que se normaliza toda caratula: el DOBLE del de la tarjeta central en el lienzo
+// logico (92x64), que a pantalla completa (k ~5) sale a ~460x320 pixeles y se muestrea con
+// filtro bilineal. Con 184x132 y vecino mas cercano se veian los bloques.
+constexpr int kTexK = 2;
+constexpr int kTexW = 184 * kTexK, kTexH = 132 * kTexK;
+
+// Factor de encaje lienzo logico -> pixeles de ventana, y su redondeo a entero para las cajas.
+float g_k = 3.0f;
+inline auto S(float v) -> int { return (int)std::lround(v * g_k); }
 
 // Bandas verticales del lienzo.
 constexpr int kBarH   = 15;                // cabecera
@@ -152,9 +163,18 @@ struct Canvas {
 // que no es un rectangulo, asi que no vale un Rectangle() de GDI.
 auto line(Canvas& cv, float x0, float y0, float x1, float y1, u32 c, float a) -> void {
   int steps = (int)(std::max(std::fabs(x1 - x0), std::fabs(y1 - y0)) + 1.0f);
+  const int th = std::max(1, S(0.75f));   // grosor: ~3/4 de pixel logico
+  const int h0 = -th / 2;
   for(int i = 0; i <= steps; i++) {
     float t = steps ? (float)i / steps : 0.0f;
-    cv.blend((int)(x0 + (x1 - x0) * t + 0.5f), (int)(y0 + (y1 - y0) * t + 0.5f), c, a);
+    const int px = (int)(x0 + (x1 - x0) * t + 0.5f), py = (int)(y0 + (y1 - y0) * t + 0.5f);
+    for(int dy = 0; dy < th; dy++)
+      for(int dx = 0; dx < th; dx++) {
+        const int X = px + h0 + dx, Y = py + h0 + dy;
+        if((unsigned)X >= (unsigned)cv.w || (unsigned)Y >= (unsigned)cv.h) continue;
+        u32& p = cv.px[(usize)Y * cv.w + X];
+        p = lerpC(p, c, a);   // sin pasar dos veces por el mismo pixel no hace falta mas
+      }
   }
 }
 
@@ -522,25 +542,26 @@ auto makePlaceholder(const Entry& e, HFONT small, HFONT big, std::vector<u32>& o
   Canvas c;
   if(!c.create(kTexW, kTexH)) return;
   c.fill(0, 0, kTexW, kTexH, scaleC(base, 0.35f));
-  c.fill(4, 4, kTexW - 4, kTexH - 4, base);
-  c.fill(4, 4, kTexW - 4, 30, scaleC(base, 1.45f));       // banda de arriba, como el lomo
-  c.fill(4, 30, kTexW - 4, 32, scaleC(base, 0.30f));
-  c.fill(4, kTexH - 22, kTexW - 4, kTexH - 4, scaleC(base, 0.55f));
+  const int K = kTexK;
+  c.fill(4 * K, 4 * K, kTexW - 4 * K, kTexH - 4 * K, base);
+  c.fill(4 * K, 4 * K, kTexW - 4 * K, 30 * K, scaleC(base, 1.45f));   // banda de arriba, como el lomo
+  c.fill(4 * K, 30 * K, kTexW - 4 * K, 32 * K, scaleC(base, 0.30f));
+  c.fill(4 * K, kTexH - 22 * K, kTexW - 4 * K, kTexH - 4 * K, scaleC(base, 0.55f));
 
   SetBkMode(c.dc, TRANSPARENT);
-  RECT r = {6, 8, kTexW - 6, 28};
+  RECT r = {6 * K, 8 * K, kTexW - 6 * K, 28 * K};
   SelectObject(c.dc, big);
   SetTextColor(c.dc, cref(0xffffff));
   const std::string tag = e.cart.empty() ? std::string("N64") : e.cart;
   DrawTextA(c.dc, tag.c_str(), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
   SelectObject(c.dc, small);
-  r = {8, 40, kTexW - 8, kTexH - 26};
+  r = {8 * K, 40 * K, kTexW - 8 * K, kTexH - 26 * K};
   SetTextColor(c.dc, cref(0xf4f4f4));
   const std::string t = e.title.empty() ? e.file : e.title;
   DrawTextA(c.dc, t.c_str(), -1, &r, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
 
-  r = {6, kTexH - 20, kTexW - 6, kTexH - 6};
+  r = {6 * K, kTexH - 20 * K, kTexW - 6 * K, kTexH - 6 * K};
   SetTextColor(c.dc, cref(scaleC(base, 1.9f)));
   DrawTextA(c.dc, "SIN CARATULA", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
@@ -578,21 +599,25 @@ auto drawTri(Canvas& cv, const Vtx& a, const Vtx& b, const Vtx& c, const u32* te
       if(iz <= 0.0f) continue;
       const float u = (wa * a.uz + wb * b.uz + wc * c.uz) / iz;
       const float v = (wa * a.vz + wb * b.vz + wc * c.vz) / iz;
-      int tx = (int)(u * kTexW);
-      int ty = (int)(v * kTexH);
-      if(tx < 0) tx = 0;
-      if(tx >= kTexW) tx = kTexW - 1;
-      if(ty < 0) ty = 0;
-      if(ty >= kTexH) ty = kTexH - 1;
+      // Bilineal: la tarjeta central sale MAYOR que la textura a pantalla completa.
+      float fx = u * kTexW - 0.5f, fy = v * kTexH - 0.5f;
+      if(fx < 0.0f) fx = 0.0f;
+      if(fy < 0.0f) fy = 0.0f;
+      int tx = (int)fx, ty = (int)fy;
+      if(tx > kTexW - 2) tx = kTexW - 2;
+      if(ty > kTexH - 2) ty = kTexH - 2;
+      const float ax = std::min(1.0f, fx - tx), ay = std::min(1.0f, fy - ty);
+      const u32* t0 = tex + (usize)ty * kTexW + tx;
+      const u32 texel = lerpC(lerpC(t0[0], t0[1], ax), lerpC(t0[kTexW], t0[kTexW + 1], ax), ay);
       float f = amt;
       if(reflect) {
         // El reflejo se desvanece hacia abajo y se raya en las lineas impares: se lee como
         // un tubo de rayos catodicos, no como el brillo de cristal de una pagina web.
         f *= kReflTop * (v - (1.0f - kReflFrac)) / kReflFrac;
-        if(y & 1) f *= 0.45f;
+        if((int)(y / g_k) & 1) f *= 0.45f;   // raya por linea del lienzo logico
         if(f <= 0.004f) continue;
       }
-      cv.blend(x, y, scaleC(tex[(usize)ty * kTexW + tx], bright), f);
+      cv.blend(x, y, scaleC(texel, bright), f);
     }
   }
 }
@@ -610,7 +635,7 @@ struct HitBox { int idx; float x[4], y[4]; };
 struct Lib {
   HWND win = nullptr;
   Canvas cv;
-  HFONT fSmall = nullptr, fBig = nullptr, fTex = nullptr;
+  HFONT fSmall = nullptr, fBig = nullptr, fTex = nullptr, fTexBig = nullptr;
   std::vector<Entry> roms;
   std::vector<HitBox> hits;
   std::string dir;
@@ -619,7 +644,7 @@ struct Lib {
   float pos = 0.0f;
   bool dirty = true;
   bool sound = true;
-  int scale = 3, offX = 0, offY = 0;
+  int offX = 0, offY = 0, pw = 0, ph = 0;   // lienzo de pixeles: origen y tamano en la ventana
   int loaded = 0;             // caratulas con textura viva (para poder soltar las lejanas)
   int padDir = 0;             // direccion mantenida en el mando
   DWORD padNext = 0;          // cuando toca repetir
@@ -651,7 +676,7 @@ auto ensureTex(Entry& e) -> void {
     fitCover(im, e.tex);
     e.state = 1;
   } else {
-    makePlaceholder(e, g.fTex, g.fBig, e.tex);
+    makePlaceholder(e, g.fTex, g.fTexBig, e.tex);
     e.state = 2;
   }
   g.loaded++;
@@ -662,21 +687,21 @@ auto ensureTex(Entry& e) -> void {
 auto tprint(Canvas& cv, HFONT f, int x, int y, u32 col, const std::string& s) -> void {
   SelectObject(cv.dc, f);
   SetTextColor(cv.dc, cref(col));
-  TextOutA(cv.dc, x, y, s.c_str(), (int)s.size());
+  TextOutA(cv.dc, S((float)x), S((float)y), s.c_str(), (int)s.size());
 }
 
 auto tcenter(Canvas& cv, HFONT f, int x0, int x1, int y, int h, u32 col,
              const std::string& s) -> void {
   SelectObject(cv.dc, f);
   SetTextColor(cv.dc, cref(col));
-  RECT r = {x0, y, x1, y + h};
+  RECT r = {S((float)x0), S((float)y), S((float)x1), S((float)(y + h))};
   DrawTextA(cv.dc, s.c_str(), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 auto tright(Canvas& cv, HFONT f, int x1, int y, int h, u32 col, const std::string& s) -> void {
   SelectObject(cv.dc, f);
   SetTextColor(cv.dc, cref(col));
-  RECT r = {0, y, x1, y + h};
+  RECT r = {0, S((float)y), S((float)x1), S((float)(y + h))};
   DrawTextA(cv.dc, s.c_str(), -1, &r, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
@@ -726,8 +751,8 @@ auto renderCarousel(Canvas& cv) -> void {
       const float Z = cz3 + u * sa;
       const float iz = 1.0f / Z;
       Vtx v;
-      v.x = kCanW * 0.5f + kFocal * X * iz;
-      v.y = kCarY - kFocal * yl * iz;
+      v.x = (kCanW * 0.5f + kFocal * X * iz) * g_k;
+      v.y = (kCarY - kFocal * yl * iz) * g_k;
       v.iz = iz;
       v.uz = tu * iz;
       v.vz = tv * iz;
@@ -777,19 +802,20 @@ auto renderCarousel(Canvas& cv) -> void {
 }
 
 auto render(Canvas& cv) -> void {
-  cv.fill(0, 0, kCanW, kCanH, kColBg);
+  if(!cv.px) return;   // layout() aun no ha creado el lienzo
+  cv.fill(0, 0, cv.w, cv.h, kColBg);
 
   // Suelo: una raya tenue a la altura de la costura del reflejo. Sin ella las caratulas
   // flotan y el carrusel no se apoya en nada.
   const int seam = kCarY + (int)kHalfH;
-  cv.fill(0, seam, kCanW, seam + 1, lerpC(kColBg, kColAcc, 0.14f));
+  cv.fill(0, S((float)seam), cv.w, S(seam + 0.6f), lerpC(kColBg, kColAcc, 0.14f));
 
   renderCarousel(cv);
 
-  cv.fill(0, 0, kCanW, kBarH, kColBar);
-  cv.fill(0, kBarH, kCanW, kBarH + 1, kColAcc);
-  cv.fill(0, kInfoY, kCanW, kInfoY + 15, kColPanel);
-  cv.fill(0, kHelpY, kCanW, kCanH, kColBar);
+  cv.fill(0, 0, cv.w, S((float)kBarH), kColBar);
+  cv.fill(0, S((float)kBarH), cv.w, S(kBarH + 0.6f), kColAcc);
+  cv.fill(0, S((float)kInfoY), cv.w, S((float)(kInfoY + 15)), kColPanel);
+  cv.fill(0, S((float)kHelpY), cv.w, cv.h, kColBar);
 
   // A partir de aqui SOLO GDI: los pixeles a pelo van todos antes, que si no habria que
   // vaciar la cola de GDI (GdiFlush) entre unos y otros.
@@ -944,15 +970,36 @@ auto pollPad() -> void {
 
 // ============================================================ ventana
 
+// Fuente de paso fijo TrueType, suavizada, al tamano en pixeles que pide el factor de encaje.
+// La altura es de CELDA (positiva), la misma medida que tenia la Terminal de trama, para que
+// las lineas de 48-63 caracteres sigan cabiendo en el ancho del lienzo.
+// Si Consolas no estuviera, GDI cae a otra de paso fijo y la pantalla se sigue leyendo.
+auto makeFont(int height, int weight) -> HFONT {
+  return CreateFontA(height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                     OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                     FIXED_PITCH | FF_MODERN, "Consolas");
+}
+
 auto layout(HWND h) -> void {
   RECT rc;
   GetClientRect(h, &rc);
   const int cw = rc.right, chh = rc.bottom;
-  int s = std::min(cw / kCanW, chh / kCanH);
-  if(s < 1) s = 1;
-  g.scale = s;
-  g.offX = (cw - kCanW * s) / 2;
-  g.offY = (chh - kCanH * s) / 2;
+  float k = std::min((float)cw / kCanW, (float)chh / kCanH);
+  if(k < 1.0f) k = 1.0f;
+  const int pw = (int)std::lround(kCanW * k), ph = (int)std::lround(kCanH * k);
+  g.offX = (cw - pw) / 2;
+  g.offY = (chh - ph) / 2;
+  if(pw == g.pw && ph == g.ph) return;
+  g_k = k;
+  g.pw = pw;
+  g.ph = ph;
+  g.cv.destroy();
+  g.cv.create(pw, ph);
+  if(g.fSmall) DeleteObject(g.fSmall);
+  if(g.fBig) DeleteObject(g.fBig);
+  g.fSmall = makeFont(S(12.0f), FW_NORMAL);
+  g.fBig = makeFont(S(18.0f), FW_BOLD);
+  g.dirty = true;
 }
 
 // Punto (en el lienzo) dentro del cuadrilatero de una caratula.
@@ -966,9 +1013,8 @@ auto inQuad(const HitBox& q, float px, float py) -> bool {
 }
 
 auto hitTest(int mx, int my) -> int {
-  if(!g.scale) return -1;
-  const float px = (mx - g.offX) / (float)g.scale;
-  const float py = (my - g.offY) / (float)g.scale;
+  if(!g.pw) return -1;
+  const float px = (float)(mx - g.offX), py = (float)(my - g.offY);   // hits en pixeles
   for(const HitBox& q : g.hits)
     if(inQuad(q, px, py)) return q.idx;
   return -1;
@@ -997,21 +1043,19 @@ LRESULT CALLBACK libProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       render(g.cv);
       RECT rc;
       GetClientRect(h, &rc);
-      // Bandas del encaje: el lienzo solo sube por factores enteros, asi que casi siempre
-      // sobra un borde. Se pinta del color del fondo, no de negro puro.
+      // Bandas del encaje: el lienzo guarda la proporcion 16:9, asi que casi siempre sobra
+      // un borde. Se pinta del color del fondo, no de negro puro.
       HBRUSH bg = CreateSolidBrush(cref(kColBg));
       RECT b1 = {0, 0, rc.right, g.offY};
-      RECT b2 = {0, g.offY + kCanH * g.scale, rc.right, rc.bottom};
-      RECT b3 = {0, g.offY, g.offX, g.offY + kCanH * g.scale};
-      RECT b4 = {g.offX + kCanW * g.scale, g.offY, rc.right, g.offY + kCanH * g.scale};
+      RECT b2 = {0, g.offY + g.ph, rc.right, rc.bottom};
+      RECT b3 = {0, g.offY, g.offX, g.offY + g.ph};
+      RECT b4 = {g.offX + g.pw, g.offY, rc.right, g.offY + g.ph};
       FillRect(dc, &b1, bg);
       FillRect(dc, &b2, bg);
       FillRect(dc, &b3, bg);
       FillRect(dc, &b4, bg);
       DeleteObject(bg);
-      SetStretchBltMode(dc, COLORONCOLOR);   // vecino mas cercano: el pixel gordo es el fin
-      StretchBlt(dc, g.offX, g.offY, kCanW * g.scale, kCanH * g.scale, g.cv.dc, 0, 0, kCanW,
-                 kCanH, SRCCOPY);
+      BitBlt(dc, g.offX, g.offY, g.pw, g.ph, g.cv.dc, 0, 0, SRCCOPY);   // ya a su tamano
       EndPaint(h, &ps);
       return 0;
     }
@@ -1059,15 +1103,6 @@ LRESULT CALLBACK libProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return DefWindowProcA(h, m, w, l);
 }
 
-// Fuente de mapa de bits. "Terminal" es la fuente de trama que Windows arrastra desde la
-// epoca de VGA (vgaoem.fon): 8x12 y 8x16 clavados, sin suavizar y sin escalar, que es
-// exactamente lo que pide la referencia. Si un dia no estuviera, GDI cae a la de sistema de
-// paso fijo y la pantalla se sigue leyendo.
-auto makeFont(int height, int weight) -> HFONT {
-  return CreateFontA(height, 0, 0, 0, weight, FALSE, FALSE, FALSE, OEM_CHARSET,
-                     OUT_RASTER_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-                     FIXED_PITCH | FF_MODERN, "Terminal");
-}
 
 // Donde empezar a mirar: lo que dejo el lanzador, si no la carpeta de la ultima ROM, si no
 // las carpetas donde el paquete y el arbol de desarrollo dejan las ROMs.
@@ -1113,10 +1148,10 @@ auto pickRomLibrary(void* ownerHwnd) -> std::string {
   Profile prof = loadProfile();
   g.dir = startDir(prof);
   g.sound = prof.getBool("audio");
-  g.fSmall = makeFont(12, FW_NORMAL);
-  g.fBig = makeFont(16, FW_BOLD);
-  g.fTex = makeFont(12, FW_BOLD);
-  g.cv.create(kCanW, kCanH);
+  // Las de la portada sin caratula van a la escala de la TEXTURA, no a la de la ventana.
+  g.fTex = makeFont(12 * kTexK, FW_BOLD);
+  g.fTexBig = makeFont(16 * kTexK, FW_BOLD);
+  // Lienzo y fuentes de pantalla los crea layout() al tamano de la ventana.
   scanDir(g.dir, g.roms);
   // Arrancar sobre la ROM que se jugo la ultima vez: volver a abrir el emulador cae donde
   // uno lo dejo, no al principio del alfabeto.
@@ -1160,6 +1195,7 @@ auto pickRomLibrary(void* ownerHwnd) -> std::string {
   if(g.fSmall) DeleteObject(g.fSmall);
   if(g.fBig) DeleteObject(g.fBig);
   if(g.fTex) DeleteObject(g.fTex);
+  if(g.fTexBig) DeleteObject(g.fTexBig);
   g = Lib();
   if(SUCCEEDED(co)) CoUninitialize();
   g_open.store(false);

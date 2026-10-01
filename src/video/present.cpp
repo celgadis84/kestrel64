@@ -829,7 +829,13 @@ static auto loadPadMapFile(PadMap& m, const char* path) -> void {
       if(std::strcmp(kPadIds[i], id)) continue;
       m.key[i] = lookupKey(std::strcmp(k, "-") ? k : nullptr);
       m.setKey[i] = true;
-      if(*g) { m.gpb[i] = lookupGamepad(std::strcmp(g, "-") ? g : nullptr); m.setGp[i] = true; }
+      // El lanzador escribe el mapa ENTERO, de fabrica incluido: una linea que repite el
+      // valor de fabrica no es una redefinicion y no apaga los alias del mando (stick
+      // derecho -> C, Y/gatillo derecho -> R, BACK -> START). Solo un cambio real los quita.
+      if(*g) {
+        int gv = lookupGamepad(std::strcmp(g, "-") ? g : nullptr);
+        if(gv != m.gpb[i]) { m.gpb[i] = gv; m.setGp[i] = true; }
+      }
       n++;
       break;
     }
