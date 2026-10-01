@@ -169,7 +169,9 @@ auto Memory::reset(bool expansionPak) -> void {
   // encuentra una consola encima de la mesa; el menu de la ventana los cambia en caliente
   // (rt::padOn/padAcc) y KESTREL_PADS deja hacerlo sin ventana, por ejemplo en un gate.
   //   KESTREL_PADS=1101   mandos 1, 2 y 4
-  //   KESTREL_PADACC=1102 accesorio por puerto: 0 nada, 1 Controller Pak, 2 Rumble Pak
+  //   KESTREL_PADACC=1102 accesorio por puerto: 0 nada, 1 Controller Pak, 2 Rumble Pak,
+  //                       3 Transfer Pak (KESTREL_TPAK_ROM1..4 = ROM de GB de cada uno;
+  //                       KESTREL_TPAK_ROM vale por la del puerto 1)
   // El Controller Pak es del MANDO, no de la cartuchera: existe aunque el juego no guarde.
   const char* pads = std::getenv("KESTREL_PADS");
   const char* accs = std::getenv("KESTREL_PADACC");
@@ -178,12 +180,25 @@ auto Memory::reset(bool expansionPak) -> void {
     bool on = pads && pads[0] ? (pads[i] ? pads[i] != '0' : false) : (i == 0);
     u8   ac = accs && accs[i] ? (u8)(accs[i] - '0') : (u8)1;
     if(i == 0 && oldMempak && oldMempak[0] == '0') ac = 0;
-    if(ac > 2) ac = 0;
+    if(ac > 3) ac = 0;
     padPort[i].connected = on;
     padPort[i].accessory = ac;
     rt::padOn[i].store(on, std::memory_order_relaxed);
     rt::padAcc[i].store(ac, std::memory_order_relaxed);
     if(ac == 1 && padPort[i].mempak.empty()) mempakFormat(padPort[i].mempak);
+    // Transfer Pak: apagado al encender la consola (el SDK lo enciende en osGbpakInit).
+    padPort[i].tp = PadPort::TpakRegs{};
+    char var[24];
+    std::snprintf(var, sizeof var, "KESTREL_TPAK_ROM%d", i + 1);
+    const char* gbp = std::getenv(var);
+    if(!gbp && i == 0) gbp = std::getenv("KESTREL_TPAK_ROM");
+    if(gbp) {
+      std::lock_guard<std::mutex> lk(rt::tpakMx);
+      if(rt::tpakRom[i] != gbp || !padPort[i].gb.loaded()) {
+        rt::tpakRom[i] = gbp;
+        rt::tpakGen[i].fetch_add(1, std::memory_order_relaxed);
+      }
+    }
   }
   if(const char* b = std::getenv("KESTREL_BUTTONS")) padButtons() = (u32)strtoul(b, nullptr, 16);
   initMap();
@@ -405,6 +420,26 @@ static auto mempakFormat(std::vector<u8>& p) -> void {
 // Mirror the battery/flash backing to a file beside the ROM. The extension follows the
 // mupen/ares convention so saves are interchangeable: .eep (EEPROM), .sra (SRAM), .fla
 // (FlashRAM), .mpk (Controller Pak). The path is the ROM path with its extension replaced.
+// Recoge el cartucho GB que el menu (o KESTREL_TPAK_ROMn) haya puesto en el Transfer Pak
+// del puerto. Corre en el hilo de la CPU, dentro del joybus: el cambio cae entre dos
+// transacciones. Cambiar de cartucho con uno ya puesto deja GBCART_PULL para la siguiente
+// lectura de estado, que es como el SDK se entera (PFS_ERR_NEW_GBCART).
+auto Memory::tpakSync(int port) -> void {
+  PadPort& pp = padPort[port];
+  u32 g = rt::tpakGen[port].load(std::memory_order_relaxed);
+  if(g == pp.tpGen) return;
+  pp.tpGen = g;
+  std::string path;
+  { std::lock_guard<std::mutex> lk(rt::tpakMx); path = rt::tpakRom[port]; }
+  bool had = pp.gb.loaded();
+  pp.gb.flush();
+  if(path.empty()) pp.gb.clear();
+  else if(!pp.gb.load(path))
+    std::fprintf(stderr, "[tpak] puerto %d: no se pudo cargar la ROM de GB '%s'\n", port + 1, path.c_str());
+  pp.tp.pull = had;
+  pp.tp.cartOn = false;
+}
+
 auto Memory::attachSaveFile(const std::string& romPath) -> void {
   // Los Controller Pak van aparte: no dependen del tipo de save de la cartuchera, y cada
   // puerto lleva el suyo. El del puerto 1 conserva el nombre de siempre (.mpk) para no
@@ -430,8 +465,10 @@ auto Memory::attachSaveFile(const std::string& romPath) -> void {
 }
 
 auto Memory::flushSaveFile() const -> void {
-  for(const PadPort& pp : padPort)
+  for(const PadPort& pp : padPort) {
     if(pp.mempakDirty && !pp.mempakPath.empty()) storeFrom(pp.mempakPath, pp.mempak);
+    pp.gb.flush();                   // RAM con bateria del cartucho GB del Transfer Pak
+  }
   if(saveFilePath.empty() || saveType == SaveType::None || !saveDirty) return;
   storeFrom(saveFilePath, isEeprom() ? eeprom : saveRam);
 }
@@ -2175,7 +2212,41 @@ auto Memory::pifProcessJoybus() -> u32 {
         u8 data[32];
         if(wr) for(int k = 0; k < 32; k++) data[k] = (3 + k) < tx ? pifram[txStart + 3 + k] : 0;
 
-        if(pp.accessory == 1) {                       // Controller Pak: 32 KiB de RAM
+        if(pp.accessory == 3) {                       // Transfer Pak (ver PadPort)
+          tpakSync(channel);
+          PadPort::TpakRegs& tp = pp.tp;
+          bool gbWin = false;
+          u8 fill = 0x00;
+          if(off >= 0x8000 && off < 0x9000) {         // alimentacion del pak
+            if(wr) { if(data[31] == 0x84) tp.power = true; else if(data[31] == 0xFE) tp.power = false; }
+            else fill = tp.power ? 0x84 : 0x00;
+          } else if(!tp.power) {
+            // Apagado no contesta: ceros, y lo escrito se pierde.
+          } else if(off >= 0xA000 && off < 0xB000) {  // banco del bus GB
+            if(wr) tp.bank = data[31];
+          } else if(off >= 0xB000 && off < 0xC000) {  // cartucho GB: alimentacion / estado
+            if(wr) { tp.cartOn = data[31] & 1; tp.rst = 0x04; }
+            else if(pp.gb.loaded()) {
+              // GBCART_ON, y con el cartucho alimentado POWER + RSTB_STATUS (la linea de
+              // reset del GB ya soltada). RSTB_DETECTION (en el primer byte) y GBCART_PULL
+              // se entregan una sola vez.
+              fill = (u8)(0x80 | (tp.cartOn ? 0x09 : 0x00) | (tp.pull ? 0x40 : 0x00));
+              tp.pull = false;
+            } else fill = 0x40;                       // sin cartucho: GBCART_ON a cero
+          } else if(off >= 0xC000) {                  // ventana de 16 KiB sobre el bus GB
+            gbWin = true;
+            u16 ga = (u16)((tp.bank & 3) * 0x4000u + (off - 0xC000u));
+            if(wr) { for(int k = 0; k < 32; k++) pp.gb.write((u16)(ga + k), data[k]); }
+            else   { for(int k = 0; k < 32; k++) data[k] = pp.gb.read((u16)(ga + k)); }
+          }
+          if(!wr) {
+            if(!gbWin) {
+              for(int k = 0; k < 32; k++) data[k] = fill;
+              if(tp.power && off >= 0xB000 && off < 0xC000 && pp.gb.loaded()) { data[0] |= tp.rst; tp.rst = 0; }
+            }
+            for(int k = 0; k < rx && k < 32; k++) rxp[k] = data[k];
+          }
+        } else if(pp.accessory == 1) {                       // Controller Pak: 32 KiB de RAM
           if(wr) {
             if(off + 32 <= pp.mempak.size()) {
               std::memcpy(&pp.mempak[off], data, 32);

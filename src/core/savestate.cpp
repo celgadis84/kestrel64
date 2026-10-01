@@ -26,7 +26,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 14;  // 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 15;  // 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -50,6 +50,7 @@ struct StateIO {
   const u8* in = nullptr;
   usize len = 0, pos = 0;
   bool bad = false;
+  u32  version = kVersion;           // del estado que se lee (se aceptan versiones previas)
 
   auto bytes(void* p, usize n) -> void {
     if(bad) { if(!writing) std::memset(p, 0, n); return; }
@@ -274,6 +275,21 @@ auto visitRam(StateIO& io, Memory& m) -> void {
   // Los pak son RAM viva: rebobinar un estado tiene que rebobinarlos. Van los cuatro
   // puertos, y con ellos el estado del motor del Rumble (que el juego enciende y apaga).
   for(auto& pp : m.padPort) { io.vecBlob(pp.mempak); io.pod(pp.rumble); }
+  // Transfer Pak (v15): sus registros y los del MBC, y la RAM del cartucho GB. La ROM de GB
+  // es un fichero y no viaja; el estado se carga sobre el cartucho que este puesto.
+  if(io.version >= 15)
+    for(auto& pp : m.padPort) {
+      auto& t = pp.tp; auto& r = pp.gb.r;     // campo a campo: sin bytes de relleno
+      io.pod(t.power); io.pod(t.cartOn); io.pod(t.pull); io.pod(t.bank); io.pod(t.rst);
+      io.pod(r.ramOn); io.pod(r.romBank); io.pod(r.hiBank); io.pod(r.mode);
+      io.pod(r.rtc); io.pod(r.latched); io.pod(r.rtcBase);
+      if(io.writing) io.vecBlob(pp.gb.ram);
+      else {                                  // solo si casa con el cartucho puesto
+        std::vector<u8> ram;
+        io.vecBlob(ram);
+        if(!io.bad && ram.size() == pp.gb.ram.size()) pp.gb.ram.swap(ram);
+      }
+    }
 }
 
 // Peliculas TAS: los sondeos consumidos son estado de la partida igual que la RDRAM. Sin
@@ -408,12 +424,13 @@ auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> b
   std::memcpy(&h, data, sizeof(h));
   Header want = makeHeader(sys);
   if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion) { err = "version de estado incompatible"; return false; }
+  if(h.version != kVersion && h.version != 14) { err = "version de estado incompatible"; return false; }
   if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
   if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
 
   StateIO io;
   io.writing = false;
+  io.version = h.version;
   io.in = data + sizeof(Header);
   io.len = len - sizeof(Header);
   visitAll(io, sys);

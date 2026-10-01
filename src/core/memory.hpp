@@ -8,6 +8,7 @@
 // interrupts. Named RAM regions are exposed to the telemetry server for MCP inspection.
 
 #include "types.hpp"
+#include "gbcart.hpp"
 #include "../rdp/rdp.hpp"
 #include "../rsp/rsp.hpp"
 #include <vector>
@@ -205,7 +206,8 @@ struct Memory {
   // vacio contesta "no hay nada" (bit NO_DEVICE), que es distinto de un mando sin
   // accesorio. Todo lo que define un puerto vive junto porque el joybus lo consulta junto.
   //
-  // Accesorio (`accessory`): 0 = ranura vacia, 1 = Controller Pak, 2 = Rumble Pak.
+  // Accesorio (`accessory`): 0 = ranura vacia, 1 = Controller Pak, 2 = Rumble Pak,
+  // 3 = Transfer Pak.
   //  - Controller Pak: 32 KiB de RAM con bateria DENTRO del mando, no de la cartuchera —
   //    existe aunque el juego no tenga partida guardada. Se lee y escribe por joybus en
   //    bloques de 32 bytes con CRC de direccion (5 bits) y de datos (8 bits); el SDK
@@ -213,16 +215,29 @@ struct Memory {
   //    aparte (convencion mupen/ares), uno por puerto.
   //  - Rumble Pak: no tiene RAM. Se identifica porque la ventana 0x8000 devuelve 0x80 en
   //    los 32 bytes, y el motor se enciende y se apaga escribiendo en 0xC000.
+  //  - Transfer Pak: adaptador al bus de un cartucho de Game Boy (ver GbCart). Cuatro
+  //    ventanas de 4 KiB (libultra osGbpak*): 0x8000 alimentacion del propio pak (0x84
+  //    encendido / 0xFE apagado, y se lee 0x84 o 0x00), 0xA000 banco de 16 KiB del bus GB,
+  //    0xB000 alimentacion del cartucho GB (bit 0) y, al leer, su estado, y 0xC000-0xFFFF
+  //    la ventana de 16 KiB sobre el bus GB en el banco elegido.
   struct PadPort {
     bool connected = false;          // hay un mando enchufado en este conector
-    u8   accessory = 0;              // 0 nada / 1 Controller Pak / 2 Rumble Pak
+    u8   accessory = 0;              // 0 nada / 1 Controller Pak / 2 Rumble Pak / 3 Transfer Pak
     u32  buttons = 0;                // byte0<<8|byte1 (A=0x8000 ... C-derecha=0x0001)
     s8   stickX = 0, stickY = 0;     // puerta octogonal del mando: +-85 en eje, +-69 en diagonal
     bool rumble = false;             // ultimo estado del motor que ha pedido el juego
     std::vector<u8> mempak;          // vacia hasta que hace falta; 32 KiB formateados
     std::string     mempakPath;      // "" hasta que se engancha una ROM
     bool            mempakDirty = false;   // el juego escribio: merece la pena volcarlo
+    // Transfer Pak. Estado de invitado (va en el savestate salvo la ROM de GB, que es un
+    // fichero). rst = OS_GBPAK_RSTB_DETECTION pendiente de leer; pull = el cartucho GB se ha
+    // cambiado desde la ultima lectura de estado (OS_GBPAK_GBCART_PULL).
+    struct TpakRegs { bool power = false, cartOn = false, pull = false; u8 bank = 0, rst = 0; };
+    TpakRegs tp;
+    mutable GbCart gb;               // mutable: flushSaveFile es const y el .sav se vuelca ahi
+    u32 tpGen = 0;                   // ultima rt::tpakGen cargada
   };
+  auto tpakSync(int port) -> void;   // recoge el cartucho GB que haya elegido el menu
   PadPort padPort[4];
 
   // FlashRAM command/status state machine (PI domain 2). Reads at 0x08000000 return

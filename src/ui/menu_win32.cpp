@@ -817,6 +817,7 @@ struct PadDlg {
   HWND win = nullptr;
   int  port = 0;              // conector que se esta editando (0..3)
   HWND cbPort = nullptr, ckOn = nullptr, cbDev = nullptr, cbAcc = nullptr;
+  HWND btGb = nullptr;        // ROM de GB del Transfer Pak
   HWND stHint = nullptr;      // que columna se puede tocar y por que
   std::vector<HWND> keyBtn;
   std::vector<HWND> gpCombo;
@@ -831,6 +832,7 @@ PadDlg g_pad;
 constexpr int kIdPadKey0 = 2000, kIdPadGp0 = 2100;
 constexpr int kIdPadOk = 2300, kIdPadCancel = 2301, kIdPadDefaults = 2302;
 constexpr int kIdPadPort = 2303, kIdPadConn = 2304, kIdPadDev = 2305, kIdPadAcc = 2306;
+constexpr int kIdPadGb = 2307;
 
 // Nombres GLFW de los botones de mando, en el mismo orden que la tabla de present.cpp.
 const char* const kGpNames[] = {
@@ -1091,6 +1093,21 @@ auto fillDevCombo() -> void {
   g_pad.joySeen = gen;
 }
 
+auto pickGbRom(HWND owner) -> std::string {
+  char file[MAX_PATH] = {0};
+  OPENFILENAMEA ofn = {};
+  ofn.lStructSize = sizeof ofn;
+  ofn.hwndOwner = owner;
+  static const char kFilter[] =
+      "ROM de Game Boy / Color\0*.gb;*.gbc;*.sgb\0Todos los archivos\0*.*\0";
+  ofn.lpstrFilter = kFilter;
+  ofn.lpstrTitle = "Cartucho de Game Boy para el Transfer Pak";
+  ofn.lpstrFile = file;
+  ofn.nMaxFile = MAX_PATH;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+  return GetOpenFileNameA(&ofn) ? std::string(file) : std::string();
+}
+
 auto padRefresh() -> void {
   const int port = g_pad.port;
   auto& map = g_prof.pad[port];
@@ -1118,7 +1135,18 @@ auto padRefresh() -> void {
                : (dev == "auto" || dev.empty())
                    ? "Automatico: teclado y primer mando, las dos columnas."
                    : "Mando: edita la columna BOTON DEL MANDO.";
+  // Con Transfer Pak lo que importa es que cartucho de GB lleva metido.
+  std::string gbHint;
+  const bool tpak = on && padAcc(g_prof, port) == 3;
+  if(tpak) {
+    std::string gb = padGbRom(g_prof, port);
+    usize sl = gb.find_last_of("/\\");
+    gbHint = gb.empty() ? "Transfer Pak sin cartucho: pulsa ROM GB..."
+                        : "Transfer Pak: " + (sl == std::string::npos ? gb : gb.substr(sl + 1));
+    hint = gbHint.c_str();
+  }
   SetWindowTextA(g_pad.stHint, hint);
+  EnableWindow(g_pad.btGb, tpak);
   SendMessageA(g_pad.ckOn, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
   SendMessageA(g_pad.cbAcc, CB_SETCURSEL, padAcc(g_prof, port), 0);
   EnableWindow(g_pad.cbDev, on);
@@ -1140,6 +1168,11 @@ auto padApply() -> void {
 
     rt::padOn[q].store(padOn(g_prof, q), std::memory_order_relaxed);
     rt::padAcc[q].store(padAcc(g_prof, q), std::memory_order_relaxed);
+    {                                        // cartucho GB: el joybus lo carga al ver la generacion
+      std::string gb = padGbRom(g_prof, q);
+      std::lock_guard<std::mutex> lk(rt::tpakMx);
+      if(rt::tpakRom[q] != gb) { rt::tpakRom[q] = gb; rt::tpakGen[q].fetch_add(1, std::memory_order_relaxed); }
+    }
 
     std::string dev = padDevice(g_prof, q);
     int val = -3;
@@ -1254,7 +1287,18 @@ LRESULT CALLBACK padProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       }
       if(id == kIdPadAcc && HIWORD(w) == CBN_SELCHANGE) {
         LRESULT sel = SendMessageA(g_pad.cbAcc, CB_GETCURSEL, 0, 0);
-        if(sel >= 0 && sel <= 2) setPadAcc(g_prof, g_pad.port, (int)sel);
+        if(sel >= 0 && sel <= 3) setPadAcc(g_prof, g_pad.port, (int)sel);
+        // Recien elegido el Transfer Pak y sin cartucho: se pide ya, que sin el no sirve.
+        if(sel == 3 && padGbRom(g_prof, g_pad.port).empty()) {
+          std::string f = pickGbRom(g_pad.win);
+          if(!f.empty()) setPadGbRom(g_prof, g_pad.port, f);
+        }
+        padRefresh();
+        return 0;
+      }
+      if(id == kIdPadGb) {
+        std::string f = pickGbRom(g_pad.win);
+        if(!f.empty()) { setPadGbRom(g_prof, g_pad.port, f); padRefresh(); }
         return 0;
       }
       if(id == kIdPadDefaults) {
@@ -1341,9 +1385,10 @@ auto padDialogThread() -> void {
   g_pad.ckOn = mk("BUTTON", "Conectado", WS_TABSTOP | BS_AUTOCHECKBOX, 166, 12, 96, 20,
                   kIdPadConn);
   mk("STATIC", "Accesorio:", 0, 276, 14, 66, 18, 0);
-  g_pad.cbAcc = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST, 346, 10, 190, 200, kIdPadAcc);
-  for(const char* a : {"Ninguno", "Controller Pak", "Rumble Pak"})
+  g_pad.cbAcc = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST, 346, 10, 118, 200, kIdPadAcc);
+  for(const char* a : {"Ninguno", "Controller Pak", "Rumble Pak", "Transfer Pak"})
     SendMessageA(g_pad.cbAcc, CB_ADDSTRING, 0, (LPARAM)a);
+  g_pad.btGb = mk("BUTTON", "ROM GB...", WS_TABSTOP, 468, 9, 68, 24, kIdPadGb);
   mk("STATIC", "Aparato:", 0, 12, 46, 46, 18, 0);
   g_pad.cbDev = mk("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 62, 42, 474,
                    300, kIdPadDev);

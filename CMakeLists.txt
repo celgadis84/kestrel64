@@ -109,6 +109,26 @@ if(WIN32)
   target_link_libraries(save_test PRIVATE winmm)
 endif()
 
+# Transfer Pak unit test (joybus pak commands + GB cartridge MBCs; no windowing deps).
+add_executable(tpak_test EXCLUDE_FROM_ALL
+  test/tpak_test.cpp
+  src/telemetry/hostprof.cpp
+  src/telemetry/symbols.cpp
+  src/cpu/cpu.cpp
+  src/cpu/jit.cpp
+  src/video/vifilter.cpp
+  src/core/memory.cpp
+  src/core/archive.cpp
+  src/rdp/rdp.cpp
+  src/rsp/rsp.cpp
+  src/rsp/rspjit.cpp
+  src/audio/audio.cpp
+)
+target_include_directories(tpak_test PRIVATE src)
+if(WIN32)
+  target_link_libraries(tpak_test PRIVATE winmm)
+endif()
+
 # Wild-address unit test: direcciones de invitado imposibles (desalineadas, pasadas del
 # final de RDRAM, kuseg sin TLB, punteros de 64 bits no canonicos) deben dar excepcion de
 # invitado y el mismo resultado en interprete y dynarec, nunca un fallo de acceso del host.
@@ -211,7 +231,7 @@ target_include_directories(rewind_test PRIVATE src)
 
 # Los tests compilan rsp.cpp, que usa SSSE3 en el difusor de banda: sin el mismo juego de
 # instrucciones que el binario principal no enlaza.
-foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test pif_test)
+foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test pif_test tpak_test)
   if(NOT MSVC)
     if(KESTREL_BUILD_LOCAL)
       target_compile_options(${t} PRIVATE -march=native)

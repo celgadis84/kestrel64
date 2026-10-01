@@ -9831,3 +9831,16 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   no es RDRAM real). Se queda 1 GCLK/8 B como estimacion; falta ROM + medida en consola.
 - P7: FILL a 64 bits/clock y la separacion BUF/PIPE por huecos, bloqueados sin oraculo.
 - Puertas: `gate_quick.sh krom thar0` ALL OK (krom regress=0, Thar0 0.1332).
+
+## 2026-10-01 -- JIT nivel 2 cerrado; Transfer Pak (GAP 13, el ultimo P2 de accesorios)
+
+- JIT nivel 2, pasos 4-6 (inmediatos cortos, KSU conocido por bloque, rango de `roundTail`
+  por exponente), cada uno con su toggle `KESTREL_JIT_NO*`. Lockstep DK64/PD identico; SM64
+  -0,7..-1,3 % por paso, DK64 plano. Cierre de fase: `gate_all` 767 s + `gate_prdp` 373 s
+  RC=0.
+- Transfer Pak (accesorio 3): `src/core/gbcart.hpp` (MBC1/2/3+RTC/5, `.sav`) + rama del
+  joybus 0x02/0x03 en `memory.cpp` (ventanas 0x8000/0xA000/0xB000/0xC000 de libultra gbpak).
+  ROM de GB por `KESTREL_TPAK_ROM1..4` o el dialogo de mandos; la carga la hace el joybus en
+  el hilo de CPU al ver subir `rt::tpakGen`. Estado guardado v15 (acepta v14).
+  `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
+  statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.

@@ -45,7 +45,13 @@ inline std::atomic<bool> padOn[4]  = {{true}, {false}, {false}, {false}};
 // -3 sin aparato elegido, -2 automatico (teclado + primer mando, el modo de siempre),
 // -1 teclado, >=0 indice de joystick de GLFW.
 inline std::atomic<int>  padDev[4] = {{-2}, {-3}, {-3}, {-3}};
-inline std::atomic<int>  padAcc[4] = {{1}, {1}, {1}, {1}};   // 0 nada, 1 Controller Pak, 2 Rumble Pak
+inline std::atomic<int>  padAcc[4] = {{1}, {1}, {1}, {1}};   // 0 nada, 1 Controller Pak, 2 Rumble Pak, 3 Transfer Pak
+// ROM de Game Boy metida en el Transfer Pak de cada puerto ("" = sin cartucho). La escriben
+// el menu y Memory::reset (KESTREL_TPAK_ROM1..4); la CARGA el joybus, en el hilo de la CPU,
+// cuando ve subir la generacion: el cartucho nunca cambia debajo de una transaccion.
+inline std::mutex       tpakMx;
+inline std::string      tpakRom[4];
+inline std::atomic<u32> tpakGen[4] = {{0}, {0}, {0}, {0}};
 
 // Mandos que Windows tiene enchufados AHORA, publicados por el presentador (que es el unico
 // hilo que puede preguntarle a GLFW) para que el dialogo de mando pueda ensenar nombres de

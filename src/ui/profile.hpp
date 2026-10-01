@@ -48,10 +48,12 @@ auto writePadFile(const Profile& p, int port) -> std::string;
 // ordenes), asi que sus valores de fabrica viven aqui: solo el mando 1 viene enchufado, y
 // con Controller Pak, que es lo que hacia el emulador cuando solo habia un puerto.
 auto padOn(const Profile& p, int port) -> bool;
-auto padAcc(const Profile& p, int port) -> int;          // 0 nada, 1 Controller Pak, 2 Rumble
+auto padAcc(const Profile& p, int port) -> int;          // 0 nada, 1 Controller Pak, 2 Rumble, 3 Transfer
+auto padGbRom(const Profile& p, int port) -> std::string;  // ROM de GB del Transfer Pak ("" = ninguna)
 auto padDevice(const Profile& p, int port) -> std::string;  // "auto", "kb" o nombre del mando
 auto setPadOn(Profile& p, int port, bool on) -> void;
 auto setPadAcc(Profile& p, int port, int acc) -> void;
 auto setPadDevice(Profile& p, int port, const std::string& dev) -> void;
+auto setPadGbRom(Profile& p, int port, const std::string& path) -> void;
 
 }  // namespace kestrel::ui

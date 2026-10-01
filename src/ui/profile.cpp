@@ -271,7 +271,12 @@ auto padAcc(const Profile& p, int port) -> int {
   auto it = p.v.find(padKey(port, "acc"));
   if(it == p.v.end()) return 1;           // Controller Pak, como hacia el puerto unico
   int a = std::atoi(it->second.c_str());
-  return (a >= 0 && a <= 2) ? a : 0;
+  return (a >= 0 && a <= 3) ? a : 0;
+}
+
+auto padGbRom(const Profile& p, int port) -> std::string {
+  auto it = p.v.find(padKey(port, "gb"));
+  return it == p.v.end() ? std::string() : it->second;
 }
 
 auto padDevice(const Profile& p, int port) -> std::string {
@@ -286,6 +291,7 @@ auto padDevice(const Profile& p, int port) -> std::string {
 auto setPadOn(Profile& p, int port, bool on) -> void { p.v[padKey(port, "on")] = on ? "1" : "0"; }
 auto setPadAcc(Profile& p, int port, int acc) -> void { p.v[padKey(port, "acc")] = std::to_string(acc); }
 auto setPadDevice(Profile& p, int port, const std::string& dev) -> void { p.v[padKey(port, "dev")] = dev; }
+auto setPadGbRom(Profile& p, int port, const std::string& path) -> void { p.v[padKey(port, "gb")] = path; }
 
 auto writePadFile(const Profile& p, int port) -> std::string {
   if(port < 0 || port > 3 || p.pad[port].empty()) return {};
@@ -410,6 +416,9 @@ auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& e
     std::string dev = padDevice(p, q);
     std::snprintf(var, sizeof var, "KESTREL_PADDEV%d", q + 1);
     if(!dev.empty()) put(var, dev);
+    std::string gb = padGbRom(p, q);          // cartucho GB del Transfer Pak
+    std::snprintf(var, sizeof var, "KESTREL_TPAK_ROM%d", q + 1);
+    if(!gb.empty()) put(var, gb);
   }
   put("KESTREL_PADS", pads);
   put("KESTREL_PADACC", accs);
