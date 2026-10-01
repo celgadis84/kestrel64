@@ -116,6 +116,11 @@ struct SoftRdp {
   // they must advance with a cost model, not stay pinned at zero. See rdp.cpp for
   // the model and scripts/rdptiming.py for its calibration against hardware.
   auto accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void;
+  // Tramos (una linea de una primitiva) de lo que se va a cobrar: el llamante declara cada
+  // linea con su primer pixel y su anchura y accountPixels los consume. Sin tramos declarados
+  // cae al reparto plano npx/8 de antes.
+  auto addSpan(int x0, u64 npx) -> void;
+  u64 spanLines = 0, spanUnits = 0;
   auto accountTmem(Memory& mem, u64 bytes) -> void;
   // Coste fijo de un comando que para el pipeline sin tocar RDRAM ni TMEM (SYNC_LOAD/PIPE/TILE).
   auto accountStall(Memory& mem, u32 gclk) -> void;

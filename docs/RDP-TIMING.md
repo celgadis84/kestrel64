@@ -141,3 +141,46 @@ they only diverge across FIFO gaps before SYNC_FULL, which is not modelled.
 Accepted for now and tracked here. The fix is separate per-counter accounting plus a
 FILL-cycle path in the cost model — and it needs its own hardware oracle, because
 Thar0's sweep never enters FILL mode.
+
+## FILL/COPY path and per-line cost (2026-10-02)
+
+Requested by the kestrel64-sdk session (bench `demos/09_rdp_bench`). Before this,
+FILL/COPY went through the same chunk/memory model as 1-cycle and came out
+memory-bound at ~0.97 clk/px, only ~20 % faster than 1-cycle. There was also no
+per-line cost, so 1200 small triangles cost the same as 2 big ones.
+
+There is still no hardware measurement of FILL/COPY. The new shape comes only from
+documented hardware behaviour, with no new constant fitted:
+
+- **FILL/COPY bypass the span buffer.** n64brew "Reality Display Processor/Pipeline"
+  says: "Writes are committed straight to RDRAM without passing through the span
+  buffers", "Pixels are written out 64-bits (8 8-bit pixels, 4 16-bit pixels,
+  2 32-bit pixels) at a time". The N64 programming manual agrees: four 16-bit or two
+  32-bit pixels per cycle.
+  - The model charges one GCLK per *aligned* 64-bit word that the line touches.
+  - That cost is scaled by the existing calibrated VI contention `T_VI`.
+  - No chunk overhead and no read latency are added.
+- **One dead cycle per line** (n64brew: "1 dead cycle at the end of every line in a
+  primitive where the pipeline is cycled but no pixel is output"). Every line of every
+  primitive pays it, in all cycle types.
+- **Chunks never span two lines.** In 1/2-cycle mode each line costs `ceil(px/8)`
+  span-buffer chunks, so a 2-pixel line pays a whole chunk.
+
+Results (09_rdp_bench, 320x240 RGBA16, VI on):
+
+| test | before | after |
+|---|---:|---:|
+| fill rect | 75 451 | 21 150 |
+| copy 1 wrapped rect | 74 902 | 21 062 |
+| 1-cycle rect | 92 217 | 92 457 |
+| 1-cycle 2 tris per 8x8 cell | 91 200 | 140 400 |
+| prim canvas 2x2 | 191 160 | 440 320 |
+
+- FILL/COPY now run about 4.4x faster than 1-cycle, which matches libdragon's
+  "approximately 4 times faster".
+- Thar0 is unchanged at rmse 0.1332: all its rects are 320 wide, so chunk rounding does
+  nothing and only the 240 dead cycles per rect remain. Max error moves 0.2992 -> 0.2967.
+
+Still not modelled: a per-primitive setup cost (edge walker / command fetch). No source
+gives a number for it, so none is invented. The command words themselves still cost
+nothing beyond the FIFO.

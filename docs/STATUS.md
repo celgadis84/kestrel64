@@ -9845,6 +9845,16 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-02 (b) -- Coste RDP: camino FILL/COPY y coste por linea
+
+- Pedido n64-be (09_rdp_bench). FILL/COPY ya no pasan por el modelo de chunks: 1 GCLK por
+  palabra de 64 bits alineada (n64brew: escriben directo a RDRAM sin span buffer) x T_VI.
+  Cada linea de cada primitiva paga 1 GCLK muerto (n64brew) y, en 1/2 ciclos, chunks de 8 px
+  redondeados por linea. Ninguna constante nueva.
+- fill rect 75451 -> 21150 (4,4x mas rapido que 1 ciclo, libdragon "approx 4x"); 1200 tris
+  de 8x8 91200 -> 140400; canvas 2x2 191160 -> 440320. Thar0 rmse 0.1332 sin cambio.
+- Sin modelar: setup por primitiva (sin fuente con numero). Ver docs/RDP-TIMING.md.
+
 ## 2026-10-02 -- SoftRDP: recorrido de bordes de triangulo en entero (costuras)
 
 - Reporte n64-be: costuras de fondo de 1 px en aristas compartidas (kestrel64-sdk

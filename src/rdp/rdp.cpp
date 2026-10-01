@@ -221,7 +221,32 @@ auto SoftRdp::wrAdd(u32 a, u32 b) -> void {
   wrLo[best] = std::min(wrLo[best], a); wrHi[best] = std::max(wrHi[best], b);
 }
 
+// Una linea de primitiva. Lo que cuenta depende del tipo de ciclo:
+//  * FILL/COPY no pasan por el span buffer: escriben directo a RDRAM en palabras de 64 bits
+//    alineadas, una por GCLK (n64brew "Reality Display Processor/Pipeline": "Writes are
+//    committed straight to RDRAM without passing through the span buffers", "Pixels are
+//    written out 64-bits ... at a time"; manual de programacion: 4 px de 16 bits por ciclo).
+//    La unidad es la palabra de 64 bits que toca la linea, contando la alineacion.
+//  * 1/2 ciclos: la unidad es el chunk del span buffer (T_CHUNK pixeles). Un chunk no
+//    cruza de una linea a la siguiente, asi que una linea de 2 pixeles paga un chunk entero.
+// En los dos casos cada linea paga ademas 1 GCLK de pipeline muerto (n64brew: "1 dead cycle
+// at the end of every line in a primitive where the pipeline is cycled but no pixel is
+// output").
+auto SoftRdp::addSpan(int x0, u64 npx) -> void {
+  if(!npx) return;
+  spanLines++;
+  if(cycleType() >= 2) {
+    const u64 bpp = ci_size == 3 ? 4u : ci_size == 2 ? 2u : 1u;
+    const u64 a = u64(std::max(x0, 0)) * bpp, b = a + npx * bpp;
+    spanUnits += (b + 7) / 8 - a / 8;
+  } else {
+    spanUnits += (npx + T_CHUNK - 1) / T_CHUNK;
+  }
+}
+
 auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void {
+  const u64 lines = spanLines, units = spanUnits;
+  spanLines = spanUnits = 0;
   if(!npx) return;
   {
     // Zona escrita (ver wrLo): 4 bytes por pixel sea cual sea el formato; pasarse solo cuesta
@@ -238,7 +263,20 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   bool viOn = (mem.rcp.vi_ctrl & 3) != 0 && mem.rcp.vi_origin != 0;
   bool fbviSame = viOn && (ci_addr >> 20) == ((mem.rcp.vi_origin & 0x00ff'ffff) >> 20);
 
-  double pipeline = (cycleType() < 2 ? double(cycleType() + 1) : 0.25) * T_CHUNK + T_CHUNKOVH;
+  double cycles;
+  if(cycleType() >= 2) {
+    // FILL/COPY: una palabra de 64 bits por GCLK mas el ciclo muerto de cada linea; el VI
+    // sigue robando bus igual que a los chunks (mismo T_VI calibrado). Sin tramos
+    // declarados, 64 bits = 8 bytes de la anchura de pixel del color image.
+    const u64 bpp = ci_size == 3 ? 4u : ci_size == 2 ? 2u : 1u;
+    double gclk = lines ? double(units + lines) : double(npx * bpp) / 8.0;
+    cycles = gclk * (viOn ? 1.0 + T_VI : 1.0);
+  } else {
+  // Chunks: los declarados por linea, o el reparto plano. El pipeline de un chunk es el de
+  // sus pixeles medios mas el sobrecoste fijo y su parte del ciclo muerto de fin de linea.
+  const double chunks = lines ? double(units) : double(npx) / T_CHUNK;
+  double pipeline = double(cycleType() + 1) * (double(npx) / chunks) + T_CHUNKOVH
+                  + double(lines) / chunks;
   int seq[4], n = 0;
   if(fbRead) seq[n++] = 0;
   if(zRead)  seq[n++] = 1;
@@ -251,7 +289,8 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   double wrote = chunkCost(pipeline, seq, n, nRead > 0, fbzbSame, viOn, fbviSame);
 
   double frac = double(nWrite) / double(npx);
-  double cycles = (frac * wrote + (1.0 - frac) * killed) * double(npx) / T_CHUNK;
+  cycles = (frac * wrote + (1.0 - frac) * killed) * chunks;
+  }
   u32 c = (u32)(u64)cycles;
   if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
   if(auto& st = mem.rdpStats; st.on.load(std::memory_order_relaxed)) {
@@ -638,6 +677,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
       for(int y = y0; y < y1; y++)
         for(int x = x0; x < x1; x++) pass += depthPasses(mem, x, y, (s32)prim_z);
     }
+    for(int y = y0; y < y1 && x1 > x0; y++) addSpan(x0, u64(x1 - x0));
     accountPixels(mem, npx, pass, (pipeMode && (other_lo & 0x20) && zi_addr) ? pass : 0);
     return;
   }
@@ -682,6 +722,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
       }
     }
   }
+  for(int y = y0; y < y1 && x1 > x0; y++) addSpan(x0, u64(x1 - x0));
   accountPixels(mem, npx, pxWrites - w0, pxZWrites - z0);
 }
 
@@ -847,8 +888,10 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     const int xe = (std::max(std::max(qR[0], qR[1]), std::max(qR[2], qR[3])) >> 3) + 1;
     // Solo-coste: misma decision de pixel que el bucle largo (la de la cobertura), asi que
     // la cuenta es IDENTICA; se salta el trabajo por pixel (textura, combinador, mezcla).
+    const u64 rowPx0 = rasterPx;
     if(costOnly) {
       for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(aaOn ? c != 0 : (c & 1) != 0) rasterPx++; }
+      addSpan(xs, rasterPx - rowPx0);
       continue;
     }
     // Borde mayor en la fila (ancla de los atributos por x; los atributos siguen en double).
@@ -950,6 +993,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : flat;
         if(zPass(x, dx)) blendPixel(mem, x, y, c, hits); }
     }
+    addSpan(xs, rasterPx - rowPx0);
   }
   if(costOnly) accountPixels(mem, rasterPx, rasterPx, zUpd ? rasterPx : 0);
   else         accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
@@ -1533,11 +1577,13 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   if(costOnly) {
     int bx = X0 < 0 ? 0 : X0, by = Y0 < 0 ? 0 : Y0;
     u64 npx = u64(std::max(0, X1 - bx)) * u64(std::max(0, Y1 - by));
+    for(int y = by; y < Y1 && X1 > bx; y++) addSpan(bx, u64(X1 - bx));
     accountPixels(mem, npx, npx, 0);
     return;
   }
   for(int y = Y0; y < Y1; y++) {
     if(y < 0) continue;
+    if(X1 > std::max(X0, 0)) addSpan(std::max(X0, 0), u64(X1 - std::max(X0, 0)));
     for(int x = X0; x < X1; x++) {
       if(x < 0) continue;
       rasterPx++;
