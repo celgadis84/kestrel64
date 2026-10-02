@@ -9845,6 +9845,17 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-02 (e) -- SoftRDP: ciclo 0 del blender en 2-cycle (niebla) + mux SHADE_ALPHA
+
+- Aviso n64-be (sdk 12_static, G_RM_FOG_SHADE_A + G_RM_ZB_OPA_SURF2): SoftRDP solo evaluaba
+  el ciclo 1 del blender; la niebla nunca se aplicaba. En HW el ciclo 0 corre SIEMPRE (sin
+  FORCE_BLEND ni blend_en ni atajos, >>5 sin divisor) y su RGB es el IN del ciclo 1
+  (parallel-rdp `blender(final_cycle=false)`, angrylion blender_equation_cycle0_2).
+- Mux A = SHADE_ALPHA usaba el alfa del pixel combinado; ahora es el alfa de shade
+  interpolado (`SoftRdp::pxShadeA`, 0 sin shade). Sin dither de alfa (no modelado).
+- 12_static vs prdp close 93,32 -> 98,44 %. krom improve=5 regress=0 (88,73/92,09).
+  sm64 sin cambio.
+
 ## 2026-10-02 (d) -- SoftRDP: division perspectiva de texturas (TEX_PERSP)
 
 - Aviso n64-be (sdk 12_static): mallas con S,T constantes muestreaban texeles que variaban.

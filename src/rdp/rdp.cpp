@@ -470,7 +470,13 @@ auto SoftRdp::buildBlendPlan() -> void {
   p.asel = (u8)((other_lo >> (24 + sh)) & 3);
   p.msel = (u8)((other_lo >> (20 + sh)) & 3);
   p.bsel = (u8)((other_lo >> (16 + sh)) & 3);
-  p.usesMem  = (p.msel == 1) || (p.bsel == 1);
+  p.two   = cycleType() == 1;
+  p.psel0 = (u8)((other_lo >> 30) & 3);
+  p.asel0 = (u8)((other_lo >> 26) & 3);
+  p.msel0 = (u8)((other_lo >> 22) & 3);
+  p.bsel0 = (u8)((other_lo >> 18) & 3);
+  p.usesMem  = (p.msel == 1) || (p.bsel == 1) ||
+               (p.two && (p.psel0 == 1 || p.msel0 == 1 || p.bsel0 == 1));
   p.imRd     = (other_lo & 0x40) != 0;
   p.force    = ((other_lo >> 14) & 1) != 0;
   p.aaEn     = (other_lo & 0x08) != 0 && !g_noAA;
@@ -499,6 +505,27 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
   auto pick = [&](int sel) -> u32 {   // P/M colour mux: IN / MEM / BLEND / FOG
     switch(sel) { case 0: return src; case 1: return memc; case 2: return blend_color; default: return fog_color; }
   };
+  // 2-cycle: el ciclo 0 corre siempre, sin FORCE_BLEND ni blend_en ni atajos, con >>5 directo
+  // (sin divisor); su RGB pasa a ser el IN del ciclo 1 y el alfa del pixel no cambia
+  // (parallel-rdp `blender(..., final_cycle=false)`; angrylion blender_equation_cycle0_2).
+  // Es la fase de niebla de G_RM_FOG_SHADE_A: (FOG, SHADE_A, IN, 1MA).
+  if(bp.two) {
+    const u32 P0 = pick(bp.psel0), M0 = pick(bp.msel0);
+    int b0;
+    switch(bp.asel0) { case 0: b0 = src & 0xff; break; case 1: b0 = fog_color & 0xff; break;
+                       case 2: b0 = pxShadeA; break; default: b0 = 0; }
+    int b1;
+    switch(bp.bsel0) { case 0: b1 = (~b0) & 0xff; break; case 1: b1 = memc & 0xff; break;
+                       case 2: b1 = 0xff; break; default: b1 = 0; }
+    b0 >>= 3; b1 >>= 3;
+    u32 c0 = src & 0xff;
+    for(int i = 0; i < 3; i++) {
+      const int sh = 24 - i * 8;
+      const int v = ((int)((P0 >> sh) & 0xff) * b0 + (int)((M0 >> sh) & 0xff) * (b1 + 1)) >> 5;
+      c0 |= (u32)(v & 0xff) << sh;
+    }
+    src = c0;
+  }
   u32 P = pick(Psel), M = pick(Msel);
   // COLOR_ON_CVG: cuando la cobertura del pixel NO desborda, el ciclo final del blender
   // devuelve el color M tal cual, sin mirar coeficientes ni siquiera si el blender esta
@@ -507,7 +534,7 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
   if(bp.colorOnCvg && !cvgWrap) return (M & ~0xffu) | (src & 0xff);
   int a0;                             // A mux: IN alpha / FOG alpha / SHADE alpha / 0
   switch(Asel) { case 0: a0 = src & 0xff; break; case 1: a0 = fog_color & 0xff; break;
-                 case 2: a0 = src & 0xff; break; default: a0 = 0; }
+                 case 2: a0 = pxShadeA; break; default: a0 = 0; }
   // Two hardware shortcuts that write the P colour untouched. Without them a "solid"
   // primitive picks up a 1/32 smear of M, because the coefficient path below is NOT an
   // exact lerp (see the 5-bit truncation).
@@ -1014,6 +1041,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                             | (clamp8(eB + dBdx * dx) << 8) | clamp8(eA + dAdx * dx)) : 0;
 #endif
         u32 c = (combProg && !copyCy) ? combineColor(tex, tex, shd) : tex;
+        pxShadeA = (u8)(shd & 0xff);
         // Alpha compare (see texRect): COPY mode keys on the 1-bit texel alpha (drop
         // alpha==0); 1-/2-cycle compares COMBINED alpha against the blend_color
         // threshold. Disabled → texel drawn regardless of its 5551 transparency bit.
@@ -1029,6 +1057,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                 | (clamp8(eB + dBdx * dx) << 8)  |  clamp8(eA + dAdx * dx);
 #endif
         u32 c = combProg ? combineColor(0, 0, shd) : shd;
+        pxShadeA = (u8)(shd & 0xff);
         if(zPass(x, dx)) blendPixel(mem, x, y, c, hits);
       } else { double dx = x - xA;
         // Flat (no shade/tex coords) but the combiner may still select TEXEL0/1. The RDP
@@ -1037,10 +1066,12 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // the Krom fill tests) picks up that texel. If the combiner ignores texel this is
         // harmless. Sampled once (constant across the primitive).
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : flat;
+        pxShadeA = 0;
         if(zPass(x, dx)) blendPixel(mem, x, y, c, hits); }
     }
     addSpan(xs, rasterPx - rowPx0);
   }
+  pxShadeA = 0;   // rects y demas primitivas sin shade ven 0
   if(costOnly) accountPixels(mem, rasterPx, rasterPx, zUpd ? rasterPx : 0);
   else         accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }

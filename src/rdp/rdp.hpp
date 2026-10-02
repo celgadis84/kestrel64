@@ -308,6 +308,9 @@ private:
   struct BlendPlan {
     u32  keyHi = ~0u, keyLo = ~0u;
     u8   psel = 0, asel = 0, msel = 0, bsel = 0;
+    // 2-cycle: el ciclo 0 del blender (GBL_c1) corre SIEMPRE y su RGB es el IN del ciclo 1.
+    bool two = false;
+    u8   psel0 = 0, asel0 = 0, msel0 = 0, bsel0 = 0;
     u8   dither = 3;      // RGB_DITHER_SEL: 0 magic, 1 bayer, 2 ruido, 3 off
     bool usesMem = false; // el mux referencia CLR_MEM o MEM_alpha
     bool imRd = false;    // IM_RD: lecturas de framebuffer habilitadas
@@ -323,6 +326,9 @@ private:
     bool alphaCvgSel= false;  // ALPHA_CVG_SELECT (bit 13)
     bool needMem = false;     // el pixel necesita leer el framebuffer (color y/o coverage)
   } blendPlan;
+  // Alfa de shade del pixel en curso (mux A del blender = SHADE_ALPHA): alfa de shade
+  // interpolado y acotado; 0 en primitivas sin shade. Lo pone drawTriangle por pixel.
+  u8 pxShadeA = 0;
   auto buildBlendPlan() -> void;
   auto buildCombPlan() -> void;
   auto combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32;   // referencia (y camino NOISE)
