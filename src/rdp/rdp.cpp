@@ -728,6 +728,41 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
 
 // Flat/Gouraud triangle from RDP edge coefficients. First light: correct geometry,
 // solid shade-base color (Gouraud/texture refined later).
+// Division perspectiva del RDP: s16 entre W s1.15 con reciproco por tabla de 64 entradas
+// + pendiente, producto y desplazamiento; saturacion fuera de rango y W<=0 -> 0x7fff.
+// Copia bit a bit de parallel-rdp shaders/perspective.h (= tcdiv_persp de angrylion).
+static auto perspDivide(s32 s, s32 t, s32 w, s32& os, s32& ot) -> void {
+  static constexpr s16 tab[64][2] = {
+    {0x4000,-252*4},{0x3f04,-244*4},{0x3e10,-238*4},{0x3d22,-230*4},{0x3c3c,-223*4},{0x3b5d,-218*4},
+    {0x3a83,-210*4},{0x39b1,-205*4},{0x38e4,-200*4},{0x381c,-194*4},{0x375a,-189*4},{0x369d,-184*4},
+    {0x35e5,-179*4},{0x3532,-175*4},{0x3483,-170*4},{0x33d9,-166*4},{0x3333,-162*4},{0x3291,-157*4},
+    {0x31f4,-155*4},{0x3159,-150*4},{0x30c3,-147*4},{0x3030,-143*4},{0x2fa1,-140*4},{0x2f15,-137*4},
+    {0x2e8c,-134*4},{0x2e06,-131*4},{0x2d83,-128*4},{0x2d03,-125*4},{0x2c86,-123*4},{0x2c0b,-120*4},
+    {0x2b93,-117*4},{0x2b1e,-115*4},{0x2aab,-113*4},{0x2a3a,-110*4},{0x29cc,-108*4},{0x2960,-106*4},
+    {0x28f6,-104*4},{0x288e,-102*4},{0x2828,-100*4},{0x27c4,-98*4},{0x2762,-96*4},{0x2702,-94*4},
+    {0x26a4,-92*4},{0x2648,-91*4},{0x25ed,-89*4},{0x2594,-87*4},{0x253d,-86*4},{0x24e7,-85*4},
+    {0x2492,-83*4},{0x243f,-81*4},{0x23ee,-80*4},{0x239e,-79*4},{0x234f,-77*4},{0x2302,-76*4},
+    {0x22b6,-74*4},{0x226c,-74*4},{0x2222,-72*4},{0x21da,-71*4},{0x2193,-70*4},{0x214d,-69*4},
+    {0x2108,-67*4},{0x20c5,-67*4},{0x2082,-65*4},{0x2041,-65*4}};
+  const bool wCarry = w <= 0;
+  w &= 0x7fff;
+  const int msb = w ? 31 - __builtin_clz((u32)w) : -1;   // findMSB(0) = -1
+  const int shift = std::min(14 - msb, 14);
+  const int normout = (s32)((u32)w << shift) & 0x3fff;
+  const int rcp = ((tab[normout >> 8][1] * (normout & 0xff)) >> 10) + tab[normout >> 8][0];
+  s32 prod[2] = {(s32)((u32)s * (u32)rcp), (s32)((u32)t * (u32)rcp)}, out[2];
+  const s32 mask = ((1 << 30) - 1) & -((1 << 29) >> shift);
+  for(int i = 0; i < 2; i++) {
+    const s32 oob = prod[i] & mask;
+    const s32 p = shift != 14 ? (prod[i] >> (13 - shift)) : prod[i];
+    out[i] = shift != 14 ? p : (s32)((u32)prod[i] << 1);
+    if(oob != mask && oob != 0) out[i] = (p & (1 << 29)) == 0 ? 0x7fff : -0x8000;
+    if(wCarry) out[i] = 0x7fff;
+    out[i] = std::clamp(out[i], -0x10000, 0xffff);
+  }
+  os = out[0]; ot = out[1];
+}
+
 auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void {
   if(g_noRaster) return;
   bool hasShade = op & 4, hasTex = op & 2, hasZ = op & 1;
@@ -774,8 +809,8 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   // Texture coefficients (s10.5 → 1/32-texel units, split int-hi / frac-lo). Block
   // starts after edge(4) + shade(8 if present). Layout per +x/+e/+y like shade:
   //   start = j0(int)/j2(frac)   DsDx = j1/j3   DsDe = j4/j6 (per +y along edge).
-  // S occupies bits [63:48], T [47:32], W [31:16] (perspective W ignored for now).
-  double S = 0, T = 0, dSdx = 0, dTdx = 0, dSde = 0, dTde = 0;
+  // S occupies bits [63:48], T [47:32], W [31:16]. W solo cuenta con TEX_PERSP (abajo).
+  double S = 0, T = 0, dSdx = 0, dTdx = 0, dSde = 0, dTde = 0, W = 0, dWdx = 0, dWde = 0;
   if(textured) {
     int tb = 4 + (hasShade ? 8 : 0);
     auto tc = [&](int ii, int fi, int comp) -> double {
@@ -786,7 +821,10 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     S = tc(0, 2, 0); T = tc(0, 2, 1);
     dSdx = tc(1, 3, 0); dTdx = tc(1, 3, 1);
     dSde = tc(4, 6, 0); dTde = tc(4, 6, 1);
+    W = tc(0, 2, 2); dWdx = tc(1, 3, 2); dWde = tc(4, 6, 2);
   }
+  // TEX_PERSP (other_hi bit 19): el RSP manda S/W, T/W y 1/W, y el RDP divide por pixel.
+  const bool persp = textured && ((other_hi >> 19) & 1);
 
   // Shade coefficients (s16.16, split int-hi / frac-lo across two 64-bit words):
   //   start C  = w4(int) / w6(frac)      DcDx = w5 / w7  (per +x)
@@ -900,6 +938,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     double eR = R + dRde * (y - yh), eG = G + dGde * (y - yh);
     double eB = B + dBde * (y - yh), eA = A + dAde * (y - yh);
     double eS = S + dSde * (y - yh), eT = T + dTde * (y - yh);
+    const double eW = W + dWde * (y - yh);
     double eZ = Zs + dZde * (y - yh);
     // Per-pixel depth test against the 16-bit z image, honouring Z_SOURCE_SEL and
     // Z_UPDATE. Opaque z-mode: the pixel wins when its depth is nearer (strictly
@@ -954,10 +993,17 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         const __m128d vdx = _mm_set1_pd(dx);
         const __m128d st = _mm_mul_pd(_mm_add_pd(vST, _mm_mul_pd(cST, vdx)),
                                       _mm_set1_pd(1.0 / 32.0));   // 1/32 exacto: potencia de dos
-        const double su = _mm_cvtsd_f64(st), tu = _mm_cvtsd_f64(_mm_unpackhi_pd(st, st));
+        double su = _mm_cvtsd_f64(st), tu = _mm_cvtsd_f64(_mm_unpackhi_pd(st, st));
 #else
         double su = (eS + dSdx * dx) / 32.0, tu = (eT + dTdx * dx) / 32.0;  // 1/32 → texel
 #endif
+        if(persp) {
+          // El divisor ve solo la parte entera (>>16) de S, T y W, como el HW.
+          s32 ps, pt;
+          perspDivide((s32)std::floor(eS + dSdx * dx), (s32)std::floor(eT + dTdx * dx),
+                      (s32)std::floor(eW + dWdx * dx), ps, pt);
+          su = ps / 32.0; tu = pt / 32.0;
+        }
         u32 tex = sampleTexFold(texF, su, tu);
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.

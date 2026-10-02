@@ -9845,6 +9845,16 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-02 (d) -- SoftRDP: division perspectiva de texturas (TEX_PERSP)
+
+- Aviso n64-be (sdk 12_static): mallas con S,T constantes muestreaban texeles que variaban.
+  SoftRDP ignoraba W: con TEX_PERSP el RSP manda S/W, T/W y 1/W y el RDP divide por pixel.
+- `perspDivide` en rdp.cpp = parallel-rdp shaders/perspective.h bit a bit (tabla 64 de
+  reciproco + pendiente, saturacion, W<=0 -> 0x7fff); entra la parte entera (>>16) de S/T/W.
+- 12_static igual que prdp. sm64 SoftRDP `8c0b9ee6` -> `2c542f7d`, close vs prdp 87,24 % ->
+  94,88 %. krom regress=0, improve=2 (RDPTestCPU/RSP 99,07 -> 99,74). thar0 sin cambio.
+- Sin modelar todavia: LOD/mipmap con st_dx/st_dy divididos.
+
 ## 2026-10-02 (c) -- Threaded: SP_RD_LEN tras SP_WR_LEN a la misma RDRAM leia dato viejo
 
 - Aviso n64-be (kestrel64-sdk 11_audio, sin la guarda `ad_samebook`): 1-2 de 187 buffers
