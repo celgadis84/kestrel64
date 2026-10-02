@@ -9845,6 +9845,20 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-02 (c) -- Threaded: SP_RD_LEN tras SP_WR_LEN a la misma RDRAM leia dato viejo
+
+- Aviso n64-be (kestrel64-sdk 11_audio, sin la guarda `ad_samebook`): 1-2 de 187 buffers
+  RSP != CPU, intermitente, solo con `KESTREL_THREADS=1`. La escritura SP_WR_LEN del RSP va
+  al diario (`spDmaLogPush`) y la aplica la CPU al llegar a su instante; la lectura
+  SP_RD_LEN siguiente leia RDRAM directo sin mirar el diario. En HW la cola DMA del SP es
+  FIFO: la lectura ve lo escrito.
+- Fix `Rsp::mtc0`: antes de lanzar SP_RD_LEN/SP_WR_LEN directo, si alguna pagina de 4 KB del
+  rango tiene DMA pendiente (`Memory::dmaPgAny`, mismo `dmaPg[]` que `dmaSettle`) se vacia
+  el diario con `dpLogWait`. Caso normal (nada pendiente) = una lectura atomica.
+- Repro antes: bad=1 en 2/4 corridas; despues 0/8. junkrunner64 threaded x4 `32a0ccb4` igual
+  que antes. OJO: lockstep da `39ca6290` con el binario de ANTES tambien (dist 09:35): la
+  diferencia lockstep/threaded a 400 M insn es previa, no de este cambio. Pendiente.
+
 ## 2026-10-02 (b) -- Coste RDP: camino FILL/COPY y coste por linea
 
 - Pedido n64-be (09_rdp_bench). FILL/COPY ya no pasan por el modelo de chunks: 1 GCLK por

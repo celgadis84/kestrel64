@@ -796,6 +796,16 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
      && mem->spDmaLogPush(mem->rspGuestNowAt(exactCycles()), v))
     return;
   // Un DMA puede leer o pisar RDRAM que toca un tramo aun en el diario: vaciarlo antes.
+  // La cola DMA del SP es FIFO: una lectura (SP_RD_LEN) lanzada tras una escritura
+  // (SP_WR_LEN) a la misma RDRAM ve lo escrito, y una escritura directa no puede quedar
+  // debajo de otra anterior que aun esta en el diario. Sin esto la lectura leia la RDRAM
+  // antes de que la CPU aplicase la entrada: dato viejo, intermitente segun lo adelantada
+  // que fuera la CPU (kestrel64-sdk 11_audio, estado ADPCM releido por el record siguiente).
+  if(((rd & 7) == 2 || (rd & 7) == 3) && mem->rcpMode == Memory::RcpMode::Threaded) {
+    const u32 lo = mem->rcp.sp_dram_addr & 0xfffff8;
+    const u64 span = (u64)((((v & 0xfff) + 8) & ~7u) + ((v >> 20) & 0xfff)) * (((v >> 12) & 0xff) + 1);
+    if(mem->dmaPgAny(lo, (u64)lo + span)) { publishExact(); mem->dpLogWait(0, false); }
+  }
   // Un DMA del SP lee o escribe RDRAM en SU instante de invitado. En Threaded el RSP va por
   // delante de la CPU, asi que sin cita leia un buffer que la CPU aun no habia escrito (rspq de
   // libdragon: la CPU mete comandos y el microcodigo los baja por DMA) o dejaba en RDRAM datos

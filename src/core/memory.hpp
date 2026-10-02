@@ -605,6 +605,16 @@ struct Memory {
     dmaSettleSlow(lo, hi);
   }
   auto dmaSettleSlow(u32 lo, u64 hi) -> void;
+  // Hilo del RSP: alguna entrada de DMA sin aplicar toca [lo, hi)? Mismo contador por pagina
+  // que dmaSettle, sin vaciar (el RSP vacia con dpLogWait; ver Rsp::mtc0).
+  auto dmaPgAny(u32 lo, u64 hi) const -> bool {
+    if(!dmaPgPend.load(std::memory_order_acquire)) return false;
+    if(hi <= lo) hi = (u64)lo + 1;
+    const u32 e = (u32)((hi - 1) >> kDmaPgShift);
+    for(u32 p = lo >> kDmaPgShift; p <= e && p < kDmaPgN; p++)
+      if(dmaPg[p].load(std::memory_order_acquire)) return true;
+    return false;
+  }
   auto dpLogApply(u64 upTo) -> void;                // aplica lo fechado hasta upTo
   auto dpLogWait(u64 now, bool clock) -> void;      // SOLO hilo del RSP
   auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
