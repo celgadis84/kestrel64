@@ -231,6 +231,15 @@ private:
   // mata el pixel si se queda en cero, y acaba guardado en el framebuffer segun CVG_DEST.
   auto blendPixel(Memory& mem, int x, int y, u32 src, int cvg = 8) -> void;
   auto ditherRgb(int x, int y, u32 c) const -> u32;   // RGB_DITHER_SEL, framebuffer write path
+  auto alphaDither(int x, int y) const -> int;        // ALPHA_DITHER_SEL, 0..7
+  // Alfa de referencia del alpha compare: el alfa combinado expandido (0xff -> 0x100) mas
+  // el dither de alfa, salvo con ALPHA_CVG_SELECT, saturado a 0xff.
+  auto alphaRef(int x, int y, u32 c) const -> int {
+    int a = (int)(c & 0xff);
+    if(other_lo & 0x2000) return a;
+    a += ((a + 1) >> 8) + alphaDither(x, y);
+    return a > 255 ? 255 : a;
+  }
   // Bits ocultos de RDRAM: los 2 bits bajos de la cobertura de cada pixel de 16bpp. El bit
   // alto vive en el bit 0 del propio pixel RGBA5551 (lo que el GBI llama "alfa"); los otros
   // dos estan en la RAM oculta de 9 bits de los chips RDRAM, invisible para la CPU.

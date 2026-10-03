@@ -585,11 +585,13 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
 // hardware capture as two adjacent 5-bit levels in a 4x4 pattern rather than as noise.
 // It runs regardless of the colour image's depth — on a 32bpp image the +8 survives
 // verbatim, on a 16bpp one it decides which way the >>3 truncation goes.
+static const u8 kDitherMatrix[2][16] = {
+  { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 },   // magic square
+  { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 },   // standard Bayer
+};
+
 auto SoftRdp::ditherRgb(int x, int y, u32 c) const -> u32 {
-  static const u8 kMatrix[2][16] = {
-    { 0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0 },   // magic square
-    { 0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2 },   // standard Bayer
-  };
+  const auto& kMatrix = kDitherMatrix;
   const u32 mode = blendPlan.dither;   // el llamador ya valido el plan (blendPixel)
   if(mode == 3) return c;
   u32 out = c & 0xff;                      // alpha/coverage untouched by RGB dither
@@ -610,6 +612,26 @@ auto SoftRdp::ditherRgb(int x, int y, u32 c) const -> u32 {
     out |= (u32)v << (24 - i * 8);
   }
   return out;
+}
+
+// Dither de alfa (SET_OTHER_MODES ALPHA_DITHER_SEL, bits 37:36 -> other_hi bits 5:4):
+//   0 = patron, 1 = patron invertido (~d & 7), 2 = ruido, 3 = apagado.
+// El patron es la matriz del modo RGB (magic square o Bayer; con RGB en ruido/apagado,
+// la del bit bajo del modo RGB). Se SUMA (0..7) al alfa expandido de la salida del
+// combinador cuando no hay ALPHA_CVG_SELECT, al alfa de referencia del alpha compare y al
+// alfa de shade que ve el blender (parallel-rdp `dither_coefficients`, `combiner_cycle1`,
+// `shading.h shade_alpha`).
+auto SoftRdp::alphaDither(int x, int y) const -> int {
+  const u32 am = (u32)(other_hi >> 4) & 3, rm = (u32)(other_hi >> 6) & 3;
+  if(am == 3) return 0;
+  if(am == 2) {
+    // Ruido: mismo hash por pixel que el dither RGB de ruido (canal 3), reproducible.
+    u32 h = (u32)x * 0x9e3779b1u ^ (u32)y * 0x85ebca6bu ^ 3u * 0xc2b2ae35u;
+    h ^= h >> 15; h *= 0x2545f491u; h ^= h >> 13;
+    return (int)(h & 7);
+  }
+  int d = kDitherMatrix[rm & 1][(y & 3) * 4 + (x & 3)];
+  return am == 1 ? (~d & 7) : d;
 }
 
 auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
@@ -642,6 +664,7 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
     if(bp.cvgXAlpha) { modulated = (expanded * cvg + 4) >> 3; cvg = modulated >> 5; }
     else             { modulated = cvg << 5; }
     if(bp.alphaCvgSel) expanded = modulated;
+    else               expanded += alphaDither(x, y);
     src = (src & ~0xffu) | (u32)(expanded < 0 ? 0 : expanded > 255 ? 255 : expanded);
   }
   // Un pixel sin cobertura no existe. Solo con antialias encendido: con AA apagado el
@@ -719,7 +742,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : blend_color;
         // Alpha compare (1-/2-cycle form): COMBINED alpha against the blend_color
         // threshold. A fill rect is a primitive like any other here.
-        if((other_lo & 1) && (c & 0xff) < (blend_color & 0xff)) continue;
+        if((other_lo & 1) && alphaRef(x, y, c) < (int)(blend_color & 0xff)) continue;
         // Depth: a fill rect carries no z slope, so its only defined depth source is
         // SET_PRIM_DEPTH (Z_SOURCE_SEL, other_lo bit 2). Without that bit the span z
         // the rect never programs is undefined, so leave the z image alone.
@@ -1083,12 +1106,12 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                             | (clamp8(eB + dBdx * dx) << 8) | clamp8(eA + dAdx * dx)) : 0;
 #endif
         u32 c = (combProg && !copyCy) ? combineColor(tex, tex1, shd) : tex;
-        pxShadeA = (u8)(shd & 0xff);
+        pxShadeA = (u8)std::min<u32>((shd & 0xff) + (u32)alphaDither(x, y), 0xff);
         // Alpha compare (see texRect): COPY mode keys on the 1-bit texel alpha (drop
-        // alpha==0); 1-/2-cycle compares COMBINED alpha against the blend_color
-        // threshold. Disabled → texel drawn regardless of its 5551 transparency bit.
+        // alpha==0); 1-/2-cycle compares COMBINED alpha (+ alpha dither) against the
+        // blend_color threshold. Disabled → texel drawn regardless of its 5551 bit.
         bool apass = !alphaCmpEn ||
-                     (copyCy ? (c & 0xff) != 0 : ((c & 0xff) >= (blend_color & 0xff)));
+                     (copyCy ? (c & 0xff) != 0 : (alphaRef(x, y, c) >= (int)(blend_color & 0xff)));
         if(apass && zPass(x, dx)) blendPixel(mem, x, y, c, hits);
       } else if(gouraud) {
         double dx = x - xA;
@@ -1099,7 +1122,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                 | (clamp8(eB + dBdx * dx) << 8)  |  clamp8(eA + dAdx * dx);
 #endif
         u32 c = combProg ? combineColor(0, 0, shd) : shd;
-        pxShadeA = (u8)(shd & 0xff);
+        pxShadeA = (u8)std::min<u32>((shd & 0xff) + (u32)alphaDither(x, y), 0xff);
         if(zPass(x, dx)) blendPixel(mem, x, y, c, hits);
       } else { double dx = x - xA;
         // Flat (no shade/tex coords) but the combiner may still select TEXEL0/1. The RDP
@@ -1108,7 +1131,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // the Krom fill tests) picks up that texel. If the combiner ignores texel this is
         // harmless. Sampled once (constant across the primitive).
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : flat;
-        pxShadeA = 0;
+        pxShadeA = (u8)alphaDither(x, y);   // shade 0 + dither de alfa
         if(zPass(x, dx)) blendPixel(mem, x, y, c, hits); }
     }
     addSpan(xs, rasterPx - rowPx0);
@@ -1821,7 +1844,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       // Disabled → texel written regardless of its 5551 transparency bit (opaque mode).
       // (The old `tex & 0xff` gate wrongly dropped alpha-0 texels in every mode.)
       if(other_lo & 1) {
-        if(copy ? (c & 0xff) == 0 : (c & 0xff) < (blend_color & 0xff)) continue;
+        if(copy ? (c & 0xff) == 0 : alphaRef(x, y, c) < (int)(blend_color & 0xff)) continue;
       }
       if(other_lo & 0x40) blendPixel(mem, x, y, c);      // blend against framebuffer
       else putPixel(mem, x, y, c);                        // opaque write

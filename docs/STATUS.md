@@ -9845,6 +9845,16 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-03 (b) -- SoftRDP: dither de alfa (ALPHA_DITHER_SEL)
+
+- Oraculo parallel-rdp (`dither.h dither_coefficients`, `combiner.h combiner_cycle1`,
+  `shading.h`). Modo en other_hi bits 5:4: 0 patron, 1 patron invertido, 2 ruido (hash
+  por pixel reproducible, como el RGB), 3 apagado. Patron = matriz del bit bajo del modo RGB.
+- El valor 0..7 se suma al alfa expandido de la salida del combinador (sin
+  ALPHA_CVG_SELECT), al alfa de referencia del alpha compare (`SoftRdp::alphaRef`) y al
+  alfa de shade que ve el blender (`pxShadeA`, saturado).
+- krom regress=0, AlphaCompare 95,95 -> 96,86, CombinerOverflow 45,04 -> 45,54. sm64 igual.
+
 ## 2026-10-03 -- SoftRDP: unidad de LOD (mipmap), TEXEL1 de tile1, texels cruzados en ciclo 1
 
 - Oraculo parallel-rdp (`texture.h compute_lod_2cycle`, `interpolation.h interpolate_stz`,
