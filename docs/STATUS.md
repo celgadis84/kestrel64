@@ -9845,6 +9845,33 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 -- Threaded: CLEAR_HALT entre el BREAK y el plazo de fin de tarea relanza (libdragon rspq) + VI_V_CURRENT sin deriva
+
+- Repro (sesion kestrel64-sdk): libdragon actual (preview 43c67dc) moria al arrancar con
+  "RSP CRASH rspq_syncpoint_wait ... wait loop timed out", RSP parado en HALT|BROKE con SIG7.
+  Solo en Threaded con adelanto (`KESTREL_SPLEAD` > 0, el defecto 512 en velocidad libre);
+  lockstep y SPLEAD=0 no.
+- Causa: en Threaded el HALT|BROKE del BREAK se publica en un plazo `spDateOps()` ops detras
+  del BREAK (`spEndArm`). `rspq_flush_internal` escribe dos veces SET_SIG7|CLEAR_HALT|
+  CLEAR_BROKE para cubrir la carrera mfc0/break del bucle de espera del microcodigo. Si la
+  escritura cae en ese hueco, ve el nucleo "en marcha" y no hace nada; al vencer el plazo se
+  publicaba HALT|BROKE encima y nadie lo volvia a lanzar. En hardware el RSP ya estaba parado
+  y el CLEAR_HALT lo relanza.
+- Fix (`Memory::spClearHaltAfter`, llamado en `rcpFlushPending` al vencer el fin de tarea): si
+  hay en `spSigRing` un CLEAR_HALT marcado lateHalt con instante posterior al BREAK, se
+  cobra el BREAK (MI_SP si intr_on_break, BROKE salvo CLEAR_BROKE) y se relanza el RSP en vez
+  de pararlo. Con SPLEAD=0 (puertas) la rama no se ejecuta. `KESTREL_SPRELAUNCH=0` = A/B
+  (vuelve a parar; el fallo de libdragon reaparece con la misma ROM).
+- VI_V_CURRENT: la lectura dividia por `cph = campo / total` truncado (NTSC 1118437/525 deja
+  ~1187 ops por campo sin repartir), asi que el contador iba algo mas rapido que el campo de
+  `viTick` y la deriva se acumulaba: a los ~100 campos MI_VI subia al cruzar V_INTR=2 y el
+  handler leia V_CURRENT = 11-12 (libdragon: "VI WARNING: __vblank_interrupt outside of vblank
+  period: 12", 28 avisos). Ahora usa la misma formula que `viTick`
+  (`(t % campo) * total / campo`). Queda un aviso "374" en el arranque: MI_VI pendiente del
+  V_INTR anterior, atendido cuando libdragon reabre interrupciones tras poner V_INTR=2.
+- gate_quick krom thar0 lock ALL OK (sm64 `b5521b24` sin cambio, krom regress=0, thar0 0,1332);
+  junkrunner64 threaded x3 == lockstep `1041662d`; SM64/PD a velocidad libre 300 swaps OK.
+
 ## 2026-10-03 (d) -- SoftRDP: etapa de profundidad con delta-z + desplazadores y divisor del blender
 
 - Oraculo parallel-rdp (`depth_test.h`, `blender.h`, `rdp_renderer.cpp build_derived_attributes`,

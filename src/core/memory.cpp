@@ -1058,11 +1058,15 @@ auto Memory::mmioRead32(u32 a) -> u32 {
       // derive it from the retired-instruction clock at the SAME field length the tick
       // uses (viFieldInsns, set by System from Clocks::fieldInsns()). Con dos constantes
       // distintas el emulador corria dos relojes de video a la vez.
+      // Y la MISMA formula: antes se dividia por `cph = campo / total` truncado, que en NTSC
+      // deja ~1187 ops por campo sin repartir (1118437 / 525). El contador corria un poco mas
+      // rapido que el campo y la deriva se acumulaba entre campos: a los ~100 campos MI_VI
+      // subia al cruzar V_INTR = 2 y V_CURRENT, leido 93 ops despues, ya valia 11 (libdragon:
+      // "VI WARNING: __vblank_interrupt outside of vblank period: 12").
       u32 total = rcp.viHalflines();
-      u64 cph = viFieldInsns / total;   // instrucciones retiradas por media-linea
-      if(cph == 0) cph = 1;
+      u64 field = viFieldInsns ? viFieldInsns : 1;
       u64 cyc = cartNow();   // mismo reloj de invitado que viTick (incluye paradas de cache)
-      return (u32)((cyc / cph) % total);
+      return (u32)((cyc % field) * total / field);
     }
     case 0x14: return rcp.vi_burst;
     case 0x18: return rcp.vi_vsync;
@@ -4243,6 +4247,28 @@ auto Memory::spLateClearHalt(u64 now) -> u32 {
   return 0;
 }
 
+// CLEAR_HALT de la CPU POSTERIOR al BREAK que aun no ha visto el HALT. En Threaded el fin de
+// tarea se publica en un plazo (spEndArm) que va `spDateOps()` ops por detras del BREAK, el
+// adelanto fijo de la CPU (KESTREL_SPLEAD). Una escritura SET_SIG_MORE|CLEAR_HALT que cae en
+// ese hueco ve el nucleo "en marcha" y es un no-op; al vencer el plazo se publicaba HALT|BROKE
+// encima y el RSP se quedaba parado con la senal puesta para siempre. En hardware el RSP ya
+// estaba parado en ese instante y el CLEAR_HALT lo relanza, lleve senales o no: es justo la
+// segunda escritura de rspq_flush_internal en libdragon ("RSP CRASH rspq_syncpoint_wait ...
+// wait loop timed out" con SIG7 y HALT|BROKE). Con SPLEAD=0 el hueco no existe. Devuelve 0 si
+// no hay ninguna, o 1 | (2 si la escritura llevaba CLEAR_BROKE). SOLO hilo de CPU.
+auto Memory::spClearHaltAfter(u64 tBreak) -> u32 {
+  std::lock_guard<std::mutex> lk(spSigMx);
+  for(u32 k = 0; k < spSigCount; ++k) {
+    SpSigWr& w = spSigRing[(spSigHead + k) % kSpSigN];
+    if((w.flags & 1u) && w.raw > tBreak) {
+      const u32 f = w.flags; w.flags &= ~1u;
+      spLateRelaunch.fetch_add(1, std::memory_order_relaxed);
+      return 1u | (f & 2u);
+    }
+  }
+  return 0;
+}
+
 auto Memory::spStatusForRsp(u64 now) -> u32 {
   std::lock_guard<std::mutex> lk(spSigMx);
   while(spSigCount && spSigRing[spSigHead].stamp <= now) { spSigHead = (spSigHead + 1) % kSpSigN; --spSigCount; }
@@ -4736,6 +4762,12 @@ auto Memory::rcpDeadlineOn() -> bool {
   return v;
 }
 
+auto Memory::spDateOps() -> u64 {
+  static const s64 kSpDate = []{ const char* e = std::getenv("KESTREL_SPDATE");
+                                 return (e && *e) ? (s64)std::strtoll(e, nullptr, 10) : (s64)-1; }();
+  return kSpDate < 0 ? spLeadOps() : (u64)kSpDate;
+}
+
 auto Memory::spEndArm(u64 cyclesUsed) -> void {
   // RETRASO FIJO DEL FIN DE TAREA CON ADELANTO PERMANENTE. Con kSpLeadAlways puesto la CPU
   // puede estar hasta L ops por delante del reloj del RSP, asi que el instante crudo del BREAK
@@ -4750,9 +4782,7 @@ auto Memory::spEndArm(u64 cyclesUsed) -> void {
   // que se FECHA el fin de tarea. Por defecto son el mismo valor (spLeadOps), que es lo que
   // garantiza que el plazo no nazca vencido. Con SPDATE menor el MI_SP sube antes -- mas fiel --
   // a cambio de arriesgar plazos vencidos (spLate), que son los que rompen el determinismo.
-  static const s64 kSpDate = []{ const char* e = std::getenv("KESTREL_SPDATE");
-                                 return (e && *e) ? (s64)std::strtoll(e, nullptr, 10) : (s64)-1; }();
-  spDoneAt = spCycleAt(cyclesUsed) + (kSpDate < 0 ? spLeadOps() : (u64)kSpDate);
+  spDoneAt = spCycleAt(cyclesUsed) + spDateOps();
   spArms.fetch_add(1, std::memory_order_relaxed);
   if(spDoneAt < cartNow()) {
     const u64 nowOps = cartNow();
@@ -4809,6 +4839,22 @@ auto Memory::rcpFlushPending(u32 bits) -> void {
   u32 pend = rcpPend.load(std::memory_order_acquire) & bits;
   if(pend & 1u) {
     rcpPend.fetch_and(~1u, std::memory_order_relaxed);
+    // CLEAR_HALT de la CPU entre el BREAK y este plazo: relanza en vez de parar.
+    // KESTREL_SPRELAUNCH=0: A/B, vuelve a parar siempre (el fallo de libdragon reaparece).
+    static const bool kRelaunch = []{ const char* e = std::getenv("KESTREL_SPRELAUNCH");
+                                      return !(e && *e == '0'); }();
+    const u64 date = spDateOps();
+    if(kRelaunch && !tlIsRspThread && rcpMode == RcpMode::Threaded && date) {
+      if(u32 f = spClearHaltAfter(spDoneAt >= date ? spDoneAt - date : 0)) {
+        spRets.fetch_add(1, std::memory_order_relaxed);
+        if(rcp.sp_intr_on_break.load(std::memory_order_acquire)) raiseIntr(MI_SP);
+        if(!(f & 2u)) rcp.sp_status.fetch_or(2u, std::memory_order_acq_rel);   // BROKE
+        spSigAtKick(); rsp.mem = this; rsp.start(); rspSubmitKick();
+        pend &= ~1u;
+      }
+    }
+  }
+  if(pend & 1u) {
     rcp.sp_status.fetch_or(1u | 2u, std::memory_order_acq_rel);   // HALT | BROKE
     spRets.fetch_add(1, std::memory_order_relaxed);
     if(rcp.sp_intr_on_break.load(std::memory_order_acquire)) raiseIntr(MI_SP);

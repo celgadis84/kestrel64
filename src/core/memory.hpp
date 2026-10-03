@@ -758,6 +758,9 @@ struct Memory {
   static auto spSigQuant() -> u64;
   auto spSigAtKick() -> void;              // lanzamiento: lo pendiente pasa a su instante real
   auto spLateClearHalt(u64 now) -> u32;    // SOLO quien ejecuta el RSP, en BREAK (ver rsp.cpp)
+  auto spClearHaltAfter(u64 tBreak) -> u32; // SOLO hilo de CPU, al vencer el fin de tarea
+  static auto spDateOps() -> u64;          // retraso del plazo de fin de tarea sobre el BREAK
+  std::atomic<u64> spLateRelaunch{0};      // relanzados por spClearHaltAfter
   auto spReadSync(u64 now, u32 site = 0) -> void;        // SOLO hilo del RSP: la CPU llega a `now`, sin adelanto
   // --- Siesta de la cita del RSP -------------------------------------------------
   // Cuando el RSP se ha ido MUY por delante de la CPU (en Perfect Dark el sitio del sondeo de
