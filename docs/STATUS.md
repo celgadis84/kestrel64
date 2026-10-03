@@ -9845,6 +9845,22 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-03 -- SoftRDP: unidad de LOD (mipmap), TEXEL1 de tile1, texels cruzados en ciclo 1
+
+- Oraculo parallel-rdp (`texture.h compute_lod_2cycle`, `interpolation.h interpolate_stz`,
+  `shading.h`). La unidad de LOD corre con TEX_LOD_EN o en 2-cycle si el combinador lee
+  LOD_FRAC: vecinos +x (sentido del recorrido, DxDx sin 5 bits bajos) y +y (DxDy, ahora
+  parseado, sin 15 bits bajos), divididos por W con perspectiva (desborde = distante).
+  Da LOD_FRAC por pixel (`SoftRdp::lodFracV`, antes constante 0xff) y con TEX_LOD_EN
+  elige tile0/tile1 (sharpen, detail, `min_level` de SET_PRIM_COLOR bits 44:40, nivel
+  maximo bits 53:51 del triangulo). Sin LOD sigue 0xff (testigo krom GRB intacto).
+- 2-cycle: TEXEL1 es un segundo muestreo de tile1 en el mismo S/T (antes = TEXEL0), y el
+  ciclo 1 del combinador ve TEXEL0/TEXEL1 cruzados (desfase de la tuberia). Triangulos y
+  texrects. 1-cycle sigue aproximando el TEXEL1 "del pixel siguiente" con TEXEL0.
+- Estado guardado v16 (`prim_min_level`), acepta v14/v15.
+- krom 371/371 88,74/92,10 regress=0 (RDPTex0And1 95,34 -> 98,83). sm64 `2c542f7d` igual.
+  DK64 intro (2e9 insn) vs prdp: 604 px cambian, error medio en ellos 25,72 -> 24,92.
+
 ## 2026-10-02 (e) -- SoftRDP: ciclo 0 del blender en 2-cycle (niebla) + mux SHADE_ALPHA
 
 - Aviso n64-be (sdk 12_static, G_RM_FOG_SHADE_A + G_RM_ZB_OPA_SURF2): SoftRDP solo evaluaba

@@ -140,16 +140,16 @@ private:
   u32 fill_color = 0;  // SET_FILL_COLOR (raw 32-bit; two 16bpp pixels or one 32bpp)
   u32 blend_color = 0, fog_color = 0, prim_color = 0, env_color = 0;
   u8  prim_lod_frac = 0;            // SET_PRIM_COLOR bits 39:32 — combiner mul input
-  // LOD fraction feeding the combiner's LOD_FRAC mux. We do not mipmap: max_level is 0,
-  // so the LOD unit always reports "distant" (parallel-rdp compute_lod_2cycle: the
-  // magnify branch takes `distant = max_level == 0` and the mip branch takes
-  // `distant = mip_base >= max_level`; both then pin lod_frac to 0xff when neither
-  // SHARPEN nor DETAIL is on). It is 0xff, NOT 0x100: the mul port is 9 bits and 0xff is
-  // an ordinary positive value there, so x*LOD_FRAC == (x*0xff + 0x80) >> 8 == x - 1 for
-  // x = 0xff. krom's GRB decoders are the witness — they route TEXEL0_ALPHA through
-  // LOD_FRAC into COMBINED_ALPHA and their hardware captures pin the resulting scale at
-  // 254/256, which only 0xff produces (0x100 would pass the texel through untouched).
-  static constexpr auto lodFrac() -> int { return 0xff; }
+  u8  prim_min_level = 0;           // SET_PRIM_COLOR bits 44:40 — suelo de LOD_FRAC (sharpen/detail)
+  // LOD_FRAC del pixel en curso: registro real del TX. Lo escribe la unidad de LOD
+  // (lodSelect) cuando corre, que es con TEX_LOD_EN o en un 2-cycle cuyo combinador lo lee;
+  // si no corre se queda saturado en 0xff (parallel-rdp shading.h). Es 0xff, NO 0x100: el
+  // puerto mul es de 9 bits y 0xff ahi es un positivo normal, asi que x*LOD_FRAC ==
+  // (x*0xff + 0x80) >> 8 == x - 1 para x = 0xff. Testigo: los decodificadores GRB de krom
+  // pasan TEXEL0_ALPHA por LOD_FRAC a COMBINED_ALPHA y sus capturas de HW fijan la escala
+  // en 254/256, que solo da 0xff (0x100 dejaria pasar el texel intacto).
+  int lodFracV = 0xff;
+  auto lodFrac() const -> int { return lodFracV; }
   u32 prim_z = 0;      // SET_PRIM_DEPTH primitive Z (used when Z_SOURCE_SEL is set)
 
   int k0 = 0, k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;  // SET_CONVERT (YUV→RGB coeffs, 9-bit signed)
@@ -260,6 +260,12 @@ private:
   enum : u32 { TK_CI4, TK_IA4, TK_I4, TK_YUV, TK_IA16, TK_RGBA16, TK_RGBA32,
                TK_CI8, TK_IA8, TK_I8, TK_BAD };
   auto foldOf(u32 tile) const -> TexFold;
+  // Unidad de LOD (mipmap): vecinos +x/+y en 1/32 de texel -> LOD_FRAC, y con TEX_LOD_EN
+  // elige tile0/tile1 (entrada: tile base y base+1).
+  auto lodSelect(s32 s, s32 t, s32 sdx, s32 tdx, s32 sdy, s32 tdy, bool ovf, u32 maxLevel,
+                 u32& tile0, u32& tile1) const -> int;
+  // Que pide la primitiva al TX: unidad de LOD y segundo muestreo (TEXEL1 de tile1).
+  auto texNeeds(bool& lod, bool& tex1) const -> void;
   auto tlutEntry(u32 idx) const -> u32;          // entrada de paleta -> RGBA8888
   // Muestreo y filtro ESPECIALIZADOS por formato. El despacho (size, fmt) se hace una sola
   // vez por pixel en `sampleTexFiltered`; a partir de ahi las 3-4 tomas del filtro son codigo

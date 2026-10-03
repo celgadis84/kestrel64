@@ -758,7 +758,9 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
 // Division perspectiva del RDP: s16 entre W s1.15 con reciproco por tabla de 64 entradas
 // + pendiente, producto y desplazamiento; saturacion fuera de rango y W<=0 -> 0x7fff.
 // Copia bit a bit de parallel-rdp shaders/perspective.h (= tcdiv_persp de angrylion).
-static auto perspDivide(s32 s, s32 t, s32 w, s32& os, s32& ot) -> void {
+// `ovf` (opcional) se pone a true si algun cociente satura o W <= 0: la unidad de LOD lo
+// toma como "distante" (perspective_overflow de parallel-rdp).
+static auto perspDivide(s32 s, s32 t, s32 w, s32& os, s32& ot, bool* ovf = nullptr) -> void {
   static constexpr s16 tab[64][2] = {
     {0x4000,-252*4},{0x3f04,-244*4},{0x3e10,-238*4},{0x3d22,-230*4},{0x3c3c,-223*4},{0x3b5d,-218*4},
     {0x3a83,-210*4},{0x39b1,-205*4},{0x38e4,-200*4},{0x381c,-194*4},{0x375a,-189*4},{0x369d,-184*4},
@@ -783,8 +785,8 @@ static auto perspDivide(s32 s, s32 t, s32 w, s32& os, s32& ot) -> void {
     const s32 oob = prod[i] & mask;
     const s32 p = shift != 14 ? (prod[i] >> (13 - shift)) : prod[i];
     out[i] = shift != 14 ? p : (s32)((u32)prod[i] << 1);
-    if(oob != mask && oob != 0) out[i] = (p & (1 << 29)) == 0 ? 0x7fff : -0x8000;
-    if(wCarry) out[i] = 0x7fff;
+    if(oob != mask && oob != 0) { out[i] = (p & (1 << 29)) == 0 ? 0x7fff : -0x8000; if(ovf) *ovf = true; }
+    if(wCarry) { out[i] = 0x7fff; if(ovf) *ovf = true; }
     out[i] = std::clamp(out[i], -0x10000, 0xffff);
   }
   os = out[0]; ot = out[1];
@@ -838,6 +840,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   //   start = j0(int)/j2(frac)   DsDx = j1/j3   DsDe = j4/j6 (per +y along edge).
   // S occupies bits [63:48], T [47:32], W [31:16]. W solo cuenta con TEX_PERSP (abajo).
   double S = 0, T = 0, dSdx = 0, dTdx = 0, dSde = 0, dTde = 0, W = 0, dWdx = 0, dWde = 0;
+  double dSdy = 0, dTdy = 0, dWdy = 0;   // DxDy = j5/j7: solo los usa la unidad de LOD
   if(textured) {
     int tb = 4 + (hasShade ? 8 : 0);
     auto tc = [&](int ii, int fi, int comp) -> double {
@@ -849,6 +852,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     dSdx = tc(1, 3, 0); dTdx = tc(1, 3, 1);
     dSde = tc(4, 6, 0); dTde = tc(4, 6, 1);
     W = tc(0, 2, 2); dWdx = tc(1, 3, 2); dWde = tc(4, 6, 2);
+    dSdy = tc(5, 7, 0); dTdy = tc(5, 7, 1); dWdy = tc(5, 7, 2);
   }
   // TEX_PERSP (other_hi bit 19): el RSP manda S/W, T/W y 1/W, y el RDP divide por pixel.
   const bool persp = textured && ((other_hi >> 19) & 1);
@@ -901,6 +905,26 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   const TexFold texF   = foldOf(texTile);
   const bool    copyCy = cycleType() == 2;
   const bool    alphaCmpEn = (other_lo & 1) != 0;
+  // Mipmap / TEXEL1. La unidad de LOD mira el pixel y sus vecinos +x (en el sentido del
+  // recorrido: +1 con borde mayor a la izquierda, -1 si no) y +y, con los pasos tal como
+  // los ve el HW (parallel-rdp interpolate_stz: DxDx sin sus 5 bits bajos, DxDy sin los 15
+  // bajos), divididos por W si hay perspectiva. Nivel maximo = bits 53:51 del comando.
+  bool usesLod = false, usesTex1 = false;
+  if(!fillMode && !copyCy) texNeeds(usesLod, usesTex1);
+  const u32 maxLevel = (u32)(w0 >> 51) & 7;
+  TexFold folds[8];
+  if(textured && (usesLod || usesTex1)) for(u32 i = 0; i < 8; i++) folds[i] = foldOf(i);
+  auto lowCut = [](double v, u32 m) -> double {   // quita bits bajos del valor crudo s15.16
+    return (double)(s32)((u32)(s32)std::llround(v * 65536.0) & ~m) / 65536.0;
+  };
+  const double ldir = leftMajor ? 1.0 : -1.0;
+  const double lxS = ldir * lowCut(dSdx, 0x1f), lxT = ldir * lowCut(dTdx, 0x1f), lxW = ldir * lowCut(dWdx, 0x1f);
+  const double lyS = lowCut(dSdy, 0x7fff), lyT = lowCut(dTdy, 0x7fff), lyW = lowCut(dWdy, 0x7fff);
+  lodFracV = 0xff;
+  if(usesLod && !textured) {   // sin coordenadas: S=T=W=0 en todo el primitivo -> magnify
+    u32 t0 = texTile, t1 = (texTile + 1) & 7;
+    lodFracV = lodSelect(0, 0, 0, 0, 0, 0, false, maxLevel, t0, t1);
+  }
   // Recorrido de bordes en ENTERO, como el rasterizador del RDP. Oraculo: parallel-rdp
   // `span_setup.comp` (decodificacion en rdp_device.cpp) y `compute_coverage()` de
   // coverage.h. Antes iba en double con los bordes anclados en el `yh` FRACCIONARIO y la
@@ -1031,7 +1055,25 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                       (s32)std::floor(eW + dWdx * dx), ps, pt);
           su = ps / 32.0; tu = pt / 32.0;
         }
-        u32 tex = sampleTexFold(texF, su, tu);
+        u32 tile0 = texTile, tile1 = (texTile + 1) & 7;
+        if(usesLod) {
+          const double cs = eS + dSdx * dx, ct = eT + dTdx * dx, cw = eW + dWdx * dx;
+          s32 s0, t0, s1, t1, s2, t2;
+          bool ovf = false;
+          auto fl = [](double v) { return (s32)std::floor(v); };
+          if(persp) {
+            perspDivide(fl(cs), fl(ct), fl(cw), s0, t0, &ovf);
+            perspDivide(fl(cs + lxS), fl(ct + lxT), fl(cw + lxW), s1, t1, &ovf);
+            perspDivide(fl(cs + lyS), fl(ct + lyT), fl(cw + lyW), s2, t2, &ovf);
+          } else {
+            s0 = fl(cs); t0 = fl(ct); s1 = fl(cs + lxS); t1 = fl(ct + lxT);
+            s2 = fl(cs + lyS); t2 = fl(ct + lyT);
+          }
+          lodFracV = lodSelect(s0, t0, s1, t1, s2, t2, ovf, maxLevel, tile0, tile1);
+        }
+        u32 tex = sampleTexFold(usesLod ? folds[tile0] : texF, su, tu);
+        // 2-cycle: TEXEL1 es un segundo muestreo, de tile1, en el mismo S/T.
+        u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], su, tu) : tex;
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.
 #if defined(__SSE4_1__)
@@ -1040,7 +1082,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         u32 shd = gouraud ? ((clamp8(eR + dRdx * dx) << 24) | (clamp8(eG + dGdx * dx) << 16)
                             | (clamp8(eB + dBdx * dx) << 8) | clamp8(eA + dAdx * dx)) : 0;
 #endif
-        u32 c = (combProg && !copyCy) ? combineColor(tex, tex, shd) : tex;
+        u32 c = (combProg && !copyCy) ? combineColor(tex, tex1, shd) : tex;
         pxShadeA = (u8)(shd & 0xff);
         // Alpha compare (see texRect): COPY mode keys on the 1-bit texel alpha (drop
         // alpha==0); 1-/2-cycle compares COMBINED alpha against the blend_color
@@ -1072,8 +1114,64 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     addSpan(xs, rasterPx - rowPx0);
   }
   pxShadeA = 0;   // rects y demas primitivas sin shade ven 0
+  lodFracV = 0xff;
   if(costOnly) accountPixels(mem, rasterPx, rasterPx, zUpd ? rasterPx : 0);
   else         accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
+}
+
+// Unidad de LOD del TX. Oraculo: parallel-rdp texture.h compute_lod_2cycle. La distancia
+// es el mayor salto |vecino - pixel| en S o T (con el "abs" del HW, uno de menos en
+// negativos); su log2 sobre 1 texel elige el nivel y la mantisa es LOD_FRAC. Con
+// TEX_LOD_EN el nivel desplaza el tile base; SHARPEN y DETAIL cambian el reparto en
+// magnificacion. Bits de SET_OTHER_MODES: 48 TEX_LOD_EN, 49 SHARPEN, 50 DETAIL.
+auto SoftRdp::lodSelect(s32 s, s32 t, s32 sdx, s32 tdx, s32 sdy, s32 tdy, bool ovf, u32 maxLevel,
+                        u32& tile0, u32& tile1) const -> int {
+  const bool lodEn = (other_hi >> 16) & 1, sharpen = (other_hi >> 17) & 1, detail = (other_hi >> 18) & 1;
+  bool magnify = false, distant = false;
+  u32 off = 0;
+  int frac = 0xff;
+  if(ovf) distant = true;
+  else {
+    auto ab = [](s32 v) { return v ^ (v >> 31); };
+    const s32 maxd = std::max(std::max(ab(sdx - s), ab(tdx - t)), std::max(ab(sdy - s), ab(tdy - t)));
+    if(maxd >= 0x4000) { distant = true; off = maxLevel; }
+    else if(maxd < 32) {   // LOD < 0
+      distant = maxLevel == 0; magnify = true;
+      frac = (!sharpen && !detail) ? (distant ? 0xff : 0)
+           : (std::max((s32)prim_min_level, maxd) << 3) + (sharpen ? -0x100 : 0);
+    } else {
+      const int mipBase = 31 - __builtin_clz((u32)(maxd >> 5));
+      distant = (u32)mipBase >= maxLevel;
+      if(!distant || sharpen || detail) { frac = ((maxd << 3) >> mipBase) & 0xff; off = (u32)mipBase; }
+    }
+  }
+  if(lodEn) {
+    if(distant) off = maxLevel;
+    if(!detail) {
+      tile0 = (tile0 + off) & 7;
+      tile1 = (distant || (!sharpen && magnify)) ? tile0 : (tile0 + 1) & 7;
+    } else {
+      tile1 = (tile0 + off + ((distant || magnify) ? 1 : 2)) & 7;
+      tile0 = (tile0 + off + (magnify ? 0 : 1)) & 7;
+    }
+  }
+  return frac;
+}
+
+// Que necesita la primitiva del TX (parallel-rdp deduce_static_texture_state): la unidad de
+// LOD corre con TEX_LOD_EN o si un 2-cycle lee LOD_FRAC; el segundo muestreo (tile1) solo
+// existe en 2-cycle y hace falta si el ciclo 0 lee TEXEL1 o el ciclo 1 lee TEXEL0 (que alli
+// es el TEXEL1 del pixel). En 1-cycle TEXEL1 es el texel del pixel siguiente: se aproxima
+// con el propio TEXEL0.
+auto SoftRdp::texNeeds(bool& lod, bool& tex1) const -> void {
+  auto rd = [](const CombSet& c, int tx) {   // tx: 1 = TEXEL0, 2 = TEXEL1
+    return c.aR == tx || c.bR == tx || c.cR == tx || c.cR == tx + 7 || c.dR == tx
+        || c.aA == tx || c.bA == tx || c.cA == tx || c.dA == tx;
+  };
+  auto rl = [](const CombSet& c) { return c.cR == 13 || c.cA == 0; };
+  const bool two = cycleType() == 1;
+  lod  = ((other_hi >> 16) & 1) || (two && (rl(comb[0]) || rl(comb[1])));
+  tex1 = two && (rd(comb[0], 2) || rd(comb[1], 1));
 }
 
 auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
@@ -1401,6 +1499,11 @@ auto SoftRdp::buildCombPlan() -> void {
     const CombSet& cs = comb[c];
     u32 r[8] = { mapA(cs.aR), mapB(cs.bR), mapC(cs.cR), mapD(cs.dR),
                  mapAABD(cs.aA), mapAABD(cs.bA), mapAC(cs.cA), mapAABD(cs.dA) };
+    // 2-cycle: por el desfase de la tuberia el ciclo 1 ve los texels cruzados (su TEXEL0
+    // es el TEXEL1 del pixel y viceversa; parallel-rdp shading.h).
+    if(p.two && c == 1)
+      for(u32& v : r) v = v == CR_TEX0 ? CR_TEX1 : v == CR_TEX1 ? CR_TEX0
+                        : v == CR_TEX0A ? CR_TEX1A : v == CR_TEX1A ? CR_TEX0A : v;
     for(int k = 0; k < 8; k++) p.sel[c][k] = (u8)r[k];
     // Solo cuentan (para NOISE y para la mascara) los ciclos que de verdad se ejecutan:
     // en 1-cycle el hardware evalua la ecuacion del segundo ciclo y el primero no existe.
@@ -1613,6 +1716,7 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
   int mid[4], fin[4];
   if(cycleType() == 1) {                 // 2-cycle: cycle0 (raw) → COMBINED → cycle1
     oneCycle(comb[0], combined, mid);
+    std::swap(tex0, tex1);               // el ciclo 1 ve los texels cruzados (ver buildCombPlan)
     oneCycle(comb[1], mid, fin);
   } else {                               // 1-cycle uses the second-cycle equation
     oneCycle(comb[1], combined, fin);
@@ -1646,6 +1750,17 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   // scale: DsDx = 4<<10 (4.0) means a 1:1 texel-per-pixel copy. Divide by 4 to recover the
   // true per-pixel texel advance. (Vertical DtDy is one line per pass — unscaled.)
   if(cycleType() == 2) dsdx /= 4.0;
+  // Mipmap / TEXEL1 como en los triangulos (parallel-rdp op_texture_rectangle: el rect es
+  // un primitivo con DsDx<<11 por +x y DtDy<<11 por +y, ejes cruzados con FLIP, nivel
+  // maximo 0 y recorrido siempre +x). En unidades de 1/32 de texel.
+  bool usesLod = false, usesTex1 = false;
+  if(cycleType() < 2) texNeeds(usesLod, usesTex1);
+  TexFold folds[8];
+  if(usesLod || usesTex1) for(u32 i = 0; i < 8; i++) folds[i] = foldOf(i);
+  const s32 rdsdx = (s16)((c1 >> 16) & 0xffff), rdtdy = (s16)(c1 & 0xffff);
+  auto yCut = [](s32 r) -> double { return (double)(s32)(((u32)r << 11) & ~0x7fffu) / 65536.0; };
+  const double lxS = flip ? 0 : rdsdx / 32.0, lxT = flip ? rdtdy / 32.0 : 0;
+  const double lyS = flip ? yCut(rdsdx) : 0,  lyT = flip ? 0 : yCut(rdtdy);
   int X0 = std::max((int)std::ceil(xh), sx0), X1 = std::min((int)std::ceil(xl), sx1);
   int Y0 = std::max((int)std::ceil(yh), sy0), Y1 = std::min((int)std::ceil(yl), sy1);
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
@@ -1667,7 +1782,16 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       double fx = x - xh, fy = y - yh;
       double s = flip ? s0 + dsdx * fy : s0 + dsdx * fx;
       double t = flip ? t0 + dtdy * fx : t0 + dtdy * fy;
-      u32 tex = sampleTexFiltered(tile, s, t);   // point or N64 3-point per SAMPLE_TYPE
+      u32 tile0 = tile, tile1 = (tile + 1) & 7;
+      if(usesLod) {
+        const double cs = s * 32.0, ct = t * 32.0;
+        auto fl = [](double v) { return (s32)std::floor(v); };
+        lodFracV = lodSelect(fl(cs), fl(ct), fl(cs + lxS), fl(ct + lxT), fl(cs + lyS), fl(ct + lyT),
+                             false, 0, tile0, tile1);
+      }
+      // point or N64 3-point per SAMPLE_TYPE
+      u32 tex = usesLod ? sampleTexFold(folds[tile0], s, t) : sampleTexFiltered(tile, s, t);
+      u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], s, t) : tex;
       // COPY cycle writes the raw texel; 1-/2-cycle route it through the combiner
       // (texrect carries no shade → SHADE input is 0).
       bool combProg = (combine_hi | combine_lo) != 0;
@@ -1688,7 +1812,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
         putPixel(mem, x, y, (u32)idx);             // 8bpp path stores low byte = index
         continue;
       }
-      u32 c = (combProg && !copy) ? combineColor(tex, tex, 0) : tex;
+      u32 c = (combProg && !copy) ? combineColor(tex, tex1, 0) : tex;
       // Alpha compare (ALPHA_COMPARE_EN, other_lo bit 0) has two HW forms:
       //  - COPY mode: 1-bit transparency — the texel is discarded when its alpha is 0
       //    (e.g. TLUT index → $0000). This is the classic copy-mode sprite key.
@@ -1703,6 +1827,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       else putPixel(mem, x, y, c);                        // opaque write
     }
   }
+  lodFracV = 0xff;
   accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
@@ -1930,6 +2055,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       // prim_lod_frac (a real combiner input), 31:0 = the RGBA colour.
       prim_color    = (u32)cmd;
       prim_lod_frac = (u8)(cmd >> 32);
+      prim_min_level = (u8)((cmd >> 40) & 31);
       break;
     case 0x3b: env_color   = (u32)cmd; break;           // SET_ENV_COLOR
     case 0x3c: {                                        // SET_COMBINE
