@@ -101,7 +101,7 @@ CPUTest/CPU/SHIFT/SRLV/CPUSRLV	100.00	100.00	0.00
 CPUTest/CPU/SUB/CPUSUB	100.00	100.00	0.00	
 CPUTest/CPU/SUBU/CPUSUBU	100.00	100.00	0.00	
 CPUTest/CPU/XOR/CPUXOR	100.00	100.00	0.00	
-CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM	98.61	98.61	24.84	SIZE 640x240 vs ref 640x480
+CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM	98.74	98.74	23.94	SIZE 640x240 vs ref 640x480
 CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM_large_2	100.00	100.00	0.00	SIZE 640x240 vs ref 640x480
 CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM_large_4	100.00	100.00	0.00	SIZE 640x240 vs ref 640x480
 CPUTest/DMAAlignment-PI-cart/DMAAlignment-PI-ROM-FROM_large_6	100.00	100.00	0.00	SIZE 640x240 vs ref 640x480
@@ -135,10 +135,10 @@ Compress/HUFFMAN/HUFFMANROMGFX/HUFFMANROMGFX	99.33	99.33	12.49
 Compress/LZ77/LZ77GFX/LZ77GFX	99.40	99.40	11.84	
 Compress/LZ77/LZ77ROMGFX/LZ77ROMGFX	99.33	99.33	12.49	
 EMU/GameBoy/PPU/2BPPTile8x8/PPU2BPPTile8x8	66.93	82.59	27.00	
-EMU/SNES/PPU/2BPPTile8x8/PPU2BPPTile8x8	32.88	60.26	60.47	SIZE 272x240 vs ref 320x240
-EMU/SNES/PPU/4BPPTile8x8/PPU4BPPTile8x8	27.04	59.87	36.90	SIZE 272x240 vs ref 320x240
-EMU/SNES/PPU/8BPPTile8x8/PPU8BPPTile8x8	23.84	63.72	25.38	SIZE 272x240 vs ref 320x240
-EMU/SNES/SPC/SPCEMU	99.18	99.18	19.89	
+EMU/SNES/PPU/2BPPTile8x8/PPU2BPPTile8x8	30.80	61.59	59.42	SIZE 271x240 vs ref 320x240
+EMU/SNES/PPU/4BPPTile8x8/PPU4BPPTile8x8	23.89	60.44	35.93	SIZE 271x240 vs ref 320x240
+EMU/SNES/PPU/8BPPTile8x8/PPU8BPPTile8x8	23.39	64.11	23.70	SIZE 271x240 vs ref 320x240
+EMU/SNES/SPC/SPCEMU	99.18	99.18	19.91	
 FrameBuffer/16BPP/FrameBufferCPU320x240/FrameBufferCPU16BPP320X240	98.64	100.00	0.28	
 FrameBuffer/16BPP/FrameBufferDMA320x240/FrameBufferDMA16BPP320X240	98.64	100.00	0.28	
 FrameBuffer/32BPP/FrameBufferCPU640x480/FrameBufferCPU32BPP640X480	100.00	100.00	0.00	
@@ -153,7 +153,7 @@ Input/RDP/InputRDP	100.00	100.00	0.00
 Interrupt/VI/InterruptVI	99.98	99.98	2.98	
 Interrupt/VIScrollingBGDMA16BPP320X240/VIScrollingBGDMA16BPP320X240	0.00	46.38	17.54	
 Interrupt/VIScrollingBGDMA32BPP320X240/VIScrollingBGDMA32BPP320X240	0.21	55.52	15.49	
-N64NICCC/N64NICCC	97.97	97.97	17.42	SIZE 256x199 vs ref 320x240
+N64NICCC/N64NICCC	98.60	98.60	13.64	SIZE 255x199 vs ref 320x240
 RCP/VI/CoverageTest/CoverageTest	91.76	93.45	29.69	SIZE 320x240 vs ref 320x237
 RCP/Version/RCPVersion	98.50	98.50	24.99	SIZE 320x240 vs ref 640x480
 RDP/16BPP/Line/FillLine/Cycle1FillLine320x240/Cycle1FillLine16BPP320X240	99.21	99.21	14.61	
@@ -179,30 +179,30 @@ RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA8B320x240/
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA4B320x240/Cycle1TextureRectangle16BPPTLUTRGBA4B320X240	89.73	95.23	28.30	
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA8B320x240/Cycle1TextureRectangle16BPPTLUTRGBA8B320X240	96.03	97.90	27.66	
 RDP/16BPP/SetPrimColor/SetPrimColor16BPP	100.00	100.00	0.00	
-RDP/16BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle16BPP320X240	55.28	55.90	105.34	
+RDP/16BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle16BPP320X240	55.27	55.89	105.36	
 RDP/16BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle16BPP320X240	98.97	98.97	17.80	
 RDP/16BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle16BPP320X240	98.89	98.89	17.73	
 RDP/16BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle16BPP320X240	98.15	98.15	21.27	
 RDP/16BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle16BPP320X240	99.75	99.75	6.70	
 RDP/16BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle16BPP320X240	99.75	99.75	6.70	
 RDP/16BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle16BPP320X240	70.04	70.04	73.00	
-RDP/16BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle16BPP320X240	71.62	71.62	71.04	
-RDP/16BPP/Triangle/ShadeTriangle320x240/Cycle1ShadeTriangle16BPP320X240	96.08	100.00	1.04	
-RDP/16BPP/Triangle/TextureTriangle/CopyTextureTriangleRGBA16B320x240/CopyTextureTriangle16BPPRGBA16B320X240	99.06	99.06	17.54	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI4B320x240/Cycle1TextureTriangle16BPPI4B320X240	93.96	96.88	12.50	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI8B320x240/Cycle1TextureTriangle16BPPI8B320X240	95.83	97.30	13.50	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA16B320x240/Cycle1TextureTriangle16BPPIA16B320X240	96.03	97.59	23.69	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA4B320x240/Cycle1TextureTriangle16BPPIA4B320X240	94.21	97.22	23.81	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA8B320x240/Cycle1TextureTriangle16BPPIA8B320X240	96.03	97.59	23.66	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA16B320x240/Cycle1TextureTriangle16BPPRGBA16B320X240	96.03	97.90	23.42	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA32B320x240/Cycle1TextureTriangle16BPPRGBA32B320X240	95.28	96.66	29.90	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle16BPPYUV16B320X240	98.45	99.07	12.72	
-RDP/16BPP/Triangle/TextureTriangle/TLUT/CopyTextureTriangleTLUTRGBA4B320x240/CopyTextureTriangle16BPPTLUTRGBA4B320X240	96.68	96.68	36.60	
-RDP/16BPP/Triangle/TextureTriangle/TLUT/CopyTextureTriangleTLUTRGBA8B320x240/CopyTextureTriangle16BPPTLUTRGBA8B320X240	99.06	99.06	17.54	
-RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA4B320x240/Cycle1TextureTriangle16BPPTLUTIA4B320X240	89.73	90.31	25.05	
-RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cycle1TextureTriangle16BPPTLUTIA8B320X240	96.03	97.59	23.69	
-RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle16BPPTLUTRGBA4B320X240	89.73	95.23	21.74	
-RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle16BPPTLUTRGBA8B320X240	96.03	97.90	23.42	
+RDP/16BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle16BPP320X240	71.62	71.62	71.05	
+RDP/16BPP/Triangle/ShadeTriangle320x240/Cycle1ShadeTriangle16BPP320X240	93.77	99.67	1.49	
+RDP/16BPP/Triangle/TextureTriangle/CopyTextureTriangleRGBA16B320x240/CopyTextureTriangle16BPPRGBA16B320X240	99.04	99.04	17.69	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI4B320x240/Cycle1TextureTriangle16BPPI4B320X240	93.96	96.88	15.61	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI8B320x240/Cycle1TextureTriangle16BPPI8B320X240	95.83	97.30	15.53	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA16B320x240/Cycle1TextureTriangle16BPPIA16B320X240	96.03	97.59	27.89	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA4B320x240/Cycle1TextureTriangle16BPPIA4B320X240	94.21	97.22	31.21	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA8B320x240/Cycle1TextureTriangle16BPPIA8B320X240	96.03	97.59	27.86	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA16B320x240/Cycle1TextureTriangle16BPPRGBA16B320X240	96.03	97.90	27.66	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA32B320x240/Cycle1TextureTriangle16BPPRGBA32B320X240	95.32	96.70	33.06	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle16BPPYUV16B320X240	99.21	99.88	3.91	
+RDP/16BPP/Triangle/TextureTriangle/TLUT/CopyTextureTriangleTLUTRGBA4B320x240/CopyTextureTriangle16BPPTLUTRGBA4B320X240	96.62	96.62	36.89	
+RDP/16BPP/Triangle/TextureTriangle/TLUT/CopyTextureTriangleTLUTRGBA8B320x240/CopyTextureTriangle16BPPTLUTRGBA8B320X240	99.04	99.04	17.69	
+RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA4B320x240/Cycle1TextureTriangle16BPPTLUTIA4B320X240	89.73	90.31	30.70	
+RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cycle1TextureTriangle16BPPTLUTIA8B320X240	96.03	97.59	27.89	
+RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle16BPPTLUTRGBA4B320X240	89.73	95.23	28.30	
+RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle16BPPTLUTRGBA8B320X240	96.03	97.90	27.66	
 RDP/32BPP/Line/FillLine/Cycle1FillLine320x240/Cycle1FillLine32BPP320X240	99.21	99.21	15.10	
 RDP/32BPP/Line/FillLine/FillLine320x240/FillLine32BPP320X240	99.26	99.26	15.31	
 RDP/32BPP/Line/Plot/FillLine/PlotFillLine32BPP320X240	99.87	99.87	5.31	
@@ -223,7 +223,7 @@ RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA8B320x240/
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA4B320x240/Cycle1TextureRectangle32BPPTLUTRGBA4B320X240	89.77	94.81	28.69	
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA8B320x240/Cycle1TextureRectangle32BPPTLUTRGBA8B320X240	96.17	98.07	27.23	
 RDP/32BPP/SetPrimColor/SetPrimColor32BPP	0.79	98.41	26.13	
-RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240	55.28	55.90	106.87	
+RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240	55.27	55.89	106.89	
 RDP/32BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle32BPP320X240	98.97	98.97	18.33	
 RDP/32BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle32BPP320X240	98.89	98.89	18.78	
 RDP/32BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle32BPP320X240	98.15	98.15	21.62	
@@ -231,24 +231,24 @@ RDP/32BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle3
 RDP/32BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle32BPP320X240	99.75	99.75	7.40	
 RDP/32BPP/Triangle/Rotate/FillTriangle/LeftMajorTriangle320x240/RotateLeftMajorTriangle32BPP320X240	70.04	70.04	80.59	
 RDP/32BPP/Triangle/Rotate/FillTriangle/RightMajorTriangle320x240/RotateRightMajorTriangle32BPP320X240	69.61	69.61	81.16	
-RDP/32BPP/Triangle/ShadeTriangle320x240/Cycle1ShadeTriangle32BPP320X240	0.04	100.00	13.00	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI4B320x240/Cycle1TextureTriangle32BPPI4B320X240	93.96	96.81	12.21	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI8B320x240/Cycle1TextureTriangle32BPPI8B320X240	95.95	97.44	12.10	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA16B320x240/Cycle1TextureTriangle32BPPIA16B320X240	96.17	97.76	22.61	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA4B320x240/Cycle1TextureTriangle32BPPIA4B320X240	94.25	97.22	24.14	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA8B320x240/Cycle1TextureTriangle32BPPIA8B320X240	96.17	97.76	22.58	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA16B320x240/Cycle1TextureTriangle32BPPRGBA16B320X240	96.17	98.07	22.37	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA32B320x240/Cycle1TextureTriangle32BPPRGBA32B320X240	95.33	96.77	29.64	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle32BPPYUV16B320X240	98.07	99.07	12.39	
-RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA4B320x240/Cycle1TextureTriangle32BPPTLUTIA4B320X240	89.77	90.52	25.18	
-RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cycle1TextureTriangle32BPPTLUTIA8B320X240	96.17	97.76	22.61	
-RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle32BPPTLUTRGBA4B320X240	89.77	94.81	22.08	
-RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle32BPPTLUTRGBA8B320X240	96.17	98.07	22.37	
+RDP/32BPP/Triangle/ShadeTriangle320x240/Cycle1ShadeTriangle32BPP320X240	0.04	99.83	13.03	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI4B320x240/Cycle1TextureTriangle32BPPI4B320X240	93.96	96.81	15.26	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleI8B320x240/Cycle1TextureTriangle32BPPI8B320X240	95.95	97.44	14.32	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA16B320x240/Cycle1TextureTriangle32BPPIA16B320X240	96.17	97.75	27.41	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA4B320x240/Cycle1TextureTriangle32BPPIA4B320X240	94.25	97.22	31.57	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA8B320x240/Cycle1TextureTriangle32BPPIA8B320X240	96.17	97.75	27.37	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA16B320x240/Cycle1TextureTriangle32BPPRGBA16B320X240	96.17	98.07	27.23	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA32B320x240/Cycle1TextureTriangle32BPPRGBA32B320X240	95.37	96.82	32.87	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle32BPPYUV16B320X240	98.74	99.88	3.80	
+RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA4B320x240/Cycle1TextureTriangle32BPPTLUTIA4B320X240	89.77	90.52	30.88	
+RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cycle1TextureTriangle32BPPTLUTIA8B320X240	96.17	97.75	27.41	
+RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle32BPPTLUTRGBA4B320X240	89.77	94.81	28.69	
+RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle32BPPTLUTRGBA8B320X240	96.17	98.07	27.23	
 RDP/8BPP/Rectangle/TextureRectangle/TLUT/InternalPalette/InternalPalette	0.00	66.80	63.43	SIZE 160x240 vs ref 320x240
-RDP/AlphaCompare/AlphaCompare	95.95	98.76	16.03	
-RDP/AlphaCoverage/AlphaCoverage	74.76	75.62	60.29	
-RDP/CombinerLongTailConstants/CombinerLongTailConstants	71.13	75.08	78.90	
-RDP/CombinerOverflow/CombinerOverflow	42.71	46.19	93.85	
+RDP/AlphaCompare/AlphaCompare	96.86	99.96	2.89	
+RDP/AlphaCoverage/AlphaCoverage	74.85	75.64	60.29	
+RDP/CombinerLongTailConstants/CombinerLongTailConstants	74.31	75.53	78.47	
+RDP/CombinerOverflow/CombinerOverflow	45.54	48.92	77.33	
 RDP/LoadTLUT/LoadTLUT_b16_b16	95.75	95.88	27.44	
 RDP/LoadTLUT/LoadTLUT_b16_b32	95.75	95.88	27.44	
 RDP/LoadTLUT/LoadTLUT_b16_b4	95.70	95.83	27.78	
@@ -264,7 +264,7 @@ RDP/LoadTLUT/LoadTLUT_b8_b32	98.92	98.98	13.53
 RDP/LoadTLUT/LoadTLUT_b8_b4	98.92	98.98	13.60	
 RDP/LoadTLUT/LoadTLUT_b8_b8	98.92	98.98	13.54	
 RDP/RDPModeInput/RDPModeInput	59.49	59.55	95.90	REF-DEDUP 3
-RDP/RDPTex0And1/RDPTex0And1	92.68	95.39	23.23	
+RDP/RDPTex0And1/RDPTex0And1	98.83	98.83	10.63	
 RDP/TEXRECT_Palette/TEXRECT_Palette	88.83	90.42	38.40	
 RDP/TextureCoordinates/TextureCoordinates	87.39	90.55	37.87	
 RDP/TextureCoordinates1/TextureCoordinates1	100.00	100.00	0.00	
@@ -283,8 +283,8 @@ RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_1	80.48	80.48	83.89
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_2	75.93	75.93	99.75	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_3	67.95	67.95	112.54	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_4	73.75	73.75	101.73	
-RDPTest/CPU/RDPTestCPU	99.07	99.07	19.13	
-RDPTest/RSP/RDPTestRSP	99.06	99.06	19.34	
+RDPTest/CPU/RDPTestCPU	99.74	99.74	11.24	
+RDPTest/RSP/RDPTestRSP	99.74	99.74	11.26	
 RDRAMTest/RDRAMTest	78.76	78.76	87.32	
 RSP/DCT/FastDCTBlockDecode/RSPFastDCTBlockDecode	100.00	100.00	0.00	
 RSP/DCT/FastQuantizationBlockDecode/RSPFastQuantizationBlockDecode	100.00	100.00	0.00	
@@ -368,5 +368,5 @@ Video/I4LZRLEVideo/I4LZRLEVideo	33.28	33.28	206.67	REF-DEDUP 3
 Video/I8Decode/CPU/CPUI8Decode	32.55	96.15	35.71	
 Video/I8Decode/RDP/RDPI8Decode	78.73	97.20	25.92	
 Video/I8LZRLEVideo/I8LZRLEVideo	32.78	33.09	204.10	
-Video/YUV16LZDIFFRLEVideo/YUV16LZDIFFRLEVideo	0.00	0.00	128.37	REF-DEDUP 3
-Video/YUV8LZDIFFRLEVideo/YUV8LZDIFFRLEVideo	0.00	0.00	128.37	REF-DEDUP 3
+Video/YUV16LZDIFFRLEVideo/YUV16LZDIFFRLEVideo	0.00	0.23	141.06	REF-DEDUP 3
+Video/YUV8LZDIFFRLEVideo/YUV8LZDIFFRLEVideo	0.00	0.23	141.06	REF-DEDUP 3

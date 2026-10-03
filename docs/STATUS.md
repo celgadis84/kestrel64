@@ -9845,6 +9845,25 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-03 (c) -- SoftRDP: interpolacion de atributos en ENTERO anclada como el HW
+
+- Oraculo parallel-rdp (`span_setup.comp`, `interpolation.h`, `clamping.h`). Shade, Z y
+  S/T/W dejan de ser `double` y pasan a la aritmetica s15.16 cruda del triangulo, modular
+  a 32 bits: arranque de fila en el borde mayor (`base_x = XH >> 15`, fraccion de 8 bits
+  descontada con `DxDx >> 8`, bits bajos `& ~0x1ff` / `& ~0x3ff`), `do_offset` (latch en la
+  ultima sub-scanline, +3 pasos de XH y 3/4 de DxDe - DxDy), paso por x sin los 5 bits
+  bajos. Shade y Z se evaluan en el CENTROIDE (primera muestra cubierta, desfase en cuartos
+  de pixel) y se sujetan con las reglas de 9 bits (color) y 18+1 bits (z). S/T salen en
+  1/32 de texel (`>> 16`); los vecinos de LOD tambien en entero. Fuera: SSE `shadeVec`,
+  `lowCut`, `zPass` con `lroundExact`.
+- Cycle1ShadeTriangle 16/32, FillZBufferTriangle y CubeFillTriangle: SoftRDP sale
+  **bit-exacto con parallel-rdp** (0 px distintos). Por eso ShadeTriangle16BPP baja contra
+  el PNG de krom 96,08 -> 93,77 (=prdp, 93,77/99,67/1,49): antes se redondeaba +0,5 y el HW
+  trunca; se acepta y se rebasa la fila.
+- SM64 60 campos vs prdp: pixeles distintos 14874 -> 4566, error sumado -34 %; en los
+  13914 que cambian, error medio 15,16 -> 8,64. md5 SoftRDP nuevo `87cf46c0` (interp ==
+  threaded-jit). krom 371/371 88,75/92,11, sin otra bajada; thar0 0,1332 igual.
+
 ## 2026-10-03 (b) -- SoftRDP: dither de alfa (ALPHA_DITHER_SEL)
 
 - Oraculo parallel-rdp (`dither.h dither_coefficients`, `combiner.h combiner_cycle1`,

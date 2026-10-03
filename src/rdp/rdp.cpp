@@ -58,7 +58,7 @@ static const bool g_triDbg   = std::getenv("KESTREL_TRIDBG")   != nullptr;
 // el rango que se usa aqui (coordenadas y Z, muy por debajo de 2^52, donde v+-0.5 es exacto):
 // lround redondea el empate ALEJANDOSE del cero, que es justo floor(v+0.5) / ceil(v-0.5). Y
 // floor/ceil si se alinean a `roundsd` con la linea base SSE4.1 del build.
-static inline auto lroundExact(double v) -> int {
+[[maybe_unused]] static inline auto lroundExact(double v) -> int {
   return (int)(v < 0.0 ? std::ceil(v - 0.5) : std::floor(v + 0.5));
 }
 
@@ -126,11 +126,6 @@ inline auto wr32(V& m, u32 p, u32 v) -> void {
   if(g_rgHi) rdpGuard(p, v, 32);
   wrtag::markRange(p, 4, wrtag::kRdp, 0);
   m[p] = u8(v >> 24); m[p+1] = u8(v >> 16); m[p+2] = u8(v >> 8); m[p+3] = u8(v);
-}
-// sign-extend an n-bit field
-inline auto sx(u32 v, int bits) -> s32 {
-  u32 m = 1u << (bits - 1);
-  return (s32)((v ^ m) - m);
 }
 // 5-bit channel -> 8-bit, by bit-replication: (v<<3)|(v>>2). This is the exact
 // N64 hardware expansion (angrylion replicated_rgba[i]=(i<<3)|(i>>2), tmem.c),
@@ -821,9 +816,6 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
   u64 w0 = w[0];
   bool leftMajor = (w0 >> 55) & 1;
-  double yh = sx((w0 >> 0)  & 0x3fff, 14) / 4.0;   // top
-  auto fx = [](u64 v) { return (s32)(u32)v / 65536.0; };
-  double xh = fx(w[2] >> 32), dxhdy = fx(w[2]);
 
   // Rendering mode. In FILL cycle a triangle is painted with the packed FILL_COLOR
   // pixel (the bare-metal "Fill_Triangle" path). Otherwise, if the command carries a
@@ -842,69 +834,47 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   bool zUpd = (other_lo & 0x20) && zi_addr;
   bool zSrc = other_lo & 0x04;
   bool zActive = (zCmp || zUpd);
-  // Z coefficients (s16.16): block after edge(4)+shade(8)+tex(8). word0[63:32]=Z,
-  // word0[31:0]=DzDx, word1[63:32]=DzDe (per +y along major edge), word1[31:0]=DzDy.
-  double Zs = 0, dZdx = 0, dZde = 0;
-  if(hasZ && !zSrc) {
-    int zb = 4 + (hasShade ? 8 : 0) + (hasTex ? 8 : 0);
-    if(zb + 1 < words) {
-      // >>13, not >>16: the depth unit consumes bits 31:13 of the s15.16 attribute,
-      // so the value it compares and stores is 18-bit with 3 fractional bits. Dropping
-      // to whole units would throw away precision the z-buffer's float format keeps
-      // (its far segments step by 1 in this domain) — see SET_PRIM_DEPTH below.
-      Zs   = (double)(s32)(u32)(w[zb] >> 32)     / 8192.0;
-      dZdx = (double)(s32)(u32) w[zb]            / 8192.0;
-      dZde = (double)(s32)(u32)(w[zb + 1] >> 32) / 8192.0;
+  // Atributos en ENTERO, crudos s15.16 tal como llegan (parallel-rdp rdp_device.cpp
+  // decode_rgba/tex/z_setup): parte entera en una palabra y fraccion en otra, mismo
+  // carril. c* = R,G,B,A (bloque de shade); t* = S,T,Z,W (texture + z). Por cada uno:
+  // valor inicial, paso por +x (Dx), por +y sobre el borde mayor (De) y por +y (Dy).
+  s32 cC[4] = {}, cDx[4] = {}, cDe[4] = {}, cDy[4] = {};
+  s32 tC[4] = {}, tDx[4] = {}, tDe[4] = {}, tDy[4] = {};
+  auto attrRaw = [](u64 hi, u64 lo, int c) -> s32 {
+    const int sh = 48 - c * 16;
+    return (s32)((((u32)(hi >> sh) & 0xffff) << 16) | ((u32)(lo >> sh) & 0xffff));
+  };
+  if(gouraud) for(int c = 0; c < 4; c++) {
+    cC[c]  = attrRaw(w[4], w[6], c);  cDx[c] = attrRaw(w[5], w[7], c);
+    cDe[c] = attrRaw(w[8], w[10], c); cDy[c] = attrRaw(w[9], w[11], c);
+  }
+  // Texture: S [63:48], T [47:32], W [31:16]; entero en j0/j1/j4/j5, fraccion en j2/j3/j6/j7.
+  if(textured) {
+    const int tb = 4 + (hasShade ? 8 : 0);
+    static const int kSlot[3] = { 0, 1, 3 };
+    for(int c = 0; c < 3; c++) {
+      const int d = kSlot[c];
+      tC[d]  = attrRaw(w[tb + 0], w[tb + 2], c); tDx[d] = attrRaw(w[tb + 1], w[tb + 3], c);
+      tDe[d] = attrRaw(w[tb + 4], w[tb + 6], c); tDy[d] = attrRaw(w[tb + 5], w[tb + 7], c);
     }
   }
-
-  // Texture coefficients (s10.5 → 1/32-texel units, split int-hi / frac-lo). Block
-  // starts after edge(4) + shade(8 if present). Layout per +x/+e/+y like shade:
-  //   start = j0(int)/j2(frac)   DsDx = j1/j3   DsDe = j4/j6 (per +y along edge).
-  // S occupies bits [63:48], T [47:32], W [31:16]. W solo cuenta con TEX_PERSP (abajo).
-  double S = 0, T = 0, dSdx = 0, dTdx = 0, dSde = 0, dTde = 0, W = 0, dWdx = 0, dWde = 0;
-  double dSdy = 0, dTdy = 0, dWdy = 0;   // DxDy = j5/j7: solo los usa la unidad de LOD
-  if(textured) {
-    int tb = 4 + (hasShade ? 8 : 0);
-    auto tc = [&](int ii, int fi, int comp) -> double {
-      int sh = 48 - comp * 16;
-      u32 i = (u32)(w[tb + ii] >> sh) & 0xffff, f = (u32)(w[tb + fi] >> sh) & 0xffff;
-      return (double)(s32)((i << 16) | f) / 65536.0;   // value in 1/32-texel units
-    };
-    S = tc(0, 2, 0); T = tc(0, 2, 1);
-    dSdx = tc(1, 3, 0); dTdx = tc(1, 3, 1);
-    dSde = tc(4, 6, 0); dTde = tc(4, 6, 1);
-    W = tc(0, 2, 2); dWdx = tc(1, 3, 2); dWde = tc(4, 6, 2);
-    dSdy = tc(5, 7, 0); dTdy = tc(5, 7, 1); dWdy = tc(5, 7, 2);
+  // Z: word0[63:32]=Z, word0[31:0]=DzDx, word1[63:32]=DzDe, word1[31:0]=DzDy.
+  if(hasZ) {
+    const int zb = 4 + (hasShade ? 8 : 0) + (hasTex ? 8 : 0);
+    if(zb + 1 < words) {
+      tC[2]  = (s32)(u32)(w[zb] >> 32);     tDx[2] = (s32)(u32)w[zb];
+      tDe[2] = (s32)(u32)(w[zb + 1] >> 32); tDy[2] = (s32)(u32)w[zb + 1];
+    }
   }
   // TEX_PERSP (other_hi bit 19): el RSP manda S/W, T/W y 1/W, y el RDP divide por pixel.
   const bool persp = textured && ((other_hi >> 19) & 1);
 
-  // Shade coefficients (s16.16, split int-hi / frac-lo across two 64-bit words):
-  //   start C  = w4(int) / w6(frac)      DcDx = w5 / w7  (per +x)
-  //   DcDe     = w8(int) / w10(frac)     DcDy = w9 / w11 (per +y)
-  // Component c: 0=R 1=G 2=B 3=A occupy bits [63:48],[47:32],[31:16],[15:0].
-  double R = 0, G = 0, B = 0, A = 0, dRdx = 0, dGdx = 0, dBdx = 0, dAdx = 0;
-  double dRde = 0, dGde = 0, dBde = 0, dAde = 0;
   // Flat (non-shade, non-texture) triangle colour. Without a full combiner/blender
   // model the constant source is a guess; use the register a demo most likely put it
   // in — prim, else blend, else env — before the neutral grey fallback. (Real games
   // route this through the combiner; that lands with combiner emulation later.)
   u32 flat = prim_color ? prim_color : blend_color ? blend_color : env_color ? env_color : 0xa0a0a0ff;
   bool combProg = (combine_hi | combine_lo) != 0;   // combiner programmed? else old heuristics
-  if(gouraud) {
-    auto comp = [](u64 hi, u64 lo, int c) -> double {
-      int sh = 48 - c * 16;
-      u32 i = (u32)(hi >> sh) & 0xffff, f = (u32)(lo >> sh) & 0xffff;
-      return (double)(s32)((i << 16) | f) / 65536.0;   // s16.16 → color in 0..255
-    };
-    R = comp(w[4], w[6], 0); G = comp(w[4], w[6], 1); B = comp(w[4], w[6], 2); A = comp(w[4], w[6], 3);
-    dRdx = comp(w[5], w[7], 0); dGdx = comp(w[5], w[7], 1); dBdx = comp(w[5], w[7], 2); dAdx = comp(w[5], w[7], 3);
-    dRde = comp(w[8], w[10], 0); dGde = comp(w[8], w[10], 1); dBde = comp(w[8], w[10], 2); dAde = comp(w[8], w[10], 3);
-  }
-#if !defined(__SSE4_1__)
-  auto clamp8 = [](double v) -> u32 { int i = (int)(v + 0.5); return (u32)(i < 0 ? 0 : i > 255 ? 255 : i); };
-#endif
   // Texel the combiner sees on a flat (no-tex-coord) primitive. The RDP texel bus for a
   // primitive with no texture block presents all-ones (0xFFFFFFFF, opaque white): the Krom
   // "Fill Triangle" demos route this through the combiner alpha (TEX0_A * LOD_FRAC = 1) so
@@ -937,12 +907,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   const u32 maxLevel = (u32)(w0 >> 51) & 7;
   TexFold folds[8];
   if(textured && (usesLod || usesTex1)) for(u32 i = 0; i < 8; i++) folds[i] = foldOf(i);
-  auto lowCut = [](double v, u32 m) -> double {   // quita bits bajos del valor crudo s15.16
-    return (double)(s32)((u32)(s32)std::llround(v * 65536.0) & ~m) / 65536.0;
-  };
-  const double ldir = leftMajor ? 1.0 : -1.0;
-  const double lxS = ldir * lowCut(dSdx, 0x1f), lxT = ldir * lowCut(dTdx, 0x1f), lxW = ldir * lowCut(dWdx, 0x1f);
-  const double lyS = lowCut(dSdy, 0x7fff), lyT = lowCut(dTdy, 0x7fff), lyW = lowCut(dWdy, 0x7fff);
+  const u32 ldir = leftMajor ? 1u : ~0u;   // +1 / -1 en aritmetica modular
   lodFracV = 0xff;
   if(usesLod && !textured) {   // sin coordenadas: S=T=W=0 en todo el primitivo -> magnify
     u32 t0 = texTile, t1 = (texTile + 1) & 7;
@@ -1006,49 +971,73 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       addSpan(xs, rasterPx - rowPx0);
       continue;
     }
-    // Borde mayor en la fila (ancla de los atributos por x; los atributos siguen en double).
-    double xA = xh + dxhdy * (y - yh);
-    // Values at the major edge for this scanline (start advances by Dc/De per +y).
-    double eR = R + dRde * (y - yh), eG = G + dGde * (y - yh);
-    double eB = B + dBde * (y - yh), eA = A + dAde * (y - yh);
-    double eS = S + dSde * (y - yh), eT = T + dTde * (y - yh);
-    const double eW = W + dWde * (y - yh);
-    double eZ = Zs + dZde * (y - yh);
+    // --- atributos de la fila, en ENTERO (parallel-rdp span_setup.comp) ----------------
+    // El HW ancla los atributos en el borde mayor de la fila: x entera base_x = XH >> 15
+    // (XH en 16.15) y su fraccion de 8 bits se DESCUENTA del arranque con DxDx >> 8, asi
+    // que el valor del pixel x es arranque + DxDx * (x - base_x). Con do_offset (flip ==
+    // signo de DxHDy) el HW latchea en la ULTIMA sub-scanline: XH avanza 3 pasos y el
+    // arranque se corrige con 3/4 de (DxDe - DxDy). Todo modular a 32 bits, como el HW.
+    const s32 dyRow = y - (iYh >> 2);
+    u32 xhRow = (u32)iXh + (u32)dyRow * ((u32)iDxh << 2);
+    const bool doOffset = leftMajor == ((s32)(u32)w[2] < 0);
+    if(doOffset) xhRow += 3u * (u32)iDxh;
+    const s32 baseX = (s32)xhRow >> 15;
+    const u32 xfrac = copyCy ? 0u : ((xhRow >> 7) & 0xff);
+    auto rowAttr = [&](s32 c0, s32 ddx, s32 dde, s32 ddy) -> s32 {
+      u32 diff = 0;
+      if(doOffset) {
+        const s32 deh = dde & ~0x1ff, dyh = ddy & ~0x1ff;
+        diff = (u32)deh - (u32)(deh >> 2) - (u32)dyh + (u32)(dyh >> 2);
+      }
+      const u32 v = (u32)c0 + (u32)dde * (u32)dyRow;
+      return (s32)(((v & ~0x1ffu) + diff - xfrac * (u32)((ddx >> 8) & ~1)) & ~0x3ffu);
+    };
+    s32 rC[4], rT[4];
+    for(int c = 0; c < 4; c++) {
+      rC[c] = rowAttr(cC[c], cDx[c], cDe[c], cDy[c]);
+      rT[c] = rowAttr(tC[c], tDx[c], tDe[c], tDy[c]);
+    }
+    // Centroide: el HW evalua shade y z en la PRIMERA muestra cubierta en orden de
+    // scanline (fila k, columna izquierda antes que derecha), con el desfase en cuartos
+    // de pixel xo (0..3) / yo (0..3) aplicado a DxDx y DxDy (interpolation.h).
+    auto centroid = [](u32 cv, int& xo, int& yo) {
+      int idx = 0;
+      for(int k = 0; k < 4; k++) {
+        if(cv & (1u << k))  { idx = 2 * k; break; }
+        if(cv & (16u << k)) { idx = 2 * k + 1; break; }
+      }
+      yo = idx >> 1; xo = ((idx & 1) << 1) + (yo & 1);
+    };
+    // Shade: 9 bits con signo de guarda (>>14), centroide en i16, sujeto a 0..255 con la
+    // regla de 9 bits (un poco por debajo de 0 -> 0, por encima de 0xff -> 0xff).
+    auto shadeAt = [&](s32 dxI, int xo, int yo) -> u32 {
+      u32 out = 0;
+      for(int c = 0; c < 4; c++) {
+        const s32 v = (s32)((u32)rC[c] + (u32)(cDx[c] & ~0x1f) * (u32)dxI);
+        int t = (s16)((((int)(s16)(v >> 14)) << 2) + xo * (s16)(cDx[c] >> 14) + yo * (s16)(cDy[c] >> 14));
+        t >>= 4;
+        t = ((s32)((u32)(t - 0x80) << 23) >> 23) + 0x80;
+        t = t < 0 ? 0 : t > 255 ? 255 : t;
+        out |= (u32)t << (24 - 8 * c);
+      }
+      return out;
+    };
+    // Z: 18 bits sin signo (15.3) con un bit de guarda, mismo centroide (clamp_z).
+    auto zAt = [&](s32 dxI, int xo, int yo) -> s32 {
+      const s32 z = (s32)((u32)rT[2] + (u32)tDx[2] * (u32)dxI);
+      s32 sz = (s32)(((u32)(z >> 10) << 2) + (u32)(xo * (tDx[2] >> 10)) + (u32)(yo * (tDy[2] >> 10)));
+      sz >>= 5;
+      sz = ((s32)((u32)(sz - (1 << 17)) << 13) >> 13) + (1 << 17);
+      return sz < 0 ? 0 : sz > 0x3ffff ? 0x3ffff : sz;
+    };
     // Per-pixel depth test against the 16-bit z image, honouring Z_SOURCE_SEL and
     // Z_UPDATE. Opaque z-mode: the pixel wins when its depth is nearer (strictly
     // less) than the stored depth. On a pass with Z_UPDATE the new depth is written
     // back. Returns whether the colour should be drawn.
-    auto zPass = [&](int x, double dx) -> bool {
+    auto zPass = [&](int x, s32 dxI, int xo, int yo) -> bool {
       if(!zActive) return true;
-      return depthTest(mem, x, y, zSrc ? (s32)prim_z : (s32)lroundExact(eZ + dZdx * dx));
+      return depthTest(mem, x, y, zSrc ? (s32)prim_z : zAt(dxI, xo, yo));
     };
-    // Sub-pixel coverage the way the RDP raster does it: instead of a single horizontal
-    // box fraction, the primitive edges are evaluated at several sub-scanlines and
-    // sub-columns inside each pixel and the covered subsamples are counted. That gives
-    // graded coverage on NEAR-HORIZONTAL edges too (a pure horizontal box misses those)
-    // and quantises to 3-bit steps like the hardware. 4 sub-scanlines × 2 sub-columns = 8.
-#if defined(__SSE4_1__)
-    // Los cuatro canales de sombra (y el par S/T) son la MISMA cuenta con operandos
-    // distintos: `e + d*dx`. Van por parejas en registros de dos `double`, con los mismos
-    // productos y sumas IEEE que el escalar, asi que los valores no cambian. El clamp8 es
-    // `(int)(v + 0.5)` acotado a 0..255: suma, truncado (`cvttpd`) y min/max enteros.
-    const __m128d vRG = _mm_set_pd(eG, eR), vBA = _mm_set_pd(eA, eB), vST = _mm_set_pd(eT, eS);
-    const __m128d cRG = _mm_set_pd(dGdx, dRdx), cBA = _mm_set_pd(dAdx, dBdx),
-                  cST = _mm_set_pd(dTdx, dSdx);
-    auto shadeVec = [&](__m128d vdx) -> u32 {
-      const __m128d h = _mm_set1_pd(0.5);
-      __m128i i0 = _mm_cvttpd_epi32(_mm_add_pd(_mm_add_pd(vRG, _mm_mul_pd(cRG, vdx)), h));
-      __m128i i1 = _mm_cvttpd_epi32(_mm_add_pd(_mm_add_pd(vBA, _mm_mul_pd(cBA, vdx)), h));
-      __m128i v = _mm_unpacklo_epi64(i0, i1);
-      v = _mm_min_epi32(_mm_max_epi32(v, _mm_setzero_si128()), _mm_set1_epi32(255));
-      // Empaquetado sin pasar por memoria: tras el clamp cada carril cabe en su byte bajo,
-      // asi que un `pshufb` los junta en el orden RGBA que espera el resto del pipeline
-      // (little-endian: el byte 0 del resultado es el de menor peso, o sea el alpha).
-      const __m128i packRgba = _mm_setr_epi8(12, 8, 4, 0, -1, -1, -1, -1,
-                                             -1, -1, -1, -1, -1, -1, -1, -1);
-      return (u32)_mm_cvtsi128_si32(_mm_shuffle_epi8(v, packRgba));
-    };
-#endif
     for(int x = xs; x < xe; x++) {
       const u32 cov = coverage(x);
       if(aaOn ? cov == 0 : (cov & 1) == 0) continue;
@@ -1062,49 +1051,36 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                if(a + 1 < m.size()) hiddenBits(mem)[a >> 1] = (px & 1) ? 3 : 0; }
         pxWrites++;
       } else if(textured) {
-        double dx = x - xA;
-#if defined(__SSE4_1__)
-        const __m128d vdx = _mm_set1_pd(dx);
-        const __m128d st = _mm_mul_pd(_mm_add_pd(vST, _mm_mul_pd(cST, vdx)),
-                                      _mm_set1_pd(1.0 / 32.0));   // 1/32 exacto: potencia de dos
-        double su = _mm_cvtsd_f64(st), tu = _mm_cvtsd_f64(_mm_unpackhi_pd(st, st));
-#else
-        double su = (eS + dSdx * dx) / 32.0, tu = (eT + dTdx * dx) / 32.0;  // 1/32 → texel
-#endif
-        if(persp) {
-          // El divisor ve solo la parte entera (>>16) de S, T y W, como el HW.
-          s32 ps, pt;
-          perspDivide((s32)std::floor(eS + dSdx * dx), (s32)std::floor(eT + dTdx * dx),
-                      (s32)std::floor(eW + dWdx * dx), ps, pt);
-          su = ps / 32.0; tu = pt / 32.0;
-        }
+        const s32 dxI = x - baseX;
+        int xo, yo; centroid(cov, xo, yo);
+        // S/T/W del pixel: DxDx sin sus 5 bits bajos, parte entera (>>16) = 1/32 de texel.
+        auto stwAt = [&](int c, u32 add) -> s32 {
+          return (s32)((u32)rT[c] + (u32)(tDx[c] & ~0x1f) * (u32)dxI + add) >> 16;
+        };
+        s32 ps = stwAt(0, 0), pt = stwAt(1, 0);
+        bool ovf = false;
+        if(persp) perspDivide(ps, pt, stwAt(3, 0), ps, pt, &ovf);
+        const double su = ps / 32.0, tu = pt / 32.0;
         u32 tile0 = texTile, tile1 = (texTile + 1) & 7;
         if(usesLod) {
-          const double cs = eS + dSdx * dx, ct = eT + dTdx * dx, cw = eW + dWdx * dx;
-          s32 s0, t0, s1, t1, s2, t2;
-          bool ovf = false;
-          auto fl = [](double v) { return (s32)std::floor(v); };
+          // Vecinos +x (en el sentido del recorrido) y +y (DxDy sin sus 15 bits bajos).
+          const u32 xs0 = ldir * (u32)(tDx[0] & ~0x1f), xt0 = ldir * (u32)(tDx[1] & ~0x1f),
+                    xw0 = ldir * (u32)(tDx[3] & ~0x1f);
+          const u32 ys0 = (u32)(tDy[0] & ~0x7fff), yt0 = (u32)(tDy[1] & ~0x7fff),
+                    yw0 = (u32)(tDy[3] & ~0x7fff);
+          s32 s1 = stwAt(0, xs0), t1 = stwAt(1, xt0), s2 = stwAt(0, ys0), t2 = stwAt(1, yt0);
           if(persp) {
-            perspDivide(fl(cs), fl(ct), fl(cw), s0, t0, &ovf);
-            perspDivide(fl(cs + lxS), fl(ct + lxT), fl(cw + lxW), s1, t1, &ovf);
-            perspDivide(fl(cs + lyS), fl(ct + lyT), fl(cw + lyW), s2, t2, &ovf);
-          } else {
-            s0 = fl(cs); t0 = fl(ct); s1 = fl(cs + lxS); t1 = fl(ct + lxT);
-            s2 = fl(cs + lyS); t2 = fl(ct + lyT);
+            perspDivide(s1, t1, stwAt(3, xw0), s1, t1, &ovf);
+            perspDivide(s2, t2, stwAt(3, yw0), s2, t2, &ovf);
           }
-          lodFracV = lodSelect(s0, t0, s1, t1, s2, t2, ovf, maxLevel, tile0, tile1);
+          lodFracV = lodSelect(ps, pt, s1, t1, s2, t2, ovf, maxLevel, tile0, tile1);
         }
         u32 tex = sampleTexFold(usesLod ? folds[tile0] : texF, su, tu);
         // 2-cycle: TEXEL1 es un segundo muestreo, de tile1, en el mismo S/T.
         u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], su, tu) : tex;
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.
-#if defined(__SSE4_1__)
-        u32 shd = gouraud ? shadeVec(vdx) : 0;
-#else
-        u32 shd = gouraud ? ((clamp8(eR + dRdx * dx) << 24) | (clamp8(eG + dGdx * dx) << 16)
-                            | (clamp8(eB + dBdx * dx) << 8) | clamp8(eA + dAdx * dx)) : 0;
-#endif
+        u32 shd = gouraud ? shadeAt(dxI, xo, yo) : 0;
         u32 c = (combProg && !copyCy) ? combineColor(tex, tex1, shd) : tex;
         pxShadeA = (u8)std::min<u32>((shd & 0xff) + (u32)alphaDither(x, y), 0xff);
         // Alpha compare (see texRect): COPY mode keys on the 1-bit texel alpha (drop
@@ -1112,19 +1088,15 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // blend_color threshold. Disabled → texel drawn regardless of its 5551 bit.
         bool apass = !alphaCmpEn ||
                      (copyCy ? (c & 0xff) != 0 : (alphaRef(x, y, c) >= (int)(blend_color & 0xff)));
-        if(apass && zPass(x, dx)) blendPixel(mem, x, y, c, hits);
+        if(apass && zPass(x, dxI, xo, yo)) blendPixel(mem, x, y, c, hits);
       } else if(gouraud) {
-        double dx = x - xA;
-#if defined(__SSE4_1__)
-        u32 shd = shadeVec(_mm_set1_pd(dx));
-#else
-        u32 shd = (clamp8(eR + dRdx * dx) << 24) | (clamp8(eG + dGdx * dx) << 16)
-                | (clamp8(eB + dBdx * dx) << 8)  |  clamp8(eA + dAdx * dx);
-#endif
+        const s32 dxI = x - baseX;
+        int xo, yo; centroid(cov, xo, yo);
+        u32 shd = shadeAt(dxI, xo, yo);
         u32 c = combProg ? combineColor(0, 0, shd) : shd;
         pxShadeA = (u8)std::min<u32>((shd & 0xff) + (u32)alphaDither(x, y), 0xff);
-        if(zPass(x, dx)) blendPixel(mem, x, y, c, hits);
-      } else { double dx = x - xA;
+        if(zPass(x, dxI, xo, yo)) blendPixel(mem, x, y, c, hits);
+      } else { const s32 dxI = x - baseX; int xo, yo; centroid(cov, xo, yo);
         // Flat (no shade/tex coords) but the combiner may still select TEXEL0/1. The RDP
         // has no per-vertex S/T here, so it samples the current tile at its origin (0,0) —
         // a solid-fill triangle that routes a loaded texel through the combiner (common in
@@ -1132,7 +1104,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // harmless. Sampled once (constant across the primitive).
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : flat;
         pxShadeA = (u8)alphaDither(x, y);   // shade 0 + dither de alfa
-        if(zPass(x, dx)) blendPixel(mem, x, y, c, hits); }
+        if(zPass(x, dxI, xo, yo)) blendPixel(mem, x, y, c, hits); }
     }
     addSpan(xs, rasterPx - rowPx0);
   }
