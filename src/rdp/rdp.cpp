@@ -7,6 +7,8 @@
 #include <cstring>
 #if defined(__SSE4_1__)
 #include <smmintrin.h>
+// Tabla del divisor del blender medida en hardware (parallel-rdp luts.hpp, vendorizado).
+#include "../../third_party/parallel-rdp/parallel-rdp/luts.hpp"
 #endif
 #include <cstdio>
 
@@ -484,12 +486,13 @@ auto SoftRdp::buildBlendPlan() -> void {
   // Leer el framebuffer cuesta una lectura de RDRAM por pixel, asi que solo se hace cuando
   // algo la consume: el mux (CLR_MEM / MEM_alpha), COLOR_ON_CVG, o la cobertura de memoria
   // -- que hace falta para el desbordamiento (AA_EN) y para todos los CVG_DEST menos ZAP.
-  p.needMem  = p.usesMem || p.colorOnCvg || p.aaEn || p.cvgDst != 2;
+  // Con Z_CMP tambien: la prueba de profundidad decide "misma superficie" con el desborde.
+  p.needMem  = p.usesMem || p.colorOnCvg || p.aaEn || p.cvgDst != 2 || (other_lo & 0x10);
   p.keyHi = other_hi; p.keyLo = other_lo;
   blendPlan = p;
 }
 
-auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
+auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap, int shA, int shB) -> u32 {
   // Blend mux from the render-mode word (other_lo). 1-cycle mode evaluates the FIRST
   // blender cycle's config (GBL_c1: m1a<<30, m1b<<26, m2a<<22, m2b<<18); 2-cycle mode's
   // final write uses the SECOND cycle (GBL_c2: <<28/24/20/16). P/M pick a colour
@@ -513,6 +516,7 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
     switch(bp.bsel0) { case 0: b1 = (~b0) & 0xff; break; case 1: b1 = memc & 0xff; break;
                        case 2: b1 = 0xff; break; default: b1 = 0; }
     b0 >>= 3; b1 >>= 3;
+    if(bp.bsel0 == 1) { b0 = (b0 >> shA) & 0x3c; b1 = (b1 >> shB) | 3; }
     u32 c0 = src & 0xff;
     for(int i = 0; i < 3; i++) {
       const int sh = 24 - i * 8;
@@ -548,24 +552,25 @@ auto SoftRdp::blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32 {
   // an additive pass with B = ONE carry the framebuffer through untouched while the
   // incoming colour still loses its 1/32.
   a0 >>= 3; a1 >>= 3;
+  // B = MEM_ALPHA: los coeficientes pasan por los desplazadores que fija la etapa de
+  // profundidad (diferencia de delta-z entre pixel y memoria, 0..4), y el de memoria nunca
+  // baja de 3 (parallel-rdp `blender`: `a0 = (a0 >> shift.x) & 0x3c; a1 = (a1 >> shift.y) | 3`).
+  if(Bsel == 1) { a0 = (a0 >> shA) & 0x3c; a1 = (a1 >> shB) | 3; }
   const bool force = bp.force;
   // FORCE_BLEND takes the plain >>5; otherwise the RDP runs the sum through its divider,
   // normalising by the actual coefficient weight (a0 + a1 + 1) rather than by a fixed 32.
   int sum = (a0 >> 2) + (a1 >> 2) + 1;
-  // El divisor sale de dos coeficientes de 5 bits: `a0>>2` y `a1>>2` estan en 0..7, o sea
-  // `sum` en 1..15, y el numerador va enmascarado a 11 bits (0..2047). En ese rango
-  // `n / d` es EXACTAMENTE `(n * ceil(2^16/d)) >> 16` (comprobado exhaustivamente para
-  // todos los d y todos los n del rango), asi que la division entera por pixel y por canal
-  // -- 20-26 ciclos cada una en el host -- se va a un multiplicador y un desplazamiento.
-  static const u32 kRecip[16] = { 0, 65536, 32768, 21846, 16384, 13108, 10923, 9363,
-                                  8192, 7282, 6554, 5958, 5462, 5042, 4682, 4370 };
-  const u32 recip = kRecip[sum & 15];
+  // El divisor NO es una division entera: con `sum` en 1..15 y el numerador enmascarado a
+  // 11 bits, el hardware da n/d solo en el caso normal (pesos que suman <= 32). Cuando los
+  // desplazadores de MEM_ALPHA desequilibran los pesos el resultado desborda o sale
+  // "raro", y la unica descripcion fiel es la tabla medida (parallel-rdp
+  // `uBlenderDividerLUT`, indice (sum << 11) | n). FORCE_BLEND toma >>5 en 8 bits, que
+  // tambien da la vuelta en vez de saturar.
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   u32 out = 0;
   for(int i = 0; i < 3; i++) {
     int blended = ch(P, i) * a0 + ch(M, i) * (a1 + 1);
-    int v = force ? (blended >> 5) : (int)((((u32)(blended >> 2) & 0x7ff) * recip) >> 16);
-    v = v < 0 ? 0 : v > 255 ? 255 : v;
+    int v = force ? ((blended >> 5) & 0xff) : (int)RDP::blender_lut[(sum << 11) | ((blended >> 2) & 0x7ff)];
     out |= (u32)v << (24 - i * 8);
   }
   return out | (src & 0xff);         // carry pipeline alpha (coverage) into the stored pixel
@@ -629,7 +634,23 @@ auto SoftRdp::alphaDither(int x, int y) const -> int {
   return am == 1 ? (~d & 7) : d;
 }
 
-auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
+auto SoftRdp::setPrimDz(bool fromPrim, s32 dzdx, s32 dzdy) -> void {
+  // Delta-z por pixel de la primitiva (parallel-rdp `build_derived_attributes`): con
+  // Z_SOURCE_SEL el de SET_PRIM_DEPTH tal cual; si no, |DzDx| + |DzDy| en enteros (el
+  // negativo en complemento a uno, 15 bits) llevado a la potencia de dos SIGUIENTE, con
+  // tope 0x8000. La forma comprimida es su log2.
+  int dz;
+  if(fromPrim) dz = (int)prim_dz;
+  else {
+    const s32 dx = dzdx >> 16, dy = dzdy >> 16;
+    dz = (dx < 0 ? (~dx & 0x7fff) : dx) + (dy < 0 ? (~dy & 0x7fff) : dy);
+    dz = dz >= 0x8000 ? 0x8000 : dz == 0 ? 1 : 1 << (32 - __builtin_clz((u32)dz));
+  }
+  pxDz = dz;
+  pxDzC = (u8)(dz > 0 ? 31 - __builtin_clz((u32)dz) : 0);
+}
+
+auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg, const s32* z) -> void {
   if(x < sx0 || x >= sx1 || y < sy0 || y >= sy1 || x < 0 || y < 0) return;
   // The blender runs in every 1-/2-cycle primitive — it is not gated on IM_RD. IM_RD
   // (bit 0x40) only enables READS of the framebuffer, i.e. it matters solely when the mux
@@ -638,8 +659,14 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
   // evaluates with memc=0 (its memory inputs are never consulted). COPY/FILL bypass it.
   if(blendPlan.keyHi != other_hi || blendPlan.keyLo != other_lo) buildBlendPlan();
   const BlendPlan& bp = blendPlan;
-  if(g_noBlend || bp.passthru) { storePixel(mem, x, y, src); return; }   // FILL/COPY: no blender, no dither
-  if(bp.usesMem && !bp.imRd) { storePixel(mem, x, y, ditherRgb(x, y, src)); return; }
+  if(g_noBlend || bp.passthru) {   // FILL/COPY: no blender, no dither
+    if(z && !depthTest(mem, x, y, *z)) return;
+    storePixel(mem, x, y, src); return;
+  }
+  if(bp.usesMem && !bp.imRd) {
+    if(z && !depthTest(mem, x, y, *z)) return;
+    storePixel(mem, x, y, ditherRgb(x, y, src)); return;
+  }
 
   // --- color y cobertura de memoria -------------------------------------------------
   // IM_RD deshabilitado no significa "cobertura cero": el hardware entrega 7 (pixel lleno),
@@ -666,13 +693,73 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
   // hardware ya decidio la vida del pixel con una sola toma en el recorte del tramo.
   if(bp.aaEn && cvg == 0) return;
 
-  // --- blender ----------------------------------------------------------------------
-  // blend_en = FORCE_BLEND || (la cobertura no desborda && AA_EN). Desbordar (cobertura
-  // entrante + la que ya hay >= 8) significa que el pixel es de OTRA superficie, no del
-  // mismo borde, y entonces no se mezcla: se sobrescribe.
+  // --- etapa de profundidad (parallel-rdp `depth_test`) -----------------------------
+  // Desbordar (cobertura entrante + la que ya hay >= 8) significa que el pixel es de OTRA
+  // superficie, no del mismo borde. Con Z_CMP el z guardado lleva su delta-z (2 bits en
+  // la palabra + 2 en la RAM oculta), y "misma superficie" es estar dentro de la suma de
+  // las dos pendientes: asi el borde compartido de dos triangulos vecinos pasa la prueba y
+  // se mezcla en vez de perderse por un "menor estricto".
+  auto& m = mem.rdram;
+  const bool zCmp = z && (other_lo & 0x10), zUpd = z && (other_lo & 0x20);
+  u32 zoff = 0;
+  s32 zz = 0;
+  if(z) {
+    zoff = zi_addr + (u32(y) * ci_width + u32(x)) * 2;
+    if(zoff + 1 >= m.size()) return;
+    zz = std::clamp(*z, 0, 0x3ffff);
+  }
   const bool overflow = (cvg + memCvg) >= 8;
-  const bool blendEn  = bp.force || (!overflow && bp.aaEn);
-  u32 out = blendColor(src, memc, blendEn, overflow);
+  bool blendEn;
+  int shA = 0, shB;
+  if(zCmp) {
+    const u16 zw = (u16)(((u16)m[zoff] << 8) | m[zoff + 1]);
+    const s32 memZ = (s32)zDecode(zw);
+    const int memDzC = (int)(((zw & 3) << 2) | (hiddenBits(mem)[zoff >> 1] & 3));
+    int memDz = 1 << memDzC;
+    const int prec = (zw >> 13) & 7;   // exponente del z comprimido
+    shA = std::clamp(pxDzC - memDzC, 0, 4);
+    shB = std::clamp(memDzC - pxDzC, 0, 4);
+    // Con poca precision guardada (exponente < 3) el delta-z de memoria se ensancha; el
+    // maximo (0x8000) marca "coplanar" y pasa siempre.
+    bool coplanar = false;
+    if(prec < 3) {
+      if(memDz != 0x8000) memDz = std::max(memDz << 1, 16 >> prec);
+      else { coplanar = true; memDz = 0xffff; }
+    }
+    int cdz = pxDz | memDz;
+    cdz = cdz ? 1 << (31 - __builtin_clz((u32)cdz)) : 0;
+    const int cdzI = cdz;
+    cdz <<= 3;
+    const bool farther = coplanar || zz + cdz >= memZ;
+    blendEn = bp.force || (!overflow && bp.aaEn && farther);
+    const bool maxZ = memZ == 0x3ffff, front = zz < memZ;
+    const bool nearer = coplanar || zz - cdz <= memZ;
+    bool pass;
+    switch((other_lo >> 10) & 3) {
+      case 0:   // OPAQUE: misma superficie si esta cerca; si desborda, delante estricto
+        pass = maxZ || (overflow ? front : nearer); break;
+      case 1:   // INTERPENETRATING: en el cruce de dos superficies recorta la cobertura
+        if(!front || !farther || !overflow) pass = maxZ || (overflow ? front : nearer);
+        else {
+          const int c = (cdzI & 0xffff) ? 31 - __builtin_clz((u32)(cdzI & 0xffff)) : 0;
+          const int coeff = ((memZ >> c) - (zz >> c)) & 0xf;
+          cvg = std::min((coeff * cvg) >> 3, 8);
+          pass = true;
+        }
+        break;
+      case 2:   // TRANSPARENT: delante estricto
+        pass = front || maxZ; break;
+      default:  // DECAL: dentro de la tolerancia por los dos lados
+        pass = farther && nearer && !maxZ; break;
+    }
+    if(!pass || (bp.aaEn && cvg == 0)) return;
+  } else {
+    shB = std::min(0xf - (int)pxDzC, 4);
+    blendEn = bp.force || (!overflow && bp.aaEn);
+  }
+
+  // --- blender ----------------------------------------------------------------------
+  u32 out = blendColor(src, memc, blendEn, overflow, shA, shB);
   out = ditherRgb(x, y, out);
 
   // --- cobertura de salida: CVG_DEST -------------------------------------------------
@@ -686,6 +773,13 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg) -> void {
     default: newCvg = blendEn ? std::min(7, memCvg + cvg) : ((cvg - 1) & 7); break;  // CLAMP
   }
   storePixel(mem, x, y, (out & ~0xffu) | (u32)(newCvg << 5));
+  // Z_UPD: el z comprimido en 15:2, los 2 bits altos del delta-z en 1:0 y los 2 bajos en
+  // la RAM oculta de la misma palabra.
+  if(zUpd) {
+    wr16(m, zoff, (u16)(zEncode((u32)zz) | ((pxDzC >> 2) & 3)));
+    hiddenBits(mem)[zoff >> 1] = pxDzC & 3;
+    pxZWrites++;
+  }
 }
 
 auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
@@ -697,6 +791,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   // primitive — each pixel runs the colour combiner (no texel/shade; constants like PRIM/
   // ENV/BLEND come through the mux) and then the blender against the framebuffer.
   bool pipeMode = cycleType() < 2;
+  setPrimDz(other_lo & 4, 0, 0);   // un rect no tiene pendiente de z
   u64 npx = u64(std::max(0, x1 - x0)) * u64(std::max(0, y1 - y0));
   u64 w0 = pxWrites, z0 = pxZWrites;
   // Solo-coste (ver SoftRdp::costOnly): el area ya esta recortada al scissor, que es
@@ -741,9 +836,8 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
         // Depth: a fill rect carries no z slope, so its only defined depth source is
         // SET_PRIM_DEPTH (Z_SOURCE_SEL, other_lo bit 2). Without that bit the span z
         // the rect never programs is undefined, so leave the z image alone.
-        if((other_lo & 4) && zi_addr && (other_lo & 0x30) && !depthTest(mem, x, y, (s32)prim_z))
-          continue;
-        blendPixel(mem, x, y, c);
+        const s32 pz = (s32)prim_z;
+        blendPixel(mem, x, y, c, 8, ((other_lo & 4) && zi_addr && (other_lo & 0x30)) ? &pz : nullptr);
       } else if(ci_size == 3) {
         wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, fill_color);
         pxWrites++;
@@ -866,6 +960,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       tDe[2] = (s32)(u32)(w[zb + 1] >> 32); tDy[2] = (s32)(u32)w[zb + 1];
     }
   }
+  setPrimDz(zSrc, tDx[2], tDy[2]);
   // TEX_PERSP (other_hi bit 19): el RSP manda S/W, T/W y 1/W, y el RDP divide por pixel.
   const bool persp = textured && ((other_hi >> 19) & 1);
 
@@ -1030,13 +1125,13 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       sz = ((s32)((u32)(sz - (1 << 17)) << 13) >> 13) + (1 << 17);
       return sz < 0 ? 0 : sz > 0x3ffff ? 0x3ffff : sz;
     };
-    // Per-pixel depth test against the 16-bit z image, honouring Z_SOURCE_SEL and
-    // Z_UPDATE. Opaque z-mode: the pixel wins when its depth is nearer (strictly
-    // less) than the stored depth. On a pass with Z_UPDATE the new depth is written
-    // back. Returns whether the colour should be drawn.
-    auto zPass = [&](int x, s32 dxI, int xo, int yo) -> bool {
-      if(!zActive) return true;
-      return depthTest(mem, x, y, zSrc ? (s32)prim_z : zAt(dxI, xo, yo));
+    // Profundidad del pixel para la etapa de z de blendPixel (Z_SOURCE_SEL = la de
+    // SET_PRIM_DEPTH); nullptr si la primitiva ni compara ni actualiza.
+    s32 zCur = 0;
+    auto zIn = [&](s32 dxI, int xo, int yo) -> const s32* {
+      if(!zActive) return nullptr;
+      zCur = zSrc ? (s32)prim_z : zAt(dxI, xo, yo);
+      return &zCur;
     };
     for(int x = xs; x < xe; x++) {
       const u32 cov = coverage(x);
@@ -1088,14 +1183,14 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // blend_color threshold. Disabled → texel drawn regardless of its 5551 bit.
         bool apass = !alphaCmpEn ||
                      (copyCy ? (c & 0xff) != 0 : (alphaRef(x, y, c) >= (int)(blend_color & 0xff)));
-        if(apass && zPass(x, dxI, xo, yo)) blendPixel(mem, x, y, c, hits);
+        if(apass) blendPixel(mem, x, y, c, hits, zIn(dxI, xo, yo));
       } else if(gouraud) {
         const s32 dxI = x - baseX;
         int xo, yo; centroid(cov, xo, yo);
         u32 shd = shadeAt(dxI, xo, yo);
         u32 c = combProg ? combineColor(0, 0, shd) : shd;
         pxShadeA = (u8)std::min<u32>((shd & 0xff) + (u32)alphaDither(x, y), 0xff);
-        if(zPass(x, dxI, xo, yo)) blendPixel(mem, x, y, c, hits);
+        blendPixel(mem, x, y, c, hits, zIn(dxI, xo, yo));
       } else { const s32 dxI = x - baseX; int xo, yo; centroid(cov, xo, yo);
         // Flat (no shade/tex coords) but the combiner may still select TEXEL0/1. The RDP
         // has no per-vertex S/T here, so it samples the current tile at its origin (0,0) —
@@ -1104,7 +1199,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         // harmless. Sampled once (constant across the primitive).
         u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : flat;
         pxShadeA = (u8)alphaDither(x, y);   // shade 0 + dither de alfa
-        if(zPass(x, dxI, xo, yo)) blendPixel(mem, x, y, c, hits); }
+        blendPixel(mem, x, y, c, hits, zIn(dxI, xo, yo)); }
     }
     addSpan(xs, rasterPx - rowPx0);
   }
@@ -1728,6 +1823,7 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
 
 auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   if(g_noRaster) return;
+  setPrimDz(other_lo & 4, 0, 0);   // un rect no tiene pendiente de z
   // TEXTURE_RECTANGLE: sample `tile` across a screen rect. word0 = XL,YL(10.2),
   // tile, XH,YH(10.2) [XH/YH top-left, XL/YL bottom-right]. word1 = S,T (s10.5,
   // 1/32-texel) and DsDx,DtDy (s5.10, 1/1024 texel-per-pixel). S starts at XH and
@@ -1996,7 +2092,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     // z=0x7FFF the z-buffer's floating format has 1-unit steps in the 18-bit domain but
     // 64-unit steps in the 15-bit one, so successive prim depths 1 apart all quantize to
     // the same stored value and every depth compare after the first fails.
-    case 0x2e: prim_z = ((u32)(cmd >> 16) & 0x7fff) << 3; break;
+    case 0x2e: prim_z = ((u32)(cmd >> 16) & 0x7fff) << 3; prim_dz = (u32)cmd & 0xffff; break;
     case 0x2f:                                          // SET_OTHER_MODES
       other_hi = (u32)(cmd >> 32) & 0x00ff'ffff;
       other_lo = (u32)cmd;

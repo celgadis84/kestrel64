@@ -246,7 +246,7 @@ RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/C
 RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle32BPPTLUTRGBA8B320X240	96.17	98.07	27.23	
 RDP/8BPP/Rectangle/TextureRectangle/TLUT/InternalPalette/InternalPalette	0.00	66.80	63.43	SIZE 160x240 vs ref 320x240
 RDP/AlphaCompare/AlphaCompare	96.86	99.96	2.89	
-RDP/AlphaCoverage/AlphaCoverage	74.85	75.64	60.29	
+RDP/AlphaCoverage/AlphaCoverage	74.82	74.84	64.33	
 RDP/CombinerLongTailConstants/CombinerLongTailConstants	74.31	75.53	78.47	
 RDP/CombinerOverflow/CombinerOverflow	45.54	48.92	77.33	
 RDP/LoadTLUT/LoadTLUT_b16_b16	95.75	95.88	27.44	

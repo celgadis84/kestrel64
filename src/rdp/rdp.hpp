@@ -151,6 +151,7 @@ private:
   int lodFracV = 0xff;
   auto lodFrac() const -> int { return lodFracV; }
   u32 prim_z = 0;      // SET_PRIM_DEPTH primitive Z (used when Z_SOURCE_SEL is set)
+  u32 prim_dz = 0;     // SET_PRIM_DEPTH delta Z (bits 15:0), the dz paired with prim_z
 
   int k0 = 0, k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;  // SET_CONVERT (YUV→RGB coeffs, 9-bit signed)
 
@@ -224,12 +225,14 @@ private:
   // is set; opaque modes with no framebuffer read write straight through. out = P*a + M*b
   // with P/M/a/b picked by the blend mux (m1a,m1b,m2a,m2b) of the final blender cycle.
   auto readFb(Memory& mem, int x, int y) -> u32;             // framebuffer colour → RGBA32
-  auto blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap) -> u32;   // pure blend-mux math
+  auto blendColor(u32 src, u32 memc, bool blendEn, bool cvgWrap, int shA = 0, int shB = 0) -> u32;   // pure blend-mux math
   // `cvg` = subpixeles cubiertos por el primitivo, 0..8 (8 = pixel entero). Es el valor que
   // recorre TODA la etapa de escritura del RDP: modula el alfa (CVG_TIMES_ALPHA /
   // ALPHA_CVG_SELECT), decide si el blender se enciende (AA_EN sin desbordar coverage),
   // mata el pixel si se queda en cero, y acaba guardado en el framebuffer segun CVG_DEST.
-  auto blendPixel(Memory& mem, int x, int y, u32 src, int cvg = 8) -> void;
+  // `z` = profundidad del pixel cuando la primitiva hace Z_CMP/Z_UPD (nullptr si no): la
+  // etapa de profundidad va DENTRO, despues de que el combinador fije la cobertura.
+  auto blendPixel(Memory& mem, int x, int y, u32 src, int cvg = 8, const s32* z = nullptr) -> void;
   auto ditherRgb(int x, int y, u32 c) const -> u32;   // RGB_DITHER_SEL, framebuffer write path
   auto alphaDither(int x, int y) const -> int;        // ALPHA_DITHER_SEL, 0..7
   // Alfa de referencia del alpha compare: el alfa combinado expandido (0xff -> 0x100) mas
@@ -344,6 +347,12 @@ private:
   // Alfa de shade del pixel en curso (mux A del blender = SHADE_ALPHA): alfa de shade
   // interpolado y acotado; 0 en primitivas sin shade. Lo pone drawTriangle por pixel.
   u8 pxShadeA = 0;
+  // Delta-z de la primitiva en curso (potencia de dos) y su forma comprimida de 4 bits
+  // (log2), que es la que se guarda junto al z y la que mueve los desplazamientos del
+  // blender. Sin pendiente de z valen 1 y 0.
+  int pxDz = 1;
+  u8 pxDzC = 0;
+  auto setPrimDz(bool fromPrim, s32 dzdx, s32 dzdy) -> void;
   auto buildBlendPlan() -> void;
   auto buildCombPlan() -> void;
   auto combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32;   // referencia (y camino NOISE)

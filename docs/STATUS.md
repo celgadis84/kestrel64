@@ -9845,6 +9845,29 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-03 (d) -- SoftRDP: etapa de profundidad con delta-z + desplazadores y divisor del blender
+
+- Oraculo parallel-rdp (`depth_test.h`, `blender.h`, `rdp_renderer.cpp build_derived_attributes`,
+  `luts.hpp`). Los 4566 px de SM64 que quedaban distintos de prdp eran todos bordes de
+  triangulo del logo con AA + IM_RD: el depth test era un "menor estricto" sin delta-z.
+- Delta-z por primitiva: |DzDx|+|DzDy| (entero, negativo en complemento a uno) a la potencia
+  de dos siguiente, tope 0x8000; con Z_SOURCE_SEL el de SET_PRIM_DEPTH (bits 15:0, antes
+  ignorados). Se guarda comprimido (log2, 4 bits) junto al z: 2 bits en 1:0 de la palabra y
+  2 en la RAM oculta.
+- Prueba de z completa: tolerancia = suma de pendientes (memoria ensanchada si su exponente
+  < 3, 0x8000 = coplanar), modos OPAQUE (si desborda, delante estricto; si no, "misma
+  superficie" con tolerancia), INTERPENETRATING (recorta la cobertura en el cruce),
+  TRANSPARENT y DECAL. `blend_en` exige ademas `farther`. La etapa va ahora DENTRO de
+  `blendPixel`, despues de CVG_TIMES_ALPHA (como el HW), y el z ya no se escribe si el
+  pixel muere por cobertura 0.
+- Blender con B = MEM_ALPHA: desplazadores de la diferencia de delta-z (sin Z_CMP el de
+  memoria = min(15-dzc, 4)) y `a0 & 0x3c`, `a1 | 3`, en los dos ciclos. Divisor final = tabla
+  MEDIDA de 32 K (fuera del caso normal no es n/d), FORCE_BLEND da la vuelta en 8 bits.
+- Estado guardado v17 (`prim_dz`), acepta v14..v16.
+- **SM64 SoftRDP == parallel-rdp bit a bit**: md5 `b5521b24` en los dos backends (0 px
+  distintos, antes 4566). krom 371/371 88,75/92,11 regress=0, thar0 rmse 0,1332,
+  systemtest 0/3721.
+
 ## 2026-10-03 (c) -- SoftRDP: interpolacion de atributos en ENTERO anclada como el HW
 
 - Oraculo parallel-rdp (`span_setup.comp`, `interpolation.h`, `clamping.h`). Shade, Z y

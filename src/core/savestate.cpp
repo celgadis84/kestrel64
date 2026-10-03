@@ -26,7 +26,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 16;  // 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 17;  // 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -151,6 +151,7 @@ struct StateVisitor {
     io.blob(d.tmem, sizeof(d.tmem));
     io.arr(d.tlut, 256);
     if(io.version >= 16) io.pod(d.prim_min_level);   // v16: suelo de LOD
+    if(io.version >= 17) io.pod(d.prim_dz);          // v17: delta-z de la primitiva
   }
 
   // Punteros de reanudacion del consumidor del FIFO. Con la cola drenada valen "nada
@@ -425,7 +426,7 @@ auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> b
   std::memcpy(&h, data, sizeof(h));
   Header want = makeHeader(sys);
   if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
+  if(h.version != kVersion && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
   if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
   if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
 
