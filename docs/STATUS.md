@@ -9877,8 +9877,10 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   rango tiene DMA pendiente (`Memory::dmaPgAny`, mismo `dmaPg[]` que `dmaSettle`) se vacia
   el diario con `dpLogWait`. Caso normal (nada pendiente) = una lectura atomica.
 - Repro antes: bad=1 en 2/4 corridas; despues 0/8. junkrunner64 threaded x4 `32a0ccb4` igual
-  que antes. OJO: lockstep da `39ca6290` con el binario de ANTES tambien (dist 09:35): la
-  diferencia lockstep/threaded a 400 M insn es previa, no de este cambio. Pendiente.
+  que antes. CORREGIDO 2026-10-03: esa "diferencia" era de la MEDIDA, no del emulador. Se
+  corrio sin `KESTREL_SPLEAD=0 KESTREL_DPLOGLEAD=0`, y de fabrica (`auto`) el adelanto separa
+  threaded de lockstep a proposito. Con el entorno del oraculo (el de `validate.py`) lockstep
+  y threaded x3 dan `39ca62901d1a3e2c` los cuatro. Nada pendiente.
 
 ## 2026-10-02 (b) -- Coste RDP: camino FILL/COPY y coste por linea
 
