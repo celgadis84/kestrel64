@@ -98,6 +98,11 @@ struct SoftRdp {
   // span esta partido: el command processor no ejecuta comandos a medias, se para delante
   // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.
   u32 stopAt = 0;
+  // GPU-RDP (fase 0, ver src/gpurdp/gpurdp.hpp): hay rellenos encolados en la GPU que aun no
+  // estan en la RDRAM. gpuFlush los baja; run() lo llama antes de cualquier comando que toque
+  // la RDRAM por su cuenta y al terminar el tramo.
+  bool gpuQueued = false;
+  auto gpuFlush(Memory& mem) -> void;
   auto colorImage() const -> u32 { return ci_addr; }
   // Zona de RDRAM que cubren las primitivas cobradas desde el ultimo reinicio: color image y
   // z image hasta la esquina del scissor, en hasta kWrSlots intervalos [lo, hi) fisicos (lo >

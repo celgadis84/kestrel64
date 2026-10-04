@@ -1,5 +1,6 @@
 #include "../core/wrtag.hpp"
 #include "rdp.hpp"
+#include "../gpurdp/gpurdp.hpp"
 #include <cstdlib>
 #include "../core/memory.hpp"
 #include <algorithm>
@@ -840,6 +841,23 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
     for(int y = y0; y < y1 && x1 > x0; y++) addSpan(x0, u64(x1 - x0));
     accountPixels(mem, npx, pass, (pipeMode && (other_lo & 0x20) && zi_addr) ? pass : 0);
     return;
+  }
+  // GPU-RDP (KESTREL_GPURDP=1): en FILL/COPY el relleno es escritura pura y se encola en la
+  // GPU. Solo cuando el resultado es el mismo que el bucle de abajo sin casos raros: todo
+  // dentro de la RDRAM (los wrN de abajo descartan pixeles sueltos), x1 dentro del ancho (si
+  // no, el pixel x >= ancho cae en la fila siguiente), base alineada al pixel, y sin las
+  // herramientas de depuracion que miran cada escritura (rdpGuard, wrtag).
+  if(!pipeMode && x1 > x0 && y1 > y0 && gpurdp::active() && !g_rgHi && !wrtag::tag) {
+    const u32 bpp = ci_size == 3 ? 4 : ci_size == 1 ? 1 : 2;
+    const u64 last = u64(ci_addr) + (u64(y1 - 1) * ci_width + u64(x1)) * bpp;   // un byte detras
+    if(u32(x1) <= ci_width && ci_addr % bpp == 0 && last <= m.size()) {
+      gpurdp::queueFill({ci_addr, ci_width, bpp, u32(x0), u32(y0), u32(x1), u32(y1), fill_color});
+      gpuQueued = true;
+      pxWrites += npx;
+      for(int y = y0; y < y1; y++) addSpan(x0, u64(x1 - x0));
+      accountPixels(mem, npx, pxWrites - w0, pxZWrites - z0);
+      return;
+    }
   }
   for(int y = y0; y < y1; y++) {
     for(int x = x0; x < x1; x++) {
@@ -2265,6 +2283,26 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   }
 }
 
+auto SoftRdp::gpuFlush(Memory& mem) -> void {
+  gpuQueued = false;
+  gpurdp::flush(mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem));
+}
+
+// Comandos que no leen ni escriben RDRAM: con rellenos en la GPU pendientes se pueden ejecutar
+// sin bajarlos (cada relleno encolado lleva ya su propio estado). Un FILL_RECTANGLE en FILL/
+// COPY tambien, porque se encola detras. Todo lo demas (triangulos, texrect, cargas de TMEM y
+// TLUT, rellenos de 1/2 ciclos que mezclan con el framebuffer) necesita la RDRAM al dia.
+static auto gpuNoFlush(u32 op, u32 cycle) -> bool {
+  switch(op) {
+  case 0x00: case 0x26: case 0x27: case 0x28: case 0x29: case 0x2a: case 0x2b: case 0x2c:
+  case 0x2d: case 0x2e: case 0x2f: case 0x32: case 0x35: case 0x37: case 0x38: case 0x39:
+  case 0x3a: case 0x3b: case 0x3c: case 0x3d: case 0x3e: case 0x3f:
+    return true;
+  case 0x36: return cycle >= 2;
+  default: return false;
+  }
+}
+
 auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   const auto& m = mem.rdram;
   const auto& dm = mem.dmem;
@@ -2297,6 +2335,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     if(wrtag::tag) wrtag::moveWinLo(0, cur);
     u64 cmd = fetch(cur);
     u32 op = (cmd >> 56) & 0x3f;
+    if(gpuQueued && !gpuNoFlush(op, cycleType())) gpuFlush(mem);
     const bool st = charge && mem.rdpStats.on.load(std::memory_order_relaxed);
     if(st) statsCmd(mem, op, cmd);
     if(ops) {
@@ -2493,6 +2532,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     cur += 8; executed++;
   }
   stopAt = cur;
+  if(gpuQueued) gpuFlush(mem);   // fuera de run() la RDRAM siempre esta al dia
   if(ops) {
     // KESTREL_RDPOPS is the print interval in DP runs (default 512). Demos that
     // submit a single command buffer and then spin need =1, or the histogram

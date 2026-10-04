@@ -7,6 +7,7 @@
 #include <chrono>
 #include "../audio/audio.hpp"
 #include "../vrdp/vrdp.hpp"
+#include "../gpurdp/gpurdp.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -2579,7 +2580,10 @@ auto Memory::aiTick(u64 retiredNow) -> void {
 // std::call_once y no un bool: en modo threaded los dos sitios pueden coincidir.
 auto Memory::vrdpBringUp() -> void {
   std::call_once(vrdpOnce, [this]{
-    vrdp::init(rdram.data(), (u32)rdram.size());
+    // KESTREL_GPURDP=1: el GPU-RDP propio en vez de parallel-RDP. Nunca los dos: comparten la
+    // tabla global de volk y el presentador solo puede colgarse de un contexto.
+    if(gpurdp::wanted()) gpurdp::init((u32)rdram.size());
+    else vrdp::init(rdram.data(), (u32)rdram.size());
     vrdpTried.store(true, std::memory_order_release);
   });
 }
@@ -2590,10 +2594,18 @@ auto Memory::vrdpBringUp() -> void {
 // sin sus lookups por hilo y el RDP acaba sin completar trabajos (el juego se queda esperando
 // MESG_DP_COMPLETE para siempre). De ahi que esto solo espere.
 auto Memory::vrdpFailed() const -> bool {
-  return vrdpTried.load(std::memory_order_acquire) && !vrdp::active();
+  return vrdpTried.load(std::memory_order_acquire) && !vrdp::active() && !gpurdp::active();
 }
 
 auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
+  if(gpurdp::built && gpurdp::wanted()) {             // GPU-RDP propio: esperar a ese
+    for(u32 i = 0; i < timeoutMs; i++) {
+      if(gpurdp::active()) return true;
+      if(vrdpFailed()) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+  }
   if(!vrdp::built) return false;                      // este .exe no lo lleva: nada que esperar
   const char* e = std::getenv("KESTREL_PRDP");
   if(e && e[0] == '0') return false;                  // SoftRDP forzado: nada que esperar

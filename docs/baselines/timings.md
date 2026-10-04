@@ -547,3 +547,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-10-04 | release --quick + gate_quick (filtros de imagen postfx) | 80 s + 72 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2. Filtro de fabrica nearest = blit de siempre. |
 | 2026-10-04 | release --quick + gate_quick krom (texturas HD / texpack) | 84 s + 418 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 regress=0 (350 s). Opciones apagadas. |
 | 2026-10-05 | release --quick + gate_quick x2 (un exe, GDI sin Vulkan, ROMs recursivas) | ~90 s + 68 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2. Opciones nuevas apagadas, md5 sin cambio. |
+| 2026-10-05 | gate_gpurdp (nuevo) + gate_quick | 6 m 47 s + ~85 s | -- | -- | GPU-RDP fase 0: systemtest 0/3721, sm64 `b5521b24` = SoftRDP, krom 372 puntuaciones identicas. |

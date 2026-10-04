@@ -208,6 +208,7 @@ SIEMPRE el `.map` de cada ROM (`rom=map`).
 
 `core/` (memory, system, rom, bus, DMA, MMIO, scheduler) · `cpu/` (R4300i interp + `jit.*`
 dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP) · `vrdp/` (parallel-rdp glue, `KESTREL_PRDP`)
+· `gpurdp/` (GPU-RDP propio en Vulkan compute, `KESTREL_GPURDP=1`, fase 0 = fill; `docs/GPU-RDP.md`, puerta `scripts/gate_gpurdp.sh`)
 · `audio/` · `video/` (`present.cpp`, VI, GLFW/Vulkan WSI) · `telemetry/` · `net/` · `main.cpp`.
 
 ## Env-var toggles

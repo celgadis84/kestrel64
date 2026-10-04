@@ -1,0 +1,68 @@
+#version 450
+// GPU-RDP fase 0: FILL_RECTANGLE en ciclo FILL/COPY. Semantica = SoftRdp::fillRect (rama
+// no-pipe), bit a bit. Un hilo por PALABRA de 32 bits del espejo de RDRAM: ningun otro hilo
+// del mismo despacho toca esa palabra, asi que el leer-modificar-escribir de bytes sueltos no
+// tiene carreras aunque dos filas compartan palabra.
+//
+// El espejo guarda los bytes de la RDRAM en el mismo orden que el anfitrion (byte de la
+// direccion 4w+i en los bits 8*i de ram[w]); el valor de cada byte sale del color de relleno
+// en big-endian, como lo escribe la consola.
+//
+// pass 0: bytes de color. pass 1: bits ocultos (un byte por media palabra de 16 bits, solo
+// 16bpp): el bit 0 del pixel decide cobertura llena (3) o vacia (0).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Ram { uint ram[]; };
+layout(std430, binding = 1) buffer Hid { uint hid[]; };
+layout(push_constant) uniform P {
+  uint addr;    // ci_addr, alineado al tamano de pixel
+  uint width;   // ci_width en pixeles
+  uint bpp;     // 1, 2 o 4 bytes por pixel
+  uint x0, y0, x1, y1;   // ya recortado al scissor; x1 <= width
+  uint color;   // fill_color
+  uint base;    // primera palabra (de ram o de hid segun el pase)
+  uint count;   // numero de palabras
+  uint pass;
+} p;
+
+// Pixel de byte/entrada `off` (relativo a addr) dentro del rectangulo? Devuelve x o -1.
+int inRect(uint off) {
+  uint pix = off / p.bpp;
+  uint y = pix / p.width, x = pix - y * p.width;
+  if(y < p.y0 || y >= p.y1 || x < p.x0 || x >= p.x1) return -1;
+  return int(x);
+}
+
+uint px16(uint x) { return (x & 1u) != 0u ? (p.color & 0xffffu) : (p.color >> 16); }
+
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  if(i >= p.count) return;
+  uint w = p.base + i;
+  if(p.pass == 0u) {
+    uint v = ram[w], o = v;
+    for(uint k = 0u; k < 4u; k++) {
+      uint b = w * 4u + k;
+      if(b < p.addr) continue;
+      uint off = b - p.addr;
+      int xi = inRect(off);
+      if(xi < 0) continue;
+      uint x = uint(xi), sub = off % p.bpp, byt;
+      if(p.bpp == 4u)      byt = (p.color >> (24u - sub * 8u)) & 0xffu;
+      else if(p.bpp == 1u) byt = (p.color >> (24u - (x & 3u) * 8u)) & 0xffu;
+      else                 byt = sub == 0u ? (px16(x) >> 8) : (px16(x) & 0xffu);
+      v = (v & ~(0xffu << (k * 8u))) | (byt << (k * 8u));
+    }
+    if(v != o) ram[w] = v;
+  } else {
+    uint v = hid[w], o = v;
+    for(uint k = 0u; k < 4u; k++) {
+      uint a = (w * 4u + k) * 2u;   // media palabra de RDRAM de esta entrada
+      if(a < p.addr) continue;
+      int xi = inRect(a - p.addr);
+      if(xi < 0) continue;
+      uint byt = (px16(uint(xi)) & 1u) != 0u ? 3u : 0u;
+      v = (v & ~(0xffu << (k * 8u))) | (byt << (k * 8u));
+    }
+    if(v != o) hid[w] = v;
+  }
+}

@@ -69,6 +69,10 @@ if(KESTREL_PRDP)
   target_sources(kestrel64 PRIVATE src/vrdp/vrdp.cpp)
   target_link_libraries(kestrel64 PRIVATE parallel_rdp)
   target_compile_definitions(kestrel64 PRIVATE KESTREL_PRDP=1)
+  # GPU-RDP propio (docs/GPU-RDP.md), apagado en marcha salvo KESTREL_GPURDP=1. De momento va
+  # con los builds de parallel-RDP porque de ahi sale volk; el codigo es todo nuestro.
+  target_sources(kestrel64 PRIVATE src/gpurdp/gpurdp.cpp)
+  target_compile_definitions(kestrel64 PRIVATE KESTREL_GPURDP=1)
 endif()
 
 # RSP core unit test (hand-assembled microcode; no windowing deps).

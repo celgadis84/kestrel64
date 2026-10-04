@@ -6,6 +6,7 @@
 #   systemtest threaded-jit (SoftRDP)  -> CPU/RCP/tiempos en la config real
 #   sm64 interp (SoftRDP, lockstep)    -> md5 determinista del oraculo
 #   sm64 prdp-jit (parallel-rdp)       -> md5 del backend GPU con JIT
+#   sm64 gpurdp-jit (GPU-RDP propio)   -> md5 de SoftRDP (tiene que ser bit a bit)
 # Extras segun lo que toque el cambio (argumentos, se pueden juntar):
 #   krom  -> suite krom SoftRDP entera (rasterizador; ~6 min)
 #   lock  -> systemtest interp (oraculo lockstep)
@@ -20,6 +21,7 @@ rc=0
 KESTREL_EXE="$SOFT" $PY scripts/validate.py systemtest --mode threaded-jit || rc=1
 KESTREL_EXE="$SOFT" $PY scripts/validate.py sm64 --mode interp || rc=1
 KESTREL_EXE="$PRDP" $PY scripts/validate.py sm64 --mode prdp-jit || rc=1
+KESTREL_EXE="$PRDP" $PY scripts/validate.py sm64 --mode gpurdp-jit || rc=1
 for x in "$@"; do
   case "$x" in
     krom) KESTREL_EXE="$SOFT" $PY scripts/validate.py krom --quiet || rc=1 ;;

@@ -19,6 +19,7 @@
 #define VK_NO_PROTOTYPES
 #include <volk.h>
 #include <GLFW/glfw3.h>
+#include "../gpurdp/gpurdp.hpp"
 #else
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -291,6 +292,9 @@ auto initVulkan(Vk& v) -> bool {
   // puntero nulo. La caida al abrir la ventana con PRDP era exactamente eso (host RIP 0).
   // De paso ahorra un dispositivo logico entero en la GPU.
   const vrdp::SharedVk* sh = vrdp::sharedVk();
+#ifdef KESTREL_PRDP
+  if(!sh) sh = gpurdp::sharedVk();   // GPU-RDP propio (KESTREL_GPURDP=1): mismo trato
+#endif
   if(sh) {
     v.shared   = true;
     v.instance = (VkInstance)sh->instance;

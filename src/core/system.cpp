@@ -9,6 +9,7 @@
 #include "../telemetry/hostprof.hpp"
 #include "movie.hpp"
 #include "../audio/audio.hpp"
+#include "../gpurdp/gpurdp.hpp"
 #include "../vrdp/vrdp.hpp"   // vrdp::built: si ESTE .exe lleva el backend de GPU
 #include "runtime.hpp"
 #include <chrono>
@@ -452,7 +453,7 @@ auto System::runLoop() -> void {
   // que no existe y despues NO abrir la ventana -- el emulador inutil por doble clic.
   // Sin backend se va derecho a abrir la ventana, que es lo unico que se puede hacer.
   const char* pe = std::getenv("KESTREL_PRDP");
-  bool prdpWanted = vrdp::built && (!pe || pe[0] != '0');
+  bool prdpWanted = (vrdp::built && (!pe || pe[0] != '0')) || (gpurdp::built && gpurdp::wanted());
   bool prdpReady  = memory.vrdpWaitReady(15000);
   if(pe && pe[0] != '0' && !vrdp::built)
     std::printf("[video] este ejecutable no lleva parallel-RDP; se rasteriza con SoftRDP\n");

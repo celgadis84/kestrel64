@@ -96,6 +96,10 @@ MODES = {
     # `prdp` es el oraculo lento (interp lockstep), `prdp-jit` la configuracion real.
     "prdp":          {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_PRDP": "1"},
     "prdp-jit":      {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_PRDP": "1"},
+    # GPU-RDP propio (docs/GPU-RDP.md). Exe de build-prdp*. A diferencia de parallel-rdp
+    # tiene que ser BIT A BIT SoftRDP: el md5 se compara con sm64.txt y krom con --vs interp.
+    "gpurdp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_GPURDP": "1", **SOFT},
+    "gpurdp-jit":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_GPURDP": "1", **SOFT},
 }
 
 # Accuracy below this counts as "broken" rather than "imperfect" — used only to

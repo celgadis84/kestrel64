@@ -87,6 +87,42 @@ SoftRDP, **no** contra la de parallel-RDP).
 | 6 | escalado interno + texturas HD en GPU | visual |
 | 7 | default ON en `kestrel64.exe`; parallel-RDP queda un ciclo como alternativa y luego se retira de `third_party` | `gate_all` + `gate_prdp` sustituida |
 
+## Estado
+
+### Fase 0 -- HECHA 2026-10-05
+
+Codigo: `src/gpurdp/` (`gpurdp.hpp/.cpp`, `shaders/fill.comp`, SPIR-V embebido en
+`gpurdp_spv.inc` por `tools/gen_gpurdp_shaders.py`). Vulkan a pelo sobre volk, nada de
+Granite. Se compila en los builds con parallel-RDP (de ahi sale volk) y se enciende con
+`KESTREL_GPURDP=1`; entonces parallel-RDP no arranca (comparten la tabla global de volk).
+
+Forma elegida para ir migrando sin romper nada: **SoftRDP sigue decodificando el FIFO entero
+y el GPU-RDP le roba primitivas una a una**, no la interfaz de `vrdp.hpp` desde el dia uno.
+Asi cada fase mueve un trozo y lo que aun no esta en GPU sigue en SoftRDP, bit a bit.
+
+- `SoftRdp::fillRect` en ciclo FILL/COPY encola el rectangulo (`gpurdp::queueFill`) con su
+  estado (color image, fill color, rect recortado). Fallback a CPU si el rect se sale de la
+  RDRAM, si x1 > ancho (alias con la fila siguiente), base no alineada al pixel o con
+  `rdpGuard`/`wrtag` vivos. El coste (`addSpan`/`accountPixels`) se sigue cobrando en CPU.
+- `SoftRdp::run` baja la cola (`gpuFlush`) antes de cualquier comando que lea o escriba
+  RDRAM (todo lo que no es estado ni otro relleno FILL/COPY, ver `gpuNoFlush`) y al acabar el
+  tramo: fuera de `run()` la RDRAM esta siempre al dia (SYNC_FULL incluido).
+- Shader: un hilo por palabra de 32 bits del espejo de RDRAM (sin carreras en los bytes
+  sueltos de 8/16 bpp); pase aparte para los bits ocultos de 16 bpp. El espejo no se sube
+  nunca: un relleno pisa bytes enteros y al volver solo se copian los bytes de los rects.
+- Dispositivo propio creado en el hilo del RDP (`Memory::vrdpBringUp`), con extensiones de
+  superficie y swapchain; el presentador lo comparte (`gpurdp::sharedVk`) igual que con
+  parallel-RDP, y las colas se guardan con el mismo candado (`vrdp::queueLock`).
+
+Prueba: `scripts/gate_gpurdp.sh` (systemtest + sm64 interp/jit contra `sm64.txt` + krom contra
+la referencia de interp). Resultado: systemtest 0/3721, sm64 `b5521b24` (= SoftRDP) en los dos
+modos, krom 371/371 con las 372 puntuaciones IDENTICAS a la referencia de SoftRDP. SM64 en
+ventana: 246 rellenos por GPU en 60 cuadros, presentador Vulkan compartido sin problemas.
+`gate_quick` corre tambien `sm64 gpurdp-jit`.
+
+Siguiente (fase 1): triangulos plano/shade + coverage + z. Ahi ya hay lecturas de RDRAM
+(z-buffer, blender), asi que toca subir zonas al espejo antes de pintar.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego

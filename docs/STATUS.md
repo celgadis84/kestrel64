@@ -10224,3 +10224,15 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   PIF (fin de arranque), como `osInitialize` de libultra y el IPL3 de libdragon; sin el, el PIF
   real congela la CPU a los ~5 s y kestrel lo modela.
 - gate_quick ALL OK x2 (68 s), sm64 `b5521b24`.
+
+## 2026-10-05 (b) -- GPU-RDP propio, fase 0 (FILL_RECTANGLE en compute)
+
+- `src/gpurdp/`: Vulkan a pelo sobre volk (sin Granite), `KESTREL_GPURDP=1`, apagado por
+  defecto. SoftRDP decodifica el FIFO y encola los FILL_RECTANGLE de ciclo FILL/COPY en la
+  GPU; baja la cola antes de cualquier comando que toque RDRAM y al final de cada tramo.
+  Shader `fill.comp`, un hilo por palabra del espejo de RDRAM, pase de bits ocultos 16 bpp.
+- Dispositivo propio compartido con el presentador (como el de parallel-RDP).
+- Modos `gpurdp`/`gpurdp-jit` en `validate.py`; puerta nueva `scripts/gate_gpurdp.sh`;
+  `gate_quick` corre `sm64 gpurdp-jit`.
+- gate_gpurdp ALL OK (6 m 47 s): systemtest 0/3721, sm64 `b5521b24` = SoftRDP, krom 372/372
+  puntuaciones identicas. gate_quick ALL OK. md5 por defecto sin cambio.
