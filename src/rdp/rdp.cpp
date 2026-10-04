@@ -1360,8 +1360,12 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
   // Lee UN texel de TMEM con las coordenadas YA plegadas (ver `foldCoord`). `K` fija el
   // formato en tiempo de compilacion: la decodificacion sale sin ramas.
   const u32 rowBytes = f.rowBytes, base = f.base;
+  // Filas impares de TMEM van con las dos mitades de 32 bits de cada palabra de 64
+  // intercambiadas (las cargas las escriben asi, ver `loadTile`); el muestreador las deshace
+  // con la paridad de la fila T ya plegada. 32 bpp: el intercambio es de pares de texeles.
+  const u32 ox = (t & 1) ? (K == TK_RGBA32 ? 8u : 4u) : 0u;
   if constexpr(K == TK_CI4 || K == TK_IA4 || K == TK_I4) {     // 4-bit texels
-    u32 off = base + (u32)t * rowBytes + (u32)s / 2;
+    u32 off = (base + (u32)t * rowBytes + (u32)s / 2) ^ ox;
     if(off >= 0x1000) return 0;
     u8 nib = (s & 1) ? (tmem[off] & 0xf) : (tmem[off] >> 4);
     if constexpr(K == TK_CI4) return tlutEntry(f.palette * 16 + nib);  // 16-entry sub-palette
@@ -1377,8 +1381,8 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
     // chroma at the even bytes and shared across the pair (4:2:2). Convert with the
     // SET_CONVERT coefficients: R=Y+K0*V, G=Y+K1*U+K2*V, B=Y+K3*U (V,U signed about 128,
     // K/128 scale, HW rounds the >>7).
-    u32 off = base + (u32)t * rowBytes + (u32)s * 2;
-    u32 pairBase = base + (u32)t * rowBytes + (s & ~1u) * 2;
+    u32 off = (base + (u32)t * rowBytes + (u32)s * 2) ^ ox;
+    u32 pairBase = (base + (u32)t * rowBytes + (s & ~1u) * 2) ^ ox;
     if(pairBase + 2 >= 0x1000 || off + 1 >= 0x1000) return 0;
     int Y = tmem[off + 1], dU = (int)tmem[pairBase] - 128, dV = (int)tmem[pairBase + 2] - 128;
     auto cl = [](int v) -> u32 { return (u32)(v < 0 ? 0 : v > 255 ? 255 : v); };
@@ -1387,7 +1391,7 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
     u32 b = cl(Y + ((k3 * dU + 0x40) >> 7));
     return (r << 24) | (g << 16) | (b << 8) | 0xff;   // opaque
   } else if constexpr(K == TK_IA16 || K == TK_RGBA16) {        // 16-bit texels
-    u32 off = base + (u32)t * rowBytes + (u32)s * 2;
+    u32 off = (base + (u32)t * rowBytes + (u32)s * 2) ^ ox;
     if(off + 1 >= 0x1000) return 0;
     u16 px = ((u16)tmem[off] << 8) | tmem[off + 1];
     if constexpr(K == TK_IA16) {
@@ -1401,11 +1405,11 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
       return (r << 24) | (g << 16) | (b << 8) | a;
     }
   } else if constexpr(K == TK_RGBA32) {                        // 32-bit RGBA8888
-    u32 off = base + (u32)t * rowBytes + (u32)s * 4;
+    u32 off = (base + (u32)t * rowBytes + (u32)s * 4) ^ ox;
     if(off + 3 >= 0x1000) return 0;
     return ((u32)tmem[off] << 24) | ((u32)tmem[off+1] << 16) | ((u32)tmem[off+2] << 8) | tmem[off+3];
   } else if constexpr(K == TK_CI8 || K == TK_IA8 || K == TK_I8) {   // 8-bit texels
-    u32 off = base + (u32)t * rowBytes + (u32)s;
+    u32 off = (base + (u32)t * rowBytes + (u32)s) ^ ox;
     if(off >= 0x1000) return 0;
     u8 v = tmem[off];
     if constexpr(K == TK_CI8) return tlutEntry(v);              // full 256-entry palette
@@ -1464,14 +1468,14 @@ auto SoftRdp::sampleRawIndex(u32 tileIdx, int s, int t) -> int {
   };
   s = wrap(s, tl.maskS, tl.cmS, sMax);
   t = wrap(t, tl.maskT, tl.cmT, tMax);
-  u32 rowBytes = tl.line * 8, base = tl.tmem * 8;
+  u32 rowBytes = tl.line * 8, base = tl.tmem * 8, ox = (t & 1) ? 4u : 0u;   // fila impar: ver fetchK
   if(tl.size == 0) {                                    // CI4 (4-bit index)
-    u32 off = base + (u32)t * rowBytes + (u32)s / 2;
+    u32 off = (base + (u32)t * rowBytes + (u32)s / 2) ^ ox;
     if(off >= 0x1000) return 0;
     u8 nib = (s & 1) ? (tmem[off] & 0xf) : (tmem[off] >> 4);
     return tl.palette * 16 + nib;
   }
-  u32 off = base + (u32)t * rowBytes + (u32)s;          // CI8 (8-bit index)
+  u32 off = (base + (u32)t * rowBytes + (u32)s) ^ ox;   // CI8 (8-bit index)
   return off < 0x1000 ? tmem[off] : 0;
 }
 
@@ -1956,11 +1960,35 @@ auto SoftRdp::copyRun(const V& m, u32 src, u32 dst, u32 n) -> void {
 auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   // Copy texels from the texture image (RDRAM, ti_addr/ti_width/ti_size) into TMEM
   // at the tile's base. LOAD_TILE walks a [SL,TL]..[SH,TH] rectangle (fields in
-  // 10.2); LOAD_BLOCK copies a contiguous run (SL..SH linear texels — no DxT
-  // deswizzle yet, fine for the load-once test roms). 4-bit texels not handled.
+  // 10.2); LOAD_BLOCK copies a contiguous run (SL..SH linear texels).
+  //
+  // Filas impares: el hardware guarda cada fila impar de TMEM con las dos mitades de 32 bits
+  // de cada palabra de 64 intercambiadas, y el muestreador las deshace (fetchK). LOAD_TILE
+  // intercambia las filas impares de la carga. LOAD_BLOCK no sabe de filas: lleva un contador
+  // T que sube DXT (1.11) por palabra escrita, T = (i*DXT) >> 11, intercambia la palabra i
+  // cuando T es impar y la coloca en i + T*line (el LINE del tile de carga, casi siempre 0).
+  // Con DXT bien puesto la textura queda igual que con LOAD_TILE; con DXT = 0 no intercambia
+  // nada, y quien carga asi tiene que traer las filas impares ya intercambiadas en RDRAM
+  // (port nativo de PD). Ref: parallel-rdp tmem_update.comp. En 32 bpp el intercambio es de
+  // pares de texeles: en este TMEM lineal de 4 B/texel, XOR 8 en vez de 4.
   Tile& tl = tiles[t & 7];
   const auto& m = mem.rdram;
   u32 bpt = ti_size == 3 ? 4 : ti_size == 2 ? 2 : ti_size == 1 ? 1 : 0;   // bytes/texel (0 = 4-bit)
+  const u32 oxb = bpt == 4 ? 8u : 4u;
+  // LOAD_BLOCK: nb bytes de RDRAM desde src, palabra a palabra con el contador DXT.
+  auto blockCopy = [&](u32 src, u32 nb, u32 dxt) {
+    const u32 dst = tl.tmem * 8;
+    if(!dxt && !tl.line) { copyRun(m, src, dst, nb); return; }   // T = 0 siempre: copia recta
+    for(u32 i = 0, done = 0; done < nb; i++, done += 8) {
+      const u32 tt = (u32)(((u64)i * dxt) >> 11);
+      const u32 w = dst + (i + tt * tl.line) * 8, x = (tt & 1) ? oxb : 0u;
+      const u32 n = std::min(8u, nb - done);
+      for(u32 b = 0; b < n; b++) {
+        const u32 d = (w + b) ^ x, sa = src + done + b;
+        if(d < 0x1000 && sa < m.size()) tmem[d] = m[sa];
+      }
+    }
+  };
   u32 sl = (u32)((cmd >> 44) & 0xfff), tlo = (u32)((cmd >> 32) & 0xfff);
   u32 sh = (u32)((cmd >> 12) & 0xfff), th = (u32)((cmd >> 0) & 0xfff);
   // 4-bit texels (CI4/IA4/I4) pack 2/byte. LOAD_BLOCK is a linear byte copy of
@@ -1969,8 +1997,7 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     tl.sl = sl; tl.tl = tlo; tl.sh = sh; tl.th = th;
     if(block) {
       u32 count = (sh >= sl) ? (sh - sl + 1) : 1, nb = (count + 1) / 2;
-      u32 dst = tl.tmem * 8, src = ti_addr + (sl >> 1);
-      copyRun(m, src, dst, nb);
+      blockCopy(ti_addr + (sl >> 1), nb, th);
       accountLoad(mem, 1, nb);
     } else {
       u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2, rowBytes = tl.line * 8;
@@ -1978,7 +2005,7 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
       for(u32 ty = t0; ty <= t1; ty++)
         for(u32 tx = s0; tx <= s1; tx++) {         // nibble-granular copy
           u32 src = ti_addr + (ty * ti_width + tx) / 2;   // ti_width in texels
-          u32 dstByte = tl.tmem * 8 + (ty - t0) * rowBytes + (tx - s0) / 2;
+          u32 dstByte = (tl.tmem * 8 + (ty - t0) * rowBytes + (tx - s0) / 2) ^ (((ty - t0) & 1) ? 4u : 0u);
           if(dstByte < 0x1000 && src < m.size()) {
             u8 nib = (tx & 1) ? (m[src] & 0xf) : (m[src] >> 4);
             if((tx - s0) & 1) tmem[dstByte] = (tmem[dstByte] & 0xf0) | nib;
@@ -1994,8 +2021,8 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   tl.sl = sl; tl.tl = tlo; tl.sh = sh; tl.th = th;
   if(block) {
     u32 count = (sh >= sl) ? (sh - sl + 1) : 1;        // linear texel count
-    u32 dst = tl.tmem * 8, src = ti_addr + sl * bpt, nb = count * bpt;
-    copyRun(m, src, dst, nb);
+    u32 nb = count * bpt;
+    blockCopy(ti_addr + sl * bpt, nb, th);
     accountLoad(mem, 1, nb);
     return;
   }
@@ -2009,7 +2036,11 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   for(u32 ty = t0; ty <= t1; ty++) {
     u32 src = ti_addr + (ty * ti_width + s0) * bpt;
     u32 dst = tl.tmem * 8 + (ty - t0) * rowBytes;
-    copyRun(m, src, dst, rowRun);
+    if(!((ty - t0) & 1)) { copyRun(m, src, dst, rowRun); continue; }
+    for(u32 b = 0; b < rowRun; b++) {                 // fila impar: mitades intercambiadas
+      const u32 d = (dst + b) ^ oxb;
+      if(d < 0x1000 && src + b < m.size()) tmem[d] = m[src + b];
+    }
   }
 }
 

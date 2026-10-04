@@ -9865,9 +9865,29 @@ con el estado congelado del sdk (`kestrel64-sdk/build/ci8repro`, ranura 5): cara
 371/371 regress=0 improve=0.
 
 Aparte, sigue sin modelar el intercambio de palabras de 32 bits en filas impares de TMEM
-(LOAD_BLOCK con dxt / LOAD_TILE al escribir, el muestreador al leer). Hoy es identidad para
-todo lo que carga por las vias normales; solo se ve con datos pre-intercambiados en RDRAM y
-dxt=0.
+(LOAD_BLOCK con dxt / LOAD_TILE al escribir, el muestreador al leer) -> HECHO en (f).
+
+## 2026-10-04 (f) -- TMEM: filas impares con las mitades de 32 bits intercambiadas (SoftRDP)
+
+El hardware guarda cada fila impar de TMEM con las dos mitades de 32 bits de cada palabra de
+64 intercambiadas y el muestreador las deshace con la paridad de T. SoftRDP no modelaba
+ninguno de los dos lados, lo que es identidad SOLO si la fila que se escribe y la que se lee
+coinciden. No coinciden en tres casos: LOAD_BLOCK con DXT (las filas las decide el contador
+DXT, no la geometria del tile), datos pre-intercambiados en RDRAM con DXT=0 (port nativo de
+PD), y T plegado por mask/mirror/shift a una fila de paridad distinta de la cargada.
+
+Ahora (`rdp.cpp`, ref parallel-rdp `tmem_update.comp`):
+- LOAD_TILE: filas impares de la carga se escriben con XOR 4 (XOR 8 en 32 bpp: en este TMEM
+  lineal de 4 B/texel el intercambio HW es de pares de texeles).
+- LOAD_BLOCK: palabra i -> T = (i*DXT) >> 11; destino `i + T*line`, XOR si T impar. DXT=0 y
+  line=0 sigue siendo la copia recta de siempre.
+- Muestreador (`fetchK`, `sampleRawIndex`): XOR con la paridad de la T plegada.
+
+krom 371/371, **regress=0 improve=13**, mean_exact 88.75 -> 89.04: TexturesMaskShiftMirror
+CMShiftT0_1 79.6 -> 98.3, T1_1 80.5 -> 98.8, T15_1 83.7 -> 98.1 (y las _2.._4 +2..+8),
+TextureCoordinates 87.4 -> 93.5; RGBA32/YUV +0.05. Baja dentro de tolerancia:
+CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
+`krom-interp.tsv` regenerada. systemtest 0/3721, sm64 `b5521b24` x2 (SoftRDP y prdp).
 
 ## 2026-10-04 (d) -- Cargas de textura: coste fijo por rafaga (PD64_pending P2)
 

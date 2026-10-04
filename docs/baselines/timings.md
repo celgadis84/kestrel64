@@ -542,3 +542,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-10-04 | release --quick + gate_quick (SRAM 768K bancos bits 18-19) | 72 s + 73 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, save_test ALL PASS. |
 | 2026-10-04 | release --quick + gate_quick thar0 (coste cargas TMEM) | 130 s + 80 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, thar0 rmse 0.1332. PD Villa lockstep pdbench 121-123 s por corrida. |
 | 2026-10-04 | release --quick + gate_quick krom (LOAD_TLUT con TL) | 50 s + 430 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 regress=0. |
+| 2026-10-04 | release --quick + gate_quick krom (TMEM filas impares) | 40 s + 455 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 regress=0 improve=13 mean 89.04. |
