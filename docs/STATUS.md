@@ -9845,6 +9845,17 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 (c) -- SRAM 768K: bancos a 256 KiB, no a 64 KiB (aviso n64-70)
+
+- `saveOffset` elegia banco con los bits 16-17 (0x08000000/0x08010000/0x08020000). El
+  cartucho (Dezaemon 3D) tiene tres bancos de 32 KiB elegidos por los bits 18-19:
+  0x08000000, 0x08040000, 0x08080000; el juego comprueba su partida leyendo 0x08040000.
+  Fuentes: mapa de cartucho de ares y n64js PR #84 (Dezaemon pasa de colgarse a 4,75 s a
+  correr). Fuera de los 32 KiB de cada ventana = sin mapear. Ningun formato de fichero cambia:
+  el `.sra` sigue siendo los 96 KiB contiguos.
+- save_test ALL PASS (bancos 1/2 en 0x40004/0x80004 + escritura en el hueco ignorada),
+  gate_quick OK.
+
 ## 2026-10-04 (b) -- Tipo de partida por cabecera ED + FlashRAM con el protocolo de libultra (peticion n64-70)
 
 - **Cabecera avanzada de homebrew** (n64brew, ROM Header): si `rom[0x3C..0x3D] == "ED"`,

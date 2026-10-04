@@ -50,8 +50,9 @@ int main() {
   useType(m, Memory::SaveType::Sram768k);
   chk("saveSize", m.saveSize(), 96 * 1024);
   m.write32(SAVE + 0x0000'0004, 0xAAAA0001);  // bank 0
-  m.write32(SAVE + 0x0001'0004, 0xBBBB0002);  // bank 1 (0x08010000)
-  m.write32(SAVE + 0x0002'0004, 0xCCCC0003);  // bank 2 (0x08020000)
+  m.write32(SAVE + 0x0004'0004, 0xBBBB0002);  // bank 1 (0x08040000)
+  m.write32(SAVE + 0x0008'0004, 0xCCCC0003);  // bank 2 (0x08080000)
+  m.write32(SAVE + 0x0001'0004, 0xDEADBEEF);  // hueco entre bancos: no cae en ninguno
   chk("bank0 folded @0x00004", m.read32(SAVE + 0x0000'0004), 0xAAAA0001);
   chk("bank1 folded @0x08004", (u32)((m.saveRam[0x8004] << 24) | (m.saveRam[0x8005] << 16) |
                                      (m.saveRam[0x8006] << 8) | m.saveRam[0x8007]), 0xBBBB0002);

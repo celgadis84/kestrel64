@@ -546,8 +546,11 @@ sized:
 auto Memory::saveOffset(u32 phys) const -> u32 {
   u32 off = phys - 0x0800'0000;
   if(saveType == SaveType::Sram768k) {
-    u32 bank = off >> 16;                 // 64 KiB apart in the address map
-    return bank < 3 ? bank * (32 * 1024) + (off & 0x7fff) : 0xffff'ffff;
+    // Tres bancos de 32 KiB elegidos por los bits 18-19 de la direccion: 0x08000000,
+    // 0x08040000, 0x08080000 (Dezaemon 3D comprueba su partida leyendo 0x08040000; mapa de
+    // cartucho de ares y n64js PR #84). Antes iban a 64 KiB uno de otro, bits 16-17.
+    u32 bank = off >> 18;
+    return bank < 3 && (off & 0x3ffff) < 0x8000 ? bank * (32 * 1024) + (off & 0x7fff) : 0xffff'ffff;
   }
   return off;
 }
