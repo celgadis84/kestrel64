@@ -1257,6 +1257,9 @@ struct Memory {
   // contexto Vulkan del backend. Lo LEVANTA el hilo del RDP (Granite ata su estado por hilo),
   // asi que esto solo espera; devuelve false si expira el plazo o si el backend no esta pedido.
   auto vrdpWaitReady(u32 timeoutMs) -> bool;
+  // El arranque del backend ya se intento y NO quedo activo (sin Vulkan, sin GPU valida):
+  // el RDP sigue en SoftRDP y la ventana se abre igual, sin esperar el plazo entero.
+  auto vrdpFailed() const -> bool;
 private:
   // Puntero de lectura propio del consumidor del FIFO (el "CURRENT" del command processor).
   // Cuando el ultimo comando de un span esta partido, el RDP se para DELANTE de el y lo
@@ -1274,6 +1277,7 @@ private:
   auto rdpWorkerLoop() -> void;
   auto vrdpBringUp() -> void;      // trae parallel-rdp arriba una sola vez
   std::once_flag vrdpOnce;
+  std::atomic<bool> vrdpTried{false};
   auto rspWorkerLoop() -> void;
 public:
 

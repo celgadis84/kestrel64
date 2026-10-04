@@ -174,8 +174,9 @@ CATEGORIES = [
       values=[["auto", "Automatico - la compilacion disponible"],
               ["soft", "SoftRDP - rasterizador propio en CPU, determinista"],
               ["prdp", "paraLLEl-RDP - LLE por Vulkan en GPU"]],
-      help="paraLLEl-RDP necesita una compilacion con KESTREL_PRDP=ON. El lanzador elige el "
-           "ejecutable adecuado y activa la variable."),
+      help="Un solo ejecutable con los dos. Automatico = paraLLEl-RDP si hay GPU con Vulkan, "
+           "si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Con texturas HD o "
+           "realce, automatico elige SoftRDP. Cambiarlo relanza el emulador."),
     O("video", "KESTREL_VIDEO", "Abrir ventana", "bool", True,
       "Apagado = sin ventana (modo lote / captura)."),
     O("winscale", "KESTREL_WINSCALE", "Escala de ventana", "choice", "2",
@@ -212,8 +213,8 @@ CATEGORIES = [
     O("texpack", "KESTREL_TEXPACK", "Pack de texturas HD (carpeta)", "path", "",
       help="Carpeta con un pack de texturas en formato Rice / GLideN64 (ficheros "
            "<NOMBRE ROM>#crc#fmt#siz_all.png); los packs hechos para GLideN64 valen tal cual. "
-           "Solo con el ejecutable SoftRDP (kestrel64-soft.exe): paraLLEl-RDP muestrea la "
-           "textura en la GPU y no admite sustitutos. Ver docs/TEXTURAS-HD.md."),
+           "Solo con el rasterizador SoftRDP (en automatico se elige solo): paraLLEl-RDP "
+           "muestrea la textura en la GPU y no admite sustitutos. Ver docs/TEXTURAS-HD.md."),
     O("texfx", "KESTREL_TEXFX", "Realce de texturas", "choice", "",
       values=[["", "Ninguno - texturas originales"],
               ["scale4x", "Scale4x - agranda 4x sin emborronar (pixel art)"],
@@ -222,7 +223,7 @@ CATEGORIES = [
       help="Retoca por algoritmo cada textura original la primera vez que se dibuja, en vez "
            "de la imagen entera como el filtro de imagen: el contorno sale donde cambia la "
            "textura, no donde cambia la escena. Un pack HD, si lo hay, manda sobre esto. "
-           "Solo SoftRDP (kestrel64-soft.exe)."),
+           "Solo SoftRDP (en automatico se elige solo)."),
     O("texdump", "KESTREL_TEXDUMP", "Volcar texturas en (carpeta)", "path", "", adv=True,
       help="Guarda cada textura distinta que dibuja el juego como PNG con nombre de pack "
            "Rice/GLideN64, para hacer uno propio (por ejemplo escalandolas con una red como "
@@ -534,6 +535,9 @@ def to_env(profile):
     if str(p.get("plugin", "auto")) == "prdp":
         env["KESTREL_PRDP"] = "1"
     elif str(p.get("plugin", "auto")) == "soft":
+        env["KESTREL_PRDP"] = "0"
+    elif p.get("texpack") or p.get("texfx"):
+        # Texturas HD y realce solo existen en SoftRDP: en automatico, pedirlas elige ese.
         env["KESTREL_PRDP"] = "0"
 
     # KESTREL_VIDEO / --run: sin --run el emulador arranca en pausa esperando al MCP.

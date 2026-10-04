@@ -12,8 +12,8 @@
 #   build-prdp/                exe parallel-RDP (puerta de GPU)
 #   (desde 2026-09-30 TODOS estaticos: arrancan sin clang64 en el PATH; ver CMakeLists)
 #   build-prdp-static/         exe parallel-RDP ESTATICO = el que se distribuye
-#   build-static/              exe SoftRDP ESTATICO      = el que se distribuye tambien
-#   dist/                      kestrel64.exe (GPU) + kestrel64-soft.exe (CPU)
+#   build-static/              exe SoftRDP ESTATICO      = puertas (gate_quick); no viaja
+#   dist/                      kestrel64.exe (GPU+SoftRDP, plugin elegible dentro)
 #                              + kestrel64-gui.exe + LEEME.txt + VERSION.txt
 #   kestrel64-<ver>-win64.zip  paquete portable
 #   kestrel64-<ver>-setup.exe  instalador (si hay Inno Setup)
@@ -82,17 +82,16 @@ echo "== build-prdp-static/ (lo que se distribuye) =="
 conf build-prdp-static -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
 cmake --build build-prdp-static -j8
 
-# El paquete lleva los DOS rasterizadores. El de GPU es el recomendado y el que se llama
-# kestrel64.exe; este sale como kestrel64-soft.exe y es la salida para una maquina sin
-# Vulkan (o para comparar contra el rasterizador de referencia sin recompilar nada).
-echo "== build-static/ (SoftRDP, tambien se distribuye) =="
+# build-static (sin parallel-RDP) ya NO viaja en el paquete: el exe que se distribuye lleva
+# los dos rasterizadores. Se sigue compilando porque es el exe de las puertas rapidas.
+echo "== build-static/ (SoftRDP, para las puertas) =="
 conf build-static -DKESTREL_STATIC=ON
 cmake --build build-static -j8
 
 # dist.sh ya congela el lanzador (scripts/gui.sh), copia lo que haga falta, escribe el LEEME
 # el VERSION.txt y genera el zip; pack.sh anade el instalador. No se duplica nada aqui.
 echo "== paquete + instalador =="
-BUILD=build-prdp-static SOFTBUILD=build-static sh scripts/pack.sh
+BUILD=build-prdp-static sh scripts/pack.sh
 
 # El manifiesto (version, commit, md5) lo escribe dist.sh, que es quien cierra el zip y la
 # carpeta del instalador: escrito aqui llegaba tarde y el portable salia sin el.

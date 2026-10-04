@@ -10203,3 +10203,24 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - PD titulo, 6 s interp: 220 k fallos D$, 29,5 k I$; `dline` saca 0x521d0 <-> 0x3fe1d0 en el
   set 29 (y sus vecinas en el 30) = conflicto real de la D$.
 - Puertas: `release.sh` RC=0, `gate_quick.sh lock phys` ALL OK.
+
+## 2026-10-05 (a) -- Un solo exe con rasterizador elegible; GDI sin Vulkan; ROMs recursivas
+
+- **Un ejecutable**: `kestrel64-soft.exe` fuera del paquete. `kestrel64.exe` ya llevaba los dos
+  rasterizadores; faltaba que sobreviviese sin Vulkan. `Memory::vrdpFailed` (el arranque de
+  parallel-RDP se intento y no quedo activo) hace que `vrdpWaitReady` salga al momento y que
+  `System` abra la ventana igual. Antes: 15 s parado y sin ventana.
+- **Presentacion GDI** (`presentGdi`, `src/video/present.cpp`): si falla cargador, instancia,
+  superficie, dispositivo o cola, la ventana se pinta con `StretchDIBits` (aspecto + bandas).
+  `KESTREL_FORCEGDI=1` para probarlo. Probado: SM64 con `VK_ICD_FILENAMES` a un json
+  inexistente -> "vkCreateInstance failed" -> "presentacion GDI", ventana y titulo pintado.
+- Rasterizador `auto` + texturas HD o realce -> SoftRDP (unico que las admite), en el menu
+  (`profile.cpp`) y en el lanzador (`options.py`). Lanzador instalado: un exe `prdp` ofrece
+  tambien `soft`.
+- **Carpeta de ROMs recursiva** (peticion del usuario) en la biblioteca del exe
+  (`scanRec`, `library_win32.cpp`) y en el lanzador (`_roms`): tope 8 niveles, sin enlaces ni
+  uniones, sin ocultas/sistema. test_roms: 6 -> 417 ROMs en los dos.
+- SDK (`kestrel64-sdk` 4696782): `k64_runtime_init` escribe el bit 0x08 del byte de control del
+  PIF (fin de arranque), como `osInitialize` de libultra y el IPL3 de libdragon; sin el, el PIF
+  real congela la CPU a los ~5 s y kestrel lo modela.
+- gate_quick ALL OK x2 (68 s), sm64 `b5521b24`.

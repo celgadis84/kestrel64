@@ -81,25 +81,32 @@ La tercera fila no es un capricho: `Archivos de programa` no es escribible, y el
 guarda solo, sin boton de guardar. La segunda tampoco: instalado no hay un arbol de builds
 sino los `.exe` que se copiaron al lado del lanzador. Con que backend grafico se compilo cada
 uno no se ve desde fuera del binario, asi que `dist.sh` deja la nota al lado
-(`kestrel64.build`, `kestrel64-soft.build`; `soft` o `prdp`) y el lanzador la lee.
+(`kestrel64.build`; `soft` o `prdp`) y el lanzador la lee.
 
-## Dos rasterizadores en el paquete
+## Un ejecutable, rasterizador elegible (desde 2026-10-05)
 
-El plugin grafico se elige al **compilar** (`-DKESTREL_PRDP=ON`), no en tiempo de ejecucion,
-asi que un solo `.exe` no puede ofrecer los dos. El que se distribuye lleva parallel-RDP y
-cae a SoftRDP si Vulkan no arranca, pero esa caida es en caliente: no da a elegir, y una
-maquina con GPU vieja, driver roto o virtualizada paga el intento en cada arranque. Por eso
-el paquete lleva **dos** ejecutables, el mismo codigo con otra opcion de cmake:
+Hasta el 2026-10-04 el paquete llevaba dos ejecutables (`kestrel64.exe` con parallel-RDP y
+`kestrel64-soft.exe` con SoftRDP) porque se creia que el plugin se elegia al compilar. No
+hacia falta: el exe de `build-prdp-static` lleva compilados LOS DOS rasterizadores y
+`KESTREL_PRDP=0/1` elige en el arranque. Lo que faltaba era que ese exe funcionase en una
+maquina sin Vulkan, y eso es lo que se arreglo:
 
-| fichero | build | plugin | para que |
-|---|---|---|---|
-| `kestrel64.exe` | `build-prdp-static` | parallel-RDP (Vulkan) | el recomendado; mas rapido y mas exacto en subpixel |
-| `kestrel64-soft.exe` | `build-static` | SoftRDP (CPU) | sin GPU ni Vulkan; es el rasterizador de referencia del proyecto |
+- `vrdpWaitReady` distingue "el backend esta arrancando" de "se intento y cayo"
+  (`Memory::vrdpFailed`): sin Vulkan el RDP sigue en SoftRDP y la ventana se abre al
+  instante, en vez de esperar 15 s y no abrirla.
+- El presentador cae a **GDI** (`StretchDIBits`, `presentGdi` en `src/video/present.cpp`) si
+  no hay cargador Vulkan, instancia, superficie, dispositivo fisico o cola de presentacion.
+  Sin postfx ni filtros (son shaders), con relacion de aspecto y bandas negras.
+  `KESTREL_FORCEGDI=1` lo fuerza para probarlo.
+- El exe ya no importa `vulkan-1.dll` (volk lo carga en caliente), asi que arranca aunque
+  falte el driver.
 
-`scripts/pack.sh` compila los dos arboles (`SOFTBUILD=-` se salta el segundo) y `dist.sh`
-copia el segundo como `kestrel64-soft.exe` con su propia nota `kestrel64-soft.build`. El
-lanzador los detecta y la opcion "Rasterizador" (`soft`/`prdp`/`auto`) sigue funcionando
-igual desde una copia instalada que desde el arbol de fuentes.
+El plugin se elige como en el resto de emuladores: menu de la ventana Opciones > Video >
+Rasterizador (`auto`/`soft`/`prdp`, se relanza solo) o la misma opcion en el lanzador. En
+`auto` gana parallel-RDP si hay GPU, salvo que esten pedidas texturas HD o realce de texturas,
+que solo existen en SoftRDP. El lanzador, instalado, ofrece los dos sobre el mismo exe.
+`build-static` (SoftRDP sin parallel-RDP) se sigue compilando porque es el exe de las
+puertas rapidas, pero ya no viaja.
 
 Dos detalles de `--windowed` (sin consola detras) que rompen si no se tratan: `sys.stdout`
 es `None` y cualquier `print` revienta -- se le da `os.devnull` al arrancar --, y una segunda

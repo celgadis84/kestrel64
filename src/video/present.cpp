@@ -87,6 +87,10 @@ struct Vk {
 
   bool shared = false;        // instancia/dispositivo prestados por parallel-rdp: no destruir
   bool presentable = false;   // false → surface unusable (e.g. no desktop session); compose only
+  // Sin Vulkan utilizable (no hay vulkan-1.dll, driver sin Vulkan, sin dispositivo): la
+  // ventana sigue abriendose y el cuadro se presenta por GDI (StretchDIBits). Asi un unico
+  // .exe vale para cualquier maquina; SoftRDP rasteriza en CPU y parallel-RDP ya se cae solo.
+  bool gdi = false;
 };
 
 namespace {
@@ -295,14 +299,22 @@ auto initVulkan(Vk& v) -> bool {
     v.qfamily  = sh->queueFamily;
     v.queue    = (VkQueue)sh->queue;
   }
+  // Cualquier fallo de Vulkan de aqui en adelante deja la ventana en presentacion GDI.
+  bool vkOk = true;
+  // KESTREL_FORCEGDI=1: probar el camino sin Vulkan en una maquina que si lo tiene (solo
+  // cuando el contexto no es el de parallel-RDP, que ya lo esta usando).
+  if(!v.shared) {
+    const char* fg = std::getenv("KESTREL_FORCEGDI");
+    if(fg && std::strcmp(fg, "0") != 0) vkOk = false;
+  }
 #ifdef KESTREL_PRDP
   if(!v.shared && volkInitialize() != VK_SUCCESS) {
-    std::fprintf(stderr, "[video] volkInitialize failed\n"); return false;
+    std::fprintf(stderr, "[video] volkInitialize failed\n"); vkOk = false;
   }
 #endif
   // Create the instance BEFORE glfwInit: on this box glfwInit() poisons the AMD
   // driver so vkCreateInstance hangs. Hardcode the surface extensions GLFW needs.
-  if(!v.shared) {
+  if(!v.shared && vkOk) {
     const char* ext[] = { "VK_KHR_surface", "VK_KHR_win32_surface" };
     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     app.pApplicationName = "kestrel64"; app.apiVersion = VK_API_VERSION_1_1;
@@ -310,10 +322,11 @@ auto initVulkan(Vk& v) -> bool {
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = 2; ici.ppEnabledExtensionNames = ext;
     if(vkCreateInstance(&ici, nullptr, &v.instance) != VK_SUCCESS) {
-      std::fprintf(stderr, "[video] vkCreateInstance failed\n"); return false;
+      std::fprintf(stderr, "[video] vkCreateInstance failed\n"); vkOk = false;
+      v.instance = VK_NULL_HANDLE;
     }
 #ifdef KESTREL_PRDP
-    volkLoadInstance(v.instance);   // populate instance-level entry points
+    else volkLoadInstance(v.instance);   // populate instance-level entry points
 #endif
   }
 
@@ -357,7 +370,18 @@ auto initVulkan(Vk& v) -> bool {
   v.win = glfwCreateWindow((int)winW, (int)winH, "kestrel64", mon, nullptr);
   if(!v.win) { std::fprintf(stderr, "[video] glfwCreateWindow failed\n"); return false; }
 
+  auto toGdi = [&](const char* why) -> bool {
+    std::fprintf(stderr, "[video] %s: presentacion GDI (sin Vulkan)\n", why);
+    v.gdi = true;
+    v.presentable = false;
+    glfwShowWindow(v.win);
+    glfwFocusWindow(v.win);
+    return true;
+  };
+  if(!vkOk) return toGdi("Vulkan no disponible");
   if(glfwCreateWindowSurface(v.instance, v.win, nullptr, &v.surface) != VK_SUCCESS) {
+    v.surface = VK_NULL_HANDLE;
+    if(!v.shared) return toGdi("surface creation failed");
     std::fprintf(stderr, "[video] surface creation failed\n"); return false;
   }
   // Give the window manager a beat to map/composite the window before we query
@@ -386,7 +410,7 @@ auto initVulkan(Vk& v) -> bool {
     }
   } else {
     u32 nphys = 0; vkEnumeratePhysicalDevices(v.instance, &nphys, nullptr);
-    if(!nphys) { std::fprintf(stderr, "[video] no Vulkan devices\n"); return false; }
+    if(!nphys) return toGdi("no Vulkan devices");
     std::vector<VkPhysicalDevice> devs(nphys);
     vkEnumeratePhysicalDevices(v.instance, &nphys, devs.data());
     // Pick a device with a graphics+present queue family, preferring discrete GPUs.
@@ -406,7 +430,7 @@ auto initVulkan(Vk& v) -> bool {
         }
       }
     }
-    if(v.phys == VK_NULL_HANDLE) { std::fprintf(stderr, "[video] no graphics+present queue\n"); return false; }
+    if(v.phys == VK_NULL_HANDLE) return toGdi("no graphics+present queue");
   }
   { VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(v.phys, &p);
     std::fprintf(stderr, "[video] Vulkan device: %s\n", p.deviceName); }
@@ -420,7 +444,8 @@ auto initVulkan(Vk& v) -> bool {
     dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = 1; dci.ppEnabledExtensionNames = devExt;
     if(vkCreateDevice(v.phys, &dci, nullptr, &v.dev) != VK_SUCCESS) {
-      std::fprintf(stderr, "[video] vkCreateDevice failed\n"); return false;
+      v.dev = VK_NULL_HANDLE;
+      return toGdi("vkCreateDevice failed");
     }
 #ifdef KESTREL_PRDP
     volkLoadDevice(v.dev);   // populate device-level entry points (swapchain etc.)
@@ -576,10 +601,17 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
 
   // El present dijo que la cadena ya no vale (redimension a mitad de frame): se rehace aqui,
   // fuera del candado de cola y con el frame ya terminado.
-  if(v.needRecreate) { v.needRecreate = false; recreateSwapchain(v); }
+  if(v.needRecreate) { v.needRecreate = false; if(!v.gdi) recreateSwapchain(v); }
 }
 
 auto destroyVulkan(Vk& v) -> void {
+  if(v.gdi && !v.dev) {   // nunca hubo dispositivo: no tocar mas vk* de las justas
+    if(v.surface && v.instance) vkDestroySurfaceKHR(v.instance, v.surface, nullptr);
+    if(v.instance && !v.shared) vkDestroyInstance(v.instance, nullptr);
+    if(v.win) glfwDestroyWindow(v.win);
+    glfwTerminate();
+    return;
+  }
   if(v.dev) vkDeviceWaitIdle(v.dev);
   if(v.fence) vkDestroyFence(v.dev, v.fence, nullptr);
   if(v.semRender) vkDestroySemaphore(v.dev, v.semRender, nullptr);
@@ -596,6 +628,54 @@ auto destroyVulkan(Vk& v) -> void {
   if(v.instance && !v.shared) vkDestroyInstance(v.instance, nullptr);
   if(v.win) glfwDestroyWindow(v.win);
   glfwTerminate();
+}
+
+// Presentacion GDI (sin Vulkan): mismo rectangulo util que el blit de Vulkan (relacion de
+// aspecto de rt::aspectW/H, centrado, bandas negras), escalado nearest por StretchDIBits.
+// Los filtros de imagen no aplican: son pases compute de Vulkan.
+auto presentGdi(Vk& v, const u32* px, u32 w, u32 h) -> void {
+#ifdef _WIN32
+  if(!w || !h) return;
+  HWND hw = glfwGetWin32Window(v.win);
+  RECT rc; GetClientRect(hw, &rc);
+  const u32 ew = (u32)(rc.right - rc.left), eh = (u32)(rc.bottom - rc.top);
+  if(!ew || !eh) return;
+  const int aw = rt::aspectW.load(std::memory_order_relaxed);
+  const int ah = rt::aspectH.load(std::memory_order_relaxed);
+  u32 dw = ew, dh = eh;
+  if(aw > 0 && ah > 0) {
+    dh = (u32)((u64)ew * (u32)ah / (u32)aw);
+    if(dh > eh) { dh = eh; dw = (u32)((u64)eh * (u32)aw / (u32)ah); }
+  }
+  const int dx = (int)(ew - dw) / 2, dy = (int)(eh - dh) / 2;
+  // El cuadro es R8G8B8A8 en memoria; un DIB de 32 bits quiere B,G,R,X.
+  static std::vector<u32> bgra;
+  bgra.resize((usize)w * h);
+  for(usize i = 0; i < bgra.size(); i++) {
+    const u32 c = px[i];
+    bgra[i] = (c & 0xff00ff00u) | ((c & 0xffu) << 16) | ((c >> 16) & 0xffu);
+  }
+  BITMAPINFO bi = {};
+  bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+  bi.bmiHeader.biWidth = (LONG)w;
+  bi.bmiHeader.biHeight = -(LONG)h;   // de arriba abajo
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  HDC dc = GetDC(hw);
+  if(dw != ew || dh != eh) {
+    HBRUSH k = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    RECT r1 = {0, 0, (LONG)ew, (LONG)dy}, r2 = {0, (LONG)(dy + dh), (LONG)ew, (LONG)eh};
+    RECT r3 = {0, 0, (LONG)dx, (LONG)eh}, r4 = {(LONG)(dx + dw), 0, (LONG)ew, (LONG)eh};
+    FillRect(dc, &r1, k); FillRect(dc, &r2, k); FillRect(dc, &r3, k); FillRect(dc, &r4, k);
+  }
+  SetStretchBltMode(dc, COLORONCOLOR);
+  StretchDIBits(dc, dx, dy, (int)dw, (int)dh, 0, 0, (int)w, (int)h, bgra.data(), &bi,
+                DIB_RGB_COLORS, SRCCOPY);
+  ReleaseDC(hw, dc);
+#else
+  (void)v; (void)px; (void)w; (void)h;
+#endif
 }
 
 // Write a 24-bit BMP from an R8G8B8A8 frame — headless verification of the pixels.
@@ -998,8 +1078,9 @@ auto Presenter::open() -> bool {
     vk->needRecreate = true;   // la barra ha encogido el area de cliente
   }
 #endif
-  std::fprintf(stderr, "[video] Vulkan presenter up (%ux%u -> %ux%u)\n",
-               vk->srcW, vk->srcH, vk->extent.width, vk->extent.height);
+  if(vk->gdi) std::fprintf(stderr, "[video] presentador GDI\n");
+  else std::fprintf(stderr, "[video] Vulkan presenter up (%ux%u -> %ux%u)\n",
+                    vk->srcW, vk->srcH, vk->extent.width, vk->extent.height);
   return true;
 }
 
@@ -1038,7 +1119,7 @@ auto Presenter::pumpFrame() -> bool {
     }
     v.needRecreate = true;
   }
-  if(v.needRecreate) { v.needRecreate = false; recreateSwapchain(v); }
+  if(v.needRecreate) { v.needRecreate = false; if(!v.gdi) recreateSwapchain(v); }
 
   // --- teclas de estado guardado ---------------------------------------------
   // F5 guarda, F7 carga, F6 pasa a la siguiente ranura (0..9). Por FLANCO: glfwGetKey
@@ -1300,7 +1381,8 @@ auto Presenter::pumpFrame() -> bool {
   // (candado de cola compartido con parallel-rdp), no en construir el cuadro ni en el barrido.
   static const bool noPresent = []{ const char* e = std::getenv("KESTREL_NOPRESENT"); return e && e[0] == '1'; }();
   auto tPres = std::chrono::steady_clock::now();
-  if(v.presentable && !noPresent) presentFrame(v, frame.data(), width, height);
+  if(v.gdi && !noPresent) presentGdi(v, frame.data(), width, height);
+  else if(v.presentable && !noPresent) presentFrame(v, frame.data(), width, height);
 
   // Cuantos cuadros llegan DE VERDAD a la pantalla y cuanto cuesta cada present. El invitado
   // puede ir al 100% y verse a tirones igual si el bucle de ventana no sigue el ritmo, asi

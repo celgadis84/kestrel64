@@ -86,6 +86,7 @@ import gamecard as CARD  # noqa: E402
 import tele as TELE  # noqa: E402
 
 ROM_EXT = (".z64", ".n64", ".v64", ".rom", ".zip", ".gz")
+SCAN_DEPTH = 8   # profundidad maxima del escaneo recursivo de la carpeta de ROMs
 ROM_EXT_CRUDA = (".z64", ".n64", ".v64", ".rom")   # lo que puede haber DENTRO de un contenedor
 
 # Cliente de telemetria, uno y reutilizado: abrir un socket por peticion contra un
@@ -167,9 +168,9 @@ def builds():
             out.append(dict(id=pid, label=label, desc=desc, exe=exe, dir=d,
                             mtime=int(os.path.getmtime(exe))))
     if not out:
-        # Instalacion: los .exe al lado del lanzador. El paquete trae kestrel64.exe (el
-        # recomendado, con parallel-RDP) y kestrel64-soft.exe (el mismo emulador con el
-        # rasterizador por software), asi que aqui SI hay eleccion que ofrecer.
+        # Instalacion: los .exe al lado del lanzador. Desde 2026-10-05 el paquete trae solo
+        # kestrel64.exe (los dos rasterizadores dentro); kestrel64-soft.exe se sigue mirando
+        # por si queda de una instalacion vieja.
         DESC = {
             "soft": "Rasterizador propio en CPU. Determinista, no necesita GPU. Es el oraculo.",
             "prdp": "RDP a bajo nivel sobre Vulkan, en la GPU. Mas rapido y mas exacto en subpixel.",
@@ -189,10 +190,13 @@ def builds():
                 tag = ""
             if tag.startswith("prdp"):
                 pid, label = "prdp", "paraLLEl-RDP"
-            if any(x["id"] == pid for x in out):
-                continue
-            out.append(dict(id=pid, label=label, dir=".", exe=exe,
-                            desc=DESC[pid], mtime=int(os.path.getmtime(exe))))
+            # Un .exe con parallel-RDP lleva tambien SoftRDP (KESTREL_PRDP=0 lo elige), y desde
+            # 2026-10-05 el paquete trae solo ese: los dos plugins salen del mismo fichero.
+            for p2, l2 in ((pid, label),) + ((("soft", "SoftRDP"),) if pid == "prdp" else ()):
+                if any(x["id"] == p2 for x in out):
+                    continue
+                out.append(dict(id=p2, label=l2, dir=".", exe=exe,
+                                desc=DESC[p2], mtime=int(os.path.getmtime(exe))))
     return out
 
 
@@ -677,14 +681,32 @@ class H(BaseHTTPRequestHandler):
     def _roms(self, d):
         if not d or not os.path.isdir(d):
             return dict(error="carpeta no valida", roms=[])
+        # Recursivo, como la biblioteca del emulador (src/ui/library_win32.cpp): sin seguir
+        # enlaces ni uniones (bucles), sin carpetas ocultas/de sistema y con tope de profundidad.
         out = []
-        for e in sorted(os.scandir(d), key=lambda x: x.name.lower()):
-            if not e.is_file() or not e.name.lower().endswith(ROM_EXT):
-                continue
-            h = rom_header(e.path)
-            out.append(dict(file=e.name, path=e.path, header=h,
-                            title=(h["name"] if h else os.path.splitext(e.name)[0]),
-                            id=os.path.splitext(e.name)[0]))
+
+        def walk(dd, depth):
+            try:
+                ents = sorted(os.scandir(dd), key=lambda x: x.name.lower())
+            except OSError:
+                return
+            for e in ents:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        attrs = getattr(e.stat(follow_symlinks=False), "st_file_attributes", 0)
+                        if depth < SCAN_DEPTH and not e.name.startswith(".") and not (attrs & 0x406):
+                            walk(e.path, depth + 1)   # 0x400 reparse, 0x4 sistema, 0x2 oculta
+                        continue
+                    if not e.is_file() or not e.name.lower().endswith(ROM_EXT):
+                        continue
+                except OSError:
+                    continue
+                h = rom_header(e.path)
+                out.append(dict(file=e.name, path=e.path, header=h,
+                                title=(h["name"] if h else os.path.splitext(e.name)[0]),
+                                id=os.path.splitext(e.name)[0]))
+        walk(d, 0)
+        out.sort(key=lambda r: (r["title"].lower(), r["file"].lower()))
         return dict(dir=d, roms=out)
 
     def _boxart(self, q):

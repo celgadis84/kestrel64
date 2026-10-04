@@ -32,7 +32,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 | 6 | ~~**16:9 y escalado interno**~~ **CERRADO 2026-09-04** / ~~**texturas HD**~~ **CERRADO 2026-10-04** | `KESTREL_UPSCALE=1|2|4|8` pasa las banderas de escalado interno de parallel-rdp (`COMMAND_PROCESSOR_FLAG_UPSCALING_*`) al construir el `CommandProcessor`: SM64 pasa de 640x240 a 5120x1920 de scanout, y lo que el juego lee de su propia RDRAM sigue siendo 1x (los efectos que releen el framebuffer no se enteran). `KESTREL_SSAA=1` resuelve ese dominio ampliado promediando las NxN muestras al volcarlo a 1x. `KESTREL_ASPECT=4:3|16:9|estirar` (en caliente, `rt::aspectW/H`) decide el rectangulo destino en la ventana; 16:9 no ensancha el campo de vision -- eso solo lo hace el juego -- sino que estira la imagen anamorfica de los que traen modo panoramico propio. Con los valores de fabrica las banderas son 0 y los md5 no se mueven. Detalle en `docs/ESCALADO-Y-ASPECTO.md`. **2026-10-04 (h)**: filtros de imagen del presentador `KESTREL_FILTER` (FSR 1.0, Anime4K, bilineal nitido, CRT, cel-shading, oleo), en caliente; ver `docs/FILTROS-IMAGEN.md`. **2026-10-04 (i)**: texturas HD -- packs Rice/GLideN64 tal cual (`KESTREL_TEXPACK`), volcado con nombre de pack (`KESTREL_TEXDUMP`) y realce por algoritmo de las originales (`KESTREL_TEXFX=scale4x|cel|poster`), solo SoftRDP; ver `docs/TEXTURAS-HD.md`. Queda: texturas HD con parallel-RDP (pide meter sustitutos en sus shaders) y contornos de cel por profundidad (z-buffer del invitado). |
 | 7 | **Microcódigo gráfico HLE** | Todo es LLE (RSP real ejecutando F3DEX). Correcto y preciso, pero no hay ruta HLE, que es lo que da velocidad en máquinas flojas y lo que permite arreglar juegos con microcódigo raro. Decisión consciente; anotado por completitud. |
 | 8 | **Multiplataforma** | Sólo Windows: `menu_win32.cpp`, `winsock2`, `waveOut`. GLFW y el núcleo son portables; el ruido está en UI, red y audio. |
-| 15 | **GPU-RDP propio (quitar parallel-RDP)** | Hoy el RDP rapido es parallel-RDP (`third_party/`, ~59 k lineas con Granite, MIT, parcheado: orden de bytes, banco SPIR-V). Cada arreglo de semantica se hace dos veces o diverge (baselines krom/sm64 por backend), y no admite texturas HD ni telemetria por primitiva. Plan: rasterizador propio en **Vulkan compute** (ya es la API del presentador y de `postfx`; macOS por MoltenVK; D3D12/Metal solo duplicarian, OpenGL no tiene compute en macOS), semantica = SoftRDP bit a bit, misma interfaz que `vrdp.hpp`, `KESTREL_GPURDP=1`. Fases 0-7 (fill -> tris -> TMEM -> combiner/blender -> copy/8 bit -> coherencia/rendimiento -> escalado+HD -> default y retirar parallel-RDP). Detalle en `docs/GPU-RDP.md`. |
+| 15 | **GPU-RDP propio (quitar parallel-RDP)** | Hoy el RDP rapido es parallel-RDP (`third_party/`, ~59 k lineas con Granite, MIT, parcheado: orden de bytes, banco SPIR-V). Cada arreglo de semantica se hace dos veces o diverge (baselines krom/sm64 por backend), y no admite texturas HD ni telemetria por primitiva. Plan: rasterizador propio en **Vulkan compute** (ya es la API del presentador y de `postfx`; macOS por MoltenVK; D3D12/Metal solo duplicarian, OpenGL no tiene compute en macOS), semantica = SoftRDP bit a bit, misma interfaz que `vrdp.hpp`, `KESTREL_GPURDP=1`. Fases 0-7 (fill -> tris -> TMEM -> combiner/blender -> copy/8 bit -> coherencia/rendimiento -> escalado+HD -> default y retirar parallel-RDP). Detalle en `docs/GPU-RDP.md`. Paso previo HECHO 2026-10-05: un solo exe con los dos rasterizadores elegibles en marcha y presentacion GDI sin Vulkan (`docs/distribucion.md`), que es donde se enchufara el tercero. |
 
 ### P2 — nicho
 
@@ -127,7 +127,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
   cuela como negro y arrastra el combinador. Confirma lo que ya dijo el usuario ("el softrdp
   siempre salio mal, no es de hoy") y ahora con un caso reproducible en lote y un oraculo al
   lado. NO se persigue por ahora: la direccion es parallel-RDP, y el exe principal de `dist/`
-  ya es el de PRDP (`kestrel64-soft.exe` es el respaldo para maquinas sin GPU).
+  ya es el de PRDP (SoftRDP sigue dentro del mismo exe: Video > Rasterizador).
 
 - **El stick del mando no tenia PUERTA OCTOGONAL: la diagonal entregaba un valor que la
   consola no puede producir** — **ARREGLADO 2026-09-09** (`padOctagon`, `src/video/present.cpp`).
@@ -168,7 +168,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
   Consecuencias, por orden de importancia:
   1. **Un juego que cuenta cuadros se desincroniza.** Es la via por la que la demo de
-     apertura de DK64 se rompe con el exe de SoftRDP (`kestrel64-soft.exe`).
+     apertura de DK64 se rompe con SoftRDP (`KESTREL_PRDP=0`).
   2. **La velocidad del invitado depende del anfitrion.** Un PC lento no solo va lento: el
      JUEGO va a otra velocidad. Eso el hardware no lo hace.
   3. **`bench` sobre enhebrado+SoftRDP mide de menos.** Fija campos de video, no cuadros; si

@@ -56,10 +56,12 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
   (`--gates` para pasar antes `gate_all` + `gate_prdp`, `--quick` para saltarse `build/` y
   `build-prdp/` e iterar solo sobre los estaticos, `NOISS=1` para omitir el instalador). Deja
   `dist/VERSION.txt` con version, commit y md5 para que un zip suelto diga de donde salio.
-- El paquete lleva **dos** ejecutables porque el plugin grafico se elige al compilar:
-  `kestrel64.exe` (`build-prdp-static`, parallel-RDP, el recomendado) y `kestrel64-soft.exe`
-  (`build-static`, SoftRDP, para maquinas sin Vulkan y como rasterizador de referencia).
-  Cada uno con su nota `*.build` al lado, que es como el lanzador sabe cual es cual.
+- El paquete lleva **un** ejecutable (desde 2026-10-05): `kestrel64.exe` (`build-prdp-static`)
+  trae parallel-RDP y SoftRDP, elegibles en Video > Rasterizador (`KESTREL_PRDP=0/1`), y sin
+  Vulkan cae a SoftRDP con la ventana pintada por GDI (`KESTREL_FORCEGDI=1` lo fuerza).
+  `build-static` sigue existiendo para las puertas pero no viaja. Ver `docs/distribucion.md`.
+- La carpeta de ROMs se recorre **recursiva** (biblioteca del exe y lanzador), tope 8 niveles,
+  sin seguir enlaces/uniones ni carpetas ocultas o de sistema.
 - Las puertas por si solas recompilan `build/` y `build-prdp/` y **nunca**
   `build-prdp-static/`, que es el exe que viajan lanzador e instalador: por eso existe
   `release.sh`. Sus piezas sueltas siguen ahi si hace falta una a mano: `scripts/pack.sh`

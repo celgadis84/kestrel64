@@ -396,13 +396,25 @@ auto dirExists(const std::string& d) -> bool {
   return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-auto scanDir(const std::string& dir, std::vector<Entry>& out) -> void {
-  out.clear();
+// Recorrido RECURSIVO de la carpeta de ROMs: las colecciones suelen ir repartidas en
+// subcarpetas (por region, por letra...). No se siguen enlaces ni uniones (un junction que
+// apunte hacia arriba seria un bucle infinito), se saltan las carpetas ocultas o de sistema
+// y hay tope de profundidad, por si alguien apunta la biblioteca a la raiz de un disco.
+static constexpr int kScanDepth = 8;
+
+static auto scanRec(const std::string& dir, int depth, std::vector<Entry>& out) -> void {
   WIN32_FIND_DATAA fd;
   HANDLE hf = FindFirstFileA((dir + "\\*").c_str(), &fd);
   if(hf == INVALID_HANDLE_VALUE) return;
   do {
-    if(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+    if(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+      std::string n = fd.cFileName;
+      if(n == "." || n == ".." || depth >= kScanDepth) continue;
+      if(fd.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_HIDDEN |
+                                FILE_ATTRIBUTE_SYSTEM)) continue;
+      scanRec(dir + "\\" + n, depth + 1, out);
+      continue;
+    }
     Entry e;
     e.file = fd.cFileName;
     std::string ext = extOf(e.file);
@@ -420,6 +432,11 @@ auto scanDir(const std::string& dir, std::vector<Entry>& out) -> void {
     out.push_back(std::move(e));
   } while(FindNextFileA(hf, &fd));
   FindClose(hf);
+}
+
+auto scanDir(const std::string& dir, std::vector<Entry>& out) -> void {
+  out.clear();
+  scanRec(dir, 0, out);
   std::sort(out.begin(), out.end(), [](const Entry& a, const Entry& b) {
     if(a.title != b.title) return a.title < b.title;
     return a.file < b.file;

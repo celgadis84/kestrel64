@@ -2578,7 +2578,10 @@ auto Memory::aiTick(u64 retiredNow) -> void {
 // tambien rdpRunJob(), que es el unico camino en modo lockstep (ahi no hay hilo).
 // std::call_once y no un bool: en modo threaded los dos sitios pueden coincidir.
 auto Memory::vrdpBringUp() -> void {
-  std::call_once(vrdpOnce, [this]{ vrdp::init(rdram.data(), (u32)rdram.size()); });
+  std::call_once(vrdpOnce, [this]{
+    vrdp::init(rdram.data(), (u32)rdram.size());
+    vrdpTried.store(true, std::memory_order_release);
+  });
 }
 
 // Espera a que el hilo del RDP haya levantado parallel-rdp. El presentador comparte ese
@@ -2586,12 +2589,17 @@ auto Memory::vrdpBringUp() -> void {
 // su estado al hilo que lo crea, asi que traerlo arriba fuera del hilo del RDP deja al worker
 // sin sus lookups por hilo y el RDP acaba sin completar trabajos (el juego se queda esperando
 // MESG_DP_COMPLETE para siempre). De ahi que esto solo espere.
+auto Memory::vrdpFailed() const -> bool {
+  return vrdpTried.load(std::memory_order_acquire) && !vrdp::active();
+}
+
 auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
   if(!vrdp::built) return false;                      // este .exe no lo lleva: nada que esperar
   const char* e = std::getenv("KESTREL_PRDP");
   if(e && e[0] == '0') return false;                  // SoftRDP forzado: nada que esperar
   for(u32 i = 0; i < timeoutMs; i++) {
     if(vrdp::active()) return true;
+    if(vrdpFailed()) return false;                    // intentado y caido: no esperar mas
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   return false;

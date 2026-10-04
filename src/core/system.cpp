@@ -59,8 +59,8 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   if(texpack::active() && vrdp::built) {
     const char* pe = std::getenv("KESTREL_PRDP");
     if(!pe || pe[0] != '0')
-      std::printf("[texpack] texturas HD/realce solo con SoftRDP: usar kestrel64-soft.exe "
-                  "o KESTREL_PRDP=0\n");
+      std::printf("[texpack] texturas HD/realce solo con SoftRDP: Video > Rasterizador "
+                  "> SoftRDP (KESTREL_PRDP=0)\n");
   }
   std::printf("[system] loaded \"%s\" (%s, %.2f MB, entry 0x%08x)\n",
               rom.header.name.c_str(),
@@ -447,8 +447,8 @@ auto System::runLoop() -> void {
   // hilos del RCP) y aqui solo se espera a que el hilo del RDP lo tenga listo.
   std::thread cpuThread([this] { run(); });
   // "Querer" parallel-RDP solo tiene sentido si este .exe lo lleva compilado. El paquete
-  // trae DOS ejecutables (kestrel64.exe con GPU, kestrel64-soft.exe sin ella): en el de
-  // SoftRDP, dar por bueno el default "GPU si" hacia esperar quince segundos a un backend
+  // traia DOS ejecutables (kestrel64.exe con GPU, kestrel64-soft.exe sin ella); en uno sin
+  // parallel-RDP compilado (build/, build-static/), dar por bueno el default "GPU si" hacia esperar quince segundos a un backend
   // que no existe y despues NO abrir la ventana -- el emulador inutil por doble clic.
   // Sin backend se va derecho a abrir la ventana, que es lo unico que se puede hacer.
   const char* pe = std::getenv("KESTREL_PRDP");
@@ -456,7 +456,10 @@ auto System::runLoop() -> void {
   bool prdpReady  = memory.vrdpWaitReady(15000);
   if(pe && pe[0] != '0' && !vrdp::built)
     std::printf("[video] este ejecutable no lleva parallel-RDP; se rasteriza con SoftRDP\n");
-  if(prdpWanted && !prdpReady)
+  // Si el backend se intento y cayo (sin Vulkan o sin GPU valida) el RDP sigue en SoftRDP y
+  // la ventana se abre con su propio presentador, que a su vez cae a GDI si no hay Vulkan.
+  // Solo un backend que sigue ARRANCANDO al vencer el plazo deja sin ventana.
+  if(prdpWanted && !prdpReady && !memory.vrdpFailed())
     std::printf("[video] parallel-rdp no arranco a tiempo; sin ventana\n");
   else if(!presenter.open())
     std::printf("[video] init failed; running headless\n");

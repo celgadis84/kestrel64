@@ -34,19 +34,11 @@ cp "$EXE" "$OUT/"
 cp LICENSE "$OUT/LICENSE.txt"
 cp THIRD-PARTY.txt "$OUT/"
 
-# Segundo ejecutable: el MISMO emulador compilado con el rasterizador por software. El que
-# se distribuye lleva parallel-RDP y cae solo a SoftRDP si Vulkan no arranca, pero esa caida
-# es en caliente: quien tenga una GPU vieja, un driver roto o una maquina virtual paga el
-# intento en cada arranque y no tiene forma de pedir el oraculo determinista del proyecto.
-# Con los dos al lado, el rasterizador pasa a ser una eleccion de verdad en el lanzador.
-SOFT="${SOFTBUILD:-build-static}"
-if [ -x "$SOFT/kestrel64.exe" ]; then
-  cp "$SOFT/kestrel64.exe" "$OUT/kestrel64-soft.exe"
-  echo soft > "$OUT/kestrel64-soft.build"
-  echo "  + kestrel64-soft.exe (SoftRDP)"
-else
-  SOFT=""
-fi
+# Un solo ejecutable (desde 2026-10-05): kestrel64.exe lleva parallel-RDP y SoftRDP, el
+# rasterizador se elige en Video > Rasterizador (se relanza solo), y en una maquina sin
+# Vulkan cae a SoftRDP con la ventana pintada por GDI. El kestrel64-soft.exe de antes sobra;
+# se borra por si la carpeta viene de un paquete viejo.
+rm -f "$OUT/kestrel64-soft.exe" "$OUT/kestrel64-soft.build"
 
 # Que backend grafico lleva dentro el .exe se decidio con cmake y desde fuera no se ve.
 # El lanzador lo necesita para saber si tiene sentido pasarle KESTREL_PRDP, asi que se
@@ -74,7 +66,7 @@ fi
 # dependencia del toolchain que el usuario final no tiene: se copia. Lo que cuelga de
 # C:\WINDOWS (kernel32, ws2_32, winmm y sobre todo vulkan-1.dll, que instala el driver de
 # la GPU) NO se copia: llevarse la vulkan-1.dll de esta maquina romperia otras.
-for e in "$EXE" ${SOFT:+"$SOFT/kestrel64.exe"}; do
+for e in "$EXE"; do
   ldd "$e" | while read -r name arrow path rest; do
     case "$path" in
       /c/WINDOWS/*|/C/WINDOWS/*|"") continue ;;
@@ -115,17 +107,16 @@ Lanzado desde una consola el emulador arranca EN PAUSA a proposito: es el modo d
 depuracion, para poder enganchar el depurador antes de la primera instruccion.
 Con --run arranca corriendo.
 
-Requisitos: Windows de 64 bits y una GPU con Vulkan. vulkan-1.dll la instala el
-driver de la tarjeta grafica y NO se distribuye aqui: si Windows dice que falta,
-lo que hay que actualizar es el driver de video.
+Requisitos: Windows de 64 bits. Con una GPU con Vulkan (cualquiera de la ultima
+decada, driver al dia) se usa paraLLEl-RDP en la GPU; sin ella el emulador sigue
+funcionando con el rasterizador por software y la ventana pintada por GDI.
 
 Las DLL de esta carpeta son parte del programa: deben quedarse junto al .exe.
 (Si no hay ninguna, este build va enlazado estatico y el .exe se basta solo.)
 
-kestrel64-soft.exe es el MISMO emulador con el rasterizador por software (SoftRDP):
-no necesita GPU ni Vulkan y es el rasterizador de referencia del proyecto, a cambio de
-ir bastante mas lento. El .exe normal usa parallel-RDP (GPU) y es el recomendado; este
-es la salida para una maquina sin Vulkan o para comparar. El lanzador deja elegir.
+El rasterizador (plugin grafico) se elige dentro del emulador, menu Opciones >
+Video > Rasterizador: Automatico (GPU si hay Vulkan), SoftRDP (en CPU, el de
+referencia, determinista) o paraLLEl-RDP (GPU). Al cambiarlo se relanza solo.
 
 kestrel64-gui.exe es el lanzador grafico y la forma normal de usar esto: biblioteca
 de ROM con caratulas, overclock por componente, mando, telemetria y depurador. No
@@ -149,7 +140,7 @@ VER=$(sed -n 's/.*kVersion = "\([^"]*\)".*/\1/p' src/core/system.hpp | head -1)
   echo "fecha:   $(date '+%Y-%m-%d %H:%M:%S')"
   echo "commit:  $(git rev-parse --short HEAD 2>/dev/null || echo '?')$(git diff --quiet 2>/dev/null || echo ' (arbol sucio)')"
   echo "backend: $(cat "$OUT/kestrel64.build" 2>/dev/null || echo '?')"
-  for f in kestrel64.exe kestrel64-soft.exe kestrel64-gui.exe; do
+  for f in kestrel64.exe kestrel64-gui.exe; do
     [ -f "$OUT/$f" ] && echo "md5:     $(cd "$OUT" && md5sum "$f")"
   done
 } > "$OUT/VERSION.txt"

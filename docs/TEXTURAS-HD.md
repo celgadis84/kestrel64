@@ -12,8 +12,8 @@ Canal de sustitucion de texturas del SoftRDP (`src/rdp/texpack.{hpp,cpp}` + ganc
 Las tres van tambien en el lanzador y el menu (grupo de video). Apagadas no hacen nada:
 cada gancho mira `texpack::active()` y sale; puertas y md5 no se mueven.
 
-**Solo SoftRDP** (`kestrel64-soft.exe`, o `KESTREL_PRDP=0` en un exe con GPU que la
-ignore). parallel-RDP muestrea TMEM dentro de sus shaders con el tamano del original y no
+**Solo SoftRDP** (Video > Rasterizador = SoftRDP, o `KESTREL_PRDP=0`; con el rasterizador
+en automatico, pedir texturas HD o realce elige SoftRDP solo). parallel-RDP muestrea TMEM dentro de sus shaders con el tamano del original y no
 tiene por donde meter una textura de otro tamano; si se piden con el exe de GPU sale un
 aviso `[texpack]` y no pasa nada.
 
