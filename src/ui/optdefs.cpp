@@ -43,6 +43,16 @@ static const Choice kCh_aspect[] = {
   {"16:9", "16:9 - estirar la imagen anamorfica"},
   {"estirar", "Llenar la ventana (deforma)"},
 };
+static const Choice kCh_filter[] = {
+  {"nearest", "Pixel nitido - vecino mas cercano (fiel)"},
+  {"bilinear", "Bilineal - suaviza al escalar"},
+  {"sharp", "Bilineal nitido - pixel cuadrado sin dentado"},
+  {"fsr", "AMD FSR 1.0 - escalado con deteccion de bordes"},
+  {"a4k", "Anime4K - red neuronal x2 + FSR (pide GPU)"},
+  {"crt", "Tubo CRT - lineas de barrido y rejilla"},
+  {"cel", "Dibujo animado - bandas de tono y contornos"},
+  {"oleo", "Pintura al oleo (Kuwahara)"},
+};
 static const Choice kCh_upscale[] = {
   {"1", "1x - resolucion nativa"},
   {"2", "2x"},
@@ -127,6 +137,7 @@ static const Option kOpt_video[] = {
   {"winsize", "KESTREL_WINSIZE", "Tamano exacto WxH", OType::Text, "", "Vacio = usar la escala. Ejemplo: 1600x900. Manda sobre la escala.", false, false, false, 0, 0, 0, nullptr, 0, true},
   {"fullscreen", "KESTREL_FULLSCREEN", "Pantalla completa", OType::Bool, "0", "Usa el modo actual del monitor primario; no cambia la resolucion del escritorio.", false, false, true, 0, 0, 0, nullptr, 0, true},
   {"aspect", "KESTREL_ASPECT", "Relacion de aspecto", OType::Choice, "4:3", "El N64 saca SIEMPRE 4:3. 16:9 no ensancha el campo de vision -- eso solo lo puede hacer el juego -- sino que estira la imagen que ya generan aplastada los juegos con modo panoramico propio (Perfect Dark, GoldenEye, Turok, Rush 2).", false, false, false, 0, 0, 0, kCh_aspect, 3, true},
+  {"filter", "KESTREL_FILTER", "Filtro de imagen", OType::Choice, "nearest", "Solo cambia lo que se ve en la ventana, en la GPU, despues de componer el cuadro: el juego, los volcados y las capturas siguen viendo la imagen original. Se cambia en caliente. FSR y Anime4K inventan detalle entre pixeles; Anime4K esta entrenada con dibujos y en 3D de N64 da bordes limpios y texturas algo planas. Dibujo animado y oleo son esteticas de imagen, no de iluminacion: miran el cuadro, no la escena. Requiere Vulkan con RGBA16F en compute (cualquier GPU de la ultima decada); si no, vuelve sola a pixel nitido.", false, false, false, 0, 0, 0, kCh_filter, 8, true},
   {"upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", OType::Choice, "1", "Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con paraLLEl-RDP; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen.", false, false, false, 0, 0, 0, kCh_upscale, 4, false},
   {"ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", OType::Bool, "0", "Con escalado interno, al devolver la imagen ampliada al framebuffer del juego promedia las NxN muestras en vez de coger una. Antialiasing gratis en los efectos que releen el framebuffer, a cambio de una pasada mas.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"hud", "KESTREL_HUD_OFF", "HUD de telemetria sobre la imagen", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, true},

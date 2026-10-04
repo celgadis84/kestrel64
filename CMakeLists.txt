@@ -48,6 +48,7 @@ add_executable(kestrel64
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/video/present.cpp
+  src/video/postfx.cpp
   src/video/vifilter.cpp
   src/rdp/rdp.cpp
   src/rsp/rsp.cpp

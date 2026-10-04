@@ -107,6 +107,10 @@ auto applyLive(const Profile& p, bool windowToo) -> void {
     rt::aspectW.store(aw);
     rt::aspectH.store(ah);
   }
+  {
+    int f = rt::parseVideoFilter(p.get("filter").c_str());
+    rt::videoFilter.store(f < 0 ? 0 : f);
+  }
   if(windowToo) {
     int w = 0, h = 0;
     profileWindowSize(p, w, h);

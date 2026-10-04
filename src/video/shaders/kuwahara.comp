@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+// Pintura al oleo: filtro de Kuwahara (1976), escrito para kestrel.
+//
+// Alrededor del pixel se miran cuatro cuadrantes que se solapan en el centro; se queda la
+// MEDIA del cuadrante de menor varianza. En zonas planas aplana (pinceladas), y en un borde
+// siempre hay un cuadrante entero a un lado, asi que el borde queda nitido en vez de
+// emborronarse como con un desenfoque.
+//
+//   t0 = imagen ya escalada a la salida; las muestras van a pasos de UN texel del invitado
+//        (pc.srcSize), para que el tamano de la pincelada no dependa de la ventana
+//   pc.param.x = radio en texeles del invitado (1..3, por defecto 2)
+
+void main() {
+  ivec2 p;
+  if(!outPixel(p)) return;
+  vec2 uv = outUv(p);
+  int r = int(clamp(pc.param.x, 1.0, 3.0));
+  vec2 st = pc.srcSize.zw;
+
+  vec3 mean[4];
+  vec3 sq[4];
+  for(int k = 0; k < 4; k++) { mean[k] = vec3(0.0); sq[k] = vec3(0.0); }
+  for(int j = -r; j <= r; j++) {
+    for(int i = -r; i <= r; i++) {
+      vec3 c = texture(t0, uv + vec2(i, j) * st).rgb;
+      vec3 c2 = c * c;
+      // cuadrantes: 0 = arriba-izq, 1 = arriba-der, 2 = abajo-izq, 3 = abajo-der
+      if(i <= 0 && j <= 0) { mean[0] += c; sq[0] += c2; }
+      if(i >= 0 && j <= 0) { mean[1] += c; sq[1] += c2; }
+      if(i <= 0 && j >= 0) { mean[2] += c; sq[2] += c2; }
+      if(i >= 0 && j >= 0) { mean[3] += c; sq[3] += c2; }
+    }
+  }
+  float n = float((r + 1) * (r + 1));
+  float best = 1e9;
+  vec3 outC = vec3(0.0);
+  for(int k = 0; k < 4; k++) {
+    vec3 m = mean[k] / n;
+    vec3 v = abs(sq[k] / n - m * m);
+    float s = v.r + v.g + v.b;
+    if(s < best) { best = s; outC = m; }
+  }
+  imageStore(outImg, p, vec4(outC, 1.0));
+}

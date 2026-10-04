@@ -9845,6 +9845,23 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 (h) -- Filtros de imagen del presentador: FSR, Anime4K, CRT, cel, oleo (GAPS #6)
+
+- `KESTREL_FILTER=nearest|bilinear|sharp|fsr|a4k|crt|cel|oleo`, en caliente
+  (`rt::videoFilter`, menu y lanzador). Pases compute de Vulkan sobre el cuadro ya
+  compuesto, antes del swapchain (`src/video/postfx.{hpp,cpp}`); salida RGBA16F del tamano
+  del rectangulo util, copiada 1:1. Cualquier fallo vuelve al blit nearest.
+- FSR 1.0 (EASU+RCAS, AMD, MIT) portado; Anime4K CNN x2 M (bloc97, MIT) traducido desde el
+  formato mpv por `tools/gen_present_shaders.py`; sharp/CRT/cel/Kuwahara propios. SPIR-V
+  embebido en `src/video/postfx_spv.inc`. Atribucion en `THIRD-PARTY.txt` (6, 7).
+- Cel = Kuwahara r=1 + bandas de luma con tono conservado + Sobel a 1,5 texeles del
+  invitado. Es estetica de imagen: la luz de N64 viene horneada en el color de vertice.
+- `KESTREL_FXDUMP=<f.ppm>` vuelca la salida del filtro (capturar la ventana Vulkan desde
+  fuera sale vacio). Las seis cadenas comprobadas en SM64 960x720.
+- Coste `a4k` (el mayor): presentador 0,93 -> 3,72 ms/cuadro en RX 570, invitado igual.
+- De fabrica `nearest` = blit de siempre. `release --quick` RC=0, `gate_quick` ALL OK (72 s).
+  Detalle en `docs/FILTROS-IMAGEN.md`.
+
 ## 2026-10-04 (e) -- LOAD_TLUT ignoraba TL: paleta leida de los texeles (SoftRDP)
 
 Informe de la sesion kestrel64-sdk (port nativo de PD): caras de guardias CI8 + TLUT de ~200

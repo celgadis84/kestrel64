@@ -1,0 +1,134 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+// AMD FidelityFX Super Resolution 1.0 -- EASU (Edge Adaptive Spatial Upsampling).
+// Adaptado de ffx_fsr1.h (FsrEasuF, version de 32 bits), Copyright (c) 2021 Advanced Micro
+// Devices, Inc., licencia MIT (texto en THIRD-PARTY.txt). Cambios: GLSL a pelo sin ffx_a.h,
+// constantes calculadas aqui a partir de los tamanos en vez de FsrEasuCon, recipr. exactos.
+//
+// Escalador lanczos-2 de 12 tomas cuyo nucleo se orienta y estira siguiendo el gradiente
+// local: bordes nitidos sin escalones y sin halos (el resultado se recorta al min/max de las
+// 4 tomas vecinas).
+
+vec4 easuR(vec2 p) { return textureGather(t0, p, 0); }
+vec4 easuG(vec2 p) { return textureGather(t0, p, 1); }
+vec4 easuB(vec2 p) { return textureGather(t0, p, 2); }
+
+void easuTap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len, float lob, float clp, vec3 c) {
+  vec2 v;
+  v.x = off.x * dir.x + off.y * dir.y;
+  v.y = off.x * (-dir.y) + off.y * dir.x;
+  v *= len;
+  float d2 = min(v.x * v.x + v.y * v.y, clp);
+  float wB = 2.0 / 5.0 * d2 - 1.0;
+  float wA = lob * d2 - 1.0;
+  wB *= wB;
+  wA *= wA;
+  wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);
+  float w = wB * wA;
+  aC += c * w;
+  aW += w;
+}
+
+void easuSet(inout vec2 dir, inout float len, vec2 pp, int quad,
+             float lA, float lB, float lC, float lD, float lE) {
+  float w = 0.0;
+  if(quad == 0) w = (1.0 - pp.x) * (1.0 - pp.y);
+  if(quad == 1) w = pp.x * (1.0 - pp.y);
+  if(quad == 2) w = (1.0 - pp.x) * pp.y;
+  if(quad == 3) w = pp.x * pp.y;
+  float dc = lD - lC;
+  float cb = lC - lB;
+  float lenX = max(abs(dc), abs(cb));
+  lenX = lenX > 0.0 ? 1.0 / lenX : 0.0;
+  float dirX = lD - lB;
+  dir.x += dirX * w;
+  lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
+  lenX *= lenX;
+  len += lenX * w;
+  float ec = lE - lC;
+  float ca = lC - lA;
+  float lenY = max(abs(ec), abs(ca));
+  lenY = lenY > 0.0 ? 1.0 / lenY : 0.0;
+  float dirY = lE - lA;
+  dir.y += dirY * w;
+  lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
+  lenY *= lenY;
+  len += lenY * w;
+}
+
+void main() {
+  ivec2 ip;
+  if(!outPixel(ip)) return;
+  // FsrEasuCon con viewport = imagen entera.
+  vec2 con0xy = pc.inSize.xy * pc.outSize.zw;
+  vec2 con0zw = 0.5 * con0xy - 0.5;
+  vec2 rcpIn = pc.inSize.zw;
+
+  vec2 pp = vec2(ip) * con0xy + con0zw;
+  vec2 fp = floor(pp);
+  pp -= fp;
+  vec2 p0 = fp * rcpIn + vec2(1.0, -1.0) * rcpIn;
+  vec2 p1 = p0 + vec2(-1.0, 2.0) * rcpIn;
+  vec2 p2 = p0 + vec2(1.0, 2.0) * rcpIn;
+  vec2 p3 = p0 + vec2(0.0, 4.0) * rcpIn;
+  vec4 bczzR = easuR(p0), bczzG = easuG(p0), bczzB = easuB(p0);
+  vec4 ijfeR = easuR(p1), ijfeG = easuG(p1), ijfeB = easuB(p1);
+  vec4 klhgR = easuR(p2), klhgG = easuG(p2), klhgB = easuB(p2);
+  vec4 zzonR = easuR(p3), zzonG = easuG(p3), zzonB = easuB(p3);
+
+  vec4 bczzL = bczzB * 0.5 + (bczzR * 0.5 + bczzG);
+  vec4 ijfeL = ijfeB * 0.5 + (ijfeR * 0.5 + ijfeG);
+  vec4 klhgL = klhgB * 0.5 + (klhgR * 0.5 + klhgG);
+  vec4 zzonL = zzonB * 0.5 + (zzonR * 0.5 + zzonG);
+  float bL = bczzL.x, cL = bczzL.y;
+  float iL = ijfeL.x, jL = ijfeL.y, fL = ijfeL.z, eL = ijfeL.w;
+  float kL = klhgL.x, lL = klhgL.y, hL = klhgL.z, gL = klhgL.w;
+  float oL = zzonL.z, nL = zzonL.w;
+
+  vec2 dir = vec2(0.0);
+  float len = 0.0;
+  easuSet(dir, len, pp, 0, bL, eL, fL, gL, jL);
+  easuSet(dir, len, pp, 1, cL, fL, gL, hL, kL);
+  easuSet(dir, len, pp, 2, fL, iL, jL, kL, nL);
+  easuSet(dir, len, pp, 3, gL, jL, kL, lL, oL);
+
+  vec2 dir2 = dir * dir;
+  float dirR = dir2.x + dir2.y;
+  bool zro = dirR < 1.0 / 32768.0;
+  dirR = zro ? 1.0 : inversesqrt(dirR);
+  dir.x = zro ? 1.0 : dir.x;
+  dir *= dirR;
+  len = len * 0.5;
+  len *= len;
+  float stretch = (dir.x * dir.x + dir.y * dir.y) / max(abs(dir.x), abs(dir.y));
+  vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+  float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+  float clp = 1.0 / lob;
+
+  vec3 f3 = vec3(ijfeR.z, ijfeG.z, ijfeB.z);
+  vec3 g3 = vec3(klhgR.w, klhgG.w, klhgB.w);
+  vec3 j3 = vec3(ijfeR.y, ijfeG.y, ijfeB.y);
+  vec3 k3 = vec3(klhgR.x, klhgG.x, klhgB.x);
+  vec3 min4 = min(min(f3, g3), min(j3, k3));
+  vec3 max4 = max(max(f3, g3), max(j3, k3));
+
+  vec3 aC = vec3(0.0);
+  float aW = 0.0;
+  easuTap(aC, aW, vec2( 0.0, -1.0) - pp, dir, len2, lob, clp, vec3(bczzR.x, bczzG.x, bczzB.x));
+  easuTap(aC, aW, vec2( 1.0, -1.0) - pp, dir, len2, lob, clp, vec3(bczzR.y, bczzG.y, bczzB.y));
+  easuTap(aC, aW, vec2(-1.0,  1.0) - pp, dir, len2, lob, clp, vec3(ijfeR.x, ijfeG.x, ijfeB.x));
+  easuTap(aC, aW, vec2( 0.0,  1.0) - pp, dir, len2, lob, clp, j3);
+  easuTap(aC, aW, vec2( 0.0,  0.0) - pp, dir, len2, lob, clp, f3);
+  easuTap(aC, aW, vec2(-1.0,  0.0) - pp, dir, len2, lob, clp, vec3(ijfeR.w, ijfeG.w, ijfeB.w));
+  easuTap(aC, aW, vec2( 1.0,  1.0) - pp, dir, len2, lob, clp, k3);
+  easuTap(aC, aW, vec2( 2.0,  1.0) - pp, dir, len2, lob, clp, vec3(klhgR.y, klhgG.y, klhgB.y));
+  easuTap(aC, aW, vec2( 2.0,  0.0) - pp, dir, len2, lob, clp, vec3(klhgR.z, klhgG.z, klhgB.z));
+  easuTap(aC, aW, vec2( 1.0,  0.0) - pp, dir, len2, lob, clp, g3);
+  easuTap(aC, aW, vec2( 1.0,  2.0) - pp, dir, len2, lob, clp, vec3(zzonR.z, zzonG.z, zzonB.z));
+  easuTap(aC, aW, vec2( 0.0,  2.0) - pp, dir, len2, lob, clp, vec3(zzonR.w, zzonG.w, zzonB.w));
+
+  vec3 pix = min(max4, max(min4, aC / aW));
+  imageStore(outImg, ip, vec4(pix, 1.0));
+}

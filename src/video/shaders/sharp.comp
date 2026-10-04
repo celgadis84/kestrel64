@@ -1,0 +1,19 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+
+// Bilineal nitido: cada texel del invitado se agranda a un bloque entero (vecino mas
+// cercano) y SOLO la franja de un pixel de salida en el borde entre dos texeles se mezcla.
+// Pixeles cuadrados sin el dentado del escalado no entero ni el emborronado del bilineal.
+void main() {
+  ivec2 p;
+  if(!outPixel(p)) return;
+  vec2 texel = outUv(p) * pc.inSize.xy;
+  vec2 scale = max(floor(pc.outSize.xy * pc.inSize.zw), vec2(1.0));
+  vec2 base = floor(texel);
+  vec2 d = fract(texel) - 0.5;
+  vec2 region = 0.5 - 0.5 / scale;
+  vec2 f = (d - clamp(d, -region, region)) * scale + 0.5;
+  vec3 c = texture(t0, (base + f) * pc.inSize.zw).rgb;
+  imageStore(outImg, p, vec4(c, 1.0));
+}

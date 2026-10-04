@@ -14,7 +14,9 @@
 
 #include "types.hpp"
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 
@@ -71,6 +73,23 @@ inline std::atomic<u32>    joyGen{0};
 inline std::atomic<int> aspectW{4};
 inline std::atomic<int> aspectH{3};
 
+// Filtro de presentacion (src/video/postfx.hpp): 0 = vecino mas cercano (de fabrica, el blit
+// de siempre), 1 bilineal, 2 bilineal nitido, 3 FSR, 4 CRT, 5 cel-shading, 6 oleo, 7 Anime4K.
+// Solo cambia lo que se ve en la ventana; volcados, md5 y capturas siguen siendo el cuadro
+// original del invitado.
+inline std::atomic<int> videoFilter{0};
+
+inline auto parseVideoFilter(const char* s) -> int {
+  static const char* kNames[8] = {"nearest", "bilinear", "sharp", "fsr",
+                                  "crt", "cel", "oleo", "a4k"};
+  if(!s || !*s) return -1;
+  if(s[0] >= '0' && s[0] <= '9') { int n = std::atoi(s); return n >= 0 && n < 8 ? n : -1; }
+  for(int i = 0; i < 8; i++) if(std::strcmp(s, kNames[i]) == 0) return i;
+  if(std::strcmp(s, "anime4k") == 0) return 7;
+  if(std::strcmp(s, "toon") == 0) return 5;
+  return -1;
+}
+
 // Peticion de cambio de ventana atendida por el presentador en su proximo cuadro. `winReq`
 // se pone a 1 el ultimo, cuando el resto de campos ya estan escritos.
 inline std::atomic<int> winW{0};
@@ -121,6 +140,12 @@ inline auto initFromEnv() -> void {
     if(*sep) { w = std::atoi(a); h = std::atoi(sep + 1); }
     if(w > 0 && h > 0) { aspectW.store(w); aspectH.store(h); }
     else               { aspectW.store(0); aspectH.store(0); }   // estirar
+  }
+  // KESTREL_FILTER: nearest | bilinear | sharp | fsr | crt | cel | oleo | a4k (o su numero)
+  if(const char* f = std::getenv("KESTREL_FILTER")) {
+    int n = parseVideoFilter(f);
+    if(n >= 0) videoFilter.store(n);
+    else std::fprintf(stderr, "[video] KESTREL_FILTER=%s no reconocido; vecino mas cercano\n", f);
   }
 }
 

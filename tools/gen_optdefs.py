@@ -15,6 +15,7 @@ import options as OPT
 # menu lo dice en vez de fingir que se aplico.
 LIVE = {
   "winscale", "winsize", "fullscreen", "hud", "audio", "volume", "throttle", "aspect",
+  "filter",
 }
 
 TYPE = {"bool": "Bool", "int": "Int", "float": "Float", "text": "Text",

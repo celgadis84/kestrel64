@@ -53,6 +53,11 @@ De presentacion pura: decide el rectangulo destino dentro de la ventana
 Esta si se aplica **en caliente** (`rt::aspectW/aspectH`, atomicos leidos por el
 presentador en cada cuadro): cambiarla desde el menu se ve en el cuadro siguiente.
 
+## Filtros de imagen
+
+Escalado inteligente (FSR, Anime4K) y esteticas (CRT, dibujo animado, oleo) sobre la imagen
+ya compuesta: ver `docs/FILTROS-IMAGEN.md` (`KESTREL_FILTER`).
+
 ## Verificacion
 
 - Las cuatro escalas comprobadas en SM64 leyendo el tamano real del scanout que publica

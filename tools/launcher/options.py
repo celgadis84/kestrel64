@@ -193,6 +193,22 @@ CATEGORIES = [
       help="El N64 saca SIEMPRE 4:3. 16:9 no ensancha el campo de vision -- eso solo lo "
            "puede hacer el juego -- sino que estira la imagen que ya generan aplastada los "
            "juegos con modo panoramico propio (Perfect Dark, GoldenEye, Turok, Rush 2)."),
+    O("filter", "KESTREL_FILTER", "Filtro de imagen", "choice", "nearest",
+      values=[["nearest", "Pixel nitido - vecino mas cercano (fiel)"],
+              ["bilinear", "Bilineal - suaviza al escalar"],
+              ["sharp", "Bilineal nitido - pixel cuadrado sin dentado"],
+              ["fsr", "AMD FSR 1.0 - escalado con deteccion de bordes"],
+              ["a4k", "Anime4K - red neuronal x2 + FSR (pide GPU)"],
+              ["crt", "Tubo CRT - lineas de barrido y rejilla"],
+              ["cel", "Dibujo animado - bandas de tono y contornos"],
+              ["oleo", "Pintura al oleo (Kuwahara)"]],
+      help="Solo cambia lo que se ve en la ventana, en la GPU, despues de componer el cuadro: "
+           "el juego, los volcados y las capturas siguen viendo la imagen original. Se cambia "
+           "en caliente. FSR y Anime4K inventan detalle entre pixeles; Anime4K esta entrenada "
+           "con dibujos y en 3D de N64 da bordes limpios y texturas algo planas. Dibujo "
+           "animado y oleo son esteticas de imagen, no de iluminacion: miran el cuadro, no la "
+           "escena. Requiere Vulkan con RGBA16F en compute (cualquier GPU de la ultima "
+           "decada); si no, vuelve sola a pixel nitido."),
     O("upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", "choice", "1",
       values=[["1", "1x - resolucion nativa"], ["2", "2x"], ["4", "4x"], ["8", "8x"]],
       help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con "

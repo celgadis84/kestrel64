@@ -544,3 +544,4 @@ oscilando 181-246 s entre pasadas; ningun tramo se salio de su rango.
 | 2026-10-04 | release --quick + gate_quick krom (LOAD_TLUT con TL) | 50 s + 430 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 regress=0. |
 | 2026-10-04 | release --quick + gate_quick krom (TMEM filas impares) | 40 s + 455 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 regress=0 improve=13 mean 89.04. |
 | 2026-10-04 | release --quick + gate_quick lock phys (PIF modo arranque) | 41 s + 137 s | -- | -- | systemtest 0/3721 x3 (threaded-jit, interp, phys-threaded), sm64 `b5521b24` interp/prdp-jit/phys, pif_test 19/19. |
+| 2026-10-04 | release --quick + gate_quick (filtros de imagen postfx) | 80 s + 72 s | -- | -- | systemtest 0/3721, sm64 `b5521b24` x2. Filtro de fabrica nearest = blit de siempre. |

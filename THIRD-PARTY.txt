@@ -45,6 +45,20 @@ que seas duenno.
    https://www.glfw.org
    Licencia zlib/libpng (SPDX: Zlib). Texto completo en la seccion B.
 
+6. AMD FidelityFX Super Resolution 1.0 (FSR 1) -- filtro de presentacion "fsr", y
+   escalado previo de "cel", "oleo" y "a4k". Pases EASU y RCAS portados a GLSL en
+   src/video/shaders/easu.comp y rcas.comp, compilados a SPIR-V dentro del binario.
+   Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+   https://github.com/GPUOpen-Effects/FidelityFX-FSR
+   Licencia MIT (SPDX: MIT). Texto completo en la seccion A.
+
+7. Anime4K -- filtro de presentacion "a4k" (red Anime4K_Upscale_CNN_x2_M, sin
+   modificar, en src/video/shaders/anime4k/, traducida a compute y compilada a
+   SPIR-V dentro del binario).
+   Copyright (c) 2019-2021 bloc97. All rights reserved.
+   https://github.com/bloc97/Anime4K
+   Licencia MIT (SPDX: MIT). Texto completo en la seccion A.
+
 
 Nota sobre las FUENTES de documentacion. El emulador esta escrito contra la
 documentacion publica de hardware de n64brew, n64.dev, la wiki de libdragon y el
@@ -67,7 +81,7 @@ para impresora 3D. Ninguna malla de ellos se incluye. Atribucion:
 
 
 ================================================================================
-Seccion A -- Licencia MIT (parallel-rdp, volk)
+Seccion A -- Licencia MIT (parallel-rdp, volk, FSR 1, Anime4K)
 ================================================================================
 
 Copyright (c) 2020 Themaister

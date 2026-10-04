@@ -38,6 +38,7 @@
 #include <GLFW/glfw3native.h>
 #include "vifilter.hpp"
 #endif
+#include "postfx.hpp"
 
 namespace kestrel {
 
@@ -81,6 +82,8 @@ struct Vk {
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkSemaphore semAcquire = VK_NULL_HANDLE, semRender = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
+
+  postfx::State* fx = nullptr;   // filtros de presentacion; nullptr = la GPU no los admite
 
   bool shared = false;        // instancia/dispositivo prestados por parallel-rdp: no destruir
   bool presentable = false;   // false → surface unusable (e.g. no desktop session); compose only
@@ -444,6 +447,7 @@ auto initVulkan(Vk& v) -> bool {
   VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
   vkCreateFence(v.dev, &fci, nullptr, &v.fence);
 
+  v.fx = postfx::create(v.phys, v.dev);
   return createSrcImage(v, kSrcW, kSrcH);
 }
 
@@ -522,14 +526,29 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
     vkCmdClearColorImage(v.cmd, swap, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rng);
   }
 
+  // Filtro de presentacion (rt::videoFilter, en caliente). Los de compute dejan una imagen
+  // ya del tamano del rectangulo util y aqui solo se copia 1:1 (el blit convierte RGBA16F al
+  // formato de la cadena). Si la cadena falla, o el filtro es de blit, el blit de siempre.
+  const int filt = rt::videoFilter.load(std::memory_order_relaxed);
+  VkImage fxOut = VK_NULL_HANDLE;
+  if(filt >= postfx::Sharp)
+    fxOut = postfx::record(v.fx, v.cmd, v.srcImage, v.srcW, v.srcH, dw, dh, filt);
+
   VkImageBlit blit = {};
   blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
   blit.srcOffsets[1] = { (s32)v.srcW, (s32)v.srcH, 1 };
   blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
   blit.dstOffsets[0] = { dx, dy, 0 };
   blit.dstOffsets[1] = { dx + (s32)dw, dy + (s32)dh, 1 };
-  vkCmdBlitImage(v.cmd, v.srcImage, VK_IMAGE_LAYOUT_GENERAL, swap,
-                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+  if(fxOut) {
+    blit.srcOffsets[1] = { (s32)dw, (s32)dh, 1 };
+    vkCmdBlitImage(v.cmd, fxOut, VK_IMAGE_LAYOUT_GENERAL, swap,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+  } else {
+    vkCmdBlitImage(v.cmd, v.srcImage, VK_IMAGE_LAYOUT_GENERAL, swap,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                   filt == postfx::Bilinear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+  }
 
   barrier(v.cmd, swap, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
           VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
@@ -553,6 +572,7 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   }
 
   vkWaitForFences(v.dev, 1, &v.fence, VK_TRUE, UINT64_MAX);   // simple: one frame in flight
+  postfx::frameDone(v.fx);
 
   // El present dijo que la cadena ya no vale (redimension a mitad de frame): se rehace aqui,
   // fuera del candado de cola y con el frame ya terminado.
@@ -565,6 +585,8 @@ auto destroyVulkan(Vk& v) -> void {
   if(v.semRender) vkDestroySemaphore(v.dev, v.semRender, nullptr);
   if(v.semAcquire) vkDestroySemaphore(v.dev, v.semAcquire, nullptr);
   if(v.pool) vkDestroyCommandPool(v.dev, v.pool, nullptr);
+  postfx::destroy(v.fx);
+  v.fx = nullptr;
   destroySrcImage(v);
   if(v.swap) vkDestroySwapchainKHR(v.dev, v.swap, nullptr);
   // El dispositivo y la instancia prestados son de parallel-rdp: los destruye su Context.
