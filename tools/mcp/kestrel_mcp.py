@@ -123,6 +123,20 @@ def read_memory(region: str, addr="0", length: int = 64, coherent: bool = False)
     return data
 
 
+def mem_wrtag(addr, length: int = 16, group: str = "") -> dict:
+    """Last-writer map of RDRAM (needs kestrel launched with KESTREL_WRTAG=1).
+
+    For each 16-byte block in [addr, addr+length) physical: who wrote it last
+    (CPU-uncached, CPU-dcache = D-cache writeback/fill, SP-DMA, PI-DMA, SI-DMA, RDP,
+    "-" = nobody since boot) and the guest pc of that write. group="" returns one
+    entry per block (max 1 MiB per call); group="who" merges consecutive blocks with
+    the same writer kind (pc = first block's, npc = pc changes + 1 inside the run);
+    group="pc" merges only blocks with the same kind AND pc. Use a group mode to
+    scan all 8 MiB cheaply. Read live, without pausing the guest."""
+    data, _ = query("mem.wrtag", addr=_addr(addr), len=int(length), group=group)
+    return data
+
+
 def write_memory(region: str, addr, hexbytes: str) -> dict:
     data, _ = query("mem.write", region=region, addr=_addr(addr), data=hexbytes)
     return data
@@ -449,6 +463,7 @@ def _serve_mcp():
     mcp.tool()(memory_regions)
     mcp.tool()(read_memory)
     mcp.tool()(write_memory)
+    mcp.tool()(mem_wrtag)
     mcp.tool()(cpu_registers)
     mcp.tool()(cpu_step)
     mcp.tool()(cpu_disasm)

@@ -49,6 +49,7 @@ private:
   auto cmdMemRegions(const json::Value& args, json::Value& data) -> void;
   auto cmdMemRead(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool;
   auto cmdMemWrite(const json::Value& args, const std::vector<u8>& blob, json::Value& data) -> bool;
+  auto cmdMemWrtag(const json::Value& args, json::Value& data) -> std::string;
 
   // CPU control/inspection (all take coreMutex).
   auto cmdCpuRegs(const json::Value& args, json::Value& data) -> void;

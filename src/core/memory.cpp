@@ -1886,6 +1886,7 @@ auto Memory::spDma(bool toRam) -> void {
   // copia dejaba IMEM con la basura anterior y esa basura acababa rellenando la RDRAM
   // entera -- punteros podridos y vectores de excepcion machacados.
   const bool byByte = watchAddr != 0;
+  const u32 wrPc = 0x04001000u | (rsp.pc & 0xffc);   // KESTREL_WRTAG: pc del RSP en espacio SP IMEM
   for(u32 c = 0; c < count; c++) {
     if(byByte) {
       for(u32 i = 0; i < length; i++) {
@@ -1893,7 +1894,7 @@ auto Memory::spDma(bool toRam) -> void {
         u32 d  = dramAddr + i;
         bool have = d < rdram.size();
         if(toRam) { if(!have) continue;
-                    wrtag::mark(d, wrtag::kSpDma, 0); watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
+                    wrtag::mark(d, wrtag::kSpDma, wrPc); watchHit(d, 1, sp[mo], true); rdram[d] = sp[mo]; }
         else      sp[mo] = have ? rdram[d] : 0;
       }
     } else {
@@ -1904,7 +1905,7 @@ auto Memory::spDma(bool toRam) -> void {
         if(n > 0x1000u - mo) n = 0x1000u - mo;                            // vuelta de la SP mem
         if(d < rdram.size()) {
           if(n > (u32)(rdram.size() - d)) n = (u32)(rdram.size() - d);    // final de los chips
-          if(toRam) dmaCopy(&rdram[d], &sp[mo], n);
+          if(toRam) { dmaCopy(&rdram[d], &sp[mo], n); wrtag::markRange(d, n, wrtag::kSpDma, wrPc); }
           else      dmaCopy(&sp[mo], &rdram[d], n);
         } else if(!toRam) {
           std::memset(&sp[mo], 0, n);        // sin chip que responda: se leen ceros
@@ -1934,7 +1935,7 @@ auto Memory::spDma(bool toRam) -> void {
 // estar pintando.
 auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   static const bool diag = std::getenv("KESTREL_DMAGUARD") != nullptr;
-  if(diag || watchAddr || spTrace()) return false;
+  if(diag || watchAddr || spTrace() || wrtag::tag) return false;   // wrtag marca en spDma
   const u32 length = ((len & 0xfff) + 8) & ~7u;
   const u32 count  = ((len >> 12) & 0xff) + 1;
   const u32 skip   = (len >> 20) & 0xfff;

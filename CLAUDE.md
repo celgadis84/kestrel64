@@ -355,7 +355,7 @@ workers en su hilo y el otro sincrono, para bisecar de quien es una corrupcion �
 
 **Quien escribio esto** (caros, solo para depurar): `KESTREL_WRTAG=1` mantiene un tag de
 ultimo escritor por bloque de 16 B de RDRAM (CPU-uncached / D-cache / SP-DMA / PI-DMA /
-SI-DMA / RDP) con el PC del guest, lo imprime en el volcado de fallo, y chiva (`[fifo!]`)
+SI-DMA / RDP) con el PC del guest (SP-DMA: `0x04001000|pc` del RSP), lo imprime en el volcado de fallo, se consulta en vivo por MCP (`mem.wrtag` / `mem_wrtag(addr, length, group='' | 'who' | 'pc')`; agrupado barre 8 MiB en unos cientos de tramos; el RDP solo se marca con SoftRDP, `KESTREL_PRDP=0`), y chiva (`[fifo!]`)
 cualquier escritura dentro del FIFO del RDP aun sin consumir · `KESTREL_RDPGUARD=<lo>:<hi>`
 chiva cualquier escritura del RDP a RDRAM en ese rango fisico · `KESTREL_CIFLOOR=<phys>`
 baja el suelo por debajo del cual un SET_COLOR_IMAGE se considera basura (por defecto los

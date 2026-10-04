@@ -2,6 +2,7 @@
 #include "symbols.hpp"
 #include "../core/savestate.hpp"
 #include "../core/system.hpp"
+#include "../core/wrtag.hpp"
 #include "../core/movie.hpp"
 #include "../vrdp/vrdp.hpp"
 #include <algorithm>
@@ -94,6 +95,9 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     cmdMemRegions(args, data); done();
   } else if(cmd == "mem.read") {
     if(cmdMemRead(args, data, blob)) done(); else fail("mem.read: bad region or range");
+  } else if(cmd == "mem.wrtag") {
+    std::string err = cmdMemWrtag(args, data);
+    if(err.empty()) done(); else fail("mem.wrtag: " + err);
   } else if(cmd == "mem.write") {
     // request blob is not threaded here in M0; write uses args-encoded bytes instead.
     if(cmdMemWrite(args, blob, data)) done(); else fail("mem.write: bad region or range");
@@ -279,6 +283,50 @@ auto Server::cmdMemRead(const json::Value& args, json::Value& data, std::vector<
   data.set("len", len);
   data.set("bytes", len);   // blob carries the raw data
   return true;
+}
+
+// mem.wrtag: mapa de ultimo escritor (KESTREL_WRTAG=1, ver core/wrtag.hpp) de los bloques de
+// 16 B que tocan [addr, addr+len) fisico. Sin `group` = un registro por bloque (tope 1 MiB por
+// peticion); `group=who` junta bloques consecutivos del mismo tipo de escritor (pc = el del
+// primero, npc = PCs distintos dentro del tramo) y `group=pc` exige ademas el mismo pc. Asi un
+// barrido de 8 MiB sale en unos pocos tramos. Se lee sin parar al invitado: tags racy, es de
+// depuracion.
+auto Server::cmdMemWrtag(const json::Value& args, json::Value& data) -> std::string {
+  if(!wrtag::tag) return "KESTREL_WRTAG=1 not set at launch";
+  u32 addr = args.get("addr").asU32() & 0x1fffffff;
+  u32 len  = args.has("len") ? args.get("len").asU32() : 16;
+  std::string group = args.has("group") ? args.get("group").asString() : "";
+  if(group != "" && group != "who" && group != "pc") return "group must be '', 'who' or 'pc'";
+  u32 b0 = addr >> 4;
+  if(b0 >= wrtag::blocks || !len) return "address out of RDRAM";
+  u32 b1 = std::min<u64>(((u64)addr + len + 15) >> 4, wrtag::blocks);
+  if(group.empty() && b1 - b0 > 65536) return "per-block mode capped at 1 MiB, use group=who|pc";
+  json::Value list = json::Value::array();
+  u32 nruns = 0;
+  for(u32 b = b0; b < b1;) {
+    u8 who = wrtag::tag[b];
+    u32 pc = wrtag::pcOf[b];
+    u32 e = b + 1, npc = 1, lastPc = pc;
+    if(!group.empty()) {
+      while(e < b1 && wrtag::tag[e] == who && (group == "who" || wrtag::pcOf[e] == pc)) {
+        if(wrtag::pcOf[e] != lastPc) { npc++; lastPc = wrtag::pcOf[e]; }
+        e++;
+      }
+    }
+    json::Value r = json::Value::object();
+    r.set("phys", b << 4);
+    if(!group.empty()) r.set("len", (e - b) << 4);
+    r.set("who", std::string(wrtag::name(who)));
+    r.set("pc", pc);
+    if(group == "who") r.set("npc", npc);   // cambios de pc dentro del tramo
+    list.push(std::move(r));
+    b = e;
+    if(++nruns >= 200000) { data.set("truncated", true); break; }
+  }
+  data.set("addr", b0 << 4);
+  data.set("blocks", b1 - b0);
+  data.set("entries", list);
+  return "";
 }
 
 auto Server::cmdMemWrite(const json::Value& args, const std::vector<u8>&, json::Value& data) -> bool {
