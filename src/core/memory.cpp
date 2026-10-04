@@ -311,6 +311,7 @@ auto Memory::saveSize() const -> u32 {
     case SaveType::Sram256k:  return 32 * 1024;   // 256 kbit
     case SaveType::Sram768k:  return 96 * 1024;   // 768 kbit (three 32 KiB banks)
     case SaveType::Flash1m:   return 128 * 1024;  //  1 Mbit
+    case SaveType::Sram1m:    return 128 * 1024;  //  1 Mbit lineal (cabecera ED, homebrew)
     default:                  return 0;
   }
 }
@@ -478,18 +479,36 @@ auto Memory::flushSaveFile() const -> void {
 // from the game code in the header. The 4-byte code sits at 0x3B..0x3E; bytes
 // 0x3C-0x3D are the two-character cart ID, 0x3E the region. This curated table lists
 // the titles we are confident about; everything else keeps the EEPROM-16k default.
-// KESTREL_SAVETYPE forces a type by name (eep4k/eep16k/sram256/sram768/flash/none),
-// which is how any game can be brought up before it earns a table entry.
+// KESTREL_SAVETYPE forces a type by name (eep4k/eep16k/sram256/sram768/sram1m/flash/none,
+// o los nombres del lanzador eeprom4k/eeprom16k/sram256k/sram768k/flash1m; "auto" = no
+// forzar), which is how any game can be brought up before it earns a table entry.
+//
+// Orden: KESTREL_SAVETYPE > cabecera avanzada de homebrew > tabla de IDs. La cabecera
+// avanzada (n64brew "ROM Header", la de los flashcarts ED64/SummerCart): ID "ED" en
+// 0x3C-0x3D y el tipo en el nibble alto de 0x3F (0 nada, 1 EEPROM 4k, 2 EEPROM 16k,
+// 3 SRAM 256k, 4 SRAM 768k en tres bancos, 5 FlashRAM 1M, 6 SRAM 1M lineal). Es lo que
+// escribe la toolchain de libdragon (n64tool --header / SAVE en el proyecto); sin leerla una
+// ROM de SDK con SRAM arrancaba con EEPROM y no guardaba.
 auto Memory::resolveSaveType() -> void {
   saveType = SaveType::Eeprom16k;                  // default; overridden below
-  if(const char* env = std::getenv("KESTREL_SAVETYPE")) {
-    std::string s = env;
-    if(s == "none")          saveType = SaveType::None;
-    else if(s == "eep4k")    saveType = SaveType::Eeprom4k;
-    else if(s == "eep16k")   saveType = SaveType::Eeprom16k;
-    else if(s == "sram256")  saveType = SaveType::Sram256k;
-    else if(s == "sram768")  saveType = SaveType::Sram768k;
-    else if(s == "flash")    saveType = SaveType::Flash1m;
+  const char* env = std::getenv("KESTREL_SAVETYPE");
+  std::string s = env ? env : "";
+  if(!s.empty() && s != "auto") {
+    if(s == "none")                               saveType = SaveType::None;
+    else if(s == "eep4k"   || s == "eeprom4k")    saveType = SaveType::Eeprom4k;
+    else if(s == "eep16k"  || s == "eeprom16k")   saveType = SaveType::Eeprom16k;
+    else if(s == "sram256" || s == "sram256k")    saveType = SaveType::Sram256k;
+    else if(s == "sram768" || s == "sram768k")    saveType = SaveType::Sram768k;
+    else if(s == "sram1m")                        saveType = SaveType::Sram1m;
+    else if(s == "flash"   || s == "flash1m")     saveType = SaveType::Flash1m;
+    else std::fprintf(stderr, "[save] KESTREL_SAVETYPE='%s' desconocido, EEPROM 16k\n", env);
+  } else if(rom.size() > 0x3F && rom[0x3C] == 'E' && rom[0x3D] == 'D') {
+    static const SaveType kEd[] = { SaveType::None, SaveType::Eeprom4k, SaveType::Eeprom16k,
+                                    SaveType::Sram256k, SaveType::Sram768k, SaveType::Flash1m,
+                                    SaveType::Sram1m };
+    u32 t = rom[0x3F] >> 4;
+    if(t < std::size(kEd)) saveType = kEd[t];
+    else std::fprintf(stderr, "[save] cabecera ED con tipo %u desconocido, EEPROM 16k\n", t);
   } else if(rom.size() > 0x3E) {
     char id0 = (char)rom[0x3C], id1 = (char)rom[0x3D];
     auto is = [&](const char* id){ return id[0] == id0 && id[1] == id1; };
@@ -542,13 +561,13 @@ auto Memory::saveRead(u32 phys, u32 nbytes) -> u32 {
     return v;
   };
   if(isFlash()) {
-    if(flashMode == FlashMode::Status) {              // status/id window (8 bytes, repeats)
+    if(flashMode != FlashMode::Read) {                // status/id window (8 bytes, repeats)
       u8 st[8];
       for(int i = 0; i < 8; i++) st[i] = (u8)(flashStatus >> (56 - 8 * i));
       u32 o = (phys - 0x0800'0000) & 7;
       return bePick(st + o, 8 - o);
     }
-    u32 off = phys - 0x0800'0000;                      // Read mode: array data
+    u32 off = flashArrayOff(phys);                     // Read mode: array data
     return off < saveRam.size() ? bePick(saveRam.data() + off, (u32)saveRam.size() - off) : 0;
   }
   if(isSram()) {
@@ -569,8 +588,15 @@ auto Memory::saveWrite(u32 phys, u64 value, u32 nbytes) -> void {
     for(u32 i = 0; i < nbytes && off + i < sz; i++)
       p[off + i] = (u8)(value >> (8 * (nbytes - 1 - i)));
   };
-  if(isFlash()) {                                       // Write mode: stage page buffer
-    put(flashPageBuf, sizeof flashPageBuf, (phys - 0x0800'0000) & 0x7f);
+  if(isFlash()) {
+    if(flashMode == FlashMode::Status) {                // escritura = registro de estado
+      if(((phys - 0x0800'0000) & 0xffff) < 4) {         // (libultra: 0xD2 + 0 lo limpia)
+        const u64 sr = value & 0xff;
+        flashStatus = (flashStatus & ~(0xffull << 32)) | (sr << 32);
+      }
+      return;
+    }
+    put(flashPageBuf, sizeof flashPageBuf, (phys - 0x0800'0000) & 0x7f);   // bufer de pagina
     return;
   }
   if(isSram()) {
@@ -579,29 +605,61 @@ auto Memory::saveWrite(u32 phys, u64 value, u32 nbytes) -> void {
   }
 }
 
-// FlashRAM command register (0x08010000). Drives the mode state machine; the high
-// byte is the opcode and, for offset commands, the low 16 bits are a 128-byte page.
+// Desplazamiento en la matriz para una direccion PI en modo Read. El chip que anunciamos
+// (id 0x00C2001E = MX "C") es de los ANTIGUOS: libultra (`__osFlashGetAddr`, `osFlashInit`)
+// los marca OLD_FLASH porque sus lineas de direccion van corridas un bit, y les pide la
+// pagina N en N*64 en vez de N*128. El chip recibe esa direccion de arranque y su contador
+// interno avanza linealmente durante la rafaga, asi que solo el ARRANQUE va por dos: la DMA
+// lo pasa una vez (`piDma`) y sigue byte a byte. Con identidad, cualquier pagina >= 1 se leia
+// de la mitad de su sitio.
+auto Memory::flashArrayOff(u32 phys) const -> u32 {
+  const u32 id = (u32)flashStatus;
+  const bool old = id == 0x00C2'0000u || id == 0x00C2'0001u || id == 0x00C2'001Eu;
+  const u32 off = (phys - 0x0800'0000) & 0xffff;
+  return old ? off * 2 : off;
+}
+
+// FlashRAM command register (0x08010000). Protocolo de libultra (src/flash/*.c), que es el
+// que corrio en consola: 0x4B|pagina (sector) o 0x3C (chip) eligen QUE borrar y 0x78 lo
+// EJECUTA; 0xB4 abre el bufer de pagina (la DMA de 128 B lo llena) y 0xA5|pagina lo
+// PROGRAMA; 0xD2 solo pasa a modo estado; 0xE1 id; 0xF0 lectura. libultra sondea el estado
+// leyendo 0x08000000 justo tras 0x78/0xA5, SIN 0xD2 por medio, y luego lo limpia con 0xD2 +
+// escritura de 0. Antes 0x78/0xA5 solo cambiaban de modo y el trabajo esperaba a 0xD2 (modelo
+// heredado de los emuladores viejos): el sondeo leia datos de la matriz como estado y podia
+// girar para siempre si el byte 3 de la partida tenia el bit de ocupado. El registro de estado
+// es el byte bajo de la palabra alta de flashStatus (0x1111800S): bit0 programando, bit1
+// borrando, bit2 programa OK, bit3 borrado OK. Sector = 128 paginas = 16 KiB (mupen64plus,
+// `erase_page & 0xff80`); el MiSTer borra 128 B, sin oraculo de hardware que lo zanje -- con
+// el patron de libultra (borrar sector, programar sus paginas) los dos dan lo mismo.
 auto Memory::flashCommand(u32 cmd) -> void {
+  auto setSr = [&](u32 clr, u32 set) {
+    u32 sr = (u32)(flashStatus >> 32) & 0xff;
+    sr = (sr & ~clr) | set;
+    flashStatus = (flashStatus & ~(0xffull << 32)) | ((u64)sr << 32);
+  };
   switch(cmd >> 24) {
-    case 0xE1: flashMode = FlashMode::Status; flashStatus = 0x1111'8001'00C2'001Eull; break;
-    case 0xF0: flashMode = FlashMode::Read;   flashStatus = 0x1111'8004'00C2'001Eull; break;
-    case 0x4B: flashErasePage = cmd & 0xffff; break;   // latch 128-byte erase page
-    case 0x78: flashMode = FlashMode::Erase;  flashStatus = 0x1111'8008'00C2'001Eull; break;
-    case 0xA5: flashWritePage = cmd & 0xffff; flashStatus = 0x1111'8004'00C2'001Eull;
-               flashMode = FlashMode::Write; break;
-    case 0xB4: flashMode = FlashMode::Write; break;
-    case 0xD2:                                                              // execute / commit
-      if(flashMode == FlashMode::Erase) {
-        // Erase a 16 KiB sector (128 pages) starting at the latched page, to 0xFF.
-        u32 base = (flashErasePage & ~0x7fu) * 128;
-        for(u32 i = 0; i < 16 * 1024 && base + i < saveRam.size(); i++) saveRam[base + i] = 0xFF;
-        saveDirty = true;
-      } else if(flashMode == FlashMode::Write) {
-        u32 base = flashWritePage * 128;
-        for(u32 i = 0; i < 128 && base + i < saveRam.size(); i++) saveRam[base + i] = flashPageBuf[i];
-        saveDirty = true;
-      }
+    case 0xE1: flashMode = FlashMode::Status; setSr(0, 1); break;   // id; bit0 como mupen (PPL)
+    case 0xF0: flashMode = FlashMode::Read; break;
+    case 0xD2: flashMode = FlashMode::Status; break;
+    case 0x3C: flashErasePage = ~0u; break;                          // chip entero
+    case 0x4B: flashErasePage = cmd & 0xffff; break;
+    case 0x78: {
+      u32 base = 0, len = (u32)saveRam.size();
+      if(flashErasePage != ~0u) { base = (flashErasePage & 0xff80) * 128; len = 128 * 128; }
+      for(u32 i = 0; i < len && base + i < saveRam.size(); i++) saveRam[base + i] = 0xFF;
+      saveDirty = true;
+      setSr(2, 8); flashMode = FlashMode::Status;
       break;
+    }
+    case 0xB4: flashMode = FlashMode::Write; break;
+    case 0xA5: {
+      flashWritePage = cmd & 0xffff;
+      u32 base = flashWritePage * 128;
+      for(u32 i = 0; i < 128 && base + i < saveRam.size(); i++) saveRam[base + i] = flashPageBuf[i];
+      saveDirty = true;
+      setSr(1, 4); flashMode = FlashMode::Status;
+      break;
+    }
     default: break;
   }
 }
@@ -1619,7 +1677,19 @@ auto Memory::piDma(bool toCart) -> void {
       u32 len = (rawLen & 0x00ff'ffff) + 1;
       u32 dram = rcp.pi_dram_addr & 0x00ff'ffff;
       u32 cart = cartPhys;
+      // FlashRAM en modo Read: solo la direccion de ARRANQUE pasa por el cableado del chip
+      // (ver flashArrayOff); la rafaga sigue lineal con el contador interno del chip.
+      const bool flashArr = !toCart && isFlash() && flashMode == FlashMode::Read;
+      const u32 flashBase = flashArr ? flashArrayOff(cartPhys) : 0;
       for(u32 i = 0; i < len; i++) {
+        if(flashArr) {
+          wrtag::mark(dram, wrtag::kPiDma, 0);
+          if(watchAddr) watchHit(dram, 1, 0, true);
+          const u32 o = flashBase + i;
+          if(dram < rdram.size()) rdram[dram] = o < saveRam.size() ? saveRam[o] : 0;
+          dram++; cart++;
+          continue;
+        }
         if(toCart) {                                    // RDRAM -> save (write/erase buffer)
           u8 b = dram < rdram.size() ? rdram[dram] : 0;
           saveWrite(cart, b, 1);

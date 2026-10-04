@@ -232,8 +232,9 @@ CATEGORIES = [
               ["none", "Ninguno"],
               ["eeprom4k", "EEPROM 4 kbit"], ["eeprom16k", "EEPROM 16 kbit"],
               ["sram256k", "SRAM 256 kbit"], ["sram768k", "SRAM 768 kbit"],
-              ["flash1m", "FlashRAM 1 Mbit"]],
-      help="Se resuelve por ID de cartucho; esto lo fuerza cuando la ROM no esta en la tabla."),
+              ["sram1m", "SRAM 1 Mbit"], ["flash1m", "FlashRAM 1 Mbit"]],
+      help="Se resuelve por la cabecera avanzada de homebrew (ID 'ED') o por ID de cartucho; "
+           "esto lo fuerza cuando la ROM no esta en la tabla."),
     O("tvtype", "KESTREL_TVTYPE", "Norma de television", "choice", "auto",
       values=[["auto", "Automatico - por region del cartucho"],
               ["ntsc", "NTSC (60 Hz)"], ["pal", "PAL (50 Hz)"], ["mpal", "PAL-M (60 Hz)"]],

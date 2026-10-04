@@ -236,7 +236,7 @@ auto Server::cmdStatus(const json::Value&, json::Value& data) -> void {
     ST st = system.memory.saveType;
     const char* sv = st == ST::Eeprom4k  ? "eeprom4k"  : st == ST::Eeprom16k ? "eeprom16k" :
                      st == ST::Sram256k  ? "sram256k"  : st == ST::Sram768k  ? "sram768k"  :
-                     st == ST::Flash1m   ? "flash1m"   : "none";
+                     st == ST::Flash1m   ? "flash1m"   : st == ST::Sram1m    ? "sram1m"    : "none";
     g.set("saveType", std::string(sv));
     g.set("saveBytes", (u64)system.memory.saveSize());
     data.set("game", g);

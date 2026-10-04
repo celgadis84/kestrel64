@@ -56,6 +56,7 @@ static const Choice kCh_savetype[] = {
   {"eeprom16k", "EEPROM 16 kbit"},
   {"sram256k", "SRAM 256 kbit"},
   {"sram768k", "SRAM 768 kbit"},
+  {"sram1m", "SRAM 1 Mbit"},
   {"flash1m", "FlashRAM 1 Mbit"},
 };
 static const Choice kCh_tvtype[] = {
@@ -146,7 +147,7 @@ static const Option kOpt_audio[] = {
 };
 
 static const Option kOpt_save[] = {
-  {"savetype", "KESTREL_SAVETYPE", "Tipo de guardado", OType::Choice, "auto", "Se resuelve por ID de cartucho; esto lo fuerza cuando la ROM no esta en la tabla.", false, false, false, 0, 0, 0, kCh_savetype, 7, false},
+  {"savetype", "KESTREL_SAVETYPE", "Tipo de guardado", OType::Choice, "auto", "Se resuelve por la cabecera avanzada de homebrew (ID 'ED') o por ID de cartucho; esto lo fuerza cuando la ROM no esta en la tabla.", false, false, false, 0, 0, 0, kCh_savetype, 8, false},
   {"tvtype", "KESTREL_TVTYPE", "Norma de television", OType::Choice, "auto", "Lo que el juego lee en osTvType, y de donde sale el ritmo de campo. En la consola de verdad lo fija la maquina, y la region del cartucho coincide con ella; algunos juegos se niegan a funcionar con la norma equivocada.", false, false, false, 0, 0, 0, kCh_tvtype, 4, false},
   {"rdram", "KESTREL_RDRAM", "Memoria RDRAM", OType::Choice, "8", "La N64 trae 4 MB y el Expansion Pak la sube a 8. Los juegos lo leen en osMemSize y algunos cambian de comportamiento: reservan menos buferes o bajan la resolucion con 4 MB, y Donkey Kong 64 y el modo de un jugador de Perfect Dark EXIGEN los 8. La RDRAM se dimensiona una sola vez, asi que cambiarlo pide relanzar, y un estado guardado con un tamano no se puede cargar con el otro.", false, false, false, 0, 0, 0, kCh_rdram, 2, false},
   {"cheats", "KESTREL_CHEATS", "Fichero de trucos (.cht)", OType::Path, "", "Codigos tipo GameShark, aplicados en cada campo de video igual que el cartucho de verdad. Sin fichero se usa el .cht que haya al lado de la ROM con su mismo nombre. Formato: [Nombre] abre un truco ([-Nombre] lo deja apagado) y debajo van las lineas AAAAAAAA VVVV tal como se publican.", false, false, false, 0, 0, 0, nullptr, 0, false},

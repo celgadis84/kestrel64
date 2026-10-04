@@ -183,10 +183,12 @@ struct Memory {
   // joybus-reported chip type against the size it expects and, on mismatch, returns
   // WITHOUT releasing the SI access mutex — deadlocking SI. Reporting the true type
   // (below) avoids it. Resolved in loadRom(); KESTREL_SAVETYPE env forces one.
-  enum class SaveType { None, Eeprom4k, Eeprom16k, Sram256k, Sram768k, Flash1m };
+  // Sram1m va al final: el estado guardado serializa el valor numerico.
+  enum class SaveType { None, Eeprom4k, Eeprom16k, Sram256k, Sram768k, Flash1m, Sram1m };
   SaveType saveType = SaveType::Eeprom16k;   // safe default; overridden per cartridge
   auto isEeprom()  const -> bool { return saveType == SaveType::Eeprom4k || saveType == SaveType::Eeprom16k; }
-  auto isSram()    const -> bool { return saveType == SaveType::Sram256k || saveType == SaveType::Sram768k; }
+  auto isSram()    const -> bool { return saveType == SaveType::Sram256k || saveType == SaveType::Sram768k ||
+                                         saveType == SaveType::Sram1m; }
   auto isFlash()   const -> bool { return saveType == SaveType::Flash1m; }
   auto eepromTypeByte() const -> u8 { return saveType == SaveType::Eeprom4k ? 0x80 : 0xC0; }
   auto saveSize()  const -> u32;             // backing size in bytes for the current type
@@ -241,16 +243,17 @@ struct Memory {
   PadPort padPort[4];
 
   // FlashRAM command/status state machine (PI domain 2). Reads at 0x08000000 return
-  // the status/silicon-id doubleword in Status mode or array data in Read mode; the
-  // command register at 0x08010000 drives mode changes, erase/write offsets, and the
-  // execute (commit) step. A 128-byte page buffer stages writes before commit.
+  // array data in Read mode and the status/silicon-id doubleword in every other mode;
+  // the command register at 0x08010000 drives it (protocolo libultra, ver flashCommand:
+  // 0x78 borra y 0xA5 programa en el acto). A 128-byte page buffer stages writes.
   enum class FlashMode { Status, Read, Erase, Write };
   FlashMode flashMode      = FlashMode::Status;
   u64       flashStatus    = 0x1111'8001'00C2'001Eull;  // Macronix MX29L1101 silicon id
-  u32       flashErasePage = 0;                          // 128-byte page index for erase
+  u32       flashErasePage = 0;                          // pagina del sector a borrar; ~0 = chip
   u32       flashWritePage = 0;                          // 128-byte page index for write commit
   u8        flashPageBuf[128] = {};                      // staged page for the next write
   auto flashCommand(u32 cmd) -> void;                    // 0x08010000 command register write
+  auto flashArrayOff(u32 phys) const -> u32;             // Read mode: phys -> offset en la matriz
 
   std::vector<Region> regions;  // for telemetry; built by initMap()
 

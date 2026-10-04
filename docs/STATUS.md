@@ -9845,6 +9845,39 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 (b) -- Tipo de partida por cabecera ED + FlashRAM con el protocolo de libultra (peticion n64-70)
+
+- **Cabecera avanzada de homebrew** (n64brew, ROM Header): si `rom[0x3C..0x3D] == "ED"`,
+  el tipo de partida es `rom[0x3F] >> 4` (0 nada, 1 eep4k, 2 eep16k, 3 sram256k, 4 sram768k,
+  5 flash, 6 sram1m). Precedencia `KESTREL_SAVETYPE` > cabecera ED > tabla de IDs de cartucho.
+  Nuevo `SaveType::Sram1m` (128 KiB lineal), AL FINAL del enum porque el estado guardado lo
+  serializa por numero; `.sra`, telemetria `sram1m`, opcion en el lanzador.
+- Arreglado de paso: el parser de `KESTREL_SAVETYPE` no entendia `eeprom4k`/`sram256k`/
+  `flash1m`/`auto`, que es justo lo que escribe el lanzador; caia a EEPROM 16k y se saltaba
+  la tabla de IDs.
+- **FlashRAM**, oraculo = libultra (`hackerlibultra/src/flash/*.c`, el codigo que corrio en
+  consola), contrastado con mupen64plus (`flashram.c`) y MiSTer (`PI.vhd`):
+  - 0x78 EJECUTA el borrado y 0xA5|pagina PROGRAMA en el acto; 0xD2 solo pasa a modo estado.
+    Antes el trabajo esperaba a 0xD2 (modelo viejo): `osFlashSectorErase`/`osFlashWriteArray`
+    sondean 0x08000000 justo tras 0x78/0xA5 sin 0xD2, asi que leian la matriz como estado
+    (bit de ocupado = byte 3 de la partida: cuelgue posible) y el borrado/programa solo caia
+    luego por el 0xD2 de `osFlashClearStatus`.
+  - Registro de estado = byte bajo de la palabra alta (0x1111800S): bit0/1 ocupado,
+    bit2 programa OK, bit3 borrado OK; escritura en modo estado lo fija (limpieza de libultra).
+    Fuera de modo Read toda lectura da la ventana estado/id.
+  - 0x3C = borrado del chip entero (no estaba). Sector de 0x4B = 128 paginas = 16 KiB
+    (`erase_page & 0xff80`, como mupen; MiSTer borra 128 B y n64brew no tiene pagina de
+    FlashRAM: con el patron de libultra los dos modelos dan lo mismo).
+  - **Lectura de la matriz en chip OLD**: el id que damos, 0x00C2001E (MX "C"), libultra lo
+    marca OLD_FLASH y pide la pagina N en N*64 (`__osFlashGetAddr`): las lineas de direccion
+    del chip van corridas un bit. La DIRECCION DE ARRANQUE se dobla y la rafaga DMA sigue lineal
+    (`flashArrayOff` + `piDma`); antes era identidad y toda pagina >= 1 se leia de la mitad de
+    su sitio. MiSTer usa identidad porque anuncia 0x00C2001D (NEW).
+- `save_test` ALL PASS (con y sin `KESTREL_SAVETYPE`): tipos ED 0..6, sram1m lineal, estado
+  tras programar/borrar, limpieza, lectura OLD x2, sector 16 KiB sin tocar el siguiente,
+  borrado de chip. E2E con `14_save_sram`/`14_save_eeprom` del SDK: detectados por cabecera
+  ED sin variable y persistentes. gate_quick OK (systemtest 0/3721, sm64 `b5521b24` x2).
+
 ## 2026-10-04 -- Threaded: CLEAR_HALT entre el BREAK y el plazo de fin de tarea relanza (libdragon rspq) + VI_V_CURRENT sin deriva
 
 - Repro (sesion kestrel64-sdk): libdragon actual (preview 43c67dc) moria al arrancar con

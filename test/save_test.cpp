@@ -4,6 +4,7 @@
 // command state machine. EEPROM is validated end-to-end by SM64 boot, not here.
 #include "../src/core/memory.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 
@@ -68,22 +69,30 @@ int main() {
   m.write32(FCMD, 0xB4000000);                 // write mode (stage page buffer)
   m.write32(SAVE + 0, 0x11223344);             // fill buffer bytes 0..3
   m.write32(SAVE + 4, 0x55667788);             // bytes 4..7
-  m.write32(FCMD, 0xA5000002);                 // set write page = 2 (offset 256)
-  m.write32(FCMD, 0xD2000000);                 // execute → commit buffer to flash[256]
+  m.write32(FCMD, 0xA5000002);                 // program page 2 (offset 256) right away
   chk("committed @256", (u32)((m.saveRam[256] << 24) | (m.saveRam[257] << 16) |
                               (m.saveRam[258] << 8) | m.saveRam[259]), 0x11223344);
+  chk("status after program", m.read32(SAVE + 0) & 0xFF, 0x04);   // libultra: & 4 = OK
+  m.write32(FCMD, 0xD2000000);                 // clear status (osFlashClearStatus)
+  m.write32(SAVE + 0, 0);
+  chk("status cleared", m.read32(SAVE + 0) & 0xFF, 0x00);
   m.write32(FCMD, 0xF0000000);                 // read-array mode
-  chk("read-array @256", m.read32(SAVE + 256), 0x11223344);
-  chk("read-array @260", m.read32(SAVE + 260), 0x55667788);
+  // chip OLD (id 0x00C2001E): libultra pide la pagina N en N*64, el chip la ve en N*128
+  chk("read-array page2 @128", m.read32(SAVE + 128), 0x11223344);
 
-  std::printf("FlashRAM sector erase → 0xFF:\n");
+  std::printf("FlashRAM sector erase -> 0xFF (libultra: 0x4B|page, 0x78 executes):\n");
   m.saveRam[256] = 0x00;                        // dirty a byte inside the sector
-  m.write32(FCMD, 0x78000000);                  // erase mode
-  m.write32(FCMD, 0x4B000000);                  // erase page 0 (sector 0 = pages 0..127)
-  m.write32(FCMD, 0xD2000000);                  // execute → erase 16 KiB sector
+  m.saveRam[16384] = 0x5A;                      // first byte of the NEXT sector
+  m.write32(FCMD, 0x4B000005);                  // sector of page 5 = pages 0..127
+  m.write32(FCMD, 0x78000000);                  // execute erase, no 0xD2 needed
+  chk("erase status", m.read32(SAVE + 0) & 0xFF, 0x08);
   chk("erased @256", m.saveRam[256], 0xFF);
   chk("erased @0", m.saveRam[0], 0xFF);
   chk("erased @16383", m.saveRam[16383], 0xFF);
+  chk("next sector kept", m.saveRam[16384], 0x5A);
+  m.write32(FCMD, 0x3C000000);                  // chip erase
+  m.write32(FCMD, 0x78000000);
+  chk("chip erased @16384", m.saveRam[16384], 0xFF);
 
   std::printf("Persistence round-trip (.sra load/flush):\n");
   {
@@ -279,6 +288,34 @@ int main() {
       std::remove("save_test_tmp.mpk");
       std::remove("save_test_tmp.sra");
     }
+  }
+
+  std::printf("Cabecera avanzada de homebrew (ID 'ED', tipo en 0x3F>>4):\n");
+  if(!std::getenv("KESTREL_SAVETYPE")) {          // la variable manda sobre la cabecera
+    auto ep = std::make_unique<Memory>();
+    Memory& e = *ep;
+    e.reset(true);
+    e.rom.assign(0x1000, 0);
+    e.rom[0x3B] = 'N'; e.rom[0x3C] = 'E'; e.rom[0x3D] = 'D'; e.rom[0x3E] = 'E';
+    const Memory::SaveType want[] = { Memory::SaveType::None, Memory::SaveType::Eeprom4k,
+      Memory::SaveType::Eeprom16k, Memory::SaveType::Sram256k, Memory::SaveType::Sram768k,
+      Memory::SaveType::Flash1m, Memory::SaveType::Sram1m };
+    for(u32 t = 0; t < 7; t++) {
+      e.rom[0x3F] = (u8)(t << 4);
+      e.resolveSaveType();
+      char nm[32]; std::snprintf(nm, sizeof nm, "ED tipo %u", t);
+      chk(nm, (u32)e.saveType, (u32)want[t]);
+    }
+    e.rom[0x3F] = 0x60;                          // SRAM 1 Mbit: 128 KiB lineal, sin bancos
+    e.resolveSaveType();
+    chk("sram1m saveSize", e.saveSize(), 128 * 1024);
+    e.write32(SAVE + 0x1'8004, 0x13572468);
+    chk("sram1m lineal @0x18004", (u32)((e.saveRam[0x18004] << 24) | (e.saveRam[0x18005] << 16) |
+                                       (e.saveRam[0x18006] << 8) | e.saveRam[0x18007]), 0x13572468);
+    chk("sram1m read-back", e.read32(SAVE + 0x1'8004), 0x13572468);
+    e.rom[0x3C] = 'S'; e.rom[0x3D] = 'M';        // sin cabecera ED vuelve la tabla (SM64 = 4k)
+    e.resolveSaveType();
+    chk("sin ED: tabla de IDs", (u32)e.saveType, (u32)Memory::SaveType::Eeprom4k);
   }
 
   std::printf("\n%s (%d failures)\n", failures ? "FAILED" : "ALL PASS", failures);
