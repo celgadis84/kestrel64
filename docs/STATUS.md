@@ -9867,6 +9867,40 @@ con el estado congelado del sdk (`kestrel64-sdk/build/ci8repro`, ranura 5): cara
 Aparte, sigue sin modelar el intercambio de palabras de 32 bits en filas impares de TMEM
 (LOAD_BLOCK con dxt / LOAD_TILE al escribir, el muestreador al leer) -> HECHO en (f).
 
+## 2026-10-04 (g) -- PIF: modo de arranque (bits 0x08/0x10/0x20/0x40 del byte 0x3F) (GAPS #14)
+
+El byte de control de la PIF RAM cambia de significado segun el modo del PIF (n64brew
+PIF-NUS). En MODO RESET, desde el encendido hasta que el cartucho da el arranque por
+terminado: 0x10 bloquea la PIF ROM, 0x20 hace que el PIF recoja los 6 bytes de checksum en
+0x32 (los borra y contesta 0x80), 0x40 los compara con los del CIC y si no casan congela la
+consola, y 0x08 termina el arranque y pasa a MODO NORMAL. Si 0x08 no llega en ~5 s desde el
+encendido el PIF para la CPU por NMI. Antes kestrel no tenia modo: esos bits se quedaban
+escritos en la PIF RAM sin efecto.
+
+Ahora (`Memory::pifCommand`, `pifBootHle`, `pifFreeze`):
+- `pifCommand` se llama tras el DMA RDRAM->PIF y tras un SW de la CPU a la palabra 0x7FC
+  (asi manda libultra el 0x08 en `__osInitialize`). Solo actua en modo reset; en modo
+  normal 0x04/0x08 son banderas del joybus y se quedan.
+- IPL1/IPL2 son HLE: `CPU::fastBoot` deja el PIF como lo deja el IPL2 real (ROM bloqueada,
+  checksum IPL2 del CIC entregado), aun en modo reset. Checksums de la tabla de n64brew por
+  chip (6101, 6102/7101, 7102, 6103/7103, 6105/7105, 6106/7106). IPL3 desconocido = sin
+  checksum: 0x40 avisa y no congela (no se inventa veredicto).
+- Plazo: en cada cierre de campo, si sigue en modo reset y el reloj de invitado pasa de
+  `usToInsns(5 s)`, congela; System pone `cpu.halted`. `KESTREL_PIFBOOTWAIT=0` lo quita
+  (solo bisecar).
+- Estado guardado v18 (modo, ROM bloqueada, checksum, plazo). Un v14..v17 carga en modo
+  normal: nadie guarda en los primeros 5 s y el plazo ya vencido congelaria al cargar.
+
+`test/pif_test.cpp` +12 casos (secuencia 0x10/0x20/0x40/0x08 por SW real, checksum malo
+congela, IPL2 HLE, CIC desconocido, plazo por el reloj de campos VI): 19/19. SM64, PD, DK64,
+systemtest y snapper64 corridos 700 M ops (>5 s de invitado): ninguno se congela, o sea
+todos mandan 0x08. systemtest 0/3721 (threaded-jit, interp, phys-threaded), sm64 `b5521b24`
+interp/prdp-jit/phys.
+
+Sigue fuera (sin PIF ROM volcada ni documentacion): boton de reset (pre-NMI INT2, 500 ms,
+NMI, osResetType=1), formato de la palabra de arranque 0x24, y el algoritmo real de la suma
+IPL2 (que el IPL2 HLE no calcula: se da por buena).
+
 ## 2026-10-04 (f) -- TMEM: filas impares con las mitades de 32 bits intercambiadas (SoftRDP)
 
 El hardware guarda cada fila impar de TMEM con las dos mitades de 32 bits de cada palabra de

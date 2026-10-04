@@ -929,6 +929,8 @@ auto System::run() -> void {
       // cruce; aqui solo se recoge. La llamada de arriba se queda porque es la que mueve
       // VI_V_CURRENT y drena el AI en cada subtramo aunque no haya cruzado nada.
       if(viFieldPend) { fieldClosed = true; viFieldPend = false; }
+      // El PIF paro la CPU (NMI sostenida): la consola se queda congelada hasta apagarla.
+      if(memory.pifFrozen && !cpu.halted) cpu.halted = true;
       // Trucos: el motor del GameShark colgaba de la interrupcion del VI, asi que el ritmo
       // es el campo de video y no el fotograma del juego. Va aqui dentro, con el nucleo
       // parado bajo coreMutex, para que las escrituras no crucen con la CPU ni con el RCP.

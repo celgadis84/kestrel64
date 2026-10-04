@@ -139,13 +139,88 @@ auto main() -> int {
   // --- 5. The control byte's other bits are left alone --------------------------------
   // Only the two the PIF serves here may change; anything else the CPU wrote has to survive
   // the round trip, or a game that packs flags in there reads back something it never wrote.
+  // In NORMAL mode: during boot (reset mode) 0x10/0x20 are PIF commands, see section 6.
   {
     auto m = makeMem();
+    m->pifBootMode = false;
     u8 blk[64]; std::memset(blk, 0xFF, sizeof blk);
     blk[0] = 0xFE;
     blk[63] = 0x31;                                      // 0x30 (bits ajenos) + 0x01 (ejecutar)
     writeBlock(*m, blk);
     check("solo se apaga el bit 0", m->pifram[63] == 0x30);
+  }
+
+  // --- 6. Boot (reset) mode: the IPL2/IPL3 command sequence ----------------------------
+  // n64brew PIF-NUS: 0x10 locks the PIF ROM, 0x20 makes the PIF take the 6 checksum bytes at
+  // 0x32 (it wipes them and answers 0x80), 0x40 compares them with the CIC's, 0x08 ends the
+  // boot. Driven through a CPU SW to the control word, which is how libultra sends 0x08.
+  static constexpr u32 PIF_CTRL_WORD = 0x1fc0'07fc;
+  static constexpr u64 kSum6102 = 0xA536'C0F1'D859ull;
+  auto putSum = [](Memory& m, u64 sum) { for(int i = 0; i < 6; i++) m.pifram[0x32 + i] = (u8)(sum >> (8 * (5 - i))); };
+  {
+    auto m = makeMem();
+    m->cicSum = kSum6102;
+    check("encendido en modo reset", m->pifBootMode && !m->pifRomLocked && !m->pifFrozen);
+    m->write32(PIF_CTRL_WORD, 0x10);
+    check("0x10 bloquea la PIF ROM y se consume", m->pifRomLocked && m->pifram[63] == 0x00);
+    putSum(*m, kSum6102);
+    m->write32(PIF_CTRL_WORD, 0x20);
+    bool wiped = true; for(int i = 0; i < 6; i++) wiped &= m->pifram[0x32 + i] == 0;
+    check("0x20 recoge el checksum, lo borra y contesta 0x80", m->pifSumGot && wiped && m->pifram[63] == 0x80);
+    m->write32(PIF_CTRL_WORD, 0x40);
+    check("0x40 con checksum bueno no congela", !m->pifFrozen && m->pifram[63] == 0x00);
+    m->write32(PIF_CTRL_WORD, 0x08);
+    check("0x08 sale del modo reset y se consume", !m->pifBootMode && m->pifram[63] == 0x00);
+    m->write32(PIF_CTRL_WORD, 0x08);
+    check("en modo normal 0x08 es bandera del joybus y se queda", m->pifram[63] == 0x08 && !m->pifFrozen);
+  }
+
+  // --- 7. A wrong checksum freezes the console ---------------------------------------
+  {
+    auto m = makeMem();
+    m->cicSum = kSum6102;
+    putSum(*m, kSum6102 ^ 1);
+    m->write32(PIF_CTRL_WORD, 0x20);
+    m->write32(PIF_CTRL_WORD, 0x40);
+    check("0x40 con checksum malo congela", m->pifFrozen);
+  }
+
+  // --- 8. HLE boot leaves the PIF where IPL2 leaves it --------------------------------
+  {
+    auto m = makeMem();
+    m->pifBootHle(kSum6102);
+    check("tras IPL2 HLE: ROM bloqueada, checksum entregado, aun modo reset",
+          m->pifRomLocked && m->pifSumGot && m->pifBootMode);
+    m->write32(PIF_CTRL_WORD, 0x40);
+    check("re-verificar tras IPL2 HLE no congela", !m->pifFrozen);
+  }
+
+  // --- 9. Unknown CIC (homebrew IPL3): no verdict invented -----------------------------
+  {
+    auto m = makeMem();
+    m->pifBootHle(0);
+    putSum(*m, 0x1234'5678'9abcull);
+    m->write32(PIF_CTRL_WORD, 0x20);
+    m->write32(PIF_CTRL_WORD, 0x40);
+    check("CIC desconocido: 0x40 no congela", !m->pifFrozen);
+  }
+
+  // --- 10. The 0x08 deadline: ~5 s of guest time from power-on ---------------------
+  // Driven by the VI field clock, the same one the run loop uses.
+  {
+    auto m = makeMem();
+    const u64 dl = m->usToInsns(Memory::kPifBootUs);
+    u64 t = 0, step = dl / 4000 + 1;
+    bool frozeEarly = false;
+    while(t < dl * 2 && !m->pifFrozen) {
+      t += step; m->viTick(t);
+      if(m->pifFrozen && t < dl) frozeEarly = true;
+    }
+    check("sin 0x08 la consola se congela al vencer el plazo", m->pifFrozen && !frozeEarly);
+    auto m2 = makeMem();
+    m2->write32(PIF_CTRL_WORD, 0x08);
+    for(u64 u = 0; u < dl * 2; u += step) m2->viTick(u);
+    check("con 0x08 a tiempo no se congela", !m2->pifFrozen);
   }
 
   std::printf(failures ? "FAILURES: %d\n" : "ALL PASS\n", failures);

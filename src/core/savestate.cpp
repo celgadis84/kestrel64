@@ -26,7 +26,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 17;  // 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 18;  // 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -272,6 +272,16 @@ auto visitRam(StateIO& io, Memory& m) -> void {
   // nivel revive con el motor ocupado para siempre o con la interrupcion perdida.
   io.pod(m.piBusy); io.pod(m.piDoneAt);
   io.vecBlob(m.pifram);
+  // Modo de arranque del PIF (v18). Un estado anterior es de un juego que ya habia pasado el
+  // arranque (nadie guarda en los primeros 5 s), asi que se carga en modo normal: si no, el
+  // plazo de 0x08 ya vencido congelaria la consola nada mas cargar.
+  if(io.version >= 18) {
+    io.pod(m.pifBootMode); io.pod(m.pifRomLocked); io.pod(m.pifFrozen);
+    io.arr(m.pifSum, 6); io.pod(m.pifSumGot); io.pod(m.cicSum); io.pod(m.pifBootDeadline);
+    if(!io.writing) m.pifFreezeWhy = m.pifFrozen ? "estado guardado ya congelado" : nullptr;
+  } else if(!io.writing) {
+    m.pifBootMode = false; m.pifFrozen = false; m.pifFreezeWhy = nullptr;
+  }
   io.vecBlob(m.eeprom);
   io.vecBlob(m.saveRam);
   // Los pak son RAM viva: rebobinar un estado tiene que rebobinarlos. Van los cuatro
@@ -426,7 +436,7 @@ auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> b
   std::memcpy(&h, data, sizeof(h));
   Header want = makeHeader(sys);
   if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
+  if(h.version != kVersion && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
   if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
   if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
 

@@ -1731,6 +1731,32 @@ public:
   // El cartucho esta firmado con CIC-NUS-6105 / 7105, que es el unico chip cuyo desafio
   // tiene algoritmo de verdad. Lo pone CPU::fastBoot al identificar la imagen del IPL3.
   bool cic6105 = false;
+
+  // --- Modo de arranque del PIF (n64brew PIF-NUS) --------------------------------
+  // El byte de control 0x3F significa cosas distintas segun el modo del PIF. En MODO RESET
+  // (desde el encendido hasta que la CPU da el arranque por terminado):
+  //   0x10  bloquear la PIF ROM (deja de verse por el bus serie; lo manda el IPL2)
+  //   0x20  recoger checksum: el PIF lee los 6 bytes de 0x32, los borra y pone 0x80
+  //   0x40  verificar checksum contra el del CIC; si no casa, congela la consola
+  //   0x08  fin del arranque: el PIF pasa a MODO NORMAL (y habilita el boton de reset)
+  // En MODO NORMAL 0x01/0x02 son joybus y desafio del CIC, y 0x04/0x08 banderas del joybus
+  // que el PIF no consume. Si 0x08 no llega en ~5 s desde el encendido, el PIF para la CPU
+  // por la linea NMI y la consola se queda congelada hasta apagarla.
+  // IPL1/IPL2 son HLE (no hay PIF ROM volcada): `pifBootHle` deja el estado en que los deja
+  // el IPL2 de verdad -- ROM bloqueada y checksum ya entregado y verificado --, todavia en
+  // modo reset; el 0x08 lo manda despues el propio cartucho (libultra, IPL3 de libdragon).
+  bool pifBootMode   = true;     // modo reset: aun no ha llegado 0x08
+  bool pifRomLocked  = false;    // 0x10 ya recibido
+  bool pifFrozen     = false;    // el PIF ha parado la CPU (plazo vencido o checksum malo)
+  u8   pifSum[6]     = {};       // checksum entregado con 0x20
+  bool pifSumGot     = false;
+  u64  cicSum        = 0;        // checksum IPL2 que guarda el CIC del cartucho (48 bits; 0 = desconocido)
+  u64  pifBootDeadline = 0;      // instante (reloj de invitado) del plazo de 0x08; 0 = sin armar
+  const char* pifFreezeWhy = nullptr;
+  static constexpr u64 kPifBootUs = 5'000'000;   // ~5 s desde el encendido
+  auto pifBootHle(u64 cicChecksum) -> void;      // estado tras IPL1+IPL2 (lo pone CPU::fastBoot)
+  auto pifCommand() -> void;     // la CPU acaba de escribir el byte de control (0x3F)
+  auto pifFreeze(const char* why) -> void;
 };
 
 }  // namespace kestrel

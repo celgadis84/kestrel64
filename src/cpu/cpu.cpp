@@ -199,6 +199,21 @@ static const CicInfo kCicTable[] = {
 };
 static constexpr u32 kCrcCic6105 = 0x98BC2C86;  // the one IPL3 with an RSP boot stage
 
+// IPL2 checksum (48 bits) the CIC holds and hands to the PIF at boot; the PIF compares it
+// with the one IPL2 computes over IPL3 (commands 0x20/0x40). Table from n64brew PIF-NUS.
+// 0 = no published value (5101) or unknown IPL3.
+static auto cicIpl2Checksum(int id) -> u64 {
+  switch(id) {
+  case 6101:             return 0x45CC'73EE'317Aull;
+  case 6102: case 7101:  return 0xA536'C0F1'D859ull;
+  case 7102:             return 0x4416'0EC5'D9AFull;
+  case 6103: case 7103:  return 0x586F'D470'9867ull;
+  case 6105: case 7105:  return 0x8618'A45B'C2D3ull;
+  case 6106: case 7106:  return 0x2BBA'D4E6'EB74ull;
+  default:               return 0;
+  }
+}
+
 static auto crc32(const u8* p, usize n) -> u32 {
   u32 c = 0xffff'ffffu;
   for(usize i = 0; i < n; i++) {
@@ -383,6 +398,9 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
   bool is6105 = (cic.crc == kCrcCic6105);
   // El PIF necesita saberlo: el desafio anti-pirateria solo lo contesta este chip.
   if(mem) mem->cic6105 = is6105;
+  // IPL1/IPL2 are HLE: leave the PIF where real IPL2 leaves it (ROM locked, checksum handed
+  // over), still in reset mode. Unknown IPL3 -> unknown chip -> no CIC checksum.
+  if(mem) mem->pifBootHle(cic.crc ? cicIpl2Checksum(cicId) : 0);
   // Arrancar por IPL3 real o emular su resultado. El camino HLE no es generico: sabe
   // reproducir el efecto de los IPL3 que CONOCE (direccion de arranque propia de cada CIC,
   // la etapa RSP del 6105, la copia del primer megabyte desde ROM+0x1000). Un cartucho con

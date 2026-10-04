@@ -158,6 +158,10 @@ auto Memory::reset(bool expansionPak) -> void {
   dmem.assign(DMEM_SIZE, 0);
   imem.assign(IMEM_SIZE, 0);
   pifram.assign(PIFRAM_SIZE, 0);
+  // Encendido: el PIF arranca en modo reset (ver pifCommand). El plazo de 0x08 lo arma el
+  // primer cierre de campo, que es cuando el reloj de invitado ya existe.
+  pifBootMode = true; pifRomLocked = false; pifFrozen = false; pifFreezeWhy = nullptr;
+  pifSumGot = false; std::memset(pifSum, 0, sizeof pifSum); pifBootDeadline = 0;
   // Size the save backings to the resolved device and blank them on a cold boot.
   // EEPROM lives on the joybus; SRAM/FlashRAM on the PI bus. Both start erased (0xFF
   // is flash-erased; SRAM/EEPROM conventionally 0x00 until written).
@@ -980,6 +984,9 @@ auto Memory::write32(u32 addr, u32 value) -> void {
   if(p && rem >= 4) {
     p[0] = (u8)(value >> 24); p[1] = (u8)(value >> 16);
     p[2] = (u8)(value >> 8);  p[3] = (u8)value;
+    // SW de la CPU sobre la palabra del byte de control de la PIF RAM (SI WR4B): el PIF lo
+    // atiende igual que tras un DMA. Es como libultra manda el 0x08 de fin de arranque.
+    if((addr & 0x1fff'fffc) == BASE_PIFRAM + 0x3c) pifCommand();
     return;
   }
   u32 m = addr & 0x1fff'ffff;
@@ -2099,6 +2106,7 @@ auto Memory::siDma(bool toPif) -> void {
     // que se apague se queda dando vueltas para siempre. Los transferimientos del joybus en
     // si no van aqui, van en la lectura (ver abajo), que es donde el hardware los corre.
     if(pifram[63] & 0x01) pifram[63] = (u8)(pifram[63] & ~0x01u);
+    pifCommand();
   } else if(pifram[63] & 0x02) {
     // Bit 1 del byte de control: DESAFIO del CIC. No es una transaccion de joybus -- el PIF
     // habla con el chip CIC del cartucho por su linea serie propia -- asi que esta lectura
@@ -2150,6 +2158,60 @@ auto Memory::siFinish() -> void {
   }
   rcp.si_status = 0;
   raiseIntr(MI_SI);
+}
+
+// --- Modo de arranque del PIF -------------------------------------------------------
+// Ver la cabecera en memory.hpp. Solo se atienden aqui los bits del MODO RESET; los del modo
+// normal (joybus, desafio del CIC) siguen en siDma porque dependen del sentido del DMA.
+auto Memory::pifBootHle(u64 cicChecksum) -> void {
+  // Lo que ya hizo el IPL2 antes de saltar al IPL3: bloquear la ROM (0x10) y entregar el
+  // checksum del IPL3 (0x20) para que el PIF lo compare con el del CIC (0x40). Un cartucho
+  // que arranca es uno cuyo IPL3 paso esa comprobacion, asi que el checksum entregado ES el
+  // del CIC. Sigue en modo reset: falta el 0x08 del cartucho.
+  cicSum = cicChecksum;
+  pifRomLocked = true;
+  for(int i = 0; i < 6; i++) pifSum[i] = (u8)(cicChecksum >> (8 * (5 - i)));
+  pifSumGot = cicChecksum != 0;
+}
+
+auto Memory::pifFreeze(const char* why) -> void {
+  if(pifFrozen) return;
+  pifFrozen = true; pifFreezeWhy = why;
+  std::fprintf(stderr, "[pif] consola CONGELADA por el PIF: %s\n", why);
+  std::fflush(stderr);
+}
+
+auto Memory::pifCommand() -> void {
+  u8& c = pifram[63];
+  if(!pifBootMode) return;                 // modo normal: 0x04/0x08 son banderas del joybus
+  if(c & 0x10) { pifRomLocked = true; c = (u8)(c & ~0x10u); }
+  if(c & 0x20) {
+    // Recoger checksum: 6 bytes en 0x32..0x37, el PIF se los queda, los borra de la PIF RAM
+    // y avisa con 0x80 en el byte de control.
+    for(int i = 0; i < 6; i++) { pifSum[i] = pifram[0x32 + i]; pifram[0x32 + i] = 0; }
+    pifSumGot = true;
+    c = (u8)((c & ~0x20u) | 0x80u);
+  }
+  if(c & 0x40) {
+    c = (u8)(c & ~0x40u);
+    u64 got = 0;
+    for(int i = 0; i < 6; i++) got = (got << 8) | pifSum[i];
+    if(!cicSum) {
+      // IPL3 desconocido (homebrew): no sabemos que chip lleva el cartucho, asi que no hay
+      // checksum del CIC con que comparar. Inventarse un veredicto seria peor que no darlo.
+      static bool warned = false;
+      if(!warned) { warned = true;
+        std::fprintf(stderr, "[pif] verificacion de checksum con CIC desconocido: se da por buena\n"); }
+    } else if(!pifSumGot || got != cicSum) {
+      pifFreeze("checksum IPL2 distinto del del CIC (orden 0x40)");
+    }
+  }
+  if(c & 0x08) {
+    // Fin del arranque: el PIF pasa a modo normal y el plazo de 5 s deja de correr. El bit
+    // se consume (en modo normal el mismo bit es una bandera del joybus).
+    pifBootMode = false;
+    c = (u8)(c & ~0x08u);
+  }
 }
 
 // --- Desafio anti-pirateria del CIC-NUS-6105 ---------------------------------
@@ -2425,6 +2487,16 @@ auto Memory::viTick(u64 retiredNow) -> bool {
   if(intrFire) raiseIntr(MI_VI);
   if(fieldClose) {
     rcp.viFields++;
+    // Plazo del PIF para el 0x08 (fin del arranque), contado desde el encendido (instante 0
+    // del reloj de invitado) y mirado por campo: la congelacion llega como mucho un campo
+    // tarde, que para un plazo de 5 s da igual. KESTREL_PIFBOOTWAIT=0 lo quita (solo para
+    // bisecar: en hardware no pasa).
+    if(pifBootMode && !pifFrozen) {
+      static const bool off = [] { const char* e = std::getenv("KESTREL_PIFBOOTWAIT"); return e && !std::strcmp(e, "0"); }();
+      if(!pifBootDeadline) pifBootDeadline = usToInsns(kPifBootUs);
+      if(!off && pifBootDeadline && retiredNow >= pifBootDeadline)
+        pifFreeze("el cartucho no mando el fin de arranque (0x08) en 5 s");
+    }
     // Barrido de video: el VI no tiene framebuffer propio, relee la imagen de RDRAM cada
     // campo, una linea por linea de salida (su buffer interno es de una linea). Es trafico
     // continuo y con prioridad sobre el RDP -- de ahi el factor T_VI del modelo de coste --
