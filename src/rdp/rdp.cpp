@@ -1023,6 +1023,10 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   TexFold folds[8];
   if(textured && (usesLod || usesTex1)) for(u32 i = 0; i < 8; i++) folds[i] = foldOf(i);
   const u32 ldir = leftMajor ? 1u : ~0u;   // +1 / -1 en aritmetica modular
+  // Textura HD / realce (texpack): sustituye el texel de tile0 cuando hay reemplazo. No con
+  // mipmap del propio juego (los niveles serian de otra textura) ni en solo-coste.
+  HdBind hdB;
+  if(texpack::active() && textured && !usesLod && !costOnly && !fillMode) hdB = hdBind(mem, texTile);
   lodFracV = 0xff;
   if(usesLod && !textured) {   // sin coordenadas: S=T=W=0 en todo el primitivo -> magnify
     u32 t0 = texTile, t1 = (texTile + 1) & 7;
@@ -1190,7 +1194,26 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
           }
           lodFracV = lodSelect(ps, pt, s1, t1, s2, t2, ovf, maxLevel, tile0, tile1);
         }
-        u32 tex = sampleTexFold(usesLod ? folds[tile0] : texF, su, tu);
+        u32 tex;
+        if(hdB.tex) {
+          // Huella del pixel en texeles originales (mismos vecinos que la unidad de LOD):
+          // elige el nivel de la piramide HD.
+          const u32 xs0 = ldir * (u32)(tDx[0] & ~0x1f), xt0 = ldir * (u32)(tDx[1] & ~0x1f),
+                    xw0 = ldir * (u32)(tDx[3] & ~0x1f);
+          const u32 ys0 = (u32)(tDy[0] & ~0x7fff), yt0 = (u32)(tDy[1] & ~0x7fff),
+                    yw0 = (u32)(tDy[3] & ~0x7fff);
+          s32 s1 = stwAt(0, xs0), t1 = stwAt(1, xt0), s2 = stwAt(0, ys0), t2 = stwAt(1, yt0);
+          if(persp) {
+            bool o2 = false;
+            perspDivide(s1, t1, stwAt(3, xw0), s1, t1, &o2);
+            perspDivide(s2, t2, stwAt(3, yw0), s2, t2, &o2);
+          }
+          const double fp = std::max({std::abs((double)s1 - ps), std::abs((double)t1 - pt),
+                                      std::abs((double)s2 - ps), std::abs((double)t2 - pt)}) / 32.0;
+          tex = hdSample(hdB, su, tu, fp);
+        } else {
+          tex = sampleTexFold(usesLod ? folds[tile0] : texF, su, tu);
+        }
         // 2-cycle: TEXEL1 es un segundo muestreo, de tile1, en el mismo S/T.
         u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], su, tu) : tex;
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
@@ -1570,6 +1593,198 @@ auto SoftRdp::sampleTexFiltered(u32 tile, double s, double t) -> u32 {
   return sampleTexFold(foldOf(tile), s, t);
 }
 
+// --- texturas HD / realce (texpack) ---------------------------------------------------
+// Semantica de los packs de Rice/GLideN64: el hash se toma de la textura en RDRAM con los
+// parametros de la ULTIMA carga a esa direccion de TMEM y el tile con que se dibuja. Ver
+// texpack.hpp y docs/TEXTURAS-HD.md. Nada de esto toca TMEM ni el muestreo normal: solo
+// sustituye el texel cuando hay textura de reemplazo.
+
+auto SoftRdp::hdNoteLoad(u32 t, bool block, u64 cmd) -> void {
+  hdGen++;
+  const Tile& tl = tiles[t & 7];
+  HdLoad& li = hdLoads[tl.tmem & 0x1ff];
+  const u32 sl = (u32)((cmd >> 44) & 0xfff) >> 2, tlo = (u32)((cmd >> 32) & 0xfff) >> 2;
+  const u32 sh = (u32)((cmd >> 12) & 0xfff) >> 2, th = (u32)(cmd & 0xfff) >> 2;
+  li = HdLoad{};
+  li.valid = true;
+  li.addr = ti_addr; li.texWidth = ti_width; li.size = ti_size;
+  li.block = block;
+  if(block) {
+    li.dxt = (u32)(cmd & 0xfff);
+  } else {
+    li.uls = sl; li.ult = tlo;
+    u32 w = (sh - sl + 1) & 0x3ff, h = (th - tlo + 1) & 0x3ff;
+    if(tl.maskS) w = std::min(w, 1u << tl.maskS);
+    if(tl.maskT) h = std::min(h, 1u << tl.maskT);
+    li.width = w; li.height = h;
+  }
+}
+
+auto SoftRdp::hdNoteTlut(Memory& mem, u32 t, u64 cmd) -> void {
+  // GLideN64 copia la paleta tal cual esta en su RDRAM (palabras de 32 bits del anfitrion)
+  // desde la direccion de la imagen, sin desplazar por SL/TL, a partir de la entrada
+  // tmem-256. Se reproduce byte a byte: byte b del anfitrion = byte b^3 del invitado.
+  hdGen++;
+  const Tile& tl = tiles[t & 7];
+  if(tl.tmem < 256) return;
+  const u32 sl = (u32)((cmd >> 44) & 0xfff) >> 2, tlo = (u32)((cmd >> 32) & 0xfff) >> 2;
+  const u32 sh = (u32)((cmd >> 12) & 0xfff) >> 2, th = (u32)(cmd & 0xfff) >> 2;
+  const u32 count = ((sh - sl + 1) * (th - tlo + 1)) & 0xffff;
+  const u32 start = (tl.tmem - 256) * 2;
+  const auto& m = mem.rdram;
+  for(u32 b = 0; b < count * 2 && start + b < sizeof hdPal; b++) {
+    const usize a = (usize)((ti_addr + b) ^ 3);
+    hdPal[start + b] = a < m.size() ? m[a] : 0;
+  }
+}
+
+namespace {
+// Rice: deduce las palabras por fila de un LOAD_BLOCK a partir de su DXT (la misma cuenta
+// que ReverseDXT de Rice Video / GLideN64; implementacion propia).
+auto txl2Words(u32 width, u32 size) -> u32 {
+  static const u32 kBytes[4] = {0, 1, 2, 4};
+  return size == 0 ? std::max(1u, width / 16) : std::max(1u, width * kBytes[size] / 8);
+}
+auto reverseDxt(u32 val, u32 width, u32 size) -> u32 {
+  if(val == 0x800) return 1;
+  auto calc = [](u32 w) -> u32 { return w == 0 ? 1 : (2048 + w - 1) / w; };
+  int low = 2047 / (int)val;
+  if(calc((u32)low) > val) low++;
+  const int high = 2047 / (int)(val - 1);
+  if(low == high) return (u32)low;
+  for(int i = low; i <= high; i++)
+    if(txl2Words(width, size) == (u32)i) return (u32)i;
+  return (u32)((low + high) / 2);
+}
+}  // namespace
+
+auto SoftRdp::hdBind(Memory& mem, u32 t) -> HdBind {
+  const Tile& tl = tiles[t & 7];
+  HdMemo& mm = hdMemo[t & 7];
+  const u32 mode = tlutMode();
+  if(mm.gen == hdGen && mm.mode == mode && !std::memcmp(&mm.tile, &tl, sizeof tl)) return mm.b;
+  mm.gen = hdGen; mm.mode = mode; mm.tile = tl; mm.b = HdBind{};
+  if(tl.fmt == 1) return mm.b;                       // YUV: no hay nada que sustituir
+  const HdLoad& li = hdLoads[tl.tmem & 0x1ff];
+  if(!li.valid || !li.addr) return mm.b;
+  int bpl = 0, w = 0, h = 0;
+  u32 addr = li.addr;
+  if(!li.block) {
+    bpl = (int)((li.texWidth << li.size) >> 1);
+    addr += li.ult * (u32)bpl + (((li.uls << li.size) + 1) >> 1);
+    w = (int)std::min(li.width, li.texWidth);
+    if(li.size > tl.size) w <<= li.size - tl.size;
+    h = (int)li.height;
+  } else {
+    const int tw = (int)((((tl.sh >> 2) - (tl.sl >> 2)) & 0x3ff) + 1);
+    const int th = (int)((((tl.th >> 2) - (tl.tl >> 2)) & 0x3ff) + 1);
+    const int mw = tl.maskS ? 1 << tl.maskS : tw, mh = tl.maskT ? 1 << tl.maskT : th;
+    w = ((tl.cmS & 2) && tw <= 256) ? std::min(mw, tw) : mw;
+    h = (((tl.cmT & 2) && th <= 256) || mh > 256) ? std::min(mh, th) : mh;
+    if(tl.size == 3)      bpl = (int)(tl.line << 4);
+    else if(li.dxt == 0)  bpl = (int)(tl.line << 3);
+    else                  bpl = (int)(reverseDxt(li.dxt, (u32)w, tl.size) << 3);
+  }
+  if(w <= 0 || h <= 0 || w > 1024 || h > 1024 || bpl <= 0) return mm.b;
+  const auto& m = mem.rdram;
+  auto hb = [&](s64 i) -> u32 {
+    const s64 a = ((s64)addr + i) ^ 3;
+    return a >= 0 && (usize)a < m.size() ? m[(usize)a] : 0;
+  };
+  const bool usePal = tl.size < 2 && (mode != 0 || tl.fmt == 2);
+  u64 crc = 0;
+  if(usePal) {
+    const u32 tcrc = texpack::riceCrc32(hb, 0, w, h, (int)tl.size, bpl);
+    u32 cimax = 0;
+    for(int y = 0; y < h && cimax < (tl.size ? 0xffu : 0xfu); y++) {
+      if(tl.size == 1) for(int x = 0; x < w; x++) cimax = std::max(cimax, hb((s64)y * bpl + x));
+      else for(int x = 0; x < w / 2; x++) {
+        const u32 v = hb((s64)y * bpl + x);
+        cimax = std::max({cimax, v >> 4, v & 15u});
+      }
+    }
+    const s64 off = tl.size == 1 ? 0 : (s64)tl.palette * 32;
+    auto pb = [&](s64 i) -> u32 { const s64 a = off + i; return a >= 0 && a < (s64)sizeof hdPal ? hdPal[a] : 0; };
+    const u32 pcrc = texpack::riceCrc32(pb, 0, (int)cimax + 1, 1, 2, tl.size == 1 ? 512 : 32);
+    crc = ((u64)pcrc << 32) | tcrc;
+  }
+  if(!crc) crc = texpack::riceCrc32(hb, 0, w, h, (int)tl.size, bpl);
+  const texpack::Tex* tex = texpack::g_load ? texpack::find(crc, tl.fmt, tl.size) : nullptr;
+  if(!tex && texpack::g_fx != texpack::FxNone) tex = texpack::enhanced(crc, tl.fmt, tl.size);
+  const bool wantDump = texpack::g_dump && !texpack::dumped(crc, tl.fmt, tl.size);
+  const bool wantFx = !tex && texpack::g_fx != texpack::FxNone;
+  if(wantDump || wantFx) {
+    // La textura tal como la ve el muestreador, leida de TMEM sin pliegue (sin mask,
+    // clamp ni shift): texel (s, t) de la imagen cargada.
+    TexFold f = foldOf(t);
+    f.shiftS = f.shiftT = f.maskS = f.maskT = f.cmS = f.cmT = 0;
+    f.sMax = f.tMax = 4095;
+    f.fastS = f.fastT = false;
+    std::vector<u32> px((usize)w * h);
+    for(int y = 0; y < h; y++)
+      for(int x = 0; x < w; x++) px[(usize)y * w + x] = texelAt(f, x, y);
+    if(wantDump) texpack::dump(crc, tl.fmt, tl.size, usePal, w, h, px.data());
+    if(wantFx) tex = texpack::enhance(crc, tl.fmt, tl.size, w, h, px.data());
+  }
+  if(!tex || tex->lv.empty()) return mm.b;
+  mm.b.tex = tex;
+  mm.b.scX = (double)tex->w / w;
+  mm.b.scY = (double)tex->h / h;
+  mm.b.f = foldOf(t);
+  return mm.b;
+}
+
+auto SoftRdp::hdSample(const HdBind& b, double s, double t, double fp) const -> u32 {
+  // Mismo pliegue que `foldCoord` (shift, clamp, mirror, mask) pero en coordenada continua:
+  // el texel entero se pliega igual que en el original y la fraccion va con el (invertida
+  // en el tramo espejo). Luego se escala a texeles HD.
+  auto fold = [](double c, u32 sh, u32 mask, u32 cm, s64 lim) -> double {
+    if(sh) c = sh <= 10 ? c / (double)(1 << sh) : c * (double)(1 << (16 - sh));
+    s64 i = (s64)std::floor(c);
+    double fr = c - (double)i;
+    if((cm & 2) || mask == 0) {
+      if(c < 0) { i = 0; fr = 0; }
+      else if(i > lim) { i = lim; fr = 0.999; }
+    }
+    if(mask) {
+      if((cm & 1) && ((i >> mask) & 1)) { i = ~i; fr = 1.0 - fr; }
+      i &= ((s64)1 << mask) - 1;
+    }
+    return (double)i + fr;
+  };
+  const TexFold& f = b.f;
+  const texpack::Tex& tx = *b.tex;
+  double u = fold(s, f.shiftS, f.maskS, f.cmS, (s64)f.sMax) * b.scX;
+  double v = fold(t, f.shiftT, f.maskT, f.cmT, (s64)f.tMax) * b.scY;
+  // Nivel: texeles HD por pixel = fp * escala. log2 entero hacia abajo, sin mezclar niveles.
+  int L = 0;
+  for(double k = fp * std::max(b.scX, b.scY); k >= 2.0 && L + 1 < (int)tx.lv.size(); k *= 0.5) L++;
+  const int lw = tx.lw[L], lh = tx.lh[L];
+  u *= (double)lw / tx.w; v *= (double)lh / tx.h;
+  const u32* p = tx.lv[L].data();
+  auto ix = [](s64 i, int n) -> int {
+    i %= n;
+    return (int)(i < 0 ? i + n : i);
+  };
+  if(!((other_hi >> 13) & 1))
+    return p[(usize)ix((s64)std::floor(v), lh) * lw + ix((s64)std::floor(u), lw)];
+  u -= 0.5; v -= 0.5;
+  const s64 x0 = (s64)std::floor(u), y0 = (s64)std::floor(v);
+  const int fx = (int)((u - (double)x0) * 256), fy = (int)((v - (double)y0) * 256);
+  const int xa = ix(x0, lw), xb = ix(x0 + 1, lw);
+  const int ya = ix(y0, lh), yb = ix(y0 + 1, lh);
+  const u32 c00 = p[(usize)ya * lw + xa], c10 = p[(usize)ya * lw + xb];
+  const u32 c01 = p[(usize)yb * lw + xa], c11 = p[(usize)yb * lw + xb];
+  u32 r = 0;
+  for(int sft = 0; sft < 32; sft += 8) {
+    const int a = (int)((c00 >> sft) & 255), bb = (int)((c10 >> sft) & 255);
+    const int c = (int)((c01 >> sft) & 255), d = (int)((c11 >> sft) & 255);
+    const int top = a * 256 + (bb - a) * fx, bot = c * 256 + (d - c) * fx;
+    r |= (u32)((top * 256 + (bot - top) * fy + 32768) >> 16) << sft;
+  }
+  return r;
+}
+
 auto SoftRdp::buildCombPlan() -> void {
   // Traduce cada selector a una fila de la tabla de fuentes. Las tablas siguen una a una a
   // los `switch` de `combineColorSlow`, que es la referencia: mismo caso, misma fuente.
@@ -1888,6 +2103,10 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
     accountPixels(mem, npx, npx, 0);
     return;
   }
+  // Textura HD / realce (texpack). No en COPY a framebuffer de 8 bits (escribe indices).
+  HdBind hdB;
+  if(texpack::active() && !usesLod && !(cycleType() == 2 && ci_size == 1)) hdB = hdBind(mem, tile);
+  const double hdFp = std::max(std::abs(dsdx), std::abs(dtdy));
   for(int y = Y0; y < Y1; y++) {
     if(y < 0) continue;
     if(X1 > std::max(X0, 0)) addSpan(std::max(X0, 0), u64(X1 - std::max(X0, 0)));
@@ -1905,7 +2124,8 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
                              false, 0, tile0, tile1);
       }
       // point or N64 3-point per SAMPLE_TYPE
-      u32 tex = usesLod ? sampleTexFold(folds[tile0], s, t) : sampleTexFiltered(tile, s, t);
+      u32 tex = hdB.tex ? hdSample(hdB, s, t, hdFp)
+              : usesLod ? sampleTexFold(folds[tile0], s, t) : sampleTexFiltered(tile, s, t);
       u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], s, t) : tex;
       // COPY cycle writes the raw texel; 1-/2-cycle route it through the combiner
       // (texrect carries no shade → SHADE input is 0).
@@ -1958,6 +2178,7 @@ auto SoftRdp::copyRun(const V& m, u32 src, u32 dst, u32 n) -> void {
 }
 
 auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
+  if(texpack::active()) hdNoteLoad(t, block, cmd);
   // Copy texels from the texture image (RDRAM, ti_addr/ti_width/ti_size) into TMEM
   // at the tile's base. LOAD_TILE walks a [SL,TL]..[SH,TH] rectangle (fields in
   // 10.2); LOAD_BLOCK copies a contiguous run (SL..SH linear texels).
@@ -2175,6 +2396,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       // (palette p covers flat entries p*16 .. p*16+15).
       u32 t  = (cmd >> 24) & 7;
       u32 dst = tiles[t].tmem & 0xff;
+      if(texpack::active()) hdNoteTlut(mem, t, cmd);
       //
       // La fuente es la de un LOAD_TILE de una sola fila: texel (SL..SH, TL) de la imagen,
       // o sea ti_addr + (TL * ti_width + s) * 2. Con TL = 0 sale lo de siempre, pero quien

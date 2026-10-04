@@ -209,6 +209,24 @@ CATEGORIES = [
            "animado y oleo son esteticas de imagen, no de iluminacion: miran el cuadro, no la "
            "escena. Requiere Vulkan con RGBA16F en compute (cualquier GPU de la ultima "
            "decada); si no, vuelve sola a pixel nitido."),
+    O("texpack", "KESTREL_TEXPACK", "Pack de texturas HD (carpeta)", "path", "",
+      help="Carpeta con un pack de texturas en formato Rice / GLideN64 (ficheros "
+           "<NOMBRE ROM>#crc#fmt#siz_all.png); los packs hechos para GLideN64 valen tal cual. "
+           "Solo con el ejecutable SoftRDP (kestrel64-soft.exe): paraLLEl-RDP muestrea la "
+           "textura en la GPU y no admite sustitutos. Ver docs/TEXTURAS-HD.md."),
+    O("texfx", "KESTREL_TEXFX", "Realce de texturas", "choice", "",
+      values=[["", "Ninguno - texturas originales"],
+              ["scale4x", "Scale4x - agranda 4x sin emborronar (pixel art)"],
+              ["cel", "Cel shading - Scale4x + bandas de tono + contorno"],
+              ["poster", "Posterizado - paleta reducida en bandas"]],
+      help="Retoca por algoritmo cada textura original la primera vez que se dibuja, en vez "
+           "de la imagen entera como el filtro de imagen: el contorno sale donde cambia la "
+           "textura, no donde cambia la escena. Un pack HD, si lo hay, manda sobre esto. "
+           "Solo SoftRDP (kestrel64-soft.exe)."),
+    O("texdump", "KESTREL_TEXDUMP", "Volcar texturas en (carpeta)", "path", "", adv=True,
+      help="Guarda cada textura distinta que dibuja el juego como PNG con nombre de pack "
+           "Rice/GLideN64, para hacer uno propio (por ejemplo escalandolas con una red como "
+           "Real-ESRGAN y poniendo la carpeta resultante como pack). Solo SoftRDP."),
     O("upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", "choice", "1",
       values=[["1", "1x - resolucion nativa"], ["2", "2x"], ["4", "4x"], ["8", "8x"]],
       help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con "

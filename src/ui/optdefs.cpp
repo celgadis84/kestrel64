@@ -53,6 +53,12 @@ static const Choice kCh_filter[] = {
   {"cel", "Dibujo animado - bandas de tono y contornos"},
   {"oleo", "Pintura al oleo (Kuwahara)"},
 };
+static const Choice kCh_texfx[] = {
+  {"", "Ninguno - texturas originales"},
+  {"scale4x", "Scale4x - agranda 4x sin emborronar (pixel art)"},
+  {"cel", "Cel shading - Scale4x + bandas de tono + contorno"},
+  {"poster", "Posterizado - paleta reducida en bandas"},
+};
 static const Choice kCh_upscale[] = {
   {"1", "1x - resolucion nativa"},
   {"2", "2x"},
@@ -138,6 +144,9 @@ static const Option kOpt_video[] = {
   {"fullscreen", "KESTREL_FULLSCREEN", "Pantalla completa", OType::Bool, "0", "Usa el modo actual del monitor primario; no cambia la resolucion del escritorio.", false, false, true, 0, 0, 0, nullptr, 0, true},
   {"aspect", "KESTREL_ASPECT", "Relacion de aspecto", OType::Choice, "4:3", "El N64 saca SIEMPRE 4:3. 16:9 no ensancha el campo de vision -- eso solo lo puede hacer el juego -- sino que estira la imagen que ya generan aplastada los juegos con modo panoramico propio (Perfect Dark, GoldenEye, Turok, Rush 2).", false, false, false, 0, 0, 0, kCh_aspect, 3, true},
   {"filter", "KESTREL_FILTER", "Filtro de imagen", OType::Choice, "nearest", "Solo cambia lo que se ve en la ventana, en la GPU, despues de componer el cuadro: el juego, los volcados y las capturas siguen viendo la imagen original. Se cambia en caliente. FSR y Anime4K inventan detalle entre pixeles; Anime4K esta entrenada con dibujos y en 3D de N64 da bordes limpios y texturas algo planas. Dibujo animado y oleo son esteticas de imagen, no de iluminacion: miran el cuadro, no la escena. Requiere Vulkan con RGBA16F en compute (cualquier GPU de la ultima decada); si no, vuelve sola a pixel nitido.", false, false, false, 0, 0, 0, kCh_filter, 8, true},
+  {"texpack", "KESTREL_TEXPACK", "Pack de texturas HD (carpeta)", OType::Path, "", "Carpeta con un pack de texturas en formato Rice / GLideN64 (ficheros <NOMBRE ROM>#crc#fmt#siz_all.png); los packs hechos para GLideN64 valen tal cual. Solo con el ejecutable SoftRDP (kestrel64-soft.exe): paraLLEl-RDP muestrea la textura en la GPU y no admite sustitutos. Ver docs/TEXTURAS-HD.md.", false, false, false, 0, 0, 0, nullptr, 0, false},
+  {"texfx", "KESTREL_TEXFX", "Realce de texturas", OType::Choice, "", "Retoca por algoritmo cada textura original la primera vez que se dibuja, en vez de la imagen entera como el filtro de imagen: el contorno sale donde cambia la textura, no donde cambia la escena. Un pack HD, si lo hay, manda sobre esto. Solo SoftRDP (kestrel64-soft.exe).", false, false, false, 0, 0, 0, kCh_texfx, 4, false},
+  {"texdump", "KESTREL_TEXDUMP", "Volcar texturas en (carpeta)", OType::Path, "", "Guarda cada textura distinta que dibuja el juego como PNG con nombre de pack Rice/GLideN64, para hacer uno propio (por ejemplo escalandolas con una red como Real-ESRGAN y poniendo la carpeta resultante como pack). Solo SoftRDP.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", OType::Choice, "1", "Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con paraLLEl-RDP; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen.", false, false, false, 0, 0, 0, kCh_upscale, 4, false},
   {"ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", OType::Bool, "0", "Con escalado interno, al devolver la imagen ampliada al framebuffer del juego promedia las NxN muestras en vez de coger una. Antialiasing gratis en los efectos que releen el framebuffer, a cambio de una pasada mas.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"hud", "KESTREL_HUD_OFF", "HUD de telemetria sobre la imagen", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, true},

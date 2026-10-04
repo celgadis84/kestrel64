@@ -1,4 +1,5 @@
 #include <cctype>
+#include "../rdp/texpack.hpp"
 #include "system.hpp"
 #include "savestate.hpp"
 #ifdef _WIN32
@@ -54,6 +55,13 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   memory.attachSaveFile(romPath);  // load existing .eep/.sra/.fla, if any, next to the ROM
   this->romPath = romPath;         // base de los nombres de ranura de estado (rom.stN)
   cheats.loadForRom(romPath);      // KESTREL_CHEATS, o el .cht que haya al lado de la ROM
+  texpack::init(rom.header.name); // KESTREL_TEXDUMP / KESTREL_TEXPACK / KESTREL_TEXFX
+  if(texpack::active() && vrdp::built) {
+    const char* pe = std::getenv("KESTREL_PRDP");
+    if(!pe || pe[0] != '0')
+      std::printf("[texpack] texturas HD/realce solo con SoftRDP: usar kestrel64-soft.exe "
+                  "o KESTREL_PRDP=0\n");
+  }
   std::printf("[system] loaded \"%s\" (%s, %.2f MB, entry 0x%08x)\n",
               rom.header.name.c_str(),
               rom.originalOrder == Rom::Order::Z64 ? "z64" :

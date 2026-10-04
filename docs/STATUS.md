@@ -9845,6 +9845,24 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 (i) -- Texturas HD (packs Rice/GLideN64), volcado y realce de texturas (GAPS #6)
+
+- `KESTREL_TEXPACK=<carpeta>` carga packs en formato Rice/GLideN64 tal cual;
+  `KESTREL_TEXDUMP=<carpeta>` vuelca cada textura con nombre de pack;
+  `KESTREL_TEXFX=scale4x|cel|poster` realza las originales por algoritmo (Scale2x x2 propio,
+  bandas de luma, contorno Sobel). Solo SoftRDP (`kestrel64-soft.exe`); con el exe de GPU,
+  aviso `[texpack]`. Lanzador/menu: opciones `texpack`, `texfx`, `texdump`.
+- Hash RiceCRC32 sobre la RDRAM vista en palabras del anfitrion, con los parametros de la
+  ultima carga a esa TMEM (LOAD_TILE directo, LOAD_BLOCK por tile de dibujo + ReverseDXT) y
+  CRC de paleta para CI. Comprobado: las 10 texturas del logo/titulo de SM64 tienen el nombre
+  exacto de un fichero de SM64 Reloaded (10/10).
+- Muestreo: pliegue del tile en continuo, escala HD/original, piramide de mips propia y
+  nivel por la huella del pixel; bilineal si el juego filtra. Memo por tile + generacion de
+  cargas: el hash no se calcula por pixel.
+- Coste SM64 titulo 300 swaps: base 10,5-11,0 s, pack 12,1 s, `cel` 11,9 s.
+- Apagado no toca nada: `release --quick` RC=0, `gate_quick krom` ALL OK (sm64 `b5521b24` x2,
+  krom 371/371 regress=0). Detalle en `docs/TEXTURAS-HD.md`.
+
 ## 2026-10-04 (h) -- Filtros de imagen del presentador: FSR, Anime4K, CRT, cel, oleo (GAPS #6)
 
 - `KESTREL_FILTER=nearest|bilinear|sharp|fsr|a4k|crt|cel|oleo`, en caliente

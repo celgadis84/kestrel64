@@ -14,6 +14,7 @@
 // and shaded/textured triangles + TEXTURE_RECTANGLE (added stepwise).
 
 #include "../core/types.hpp"
+#include "texpack.hpp"
 
 namespace kestrel {
 
@@ -299,6 +300,28 @@ private:
   auto sampleTexel(u32 tile, int s, int t) -> u32;
   auto sampleRawIndex(u32 tile, int s, int t) -> int;   // raw CI index (pre-TLUT) for 8bpp CI blits
   auto sampleTexFiltered(u32 tile, double s, double t) -> u32;  // point or N64 3-point
+  // --- texturas HD / realce (texpack.hpp, docs/TEXTURAS-HD.md). Inerte sin variables. ---
+  // Lo que GLideN64 apunta de cada carga para calcular el hash Rice de la textura en RDRAM
+  // al dibujarla: indexado por la direccion de TMEM del tile de carga, como alli.
+  struct HdLoad {
+    u32 addr = 0, uls = 0, ult = 0, width = 0, height = 0, texWidth = 0, size = 0, dxt = 0;
+    bool block = false, valid = false;
+  };
+  HdLoad hdLoads[512];
+  u8  hdPal[512] = {};   // paletas cargadas, en bytes "del anfitrion" (ver texpack.hpp)
+  u32 hdGen = 1;         // sube con cada carga a TMEM: invalida hdMemo
+  struct HdBind {
+    const texpack::Tex* tex = nullptr;   // nullptr = sin sustituto, muestreo normal
+    double scX = 1, scY = 1;             // texeles HD por texel original
+    TexFold f{};
+  };
+  struct HdMemo { u32 gen = 0, mode = ~0u; Tile tile{}; HdBind b; };
+  HdMemo hdMemo[8];
+  auto hdNoteLoad(u32 tile, bool block, u64 cmd) -> void;
+  auto hdNoteTlut(Memory& mem, u32 tile, u64 cmd) -> void;
+  auto hdBind(Memory& mem, u32 tile) -> HdBind;
+  // `fp` = texeles ORIGINALES que cubre un pixel (elige nivel de la piramide).
+  auto hdSample(const HdBind& b, double s, double t, double fp) const -> u32;
   // Run the color combiner: texel0/texel1 sampled, shade (Gouraud) → final RGBA.
   // Honours 1-cycle (comb[1]) and 2-cycle (comb[0] feeds COMBINED into comb[1]).
   // --- plan del combinador -----------------------------------------------------------
