@@ -9845,6 +9845,30 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 (e) -- LOAD_TLUT ignoraba TL: paleta leida de los texeles (SoftRDP)
+
+Informe de la sesion kestrel64-sdk (port nativo de PD): caras de guardias CI8 + TLUT de ~200
+entradas salian como ruido arcoiris en SoftRDP y bien en parallel-rdp, mismo estado. Los
+cuerpos (CI4) bien.
+
+Raiz: el port guarda la paleta DETRAS de los texeles en el mismo bloque y la carga con
+`SETTIMG 16b ancho 1` + `LOAD_TLUT` con **TL != 0** (p.ej. `f03c8c38 0678cc38`: SL=242,
+TL=782, SH=483 -> fuente = ti + (782*1 + 242)*2 = ti + 2048, justo tras los 1024 texeles del
+LOAD_BLOCK). LOAD_TLUT en hardware es un LOAD_TILE de una fila: la fuente es el texel
+(s, TL) de la imagen, `ti_addr + (TL*ti_width + s)*2`. SoftRDP usaba `ti_addr + s*2`, o sea
+leia como paleta parte de la propia textura. Con TL = 0 (lo que hace gDPLoadTLUT de
+libultra) da lo mismo, por eso no habia salido nunca.
+
+Arreglo en `rdp.cpp` (case 0x30): fila base = `ti_addr + (TL>>2) * ti_width * 2`. Verificado
+con el estado congelado del sdk (`kestrel64-sdk/build/ci8repro`, ranura 5): caras con piel.
+`release --quick` + `gate_quick krom` ALL OK: systemtest 0/3721, sm64 `b5521b24` x2, krom
+371/371 regress=0 improve=0.
+
+Aparte, sigue sin modelar el intercambio de palabras de 32 bits en filas impares de TMEM
+(LOAD_BLOCK con dxt / LOAD_TILE al escribir, el muestreador al leer). Hoy es identidad para
+todo lo que carga por las vias normales; solo se ve con datos pre-intercambiados en RDRAM y
+dxt=0.
+
 ## 2026-10-04 (d) -- Cargas de textura: coste fijo por rafaga (PD64_pending P2)
 
 - `SoftRdp::accountLoad`: LOAD_BLOCK = 14 + ceil(bytes/8), LOAD_TILE = filas x (14 +

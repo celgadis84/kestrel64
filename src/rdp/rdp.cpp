@@ -2144,9 +2144,15 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       // (palette p covers flat entries p*16 .. p*16+15).
       u32 t  = (cmd >> 24) & 7;
       u32 dst = tiles[t].tmem & 0xff;
+      //
+      // La fuente es la de un LOAD_TILE de una sola fila: texel (SL..SH, TL) de la imagen,
+      // o sea ti_addr + (TL * ti_width + s) * 2. Con TL = 0 sale lo de siempre, pero quien
+      // guarda la paleta DETRAS de los texeles en el mismo bloque la direcciona con TL != 0
+      // (ancho 1, TL = fila de la paleta); ignorar TL leia los texeles como paleta.
       u32 sl = ((u32)(cmd >> 44) & 0xfff) >> 2, sh = ((u32)(cmd >> 12) & 0xfff) >> 2;
+      u32 row = ti_addr + (((u32)(cmd >> 32) & 0xfff) >> 2) * ti_width * 2;
       for(u32 i = sl; i <= sh; i++) {
-        u32 src = ti_addr + i * 2;
+        u32 src = row + i * 2;
         if(src + 1 < m.size()) tlut[(dst + (i - sl)) & 0xff] = ((u16)m[src] << 8) | m[src + 1];
       }
       if(sh >= sl) accountLoad(mem, 1, u64(sh - sl + 1) * 2);   // antes no cobraba nada
