@@ -187,12 +187,16 @@ por ser pequeña; se ordena por impacto, no se filtra.*
   intercambios de DK64: enhebrado-jit + SoftRDP **6174** campos (antes 10830) contra 6153 del
   oraculo lockstep y 6161 de parallel-RDP. Salvavidas identico al del RSP (`kPaceMaxWait`).
 
-  **Lo que sigue abierto**: el RDP todavia no ENTREGA `DP_DONE` en un plazo del reloj del
-  invitado, solo impide que la CPU adelante al trabajo ya hecho. Con un anfitrion muy rapido
-  el juego ve el RDP como instantaneo (que es lo que hace el oraculo lockstep desde siempre).
-  Cerrarlo del todo pide el planificador por marcas de tiempo que ya pide el punto de las DMA,
-  y para parallel-RDP ademas un estimador de coste sobre el flujo de comandos, porque la GPU
-  no alimenta `accountPixels`.
+  ~~**Lo que sigue abierto**: el RDP todavia no ENTREGA `DP_DONE` en un plazo del reloj del
+  invitado~~ **CERRADO 2026-09-16** (d75ca9b/b91848b; esta nota se quedo sin tachar). El
+  tramo se FECHA al lanzarlo, en el hilo que escribe DPC_END (`Memory::dpScheduleSpan`): el
+  coste se cobra ANTES de pintar, el motor es uno (`max` contra `dpSchedEnd`), y
+  `dpEndArm(kick, gclk)` arma el plazo de `MI_DP` en `kick + rcpCyclesToOps(gclk)`; lo
+  publica `rcpRetire` en la instruccion exacta. DPC_CURRENT/STATUS salen del mismo horario.
+  Lockstep usa el mismo horario (antes era el oraculo el menos fiel), y parallel-RDP lleva el
+  estimador: la pasada solo-coste de SoftRdp (`rdpCostPass`) corre ANTES de `vrdp::runFifo`.
+  Lo que queda no es el plazo sino la PRECISION del coste: sin setup por primitiva ni por span
+  (seccion "Coste del RDP", bloqueada por oraculo HW).
 
 - **SoftRDP dibuja contorno claro en cada arista en juegos reales (DK64)** — abierto,
   NO es regresion de la cobertura de 2026-09-08. Capturas del RDRAM crudo (sin filtro VI)
