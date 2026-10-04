@@ -121,7 +121,8 @@ struct SoftRdp {
   // cae al reparto plano npx/8 de antes.
   auto addSpan(int x0, u64 npx) -> void;
   u64 spanLines = 0, spanUnits = 0;
-  auto accountTmem(Memory& mem, u64 bytes) -> void;
+  auto accountTmem(Memory& mem, u64 bytes, u64 gclk) -> void;
+  auto accountLoad(Memory& mem, u64 rows, u64 bytesPerRow) -> void;   // fijo por rafaga + 8 B/GCLK
   // Coste fijo de un comando que para el pipeline sin tocar RDRAM ni TMEM (SYNC_LOAD/PIPE/TILE).
   auto accountStall(Memory& mem, u32 gclk) -> void;
 

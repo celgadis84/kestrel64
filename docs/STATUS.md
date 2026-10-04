@@ -9845,6 +9845,15 @@ ya hace `dmaSettle` en el lado de la CPU). Mientras tanto, lo reproducible sigue
   `test/tpak_test.cpp` ALL PASS. PD con `KESTREL_PADACC=3` arranca normal; con 1 el
   statehash sigue `9b05129b`. `gate_quick lock phys` ALL OK.
 
+## 2026-10-04 (d) -- Cargas de textura: coste fijo por rafaga (PD64_pending P2)
+
+- `SoftRdp::accountLoad`: LOAD_BLOCK = 14 + ceil(bytes/8), LOAD_TILE = filas x (14 +
+  ceil(bytes_fila/8)) (la rafaga se rompe en cada fila), LOAD_TLUT = 14 + ceil(entradas*2/8).
+  LOAD_TLUT antes no cobraba NADA. Cifras = especificacion del usuario, no medida de consola;
+  `KESTREL_TMEMSETUP=<gclk>` (14 de fabrica, 0 = modelo viejo). Detalle en `docs/RDP-TIMING.md`.
+- PD Villa lockstep, por frame: `gclk_tmem` 21999 -> 25222 (+14,6 %), GCLK RDP total +0,5 %.
+- gate_quick + thar0 OK (rmse 0,1332 igual; Thar0 no tiene cargas), sm64 md5 sin cambio.
+
 ## 2026-10-04 (c) -- SRAM 768K: bancos a 256 KiB, no a 64 KiB (aviso n64-70)
 
 - `saveOffset` elegia banco con los bits 16-17 (0x08000000/0x08010000/0x08020000). El

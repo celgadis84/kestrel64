@@ -317,9 +317,29 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   mem.rcp.rdpGclk.fetch_add(c, std::memory_order_release);
 }
 
-// TMEM loads run on the RDP's 64-bit texture port: one GCLK per 8 bytes.
-auto SoftRdp::accountTmem(Memory& mem, u64 bytes) -> void {
-  u32 c = (u32)((bytes + 7) / 8);
+// Cargas de TMEM: puerto de texturas de 64 bits, 8 bytes por GCLK, y un coste FIJO por
+// rafaga de RDRAM (arranque del comando + latencia de fila). LOAD_BLOCK y LOAD_TLUT son una
+// sola rafaga lineal; LOAD_TILE abre una por FILA, porque el origen salta `ti_width` entre
+// filas y la rafaga se rompe: por eso las filas cortas le salen tan caras.
+//   LOAD_BLOCK  ~ 14 + ceil(bytes/8)
+//   LOAD_TILE   ~ filas * (14 + ceil(bytes_fila/8))
+//   LOAD_TLUT   ~ 14 + ceil(entradas*2/8)   (CI4 16 entradas ~18, CI8 256 ~78)
+// Las cifras son la especificacion que dio el usuario (2026-10-04), NO una medida en consola:
+// n64brew solo da ciclos de los SYNC y Thar0 solo mide rellenos (ver PD64_pending P2). El fijo
+// se puede mover con KESTREL_TMEMSETUP=<gclk>; =0 vuelve al modelo anterior (solo
+// transferencia) para el A/B.
+static u32 tmemSetup() {
+  static const u32 v = []{ const char* e = std::getenv("KESTREL_TMEMSETUP");
+                           return (e && *e) ? (u32)std::strtoul(e, nullptr, 10) : 14u; }();
+  return v;
+}
+
+auto SoftRdp::accountLoad(Memory& mem, u64 rows, u64 bytesPerRow) -> void {
+  accountTmem(mem, rows * bytesPerRow, rows * (tmemSetup() + (bytesPerRow + 7) / 8));
+}
+
+auto SoftRdp::accountTmem(Memory& mem, u64 bytes, u64 gclk) -> void {
+  u32 c = (u32)gclk;
   if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
   if(mem.rdpStats.on.load(std::memory_order_relaxed)) {
     mem.rdpStats.gclkTmem.fetch_add(c, std::memory_order_relaxed);
@@ -1951,10 +1971,10 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
       u32 count = (sh >= sl) ? (sh - sl + 1) : 1, nb = (count + 1) / 2;
       u32 dst = tl.tmem * 8, src = ti_addr + (sl >> 1);
       copyRun(m, src, dst, nb);
-      accountTmem(mem, nb);
+      accountLoad(mem, 1, nb);
     } else {
       u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2, rowBytes = tl.line * 8;
-      accountTmem(mem, u64(t1 - t0 + 1) * (s1 - s0 + 1) / 2);
+      accountLoad(mem, t1 - t0 + 1, (s1 - s0 + 2) / 2);
       for(u32 ty = t0; ty <= t1; ty++)
         for(u32 tx = s0; tx <= s1; tx++) {         // nibble-granular copy
           u32 src = ti_addr + (ty * ti_width + tx) / 2;   // ti_width in texels
@@ -1976,12 +1996,12 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     u32 count = (sh >= sl) ? (sh - sl + 1) : 1;        // linear texel count
     u32 dst = tl.tmem * 8, src = ti_addr + sl * bpt, nb = count * bpt;
     copyRun(m, src, dst, nb);
-    accountTmem(mem, nb);
+    accountLoad(mem, 1, nb);
     return;
   }
   u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2;
   u32 rowBytes = tl.line * 8;
-  accountTmem(mem, u64(t1 - t0 + 1) * (s1 - s0 + 1) * bpt);
+  accountLoad(mem, t1 - t0 + 1, u64(s1 - s0 + 1) * bpt);
   // Los texeles de una fila son contiguos en el texture image (paso `bpt`) y tambien en
   // TMEM (paso `bpt` desde el inicio de la fila), asi que la fila entera es un solo run.
   // Copiar byte a byte con dos comprobaciones de limite POR BYTE salia el 7 % del hilo.
@@ -2129,6 +2149,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
         u32 src = ti_addr + i * 2;
         if(src + 1 < m.size()) tlut[(dst + (i - sl)) & 0xff] = ((u16)m[src] << 8) | m[src + 1];
       }
+      if(sh >= sl) accountLoad(mem, 1, u64(sh - sl + 1) * 2);   // antes no cobraba nada
       break;
     }
     case 0x33: loadTile(mem, (cmd >> 24) & 7, true, cmd); break;   // LOAD_BLOCK

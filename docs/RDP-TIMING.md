@@ -184,3 +184,21 @@ Results (09_rdp_bench, 320x240 RGBA16, VI on):
 Still not modelled: a per-primitive setup cost (edge walker / command fetch). No source
 gives a number for it, so none is invented. The command words themselves still cost
 nothing beyond the FIFO.
+
+## Texture loads: fixed cost per burst (2026-10-04, specification, not measured)
+
+`SoftRdp::accountLoad` charges every TMEM load as RDRAM bursts on the 64-bit texture port:
+8 bytes per GCLK plus a fixed setup per burst (command start + RDRAM row latency).
+
+| command | bursts | GCLK |
+|---|---|---|
+| LOAD_BLOCK | 1 (linear) | 14 + ceil(bytes/8) |
+| LOAD_TILE | 1 per row (source strides by `ti_width`) | rows x (14 + ceil(row_bytes/8)) |
+| LOAD_TLUT | 1 (linear) | 14 + ceil(entries x 2 / 8) -- CI4 ~18, CI8 ~78 |
+
+Before this, loads paid only the transfer and LOAD_TLUT paid nothing. The figures come from
+a specification the user supplied; there is still no console measurement (n64brew only gives
+SYNC costs, Thar0 only times fills). `KESTREL_TMEMSETUP=<gclk>` moves the fixed part, `=0`
+restores the transfer-only model for A/B. The Thar0 battery has no loads, so its rmse
+(0.1332) does not move. Perfect Dark Villa, lockstep, per frame: `gclk_tmem` 21999 -> 25222
+(+14.6 %, ~230 loads x 14), total RDP GCLK 621562 -> 624785 (+0.5 %).
