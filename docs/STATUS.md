@@ -10236,3 +10236,18 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   `gate_quick` corre `sm64 gpurdp-jit`.
 - gate_gpurdp ALL OK (6 m 47 s): systemtest 0/3721, sm64 `b5521b24` = SoftRDP, krom 372/372
   puntuaciones identicas. gate_quick ALL OK. md5 por defecto sin cambio.
+
+## 2026-10-05 (c) -- GPU-RDP propio, fase 1 (triangulos sin textura)
+
+- `shaders/tri.comp`: un hilo por pixel de la caja cubierta; cobertura 4x2, centroide, shade/z en
+  entero, combinador 1/2 ciclos con el plan de `buildCombPlan`, blender entero (LUT de `luts.hpp`,
+  AA con IM_RD, z con dz y bits ocultos, dither). Medias palabras con atomicAnd/atomicOr.
+- `SoftRdp::gpuTriangle`: criterio de elegibilidad (sin textura, 16 bpp, no COPY, sin NOISE ni
+  COMBINED en el primer ciclo, filas dentro de RDRAM y color/z sin solaparse); recorrido de
+  cobertura en CPU para cobrar y dar caja y ultimo pixel. El resto sigue en CPU, vaciando antes.
+- `accountPixels` = `acctSnap` + `acctFinish`: la GPU devuelve pixeles escritos en color/z y el
+  COMBINED del ultimo pixel; `gpuFlush` cierra el cobro en orden de FIFO.
+- Flush: sube las filas de color/z de los triangulos al espejo, ejecuta rellenos y triangulos en
+  orden con barreras, baja zonas. Los triangulos ya no vacian la cola en `run()`.
+- gate_gpurdp ALL OK (6 m 53 s): systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 identicas.
+  gate_quick krom + thar0 ALL OK (rmse 0,1332). md5 por defecto sin cambio.

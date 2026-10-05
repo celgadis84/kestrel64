@@ -120,6 +120,36 @@ modos, krom 371/371 con las 372 puntuaciones IDENTICAS a la referencia de SoftRD
 ventana: 246 rellenos por GPU en 60 cuadros, presentador Vulkan compartido sin problemas.
 `gate_quick` corre tambien `sm64 gpurdp-jit`.
 
+### Fase 1 -- HECHA 2026-10-05
+
+Triangulos SIN textura en 16 bpp (FILL, plano y shade, con o sin z) a la GPU, con todo lo que
+el pixel atraviesa en SoftRDP: cobertura de 4 sub-scanlines x 2 columnas (AA y no-AA),
+centroide, shade/z en entero, combinador 1/2 ciclos (plan de `buildCombPlan`), blender
+completo (LUT de `luts.hpp`, AA con IM_RD, z compare/update con dz y bits ocultos, dither).
+Shader `shaders/tri.comp`: un hilo por pixel de la caja de pixeles cubiertos.
+
+- `SoftRdp::gpuTriangle` decide si el triangulo puede ir. Se queda en CPU (vaciando antes la
+  cola) si: textura, ci_size != 16 bpp, COPY, `sx1 > ancho` (alias con la fila siguiente),
+  ci/zi impares, filas fuera de la RDRAM, filas de color y z solapadas, NOISE en el
+  combinador (std::rand en orden de pixel) o COMBINED en el primer ciclo que corre (depende
+  del pixel anterior), y con `rdpGuard`/`wrtag`.
+- Recorrido de cobertura en CPU (barato, el mismo que el paseo solo-coste): da la cuenta de
+  pixeles y los tramos para cobrar, la caja exacta y el ultimo pixel cubierto.
+- Cobro diferido: `accountPixels` partido en `acctSnap` (foto del estado al rasterizar) y
+  `acctFinish` (lo que depende de cuantos pixeles se escribieron en color y z). La GPU
+  devuelve por triangulo esas dos cuentas y el COMBINED de su ultimo pixel; `gpuFlush`
+  cierra el cobro en orden de FIFO y restaura `combined`.
+- Lecturas de RDRAM: el triangulo declara sus filas de color image y z image; el flush sube
+  esas zonas (fundidas) al espejo y a los bits ocultos antes de pintar y las baja despues.
+  La RDRAM del CPU esta al dia al empezar el lote, y lo que pinta una primitiva anterior del
+  mismo lote lo ve la siguiente en el espejo porque la cola corre en orden, con barrera entre
+  primitivas. Medias palabras con atomicAnd/atomicOr (dos pixeles por palabra).
+- Los triangulos ya no vacian la cola en `run()` (`gpuNoFlush`): decide `drawTriangle`.
+
+Prueba: `gate_gpurdp` igual que en fase 0 (krom contra la referencia de SoftRDP, sm64 contra
+`sm64.txt`). SM64 apenas usa triangulos sin textura; la cobertura real la dan las ROMs de
+krom Fill/Shade/ZBuffer Triangle (8-16 triangulos por GPU en cada una).
+
 Siguiente (fase 1): triangulos plano/shade + coverage + z. Ahi ya hay lecturas de RDRAM
 (z-buffer, blender), asi que toca subir zonas al espejo antes de pintar.
 

@@ -243,8 +243,29 @@ auto SoftRdp::addSpan(int x0, u64 npx) -> void {
 }
 
 auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void {
-  const u64 lines = spanLines, units = spanUnits;
+  acctFinish(mem, acctSnap(mem, npx), nWrite, nZWrite);
+}
+
+// Foto del estado que decide el coste de una primitiva, tomada al rasterizarla. La parte que
+// depende de cuantos pixeles escribio (acctFinish) puede llegar mas tarde: con el GPU-RDP esos
+// numeros los devuelve la GPU al vaciar la cola, y para entonces el estado ya puede ser otro.
+auto SoftRdp::acctSnap(Memory& mem, u64 npx) -> AcctSnap {
+  AcctSnap a;
+  a.npx = npx; a.lines = spanLines; a.units = spanUnits;
   spanLines = spanUnits = 0;
+  a.ci = ci_addr; a.zi = zi_addr; a.ciW = ci_width; a.ciSize = ci_size;
+  a.sx1 = sx1; a.sy1 = sy1; a.olo = other_lo; a.cyc = cycleType();
+  a.viOn = (mem.rcp.vi_ctrl & 3) != 0 && mem.rcp.vi_origin != 0;
+  a.fbviSame = a.viOn && (ci_addr >> 20) == ((mem.rcp.vi_origin & 0x00ff'ffff) >> 20);
+  a.charge = charge;
+  return a;
+}
+
+auto SoftRdp::acctFinish(Memory& mem, const AcctSnap& a, u64 nWrite, u64 nZWrite) -> void {
+  const u64 npx = a.npx, lines = a.lines, units = a.units;
+  const u32 ci_addr = a.ci, zi_addr = a.zi, ci_width = a.ciW, ci_size = a.ciSize, other_lo = a.olo;
+  const int sx1 = a.sx1, sy1 = a.sy1;
+  const u32 cyc = a.cyc;
   if(!npx) return;
   {
     // Zona escrita (ver wrLo): 4 bytes por pixel sea cual sea el formato; pasarse solo cuesta
@@ -258,11 +279,10 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   bool zRead  = (other_lo & 0x10) != 0 && zi_addr != 0;  // Z_CMP
   bool zWrite = nZWrite != 0;
   bool fbzbSame = zi_addr != 0 && (ci_addr >> 20) == (zi_addr >> 20);
-  bool viOn = (mem.rcp.vi_ctrl & 3) != 0 && mem.rcp.vi_origin != 0;
-  bool fbviSame = viOn && (ci_addr >> 20) == ((mem.rcp.vi_origin & 0x00ff'ffff) >> 20);
+  const bool viOn = a.viOn, fbviSame = a.fbviSame;
 
   double cycles;
-  if(cycleType() >= 2) {
+  if(cyc >= 2) {
     // FILL/COPY: una palabra de 64 bits por GCLK mas el ciclo muerto de cada linea; el VI
     // sigue robando bus igual que a los chunks (mismo T_VI calibrado). Sin tramos
     // declarados, 64 bits = 8 bytes de la anchura de pixel del color image.
@@ -273,7 +293,7 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   // Chunks: los declarados por linea, o el reparto plano. El pipeline de un chunk es el de
   // sus pixeles medios mas el sobrecoste fijo y su parte del ciclo muerto de fin de linea.
   const double chunks = lines ? double(units) : double(npx) / T_CHUNK;
-  double pipeline = double(cycleType() + 1) * (double(npx) / chunks) + T_CHUNKOVH
+  double pipeline = double(cyc + 1) * (double(npx) / chunks) + T_CHUNKOVH
                   + double(lines) / chunks;
   int seq[4], n = 0;
   if(fbRead) seq[n++] = 0;
@@ -290,11 +310,11 @@ auto SoftRdp::accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> vo
   cycles = (frac * wrote + (1.0 - frac) * killed) * chunks;
   }
   u32 c = (u32)(u64)cycles;
-  if(!charge) return;   // el paseo solo-coste de este tramo ya lo pago
+  if(!a.charge) return;   // el paseo solo-coste de este tramo ya lo pago
   if(auto& st = mem.rdpStats; st.on.load(std::memory_order_relaxed)) {
     const auto r = std::memory_order_relaxed;
-    (cycleType() == 3 ? st.gclkFill : st.gclkPixel).fetch_add(c, r);
-    st.px[cycleType()].fetch_add(npx, r);
+    (cyc == 3 ? st.gclkFill : st.gclkPixel).fetch_add(c, r);
+    st.px[cyc].fetch_add(npx, r);
     st.pxWritten.fetch_add(nWrite, r);
     if(fbRead) st.pxImRd.fetch_add(npx, r);
     if(zRead)  st.pxZCmp.fetch_add(npx, r);
@@ -942,6 +962,134 @@ static auto perspDivide(s32 s, s32 t, s32 w, s32& os, s32& ot, bool* ovf = nullp
   os = out[0]; ot = out[1];
 }
 
+// GPU-RDP fase 1: encola el triangulo en la GPU si sale identico a pintarlo aqui (ver
+// gpurdp/shaders/tri.comp, que es el mismo recorrido, combinador y blender que este fichero).
+// Hace aqui el recorrido de cobertura, que es barato, para cobrar como el camino del CPU y para
+// darle a la GPU la caja exacta de pixeles. false = no se puede, el llamante lo pinta.
+auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMode, bool gouraud,
+                          bool combProg, u32 flat, u32 flatTexel, bool zActive, bool zSrc,
+                          const s32* cC, const s32* cDx, const s32* cDe, const s32* cDy,
+                          s32 zC, s32 zDx, s32 zDe, s32 zDy) -> bool {
+  if(g_rgHi || wrtag::tag || ci_size != 2 || (ci_addr & 1) || (zi_addr & 1)) return false;
+  const u32 cyc = cycleType();
+  if(cyc == 2) return false;                          // COPY sin textura: no merece la pena
+  if(sx1 > (int)ci_width) return false;               // x >= ancho pisaria la fila siguiente
+  if(!fillMode && combProg) {
+    if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo || combPlan.keyCyc != cyc)
+      buildCombPlan();
+    // NOISE va por std::rand() en orden de pixel; COMBINED en el primer ciclo lee el pixel
+    // anterior: los dos atan cada pixel al de antes y en la GPU no hay "antes".
+    if(!combPlan.fast) return false;
+    const u8* s0 = combPlan.sel[combPlan.two ? 0 : 1];
+    for(int k = 0; k < 8; k++) if(s0[k] == CR_CIN || s0[k] == CR_CINA) return false;
+  }
+  auto sext = [](u32 v, int bits) -> s32 { return (s32)(v << (32 - bits)) >> (32 - bits); };
+  const u64 w0 = w[0];
+  const s32 iYl = sext((u32)(w0 >> 32) & 0x3fff, 14), iYm = sext((u32)(w0 >> 16) & 0x3fff, 14),
+            iYh = sext((u32)w0 & 0x3fff, 14);
+  const s32 iXl = sext((u32)(w[1] >> 32), 28) >> 1, iDxl = sext((u32)w[1] >> 2, 28) >> 1;
+  const s32 iXh = sext((u32)(w[2] >> 32), 28) >> 1, iDxh = sext((u32)w[2] >> 2, 28) >> 1;
+  const s32 iXm = sext((u32)(w[3] >> 32), 28) >> 1, iDxm = sext((u32)w[3] >> 2, 28) >> 1;
+  const s32 yhBase = iYh & ~3;
+  const s32 subLo = std::max(iYh, sy0 * 4), subHi = std::min(iYl, sy1 * 4);
+  const s32 scLo = sx0 * 8, scHi = sx1 * 8;
+  const bool aaOn = (other_lo & 0x08) != 0 && !g_noAA;
+  auto quant = [&](s32 x) -> s32 { x = sext((u32)x, 27); return (x >> 12) | ((x & 0xfff) != 0); };
+  const int yFirst = std::max(subLo, 0) >> 2, yLast = (subHi - 1) >> 2;
+  // Mismo recorrido que el paseo solo-coste de drawTriangle: misma cuenta, mismos tramos.
+  u64 rasterPx = 0;
+  int bx0 = INT32_MAX, bx1 = INT32_MIN, by0 = -1, by1 = -1, lastX = -1, lastY = -1;
+  for(int y = yFirst; y <= yLast && subHi > subLo; y++) {
+    s32 qL[4], qR[4];
+    bool anyValid = false;
+    for(int k = 0; k < 4; k++) {
+      const s32 ys = y * 4 + k;
+      const s32 eh = iXh + (ys - yhBase) * iDxh;
+      const s32 el = ys < iYm ? iXm + (ys - yhBase) * iDxm : iXl + (ys - iYm) * iDxl;
+      s32 L = quant(leftMajor ? eh : el), R = quant(leftMajor ? el : eh);
+      bool bad = (L >> 1) > (R >> 1) || ys < subLo || ys >= subHi;
+      L = std::min(std::max(L, scLo), scHi); R = std::min(std::max(R, scLo), scHi);
+      if(bad) { L = 0xffff; R = 0; } else anyValid = true;
+      qL[k] = L; qR[k] = R;
+    }
+    if(!anyValid) continue;
+    const int xs = std::max(std::min(std::min(qL[0], qL[1]), std::min(qL[2], qL[3])) >> 3, 0);
+    const int xe = (std::max(std::max(qR[0], qR[1]), std::max(qR[2], qR[3])) >> 3) + 1;
+    const u64 rowPx0 = rasterPx;
+    for(int x = xs; x < xe; x++) {
+      u32 c = 0;
+      for(int k = 0; k < 4; k++) {
+        const s32 a = x * 8 + ((k & 1) ? 2 : 0), b = a + 4;
+        if(a >= qL[k] && a < qR[k]) c |= 1u << k;
+        if(b >= qL[k] && b < qR[k]) c |= 16u << k;
+      }
+      if(aaOn ? c == 0 : (c & 1) == 0) continue;
+      rasterPx++;
+      bx0 = std::min(bx0, x); bx1 = std::max(bx1, x);
+      if(by0 < 0) by0 = y;
+      by1 = y; lastX = x; lastY = y;
+    }
+    addSpan(xs, rasterPx - rowPx0);
+  }
+  // Zonas de RDRAM: filas [by0, by1] enteras del color image y del z image. Todo dentro de la
+  // RDRAM (el CPU descarta escrituras sueltas fuera; la GPU no) y sin solaparse entre si (un
+  // pixel leeria lo que escribe otro del mismo triangulo).
+  const u64 size = mem.rdram.size();
+  u32 lo[2] = {0, 0}, hi[2] = {0, 0};
+  if(rasterPx) {
+    const u64 rowB = u64(ci_width) * 2;
+    const u64 cLo = ci_addr + u64(by0) * rowB, cHi = ci_addr + u64(by1 + 1) * rowB;
+    if(cHi > size) { spanLines = spanUnits = 0; return false; }
+    lo[0] = (u32)cLo; hi[0] = (u32)cHi;
+    if(zActive && !fillMode) {
+      const u64 zLo = zi_addr + u64(by0) * rowB, zHi = zi_addr + u64(by1 + 1) * rowB;
+      if(zHi > size || (zLo < cHi && cLo < zHi)) { spanLines = spanUnits = 0; return false; }
+      lo[1] = (u32)zLo; hi[1] = (u32)zHi;
+    }
+  }
+  hiddenBits(mem);   // dimensionada antes de que el flush la use
+  const AcctSnap acct = acctSnap(mem, rasterPx);
+  if(!rasterPx) return true;   // nada cubierto: ni escribe ni toca COMBINED
+
+  gpurdp::TriRec t{};
+  using namespace gpurdp;
+  s32* r = t.w;
+  r[T_YL] = iYl; r[T_YM] = iYm; r[T_YH] = iYh;
+  r[T_XL] = iXl; r[T_DXL] = iDxl; r[T_XH] = iXh; r[T_DXH] = iDxh; r[T_XM] = iXm; r[T_DXM] = iDxm;
+  int fl = 0;
+  if(leftMajor) fl |= TF_LEFT;
+  if(leftMajor == ((s32)(u32)w[2] < 0)) fl |= TF_DOOFF;
+  if(fillMode) fl |= TF_FILL;
+  if(gouraud) fl |= TF_SHADE;
+  if(zActive) fl |= TF_ZACT;
+  if(zSrc) fl |= TF_ZSRC;
+  if(aaOn) fl |= TF_AA;
+  if(combProg) fl |= TF_COMB;
+  if(g_noBlend) fl |= TF_NOBLEND;
+  if(cyc == 1) fl |= TF_TWO;
+  if(g_noAA) fl |= TF_NOAA;
+  r[T_FLAGS] = fl;
+  r[T_SX0] = sx0; r[T_SY0] = sy0; r[T_SX1] = sx1; r[T_SY1] = sy1;
+  r[T_BX] = bx0; r[T_BY] = by0; r[T_BW] = bx1 - bx0 + 1; r[T_BH] = by1 - by0 + 1;
+  for(int c = 0; c < 4; c++) {
+    r[T_CC + c] = cC[c]; r[T_CDX + c] = cDx[c]; r[T_CDE + c] = cDe[c]; r[T_CDY + c] = cDy[c];
+  }
+  r[T_Z] = zC; r[T_ZDX] = zDx; r[T_ZDE] = zDe; r[T_ZDY] = zDy;
+  r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr;
+  r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;
+  r[T_FILL] = (s32)fill_color; r[T_PRIM] = (s32)prim_color; r[T_ENV] = (s32)env_color;
+  r[T_BLEND] = (s32)blend_color; r[T_FOG] = (s32)fog_color; r[T_FLAT] = (s32)flat;
+  r[T_FTEX] = (s32)flatTexel;
+  if(combProg) std::memcpy(&r[T_SEL], combPlan.sel, 16);
+  r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
+  r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = lastX; r[T_LASTY] = lastY;
+  t.lo[0] = lo[0]; t.hi[0] = hi[0]; t.lo[1] = lo[1]; t.hi[1] = hi[1];
+  if(!gpurdp::queueTri(t)) { gpuFlush(mem); gpurdp::queueTri(t); }
+  gpuTris.push_back({acct, combProg && !fillMode});
+  gpuQueued = true;
+  return true;
+}
+
 auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void {
   if(g_noRaster) return;
   bool hasShade = op & 4, hasTex = op & 2, hasZ = op & 1;
@@ -1049,6 +1197,15 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   if(usesLod && !textured) {   // sin coordenadas: S=T=W=0 en todo el primitivo -> magnify
     u32 t0 = texTile, t1 = (texTile + 1) & 7;
     lodFracV = lodSelect(0, 0, 0, 0, 0, 0, false, maxLevel, t0, t1);
+  }
+  // GPU-RDP fase 1 (KESTREL_GPURDP=1): triangulo sin textura en 16 bpp a la GPU.
+  if(gpurdp::active() && !costOnly) {
+    if(!textured && gpuTriangle(mem, w, leftMajor, fillMode, gouraud, combProg, flat, flatTexel,
+                                zActive, zSrc, cC, cDx, cDe, cDy, tC[2], tDx[2], tDe[2], tDy[2])) {
+      pxShadeA = 0; lodFracV = 0xff;
+      return;
+    }
+    if(gpuQueued) gpuFlush(mem);   // va por el CPU: antes, lo encolado a la RDRAM
   }
   // Recorrido de bordes en ENTERO, como el rasterizador del RDP. Oraculo: parallel-rdp
   // `span_setup.comp` (decodificacion en rdp_device.cpp) y `compute_coverage()` de
@@ -2285,13 +2442,24 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
 
 auto SoftRdp::gpuFlush(Memory& mem) -> void {
   gpuQueued = false;
-  gpurdp::flush(mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem));
+  static thread_local std::vector<gpurdp::TriOut> outs;
+  gpurdp::flush(mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem), &outs);
+  // Lo que dependia del resultado de cada triangulo, en el orden del FIFO: cobro (pixeles
+  // escritos en color y z) y el registro COMBINED que dejo su ultimo pixel.
+  for(size_t i = 0; i < gpuTris.size() && i < outs.size(); i++) {
+    const GpuTri& t = gpuTris[i];
+    const gpurdp::TriOut& o = outs[i];
+    pxWrites += (u64)o.nWrite; pxZWrites += (u64)o.nZWrite;
+    acctFinish(mem, t.acct, (u64)o.nWrite, (u64)o.nZWrite);
+    if(t.comb) for(int k = 0; k < 4; k++) combined[k] = o.comb[k];
+  }
+  gpuTris.clear();
 }
 
-// Comandos que no leen ni escriben RDRAM: con rellenos en la GPU pendientes se pueden ejecutar
-// sin bajarlos (cada relleno encolado lleva ya su propio estado). Un FILL_RECTANGLE en FILL/
-// COPY tambien, porque se encola detras. Todo lo demas (triangulos, texrect, cargas de TMEM y
-// TLUT, rellenos de 1/2 ciclos que mezclan con el framebuffer) necesita la RDRAM al dia.
+// Comandos que no leen ni escriben RDRAM: con primitivas en la GPU pendientes se pueden
+// ejecutar sin bajarlas (cada primitiva encolada lleva ya su propio estado). Un FILL_RECTANGLE
+// en FILL/COPY tambien, porque se encola detras. Todo lo demas (texrect, cargas de TMEM y TLUT,
+// rellenos de 1/2 ciclos que mezclan con el framebuffer) necesita la RDRAM al dia.
 static auto gpuNoFlush(u32 op, u32 cycle) -> bool {
   switch(op) {
   case 0x00: case 0x26: case 0x27: case 0x28: case 0x29: case 0x2a: case 0x2b: case 0x2c:
@@ -2299,6 +2467,9 @@ static auto gpuNoFlush(u32 op, u32 cycle) -> bool {
   case 0x3a: case 0x3b: case 0x3c: case 0x3d: case 0x3e: case 0x3f:
     return true;
   case 0x36: return cycle >= 2;
+  // Triangulos: drawTriangle decide; si el triangulo no va a la GPU vacia la cola el mismo.
+  case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f:
+    return true;
   default: return false;
   }
 }

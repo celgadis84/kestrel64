@@ -1,0 +1,453 @@
+#version 450
+// GPU-RDP fase 1: triangulo SIN textura (FILL, shade o plano) en 16 bpp con cobertura, z y
+// blender. Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
+// bit (rdp.cpp es la referencia; cada bloque de abajo nombra su funcion). Un hilo por pixel
+// de la caja que el CPU ya midio al cobrar el triangulo; cada hilo rehace el recorrido de
+// bordes de su fila (es barato y asi no hay datos por fila que subir).
+//
+// Dentro de un triangulo dos pixeles nunca tocan la misma media palabra (ni de color ni de z:
+// el CPU solo manda aqui triangulos con x < ancho y zonas de color y z separadas), asi que no
+// hay orden que respetar entre hilos. Las medias palabras comparten palabra de 32 bits con el
+// vecino: se escriben con atomicAnd/atomicOr sobre su mitad y nunca pisan la otra.
+//
+// Espejo de RDRAM: byte de la direccion 4w+i en los bits 8*i de ram[w] (orden del anfitrion).
+// Bits ocultos: un byte por media palabra, mismo empaquetado en hid[].
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Ram { uint ram[]; };
+layout(std430, binding = 1) buffer Hid { uint hid[]; };
+layout(std430, binding = 2) readonly buffer Recs { int rec[]; };
+layout(std430, binding = 3) readonly buffer Lut { uint lut[]; };   // divisor del blender, 32 KB
+layout(std430, binding = 4) buffer Outs { int outv[]; };
+layout(push_constant) uniform P { uint idx; uint count; } pc;
+
+// Disposicion del registro (debe casar con gpurdp.hpp TriRec, en palabras de 32 bits).
+const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6, R_XM = 7,
+          R_DXM = 8, R_FLAGS = 9, R_SX0 = 10, R_SY0 = 11, R_SX1 = 12, R_SY1 = 13,
+          R_BX = 14, R_BY = 15, R_BW = 16, R_BH = 17,
+          R_CC = 18, R_CDX = 22, R_CDE = 26, R_CDY = 30,
+          R_Z = 34, R_ZDX = 35, R_ZDE = 36, R_ZDY = 37,
+          R_CI = 38, R_CIW = 39, R_ZI = 40, R_OLO = 41, R_OHI = 42,
+          R_FILL = 43, R_PRIM = 44, R_ENV = 45, R_BLEND = 46, R_FOG = 47, R_FLAT = 48, R_FTEX = 49,
+          R_SEL = 50,   // 4 palabras: sel[2][8] en bytes
+          R_LOD = 54, R_PLOD = 55, R_PZ = 56, R_PDZ = 57, R_PDZC = 58, R_LASTX = 59, R_LASTY = 60,
+          R_SIZE = 64;
+// FLAGS
+const int F_LEFT = 1, F_DOOFF = 2, F_FILL = 4, F_SHADE = 8, F_ZACT = 16, F_ZSRC = 32, F_AA = 64,
+          F_COMB = 128, F_NOBLEND = 256, F_TWO = 512, F_NOAAGLB = 1024;
+
+int base;
+int R(int i) { return rec[base + i]; }
+uint U(int i) { return uint(rec[base + i]); }
+
+int sext(uint v, int bits) { return int(v << (32 - bits)) >> (32 - bits); }
+int s16(int v) { return (v << 16) >> 16; }
+
+// --- RDRAM -----------------------------------------------------------------------------
+uint rd8(uint a) { return (ram[a >> 2] >> ((a & 3u) * 8u)) & 0xffu; }
+uint rd16(uint a) { return (rd8(a) << 8) | rd8(a + 1u); }
+void wr16(uint a, uint v) {   // a par: los dos bytes caen en la misma palabra
+  uint sh = (a & 3u) * 8u;
+  uint bytes = ((v >> 8) & 0xffu) | ((v & 0xffu) << 8);
+  atomicAnd(ram[a >> 2], ~(0xffffu << sh));
+  atomicOr(ram[a >> 2], bytes << sh);
+}
+uint rdHid(uint e) { return (hid[e >> 2] >> ((e & 3u) * 8u)) & 0xffu; }
+void wrHid(uint e, uint v) {
+  uint sh = (e & 3u) * 8u;
+  atomicAnd(hid[e >> 2], ~(0xffu << sh));
+  atomicOr(hid[e >> 2], (v & 0xffu) << sh);
+}
+
+// --- z comprimido (SoftRdp::zEncode / zDecode) -------------------------------------------
+const uint zBase[8]  = uint[8](0u, 0x20000u, 0x30000u, 0x38000u, 0x3c000u, 0x3e000u, 0x3f000u, 0x3f800u);
+const uint zShift[8] = uint[8](6u, 5u, 4u, 3u, 2u, 1u, 0u, 0u);
+uint zEncode(uint z) {
+  if(z > 0x3ffffu) z = 0x3ffffu;
+  int e = 0;
+  while(e < 7 && z >= zBase[e + 1]) e++;
+  uint mant = (z - zBase[e]) >> zShift[e];
+  return (((uint(e) << 11) | (mant & 0x7ffu)) << 2) & 0xffffu;
+}
+uint zDecode(uint m) {
+  uint com = (m >> 2) & 0x3fffu;
+  uint e = (com >> 11) & 7u;
+  return ((com & 0x7ffu) << zShift[e]) + zBase[e];
+}
+
+// --- dither (SoftRdp::ditherRgb / alphaDither) --------------------------------------------
+const int kDith[32] = int[32](0, 6, 1, 7, 4, 2, 5, 3, 3, 5, 2, 4, 7, 1, 6, 0,
+                              0, 4, 1, 5, 4, 0, 5, 1, 3, 7, 2, 6, 7, 3, 6, 2);
+uint noiseHash(int x, int y, uint i) {
+  uint h = uint(x) * 0x9e3779b1u ^ uint(y) * 0x85ebca6bu ^ i * 0xc2b2ae35u;
+  h ^= h >> 15; h *= 0x2545f491u; h ^= h >> 13;
+  return h & 7u;
+}
+uint ditherRgb(int x, int y, uint c) {
+  uint mode = (U(R_OHI) >> 6) & 3u;
+  if(mode == 3u) return c;
+  uint o = c & 0xffu;
+  for(uint i = 0u; i < 3u; i++) {
+    int v = int((c >> (24u - i * 8u)) & 0xffu);
+    int d = mode < 2u ? kDith[int(mode) * 16 + (y & 3) * 4 + (x & 3)] : int(noiseHash(x, y, i));
+    if((v & 7) > d) v = v > 247 ? 255 : (v & 0xf8) + 8;
+    o |= uint(v) << (24u - i * 8u);
+  }
+  return o;
+}
+int alphaDither(int x, int y) {
+  uint am = (U(R_OHI) >> 4) & 3u, rm = (U(R_OHI) >> 6) & 3u;
+  if(am == 3u) return 0;
+  if(am == 2u) return int(noiseHash(x, y, 3u));
+  int d = kDith[int(rm & 1u) * 16 + (y & 3) * 4 + (x & 3)];
+  return am == 1u ? (~d & 7) : d;
+}
+
+// --- combinador (SoftRdp::combineColor, camino escalar) -----------------------------------
+// Filas: CIN, TEX0, TEX1, PRIM, SHADE, ENV, CINA, TEX0A, TEX1A, PRIMA, SHADEA, ENVA, ONE, ZERO,
+// LOD, PLOD. COMBINED del primer ciclo no llega aqui (el CPU no manda triangulos que lo lean);
+// en 2 ciclos el del segundo es el resultado crudo del primero.
+int ch(uint c, int i) { return int((c >> (24 - i * 8)) & 0xffu); }
+int rowVal(uint r, int i, uint tex, uint shade, ivec4 cin) {
+  switch(r) {
+    case 0u: return cin[i];
+    case 1u: case 2u: return ch(tex, i);
+    case 3u: return ch(U(R_PRIM), i);
+    case 4u: return ch(shade, i);
+    case 5u: return ch(U(R_ENV), i);
+    case 6u: return cin[3];
+    case 7u: case 8u: return int(tex & 0xffu);
+    case 9u: return int(U(R_PRIM) & 0xffu);
+    case 10u: return int(shade & 0xffu);
+    case 11u: return int(U(R_ENV) & 0xffu);
+    case 12u: return 0x100;
+    case 14u: return R(R_LOD);
+    case 15u: return R(R_PLOD);
+    default: return 0;
+  }
+}
+uint selOf(int cyc, int k) { int b = cyc * 8 + k; return (U(R_SEL + (b >> 2)) >> ((b & 3) * 8)) & 0xffu; }
+int sexp(int v) { int x = (v - 0x80) & 0x1ff; if((x & 0x100) != 0) x |= ~0x1ff; return x + 0x80; }
+int eq(int a, int b, int c, int d) { a = sexp(a); b = sexp(b); d = sexp(d); return (((a - b) * c + 0x80) >> 8) + d; }
+ivec4 runCycle(int cyc, uint tex, uint shade, ivec4 cin) {
+  ivec4 o;
+  for(int i = 0; i < 3; i++)
+    o[i] = eq(rowVal(selOf(cyc, 0), i, tex, shade, cin), rowVal(selOf(cyc, 1), i, tex, shade, cin),
+              rowVal(selOf(cyc, 2), i, tex, shade, cin), rowVal(selOf(cyc, 3), i, tex, shade, cin));
+  o[3] = eq(rowVal(selOf(cyc, 4), 3, tex, shade, cin), rowVal(selOf(cyc, 5), 3, tex, shade, cin),
+            rowVal(selOf(cyc, 6), 3, tex, shade, cin), rowVal(selOf(cyc, 7), 3, tex, shade, cin));
+  return o;
+}
+// Devuelve el RGBA y deja en `comb` el registro COMBINED tal como lo latchea el CPU.
+uint combine(uint tex, uint shade, out ivec4 comb) {
+  ivec4 fin;
+  if((R(R_FLAGS) & F_TWO) != 0) fin = runCycle(1, tex, shade, runCycle(0, tex, shade, ivec4(0)));
+  else                          fin = runCycle(1, tex, shade, ivec4(0));
+  for(int i = 0; i < 4; i++) { int x = sexp(fin[i]); comb[i] = x < 0 ? 0 : x > 255 ? 255 : x; }
+  uint rgba = (uint(comb[0]) << 24) | (uint(comb[1]) << 16) | (uint(comb[2]) << 8) | uint(comb[3]);
+  comb[3] += (comb[3] + 1) >> 8;
+  return rgba;
+}
+
+// --- blender (SoftRdp::blendColor) --------------------------------------------------------
+uint pickC(uint sel, uint src, uint memc) {
+  return sel == 0u ? src : sel == 1u ? memc : sel == 2u ? U(R_BLEND) : U(R_FOG);
+}
+uint blendColor(uint src, uint memc, bool blendEn, bool cvgWrap, int shA, int shB, int pxShadeA) {
+  uint olo = U(R_OLO);
+  bool two = (R(R_OHI) >> 20 & 3) == 1;
+  int sh = two ? 0 : 2;
+  uint psel = (olo >> (28 + sh)) & 3u, asel = (olo >> (24 + sh)) & 3u;
+  uint msel = (olo >> (20 + sh)) & 3u, bsel = (olo >> (16 + sh)) & 3u;
+  if(two) {
+    uint P0 = pickC((olo >> 30) & 3u, src, memc), M0 = pickC((olo >> 22) & 3u, src, memc);
+    uint as0 = (olo >> 26) & 3u, bs0 = (olo >> 18) & 3u;
+    int b0 = as0 == 0u ? int(src & 0xffu) : as0 == 1u ? int(U(R_FOG) & 0xffu) : as0 == 2u ? pxShadeA : 0;
+    int b1 = bs0 == 0u ? ((~b0) & 0xff) : bs0 == 1u ? int(memc & 0xffu) : bs0 == 2u ? 0xff : 0;
+    b0 >>= 3; b1 >>= 3;
+    if(bs0 == 1u) { b0 = (b0 >> shA) & 0x3c; b1 = (b1 >> shB) | 3; }
+    uint c0 = src & 0xffu;
+    for(int i = 0; i < 3; i++) {
+      int s = 24 - i * 8;
+      int v = (int((P0 >> s) & 0xffu) * b0 + int((M0 >> s) & 0xffu) * (b1 + 1)) >> 5;
+      c0 |= uint(v & 0xff) << s;
+    }
+    src = c0;
+  }
+  uint P = pickC(psel, src, memc), M = pickC(msel, src, memc);
+  bool colorOnCvg = (olo & 0x80u) != 0u;
+  if(colorOnCvg && !cvgWrap) return (M & ~0xffu) | (src & 0xffu);
+  int a0 = asel == 0u ? int(src & 0xffu) : asel == 1u ? int(U(R_FOG) & 0xffu) : asel == 2u ? pxShadeA : 0;
+  if(!blendEn || (asel == 0u && bsel == 0u && (src & 0xffu) == 0xffu)) return (P & ~0xffu) | (src & 0xffu);
+  int a1 = bsel == 0u ? ((~a0) & 0xff) : bsel == 1u ? int(memc & 0xffu) : bsel == 2u ? 0xff : 0;
+  a0 >>= 3; a1 >>= 3;
+  if(bsel == 1u) { a0 = (a0 >> shA) & 0x3c; a1 = (a1 >> shB) | 3; }
+  bool force = ((olo >> 14) & 1u) != 0u;
+  int sum = (a0 >> 2) + (a1 >> 2) + 1;
+  uint o = 0u;
+  for(int i = 0; i < 3; i++) {
+    int blended = ch(P, i) * a0 + ch(M, i) * (a1 + 1);
+    int v;
+    if(force) v = (blended >> 5) & 0xff;
+    else {
+      uint li = (uint(sum) << 11) | (uint(blended >> 2) & 0x7ffu);
+      v = int((lut[li >> 2] >> ((li & 3u) * 8u)) & 0xffu);
+    }
+    o |= uint(v) << (24 - i * 8);
+  }
+  return o | (src & 0xffu);
+}
+
+// --- escritura (SoftRdp::storePixel 16 bpp, depthTest, blendPixel) -------------------------
+int nWrite = 0, nZWrite = 0;
+uint to5551(uint c) {
+  uint r = (c >> 24) & 0xffu, g = (c >> 16) & 0xffu, b = (c >> 8) & 0xffu, a = c & 0xffu;
+  return ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | ((a >> 7) & 1u);
+}
+void storePixel(int x, int y, uint rgba) {
+  nWrite++;
+  uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+  wr16(a, to5551(rgba));
+  wrHid(a >> 1, (rgba >> 5) & 3u);
+}
+bool depthTest(int x, int y, int d) {
+  if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
+  uint zoff = U(R_ZI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+  uint old = zDecode(rd16(zoff));
+  uint olo = U(R_OLO);
+  if((olo & 0x10u) != 0u && uint(d) >= old) return false;
+  if((olo & 0x20u) != 0u) { wr16(zoff, zEncode(uint(d))); nZWrite++; }
+  return true;
+}
+uint readFb(int x, int y) {
+  uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+  uint px = rd16(a);
+  uint r = ((px >> 11) & 0x1fu) << 3, g = ((px >> 6) & 0x1fu) << 3, b = ((px >> 1) & 0x1fu) << 3;
+  uint al = ((((px & 1u) << 2) | (rdHid(a >> 1) & 3u)) << 5);
+  return (r << 24) | (g << 16) | (b << 8) | al;
+}
+
+void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShadeA) {
+  if(x < R(R_SX0) || x >= R(R_SX1) || y < R(R_SY0) || y >= R(R_SY1) || x < 0 || y < 0) return;
+  uint olo = U(R_OLO), ohi = U(R_OHI);
+  int fl = R(R_FLAGS);
+  // Plan del blender (SoftRdp::buildBlendPlan).
+  bool two = ((ohi >> 20) & 3u) == 1u;
+  int sh = two ? 0 : 2;
+  uint psel = (olo >> (28 + sh)) & 3u, msel = (olo >> (20 + sh)) & 3u, bsel = (olo >> (16 + sh)) & 3u;
+  bool usesMem = msel == 1u || bsel == 1u ||
+                 (two && (((olo >> 30) & 3u) == 1u || ((olo >> 22) & 3u) == 1u || ((olo >> 18) & 3u) == 1u));
+  bool imRd = (olo & 0x40u) != 0u;
+  bool force = ((olo >> 14) & 1u) != 0u;
+  bool aaEn = (olo & 0x08u) != 0u && (fl & F_NOAAGLB) == 0;
+  uint cvgDst = (olo >> 8) & 3u;
+  bool colorOnCvg = (olo & 0x80u) != 0u, cvgXAlpha = ((olo >> 12) & 1u) != 0u;
+  bool alphaCvgSel = ((olo >> 13) & 1u) != 0u;
+  bool needMem = usesMem || colorOnCvg || aaEn || cvgDst != 2u || (olo & 0x10u) != 0u;
+  if((fl & F_NOBLEND) != 0) {
+    if(hasZ && !depthTest(x, y, zin)) return;
+    storePixel(x, y, src); return;
+  }
+  if(usesMem && !imRd) {
+    if(hasZ && !depthTest(x, y, zin)) return;
+    storePixel(x, y, ditherRgb(x, y, src)); return;
+  }
+  uint memc = 0u; int memCvg = 7;
+  if(imRd && needMem) { memc = readFb(x, y); memCvg = int((memc & 0xffu) >> 5); }
+  {
+    int a = int(src & 0xffu);
+    int expanded = a + ((a + 1) >> 8);
+    int modulated;
+    if(cvgXAlpha) { modulated = (expanded * cvg + 4) >> 3; cvg = modulated >> 5; }
+    else          { modulated = cvg << 5; }
+    if(alphaCvgSel) expanded = modulated;
+    else            expanded += alphaDither(x, y);
+    src = (src & ~0xffu) | uint(expanded < 0 ? 0 : expanded > 255 ? 255 : expanded);
+  }
+  if(aaEn && cvg == 0) return;
+  bool zCmp = hasZ && (olo & 0x10u) != 0u, zUpd = hasZ && (olo & 0x20u) != 0u;
+  uint zoff = 0u; int zz = 0;
+  int pxDz = R(R_PDZ), pxDzC = R(R_PDZC);
+  if(hasZ) {
+    zoff = U(R_ZI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+    zz = clamp(zin, 0, 0x3ffff);
+  }
+  bool overflow = (cvg + memCvg) >= 8;
+  bool blendEn;
+  int shA = 0, shB;
+  if(zCmp) {
+    uint zw = rd16(zoff);
+    int memZ = int(zDecode(zw));
+    int memDzC = int(((zw & 3u) << 2) | (rdHid(zoff >> 1) & 3u));
+    int memDz = 1 << memDzC;
+    int prec = int((zw >> 13) & 7u);
+    shA = clamp(pxDzC - memDzC, 0, 4);
+    shB = clamp(memDzC - pxDzC, 0, 4);
+    bool coplanar = false;
+    if(prec < 3) {
+      if(memDz != 0x8000) memDz = max(memDz << 1, 16 >> prec);
+      else { coplanar = true; memDz = 0xffff; }
+    }
+    int cdz = pxDz | memDz;
+    cdz = cdz != 0 ? 1 << findMSB(uint(cdz)) : 0;
+    int cdzI = cdz;
+    cdz <<= 3;
+    bool farther = coplanar || zz + cdz >= memZ;
+    blendEn = force || (!overflow && aaEn && farther);
+    bool maxZ = memZ == 0x3ffff, front = zz < memZ;
+    bool nearer = coplanar || zz - cdz <= memZ;
+    bool pass;
+    switch((olo >> 10) & 3u) {
+      case 0u: pass = maxZ || (overflow ? front : nearer); break;
+      case 1u:
+        if(!front || !farther || !overflow) pass = maxZ || (overflow ? front : nearer);
+        else {
+          int c = (cdzI & 0xffff) != 0 ? findMSB(uint(cdzI & 0xffff)) : 0;
+          int coeff = ((memZ >> c) - (zz >> c)) & 0xf;
+          cvg = min((coeff * cvg) >> 3, 8);
+          pass = true;
+        }
+        break;
+      case 2u: pass = front || maxZ; break;
+      default: pass = farther && nearer && !maxZ; break;
+    }
+    if(!pass || (aaEn && cvg == 0)) return;
+  } else {
+    shB = min(0xf - pxDzC, 4);
+    blendEn = force || (!overflow && aaEn);
+  }
+  uint o = blendColor(src, memc, blendEn, overflow, shA, shB, pxShadeA);
+  o = ditherRgb(x, y, o);
+  int newCvg;
+  switch(cvgDst) {
+    case 1u: newCvg = (cvg + memCvg) & 7; break;
+    case 2u: newCvg = 7; break;
+    case 3u: newCvg = memCvg; break;
+    default: newCvg = blendEn ? min(7, memCvg + cvg) : ((cvg - 1) & 7); break;
+  }
+  storePixel(x, y, (o & ~0xffu) | uint(newCvg << 5));
+  if(zUpd) {
+    wr16(zoff, zEncode(uint(zz)) | uint((pxDzC >> 2) & 3));
+    wrHid(zoff >> 1, uint(pxDzC & 3));
+    nZWrite++;
+  }
+}
+
+// --- recorrido de bordes y pixel (SoftRdp::drawTriangle) ----------------------------------
+int quant(int x) { x = sext(uint(x), 27); return (x >> 12) | ((x & 0xfff) != 0 ? 1 : 0); }
+
+void pixel(int x, int y) {
+  int fl = R(R_FLAGS);
+  bool leftMajor = (fl & F_LEFT) != 0;
+  int iYl = R(R_YL), iYm = R(R_YM), iYh = R(R_YH);
+  int iXl = R(R_XL), iDxl = R(R_DXL), iXh = R(R_XH), iDxh = R(R_DXH), iXm = R(R_XM), iDxm = R(R_DXM);
+  int yhBase = iYh & ~3;
+  int subLo = max(iYh, R(R_SY0) * 4), subHi = min(iYl, R(R_SY1) * 4);
+  int scLo = R(R_SX0) * 8, scHi = R(R_SX1) * 8;
+  uint cov = 0u;
+  for(int k = 0; k < 4; k++) {
+    int ys = y * 4 + k;
+    int eh = iXh + (ys - yhBase) * iDxh;
+    int el = ys < iYm ? iXm + (ys - yhBase) * iDxm : iXl + (ys - iYm) * iDxl;
+    int L = quant(leftMajor ? eh : el), Rr = quant(leftMajor ? el : eh);
+    bool bad = (L >> 1) > (Rr >> 1) || ys < subLo || ys >= subHi;
+    L = min(max(L, scLo), scHi); Rr = min(max(Rr, scLo), scHi);
+    if(bad) { L = 0xffff; Rr = 0; }
+    int a = x * 8 + ((k & 1) != 0 ? 2 : 0), b = a + 4;
+    if(a >= L && a < Rr) cov |= 1u << k;
+    if(b >= L && b < Rr) cov |= 16u << k;
+  }
+  if((fl & F_AA) != 0 ? cov == 0u : (cov & 1u) == 0u) return;
+  int hits = bitCount(cov);
+  if((fl & F_FILL) != 0) {
+    uint fc = U(R_FILL);
+    uint px = (x & 1) != 0 ? (fc & 0xffffu) : (fc >> 16);
+    uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+    wr16(a, px);
+    wrHid(a >> 1, (px & 1u) != 0u ? 3u : 0u);
+    nWrite++;
+    return;
+  }
+  // Atributos de la fila.
+  int dyRow = y - (iYh >> 2);
+  uint xhRow = uint(iXh) + uint(dyRow) * (uint(iDxh) << 2);
+  bool doOffset = (fl & F_DOOFF) != 0;
+  if(doOffset) xhRow += 3u * uint(iDxh);
+  int baseX = int(xhRow) >> 15;
+  uint xfrac = (xhRow >> 7) & 0xffu;
+  int dxI = x - baseX;
+  // Centroide: primera muestra cubierta.
+  int idx = 0;
+  for(int k = 0; k < 4; k++) {
+    if((cov & (1u << k)) != 0u)  { idx = 2 * k; break; }
+    if((cov & (16u << k)) != 0u) { idx = 2 * k + 1; break; }
+  }
+  int yo = idx >> 1, xo = ((idx & 1) << 1) + (yo & 1);
+  uint shd = 0u;
+  bool gouraud = (fl & F_SHADE) != 0;
+  if(gouraud) {
+    for(int c = 0; c < 4; c++) {
+      int c0 = R(R_CC + c), ddx = R(R_CDX + c), dde = R(R_CDE + c), ddy = R(R_CDY + c);
+      uint diff = 0u;
+      if(doOffset) {
+        int deh = dde & ~0x1ff, dyh = ddy & ~0x1ff;
+        diff = uint(deh) - uint(deh >> 2) - uint(dyh) + uint(dyh >> 2);
+      }
+      uint v0 = uint(c0) + uint(dde) * uint(dyRow);
+      int rc = int(((v0 & ~0x1ffu) + diff - xfrac * uint((ddx >> 8) & ~1)) & ~0x3ffu);
+      int v = int(uint(rc) + uint(ddx & ~0x1f) * uint(dxI));
+      int t = s16(((s16(v >> 14)) << 2) + xo * s16(ddx >> 14) + yo * s16(ddy >> 14));
+      t >>= 4;
+      t = (int(uint(t - 0x80) << 23) >> 23) + 0x80;
+      t = t < 0 ? 0 : t > 255 ? 255 : t;
+      shd |= uint(t) << (24 - 8 * c);
+    }
+  }
+  int zin = 0;
+  bool hasZ = (fl & F_ZACT) != 0;
+  if(hasZ) {
+    if((fl & F_ZSRC) != 0) zin = R(R_PZ);
+    else {
+      int c0 = R(R_Z), ddx = R(R_ZDX), dde = R(R_ZDE), ddy = R(R_ZDY);
+      uint diff = 0u;
+      if(doOffset) {
+        int deh = dde & ~0x1ff, dyh = ddy & ~0x1ff;
+        diff = uint(deh) - uint(deh >> 2) - uint(dyh) + uint(dyh >> 2);
+      }
+      uint v0 = uint(c0) + uint(dde) * uint(dyRow);
+      int rz = int(((v0 & ~0x1ffu) + diff - xfrac * uint((ddx >> 8) & ~1)) & ~0x3ffu);
+      int z = int(uint(rz) + uint(ddx) * uint(dxI));
+      int sz = int((uint(z >> 10) << 2) + uint(xo * (ddx >> 10)) + uint(yo * (ddy >> 10)));
+      sz >>= 5;
+      sz = (int(uint(sz - (1 << 17)) << 13) >> 13) + (1 << 17);
+      zin = sz < 0 ? 0 : sz > 0x3ffff ? 0x3ffff : sz;
+    }
+  }
+  uint c;
+  int pxShadeA;
+  ivec4 comb = ivec4(0);
+  bool combProg = (fl & F_COMB) != 0;
+  if(gouraud) {
+    c = combProg ? combine(0u, shd, comb) : shd;
+    pxShadeA = min(int(shd & 0xffu) + alphaDither(x, y), 0xff);
+  } else {
+    c = combProg ? combine(U(R_FTEX), 0u, comb) : U(R_FLAT);
+    pxShadeA = alphaDither(x, y);
+  }
+  // El ultimo pixel cubierto (orden de recorrido) deja COMBINED para la primitiva siguiente.
+  if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
+    int o = int(pc.idx) * 8;
+    outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
+  }
+  blendPixel(x, y, c, hits, hasZ, zin, pxShadeA);
+}
+
+void main() {
+  base = int(pc.idx) * R_SIZE;
+  uint i = gl_GlobalInvocationID.x;
+  if(i >= pc.count) return;
+  uint bw = U(R_BW);
+  int x = R(R_BX) + int(i % bw), y = R(R_BY) + int(i / bw);
+  pixel(x, y);
+  if(nWrite != 0)  atomicAdd(outv[int(pc.idx) * 8 + 0], nWrite);
+  if(nZWrite != 0) atomicAdd(outv[int(pc.idx) * 8 + 1], nZWrite);
+}

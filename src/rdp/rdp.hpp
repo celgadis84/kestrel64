@@ -98,9 +98,9 @@ struct SoftRdp {
   // span esta partido: el command processor no ejecuta comandos a medias, se para delante
   // de el y lo reanuda cuando END avanza. El llamante reanuda ahi el span siguiente.
   u32 stopAt = 0;
-  // GPU-RDP (fase 0, ver src/gpurdp/gpurdp.hpp): hay rellenos encolados en la GPU que aun no
-  // estan en la RDRAM. gpuFlush los baja; run() lo llama antes de cualquier comando que toque
-  // la RDRAM por su cuenta y al terminar el tramo.
+  // GPU-RDP (ver src/gpurdp/gpurdp.hpp): hay primitivas encoladas en la GPU que aun no estan
+  // en la RDRAM. gpuFlush las baja; run() lo llama antes de cualquier comando que toque la
+  // RDRAM por su cuenta y al terminar el tramo.
   bool gpuQueued = false;
   auto gpuFlush(Memory& mem) -> void;
   auto colorImage() const -> u32 { return ci_addr; }
@@ -122,6 +122,19 @@ struct SoftRdp {
   // they must advance with a cost model, not stay pinned at zero. See rdp.cpp for
   // the model and scripts/rdptiming.py for its calibration against hardware.
   auto accountPixels(Memory& mem, u64 npx, u64 nWrite, u64 nZWrite) -> void;
+  // accountPixels en dos mitades: la foto del estado al rasterizar y el cobro, que necesita
+  // saber cuantos pixeles se escribieron (con el GPU-RDP llega al vaciar la cola).
+  struct AcctSnap {
+    u64 npx = 0, lines = 0, units = 0;
+    u32 ci = 0, zi = 0, ciW = 0, ciSize = 0, olo = 0, cyc = 0;
+    int sx1 = 0, sy1 = 0;
+    bool viOn = false, fbviSame = false, charge = true;
+  };
+  auto acctSnap(Memory& mem, u64 npx) -> AcctSnap;
+  auto acctFinish(Memory& mem, const AcctSnap& a, u64 nWrite, u64 nZWrite) -> void;
+  // Triangulos encolados en la GPU, en orden: su foto de cobro y si dejan COMBINED.
+  struct GpuTri { AcctSnap acct; bool comb; };
+  std::vector<GpuTri> gpuTris;
   // Tramos (una linea de una primitiva) de lo que se va a cobrar: el llamante declara cada
   // linea con su primer pixel y su anchura y accountPixels los consume. Sin tramos declarados
   // cae al reparto plano npx/8 de antes.
@@ -256,6 +269,10 @@ private:
   auto hiddenBits(Memory& mem) -> u8*;
   auto fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void;
   auto drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void;
+  auto gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMode, bool gouraud,
+                   bool combProg, u32 flat, u32 flatTexel, bool zActive, bool zSrc,
+                   const s32* cC, const s32* cDx, const s32* cDe, const s32* cDy,
+                   s32 zC, s32 zDx, s32 zDe, s32 zDy) -> bool;
   auto texRect(Memory& mem, const u64* w, bool flip) -> void;
   // RDRAM -> TMEM recortado al primer limite (0x1000 en TMEM, fin de RDRAM): copia el
   // MISMO prefijo que el bucle byte a byte que sustituye, porque ambos limites son
