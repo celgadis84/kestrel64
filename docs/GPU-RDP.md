@@ -179,6 +179,23 @@ identicas a SoftRDP). SM64 600 cuadros: 475513 triangulos por GPU, 462104 con te
 instantaneas de TMEM, 105584 vaciados (los texrect y demas aun van por CPU y vacian la cola:
 es lo siguiente).
 
+### Fase 4 (parte 1) -- texrect HECHO 2026-10-05
+
+- TEXTURE_RECTANGLE y FLIP en 1/2 ciclos y COPY, a 16 bpp, por el mismo registro (`TF_RECT`,
+  `TF_FLIP`, `TF_COPY`) y `rectPixel` en `tri.comp`. S/T en entero: S en 1/4096 de texel
+  (1/16384 en COPY, DsDx x4), T en 1/4096; los double de SoftRDP son diadicos exactos, asi que
+  coincide bit a bit. Filtro: S/T a 1/32 con empate lejos del cero (como `lroundExact`).
+- Alpha compare de COPY (alfa 0 fuera) y no COPY (`alphaRef`); blender con cvg 8 sin z si
+  FORCE_BL, si no escritura directa con tijera. Las cuentas (rasterPx, spans) se hacen en CPU.
+- Se quedan en CPU: texpack, mipmap (usesLod), COPY a 8 bpp, COMBINED en el primer ciclo.
+- Vaciado evitado en cargas: LOAD_TLUT/BLOCK/TILE solo vacian si su rango de lectura (cota
+  por arriba) toca lo que la cola va a escribir (hasta 8 intervalos). `KESTREL_GPUFLUSHSTAT=1`
+  saca que comandos vacian. SM64 600 cuadros: 105584 -> 73698 vaciados; por comando solo 173
+  (LOAD_BLOCK), el resto son el final de `run()` y las primitivas que caen a CPU (fase 5).
+
+Prueba: `gate_gpurdp` ALL OK (7 m 22 s), krom 371/371 identicas exacto a SoftRDP; gate_quick
+krom + thar0 ALL OK.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego

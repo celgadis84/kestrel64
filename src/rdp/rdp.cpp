@@ -872,6 +872,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
     const u64 last = u64(ci_addr) + (u64(y1 - 1) * ci_width + u64(x1)) * bpp;   // un byte detras
     if(u32(x1) <= ci_width && ci_addr % bpp == 0 && last <= m.size()) {
       gpurdp::queueFill({ci_addr, ci_width, bpp, u32(x0), u32(y0), u32(x1), u32(y1), fill_color});
+      gpuMark(ci_addr + (u32(y0) * ci_width + u32(x0)) * bpp, (u32)last);
       gpuQueued = true;
       pxWrites += npx;
       for(int y = y0; y < y1; y++) addSpan(x0, u64(x1 - x0));
@@ -1112,6 +1113,8 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   const u8* tm = textured ? tmem : nullptr;
   if(!gpurdp::queueTri(t, tm, tlut)) { gpuFlush(mem); gpurdp::queueTri(t, tm, tlut); }
   gpuTris.push_back({acct, combProg && !fillMode});
+  gpuMark(lo[0], hi[0]);
+  if(hi[1]) gpuMark(lo[1], hi[1]);
   gpuQueued = true;
   return true;
 }
@@ -2262,6 +2265,89 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
   return rgba;
 }
 
+// GPU-RDP fase 4: encola el texrect en la GPU (rectPixel de gpurdp/shaders/tri.comp). Mismas
+// cuentas que el bucle de texRect: S/T alli van en double pero son diadicos exactos, aqui en
+// entero (1/4096 de texel, 1/16384 la S de COPY).
+auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, int Y0, int Y1,
+                         bool usesTex1) -> bool {
+  if(g_rgHi || wrtag::tag || ci_size != 2 || (ci_addr & 1)) return false;
+  if(texpack::active()) return false;
+  if(X1 > (int)ci_width) return false;
+  const u32 cyc = cycleType();
+  const bool copy = cyc == 2;
+  const bool combProg = (combine_hi | combine_lo) != 0 && !copy;
+  if(combProg) {
+    if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo || combPlan.keyCyc != cyc)
+      buildCombPlan();
+    if(!combPlan.fast) return false;
+    const u8* s0 = combPlan.sel[combPlan.two ? 0 : 1];
+    for(int k = 0; k < 8; k++) if(s0[k] == CR_CIN || s0[k] == CR_CINA) return false;
+  }
+  const bool any = X1 > X0 && Y1 > Y0;
+  u32 lo = 0, hi = 0;
+  if(any) {
+    const u64 rowB = u64(ci_width) * 2;
+    const u64 cLo = ci_addr + u64(Y0) * rowB, cHi = ci_addr + u64(Y1) * rowB;
+    if(cHi > mem.rdram.size()) return false;
+    lo = (u32)cLo; hi = (u32)cHi;
+  }
+  u64 rasterPx = 0;
+  for(int y = Y0; y < Y1; y++) {
+    if(y < 0) continue;
+    if(X1 > std::max(X0, 0)) addSpan(std::max(X0, 0), u64(X1 - std::max(X0, 0)));
+    for(int x = X0; x < X1; x++) if(x >= 0) rasterPx++;
+  }
+  hiddenBits(mem);
+  const AcctSnap acct = acctSnap(mem, rasterPx);
+  if(!rasterPx) return true;
+
+  const u64 c0 = w[0], c1 = w[1];
+  const s32 XH = (s32)((c0 >> 12) & 0xfff), YH = (s32)(c0 & 0xfff);
+  const s32 S = (s16)((c1 >> 48) & 0xffff), T = (s16)((c1 >> 32) & 0xffff);
+  const s32 D = (s16)((c1 >> 16) & 0xffff), DT = (s16)(c1 & 0xffff);
+  gpurdp::TriRec t{};
+  using namespace gpurdp;
+  s32* r = t.w;
+  int fl = TF_RECT | TF_TEX;
+  if(flip) fl |= TF_FLIP;
+  if(copy) fl |= TF_COPY;
+  if(combProg) fl |= TF_COMB;
+  if(usesTex1) fl |= TF_TEX1;
+  if(g_noBlend) fl |= TF_NOBLEND;
+  if(cyc == 1) fl |= TF_TWO;
+  if(g_noAA) fl |= TF_NOAA;
+  if(!g_noFilter && ((other_hi >> 13) & 1)) fl |= TF_FILT;
+  if(other_lo & 1) fl |= TF_ACMP;
+  r[T_FLAGS] = fl;
+  r[T_SX0] = sx0; r[T_SY0] = sy0; r[T_SX1] = sx1; r[T_SY1] = sy1;
+  r[T_BX] = X0; r[T_BY] = Y0; r[T_BW] = X1 - X0; r[T_BH] = Y1 - Y0;
+  r[T_TC] = S * 128 * (copy ? 4 : 1); r[T_TC + 1] = T * 128;
+  r[T_TDX] = D; r[T_TDX + 1] = DT;
+  r[T_TDE] = flip ? YH : XH; r[T_TDE + 1] = flip ? XH : YH;
+  r[T_TINFO] = (s32)((c0 >> 24) & 7);
+  r[T_K0] = k0; r[T_K0 + 1] = k1; r[T_K0 + 2] = k2; r[T_K0 + 3] = k3;
+  for(u32 i = 0; i < 8; i++) {
+    const TexFold f = foldOf(i);
+    s32* d = &r[T_TILES + i * 5];
+    d[0] = (s32)(f.shiftS | (f.shiftT << 4) | (f.maskS << 8) | (f.maskT << 12) | (f.cmS << 16)
+                 | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
+    d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)f.rowBytes; d[4] = (s32)f.base;
+  }
+  r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr;
+  r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;
+  r[T_FILL] = (s32)fill_color; r[T_PRIM] = (s32)prim_color; r[T_ENV] = (s32)env_color;
+  r[T_BLEND] = (s32)blend_color; r[T_FOG] = (s32)fog_color;
+  if(combProg) std::memcpy(&r[T_SEL], combPlan.sel, 16);
+  r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
+  r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = X1 - 1; r[T_LASTY] = Y1 - 1;
+  t.lo[0] = lo; t.hi[0] = hi;
+  if(!gpurdp::queueTri(t, tmem, tlut)) { gpuFlush(mem); gpurdp::queueTri(t, tmem, tlut); }
+  gpuTris.push_back({acct, combProg});
+  gpuMark(lo, hi);
+  gpuQueued = true;
+  return true;
+}
+
 auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   if(g_noRaster) return;
   setPrimDz(other_lo & 4, 0, 0);   // un rect no tiene pendiente de z
@@ -2308,6 +2394,11 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   // Textura HD / realce (texpack). No en COPY a framebuffer de 8 bits (escribe indices).
   HdBind hdB;
   if(texpack::active() && !usesLod && !(cycleType() == 2 && ci_size == 1)) hdB = hdBind(mem, tile);
+  // GPU-RDP (KESTREL_GPURDP=1): 16 bpp sin mipmap a la GPU; si no, antes lo encolado a la RDRAM.
+  if(gpurdp::active()) {
+    if(!usesLod && gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
+    if(gpuQueued) gpuFlush(mem);
+  }
   const double hdFp = std::max(std::abs(dsdx), std::abs(dtdy));
   for(int y = Y0; y < Y1; y++) {
     if(y < 0) continue;
@@ -2467,8 +2558,26 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   }
 }
 
+auto SoftRdp::gpuMark(u32 lo, u32 hi) -> void {
+  // Funde con un intervalo que solape o toque; si no cabe uno nuevo, agranda el ultimo
+  // (sobra cobertura, nunca falta).
+  for(int i = 0; i < gpuNDirty; i++)
+    if(lo <= gpuDirtyHi[i] && gpuDirtyLo[i] <= hi) {
+      gpuDirtyLo[i] = std::min(gpuDirtyLo[i], lo); gpuDirtyHi[i] = std::max(gpuDirtyHi[i], hi);
+      return;
+    }
+  if(gpuNDirty < 8) { gpuDirtyLo[gpuNDirty] = lo; gpuDirtyHi[gpuNDirty] = hi; gpuNDirty++; return; }
+  gpuDirtyLo[7] = std::min(gpuDirtyLo[7], lo); gpuDirtyHi[7] = std::max(gpuDirtyHi[7], hi);
+}
+
+auto SoftRdp::gpuDirtyHit(u64 lo, u64 hi) const -> bool {
+  for(int i = 0; i < gpuNDirty; i++) if(lo < gpuDirtyHi[i] && gpuDirtyLo[i] < hi) return true;
+  return false;
+}
+
 auto SoftRdp::gpuFlush(Memory& mem) -> void {
   gpuQueued = false;
+  gpuNDirty = 0;
   static thread_local std::vector<gpurdp::TriOut> outs;
   gpurdp::flush(mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem), &outs);
   // Lo que dependia del resultado de cada triangulo, en el orden del FIFO: cobro (pixeles
@@ -2494,6 +2603,7 @@ static auto gpuNoFlush(u32 op, u32 cycle) -> bool {
   case 0x3a: case 0x3b: case 0x3c: case 0x3d: case 0x3e: case 0x3f:
     return true;
   case 0x36: return cycle >= 2;
+  case 0x24: case 0x25: return true;   // texRect decide, como los triangulos
   // Triangulos: drawTriangle decide; si el triangulo no va a la GPU vacia la cola el mismo.
   case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f:
     return true;
@@ -2533,7 +2643,32 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     if(wrtag::tag) wrtag::moveWinLo(0, cur);
     u64 cmd = fetch(cur);
     u32 op = (cmd >> 56) & 0x3f;
-    if(gpuQueued && !gpuNoFlush(op, cycleType())) gpuFlush(mem);
+    if(gpuQueued && !gpuNoFlush(op, cycleType())) {
+      // Cargas de TMEM/TLUT: solo leen RDRAM. Si lo que leen no lo va a escribir nada de la
+      // cola, no hace falta bajarla. Cota por arriba de lo que leen (4 B por texel, 8 de
+      // margen): desde ti_addr hasta pasada la ultima fila/texel.
+      bool need = true;
+      if(op == 0x30 || op == 0x33 || op == 0x34) {
+        const u64 sh = (cmd >> 12) & 0xfff, th = cmd & 0xfff;
+        const u64 hi = op == 0x33 ? u64(ti_addr) + (sh + 1) * 4 + 8
+                                  : u64(ti_addr) + ((th >> 2) + 1) * u64(ti_width) * 4 + ((sh >> 2) + 1) * 4 + 8;
+        need = gpuDirtyHit(ti_addr, hi);
+      }
+      if(need) {
+        // KESTREL_GPUFLUSHSTAT=1: al salir, que comandos obligaron a vaciar la cola.
+        static const bool fstat = std::getenv("KESTREL_GPUFLUSHSTAT") != nullptr;
+        if(fstat) {
+          static u64 fh[64] = {};
+          static const bool reg = (std::atexit([] {
+            for(int i = 0; i < 64; i++)
+              if(fh[i]) std::fprintf(stderr, "[gpurdp] vaciado por op %02x: %llu\n", i, (unsigned long long)fh[i]);
+          }), true);
+          (void)reg;
+          fh[op]++;
+        }
+        gpuFlush(mem);
+      }
+    }
     const bool st = charge && mem.rdpStats.on.load(std::memory_order_relaxed);
     if(st) statsCmd(mem, op, cmd);
     if(ops) {

@@ -10259,3 +10259,10 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   LOD/mipmap, TEXEL1 en 2 ciclos, alpha compare. Fuera: texpack (HD) y COPY.
 - gate_gpurdp ALL OK (6 m 23 s), krom 371/371 identicas; gate_quick krom + thar0 ALL OK.
   SM64: 462104 de 475513 triangulos GPU con textura.
+
+## 2026-10-05 (e) -- GPU-RDP propio, fase 4 parte 1 (texrect)
+
+- TEXTURE_RECTANGLE/FLIP 1/2 ciclos + COPY 16 bpp en `tri.comp` (`rectPixel`, S/T entero exacto).
+- Cargas de TMEM/TLUT no vacian la cola si no leen lo encolado; `KESTREL_GPUFLUSHSTAT=1`.
+- gate_gpurdp ALL OK (7 m 22 s), krom 371/371 identicas; gate_quick krom + thar0 ALL OK.
+  SM64 600 cuadros: vaciados 105584 -> 73698.

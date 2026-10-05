@@ -1,7 +1,8 @@
 #version 450
 // GPU-RDP fases 1-2: triangulo (FILL, shade, plano o con textura) en 16 bpp con cobertura, z y
 // blender. Fase 2: muestreo de TMEM (todos los formatos, TLUT, pliegue clamp/mirror/mask,
-// filtro de 3 puntos, perspectiva, LOD/mipmap, TEXEL1 en 2 ciclos) y alpha compare. Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
+// filtro de 3 puntos, perspectiva, LOD/mipmap, TEXEL1 en 2 ciclos) y alpha compare.
+// Fase 4: TEXTURE_RECTANGLE (y FLIP) en 1/2 ciclos y COPY, mismo registro con F_RECT. Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
 // bit (rdp.cpp es la referencia; cada bloque de abajo nombra su funcion). Un hilo por pixel
 // de la caja que el CPU ya midio al cobrar el triangulo; cada hilo rehace el recorrido de
 // bordes de su fila (es barato y asi no hay datos por fila que subir).
@@ -42,7 +43,8 @@ const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6
 // FLAGS
 const int F_LEFT = 1, F_DOOFF = 2, F_FILL = 4, F_SHADE = 8, F_ZACT = 16, F_ZSRC = 32, F_AA = 64,
           F_COMB = 128, F_NOBLEND = 256, F_TWO = 512, F_NOAAGLB = 1024, F_TEX = 2048,
-          F_PERSP = 4096, F_LOD = 8192, F_TEX1 = 16384, F_FILT = 32768, F_ACMP = 65536;
+          F_PERSP = 4096, F_LOD = 8192, F_TEX1 = 16384, F_FILT = 32768, F_ACMP = 65536,
+          F_RECT = 131072, F_FLIP = 262144, F_COPY = 524288;
 
 int base;
 int R(int i) { return rec[base + i]; }
@@ -431,8 +433,7 @@ uint fetch(int tl, int si, int ti) {
   return 0xffffffffu;
 }
 // S/T en 1/32 de texel (10.5). Sin filtro: el texel de floor; con filtro: 3 puntos.
-uint sampleTex(int tl, int si, int ti) {
-  if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, si >> 5), foldT(tl, ti >> 5));
+uint sampleFilt(int tl, int si, int ti) {
   int fx = si & 31, fy = ti & 31, s0 = si >> 5, t0 = ti >> 5;
   int sw0 = foldS(tl, s0), sw1 = foldS(tl, s0 + 1), tw0 = foldT(tl, t0), tw1 = foldT(tl, t0 + 1);
   uint c10 = fetch(tl, sw1, tw0), c01 = fetch(tl, sw0, tw1);
@@ -453,6 +454,17 @@ uint sampleTex(int tl, int si, int ti) {
   uint r = 0u;
   for(int i = 0; i < 4; i++) r |= uint(clamp(o[i], 0, 255)) << (24 - i * 8);
   return r;
+}
+uint sampleTex(int tl, int si, int ti) {
+  if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, si >> 5), foldT(tl, ti >> 5));
+  return sampleFilt(tl, si, ti);
+}
+// Texrect: S y T en 1/2^sh de texel. Sin filtro el texel de floor; con filtro, S/T a 1/32
+// redondeados con el empate lejos del cero (lroundExact de SoftRdp::filterK).
+int rha(int n, int k) { int h = 1 << (k - 1); return n >= 0 ? (n + h) >> k : -((h - n) >> k); }
+uint rectSample(int tl, int ns, int nt, int shS) {
+  if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, ns >> shS), foldT(tl, nt >> 12));
+  return sampleFilt(tl, rha(ns, shS - 5), rha(nt, 7));
 }
 // Reciproco por tabla de la division perspectiva (rdp.cpp perspDivide).
 const int kPt0[64] = int[64](0x4000, 0x3f04, 0x3e10, 0x3d22, 0x3c3c, 0x3b5d, 0x3a83, 0x39b1, 0x38e4, 0x381c, 0x375a, 0x369d, 0x35e5, 0x3532, 0x3483, 0x33d9, 0x3333, 0x3291, 0x31f4, 0x3159, 0x30c3, 0x3030, 0x2fa1, 0x2f15, 0x2e8c, 0x2e06, 0x2d83, 0x2d03, 0x2c86, 0x2c0b, 0x2b93, 0x2b1e, 0x2aab, 0x2a3a, 0x29cc, 0x2960, 0x28f6, 0x288e, 0x2828, 0x27c4, 0x2762, 0x2702, 0x26a4, 0x2648, 0x25ed, 0x2594, 0x253d, 0x24e7, 0x2492, 0x243f, 0x23ee, 0x239e, 0x234f, 0x2302, 0x22b6, 0x226c, 0x2222, 0x21da, 0x2193, 0x214d, 0x2108, 0x20c5, 0x2082, 0x2041);
@@ -669,6 +681,38 @@ void pixel(int x, int y) {
   blendPixel(x, y, c, hits, hasZ, zin, pxShadeA);
 }
 
+// TEXTURE_RECTANGLE (SoftRdp::texRect). R_TC: S y T de arranque ya escalados, R_TDX: DsDx
+// y DtDy, R_TDE: XH/YH (en cuartos) contra los que corren. S en 1/4096 de texel (1/16384 en
+// COPY, donde DsDx va x4), T en 1/4096. FLIP cruza los ejes. Sin shade ni z.
+void rectPixel(int x, int y) {
+  int fl = R(R_FLAGS);
+  bool flip = (fl & F_FLIP) != 0, copy = (fl & F_COPY) != 0;
+  int ns = R(R_TC) + R(R_TDX) * (4 * (flip ? y : x) - R(R_TDE));
+  int nt = R(R_TC + 1) + R(R_TDX + 1) * (4 * (flip ? x : y) - R(R_TDE + 1));
+  int shS = copy ? 14 : 12;
+  int tl = int(U(R_TINFO) & 7u);
+  uint tex = rectSample(tl, ns, nt, shS);
+  gTex1 = (fl & F_TEX1) != 0 ? rectSample((tl + 1) & 7, ns, nt, shS) : tex;
+  gLod = R(R_LOD);
+  ivec4 comb = ivec4(0);
+  bool combProg = (fl & F_COMB) != 0;
+  uint c = combProg ? combine(tex, 0u, comb) : tex;
+  if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
+    int o = int(pc.idx) * 8;
+    outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
+  }
+  if((fl & F_ACMP) != 0) {
+    if(copy) { if((c & 0xffu) == 0u) return; }
+    else {
+      int a = int(c & 0xffu);
+      if((U(R_OLO) & 0x2000u) == 0u) a = min(a + ((a + 1) >> 8) + alphaDither(x, y), 255);
+      if(a < int(U(R_BLEND) & 0xffu)) return;
+    }
+  }
+  if((U(R_OLO) & 0x40u) != 0u) blendPixel(x, y, c, 8, false, 0, 0);
+  else if(x >= R(R_SX0) && x < R(R_SX1) && y >= R(R_SY0) && y < R(R_SY1)) storePixel(x, y, c);
+}
+
 void main() {
   base = int(pc.idx) * R_SIZE;
   tbase = U(R_TSLOT) * 1152u;
@@ -676,7 +720,8 @@ void main() {
   if(i >= pc.count) return;
   uint bw = U(R_BW);
   int x = R(R_BX) + int(i % bw), y = R(R_BY) + int(i / bw);
-  pixel(x, y);
+  if((R(R_FLAGS) & F_RECT) != 0) rectPixel(x, y);
+  else pixel(x, y);
   if(nWrite != 0)  atomicAdd(outv[int(pc.idx) * 8 + 0], nWrite);
   if(nZWrite != 0) atomicAdd(outv[int(pc.idx) * 8 + 1], nZWrite);
 }

@@ -103,6 +103,12 @@ struct SoftRdp {
   // RDRAM por su cuenta y al terminar el tramo.
   bool gpuQueued = false;
   auto gpuFlush(Memory& mem) -> void;
+  // Bytes de RDRAM que lo encolado va a escribir, en hasta 8 intervalos [lo, hi). Una carga
+  // de TMEM que lee fuera de ellos no necesita vaciar la cola (lo que lee ya esta al dia).
+  u32 gpuDirtyLo[8] = {}, gpuDirtyHi[8] = {};
+  int gpuNDirty = 0;
+  auto gpuMark(u32 lo, u32 hi) -> void;
+  auto gpuDirtyHit(u64 lo, u64 hi) const -> bool;
   auto colorImage() const -> u32 { return ci_addr; }
   // Zona de RDRAM que cubren las primitivas cobradas desde el ultimo reinicio: color image y
   // z image hasta la esquina del scissor, en hasta kWrSlots intervalos [lo, hi) fisicos (lo >
@@ -253,6 +259,8 @@ private:
   // `z` = profundidad del pixel cuando la primitiva hace Z_CMP/Z_UPD (nullptr si no): la
   // etapa de profundidad va DENTRO, despues de que el combinador fije la cobertura.
   auto blendPixel(Memory& mem, int x, int y, u32 src, int cvg = 8, const s32* z = nullptr) -> void;
+  auto gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, int Y0, int Y1,
+                  bool usesTex1) -> bool;
   auto ditherRgb(int x, int y, u32 c) const -> u32;   // RGB_DITHER_SEL, framebuffer write path
   auto alphaDither(int x, int y) const -> int;        // ALPHA_DITHER_SEL, 0..7
   // Alfa de referencia del alpha compare: el alfa combinado expandido (0xff -> 0x100) mas
