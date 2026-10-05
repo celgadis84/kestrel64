@@ -196,6 +196,20 @@ es lo siguiente).
 Prueba: `gate_gpurdp` ALL OK (7 m 22 s), krom 371/371 identicas exacto a SoftRDP; gate_quick
 krom + thar0 ALL OK.
 
+### Fase 4 (parte 2) -- color images de 8 y 32 bits HECHO 2026-10-05
+
+- `T_CISZ` en el registro; `storePixel`/`readFb` del shader siguen a `SoftRdp`: 32 bits
+  RGBA8888 tal cual (direccion multiplo de 4), 8 bits el byte bajo (lectura replicada en los
+  cuatro canales), 16 bits como antes. Zonas de RDRAM con los bytes por pixel del color image;
+  el z sigue a 2 bytes por pixel.
+- Triangulos FILL en 32 bits escriben el color de relleno crudo. En 8 bits SoftRDP los pinta
+  con paso de 16 bits (otra zona), asi que esos y el COPY a 8 bits siguen en CPU.
+- YUV de textura ya iba desde la fase 2 (`fetch` con SET_CONVERT). Triangulos en COPY siguen
+  en CPU (raros: el hardware solo los define para texrect).
+
+Prueba: `gate_gpurdp` ALL OK (7 m 29 s), krom 371/371 identicas exacto (las suites 32BPP
+incluidas); gate_quick thar0 ALL OK.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego

@@ -51,7 +51,7 @@ enum TriField : int {
   T_Z = 34, T_ZDX, T_ZDE, T_ZDY, T_CI, T_CIW, T_ZI, T_OLO, T_OHI,
   T_FILL, T_PRIM, T_ENV, T_BLEND, T_FOG, T_FLAT, T_FTEX, T_SEL,
   T_LOD = 54, T_PLOD, T_PZ, T_PDZ, T_PDZC, T_LASTX, T_LASTY,
-  T_TC = 64, T_TDX = 68, T_TDE = 72, T_TDY = 76, T_TINFO = 80, T_K0 = 81, T_TSLOT = 85,
+  T_TC = 64, T_TDX = 68, T_TDE = 72, T_TDY = 76, T_TINFO = 80, T_K0 = 81, T_TSLOT = 85, T_CISZ = 86,
   T_TILES = 88,             // 8 tiles x 5 palabras (ver tri.comp)
   T_SIZE = 128,
 };

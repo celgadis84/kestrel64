@@ -37,7 +37,7 @@ const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6
           R_LOD = 54, R_PLOD = 55, R_PZ = 56, R_PDZ = 57, R_PDZC = 58, R_LASTX = 59, R_LASTY = 60,
           // Textura: S, T, (Z), W como los atributos de color; tile base | nivel maximo << 4 |
           // prim_min_level << 8; SET_CONVERT k0..k3; ranura de TMEM; 8 tiles de 5 palabras.
-          R_TC = 64, R_TDX = 68, R_TDE = 72, R_TDY = 76, R_TINFO = 80, R_K0 = 81, R_TSLOT = 85,
+          R_TC = 64, R_TDX = 68, R_TDE = 72, R_TDY = 76, R_TINFO = 80, R_K0 = 81, R_TSLOT = 85, R_CISZ = 86,
           R_TILES = 88,
           R_SIZE = 128;
 // FLAGS
@@ -61,6 +61,11 @@ void wr16(uint a, uint v) {   // a par: los dos bytes caen en la misma palabra
   uint bytes = ((v >> 8) & 0xffu) | ((v & 0xffu) << 8);
   atomicAnd(ram[a >> 2], ~(0xffffu << sh));
   atomicOr(ram[a >> 2], bytes << sh);
+}
+void wr8(uint a, uint v) {
+  uint sh = (a & 3u) * 8u;
+  atomicAnd(ram[a >> 2], ~(0xffu << sh));
+  atomicOr(ram[a >> 2], (v & 0xffu) << sh);
 }
 uint rdHid(uint e) { return (hid[e >> 2] >> ((e & 3u) * 8u)) & 0xffu; }
 void wrHid(uint e, uint v) {
@@ -219,9 +224,17 @@ uint to5551(uint c) {
   uint r = (c >> 24) & 0xffu, g = (c >> 16) & 0xffu, b = (c >> 8) & 0xffu, a = c & 0xffu;
   return ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | ((a >> 7) & 1u);
 }
+// Color image de 8 bits (byte bajo) o 32 bits (RGBA8888 tal cual), como SoftRdp::storePixel.
 void storePixel(int x, int y, uint rgba) {
   nWrite++;
-  uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+  uint pix = uint(y) * U(R_CIW) + uint(x);
+  if(R(R_CISZ) == 3) {   // ci_addr alineada a 4: la palabra entera es del pixel
+    uint a = U(R_CI) + pix * 4u;
+    ram[a >> 2] = (rgba >> 24) | ((rgba >> 8) & 0xff00u) | ((rgba << 8) & 0xff0000u) | (rgba << 24);
+    return;
+  }
+  if(R(R_CISZ) == 1) { wr8(U(R_CI) + pix, rgba); return; }
+  uint a = U(R_CI) + pix * 2u;
   wr16(a, to5551(rgba));
   wrHid(a >> 1, (rgba >> 5) & 3u);
 }
@@ -235,7 +248,13 @@ bool depthTest(int x, int y, int d) {
   return true;
 }
 uint readFb(int x, int y) {
-  uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+  uint pix = uint(y) * U(R_CIW) + uint(x);
+  if(R(R_CISZ) == 3) {
+    uint a = U(R_CI) + pix * 4u;
+    return (rd8(a) << 24) | (rd8(a + 1u) << 16) | (rd8(a + 2u) << 8) | rd8(a + 3u);
+  }
+  if(R(R_CISZ) == 1) { uint v = rd8(U(R_CI) + pix); return v * 0x01010101u; }
+  uint a = U(R_CI) + pix * 2u;
   uint px = rd16(a);
   uint r = ((px >> 11) & 0x1fu) << 3, g = ((px >> 6) & 0x1fu) << 3, b = ((px >> 1) & 0x1fu) << 3;
   uint al = ((((px & 1u) << 2) | (rdHid(a >> 1) & 3u)) << 5);
@@ -552,6 +571,12 @@ void pixel(int x, int y) {
   int hits = bitCount(cov);
   if((fl & F_FILL) != 0) {
     uint fc = U(R_FILL);
+    if(R(R_CISZ) == 3) {   // 32 bits: el color de relleno tal cual
+      uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 4u;
+      ram[a >> 2] = (fc >> 24) | ((fc >> 8) & 0xff00u) | ((fc << 8) & 0xff0000u) | (fc << 24);
+      nWrite++;
+      return;
+    }
     uint px = (x & 1) != 0 ? (fc & 0xffffu) : (fc >> 16);
     uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
     wr16(a, px);

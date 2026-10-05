@@ -10266,3 +10266,5 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Cargas de TMEM/TLUT no vacian la cola si no leen lo encolado; `KESTREL_GPUFLUSHSTAT=1`.
 - gate_gpurdp ALL OK (7 m 22 s), krom 371/371 identicas; gate_quick krom + thar0 ALL OK.
   SM64 600 cuadros: vaciados 105584 -> 73698.
+- Fase 4 parte 2: color images de 8 y 32 bits en GPU (`T_CISZ`); FILL de 32 bits crudo.
+  gate_gpurdp ALL OK, krom 371/371 identicas.

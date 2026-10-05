@@ -259,6 +259,11 @@ private:
   // `z` = profundidad del pixel cuando la primitiva hace Z_CMP/Z_UPD (nullptr si no): la
   // etapa de profundidad va DENTRO, despues de que el combinador fije la cobertura.
   auto blendPixel(Memory& mem, int x, int y, u32 src, int cvg = 8, const s32* z = nullptr) -> void;
+  // Color images que sabe pintar la GPU: 8, 16 (direccion par) y 32 bits (multiplo de 4).
+  auto gpuCiOk() const -> bool {
+    return ci_size == 1 || (ci_size == 2 && !(ci_addr & 1)) || (ci_size == 3 && !(ci_addr & 3));
+  }
+  auto gpuCiBpp() const -> u32 { return ci_size == 3 ? 4u : ci_size == 2 ? 2u : 1u; }
   auto gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, int Y0, int Y1,
                   bool usesTex1) -> bool;
   auto ditherRgb(int x, int y, u32 c) const -> u32;   // RGB_DITHER_SEL, framebuffer write path

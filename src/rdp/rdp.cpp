@@ -974,7 +974,8 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
                           const s32* tC, const s32* tDx, const s32* tDe, const s32* tDy,
                           bool textured, bool persp, bool usesLod, bool usesTex1, u32 texTile,
                           u32 maxLevel) -> bool {
-  if(g_rgHi || wrtag::tag || ci_size != 2 || (ci_addr & 1) || (zi_addr & 1)) return false;
+  if(g_rgHi || wrtag::tag || !gpuCiOk() || (zi_addr & 1)) return false;
+  if(fillMode && ci_size == 1) return false;   // el CPU lo pinta a 16 bits: otra zona
   const u32 cyc = cycleType();
   if(cyc == 2) return false;                          // COPY: aun no
   if(textured && texpack::active()) return false;     // texturas HD: solo en el CPU
@@ -1042,12 +1043,12 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   const u64 size = mem.rdram.size();
   u32 lo[2] = {0, 0}, hi[2] = {0, 0};
   if(rasterPx) {
-    const u64 rowB = u64(ci_width) * 2;
+    const u64 rowB = u64(ci_width) * gpuCiBpp(), zRowB = u64(ci_width) * 2;
     const u64 cLo = ci_addr + u64(by0) * rowB, cHi = ci_addr + u64(by1 + 1) * rowB;
     if(cHi > size) { spanLines = spanUnits = 0; return false; }
     lo[0] = (u32)cLo; hi[0] = (u32)cHi;
     if(zActive && !fillMode) {
-      const u64 zLo = zi_addr + u64(by0) * rowB, zHi = zi_addr + u64(by1 + 1) * rowB;
+      const u64 zLo = zi_addr + u64(by0) * zRowB, zHi = zi_addr + u64(by1 + 1) * zRowB;
       if(zHi > size || (zLo < cHi && cLo < zHi)) { spanLines = spanUnits = 0; return false; }
       lo[1] = (u32)zLo; hi[1] = (u32)zHi;
     }
@@ -1101,7 +1102,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
       d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)f.rowBytes; d[4] = (s32)f.base;
     }
   }
-  r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr;
+  r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr; r[T_CISZ] = (s32)ci_size;
   r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;
   r[T_FILL] = (s32)fill_color; r[T_PRIM] = (s32)prim_color; r[T_ENV] = (s32)env_color;
   r[T_BLEND] = (s32)blend_color; r[T_FOG] = (s32)fog_color; r[T_FLAT] = (s32)flat;
@@ -2270,11 +2271,12 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
 // entero (1/4096 de texel, 1/16384 la S de COPY).
 auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, int Y0, int Y1,
                          bool usesTex1) -> bool {
-  if(g_rgHi || wrtag::tag || ci_size != 2 || (ci_addr & 1)) return false;
+  if(g_rgHi || wrtag::tag || !gpuCiOk()) return false;
   if(texpack::active()) return false;
   if(X1 > (int)ci_width) return false;
   const u32 cyc = cycleType();
   const bool copy = cyc == 2;
+  if(copy && ci_size == 1) return false;   // COPY a 8 bits: indice crudo, va por CPU
   const bool combProg = (combine_hi | combine_lo) != 0 && !copy;
   if(combProg) {
     if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo || combPlan.keyCyc != cyc)
@@ -2286,7 +2288,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   const bool any = X1 > X0 && Y1 > Y0;
   u32 lo = 0, hi = 0;
   if(any) {
-    const u64 rowB = u64(ci_width) * 2;
+    const u64 rowB = u64(ci_width) * gpuCiBpp();
     const u64 cLo = ci_addr + u64(Y0) * rowB, cHi = ci_addr + u64(Y1) * rowB;
     if(cHi > mem.rdram.size()) return false;
     lo = (u32)cLo; hi = (u32)cHi;
@@ -2333,7 +2335,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
                  | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
     d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)f.rowBytes; d[4] = (s32)f.base;
   }
-  r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr;
+  r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr; r[T_CISZ] = (s32)ci_size;
   r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;
   r[T_FILL] = (s32)fill_color; r[T_PRIM] = (s32)prim_color; r[T_ENV] = (s32)env_color;
   r[T_BLEND] = (s32)blend_color; r[T_FOG] = (s32)fog_color;
