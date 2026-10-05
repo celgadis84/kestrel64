@@ -272,7 +272,9 @@ private:
   auto gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMode, bool gouraud,
                    bool combProg, u32 flat, u32 flatTexel, bool zActive, bool zSrc,
                    const s32* cC, const s32* cDx, const s32* cDe, const s32* cDy,
-                   s32 zC, s32 zDx, s32 zDe, s32 zDy) -> bool;
+                   const s32* tC, const s32* tDx, const s32* tDe, const s32* tDy,
+                   bool textured, bool persp, bool usesLod, bool usesTex1, u32 texTile,
+                   u32 maxLevel) -> bool;
   auto texRect(Memory& mem, const u64* w, bool flip) -> void;
   // RDRAM -> TMEM recortado al primer limite (0x1000 en TMEM, fin de RDRAM): copia el
   // MISMO prefijo que el bucle byte a byte que sustituye, porque ambos limites son

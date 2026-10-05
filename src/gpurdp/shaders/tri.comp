@@ -1,6 +1,7 @@
 #version 450
-// GPU-RDP fase 1: triangulo SIN textura (FILL, shade o plano) en 16 bpp con cobertura, z y
-// blender. Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
+// GPU-RDP fases 1-2: triangulo (FILL, shade, plano o con textura) en 16 bpp con cobertura, z y
+// blender. Fase 2: muestreo de TMEM (todos los formatos, TLUT, pliegue clamp/mirror/mask,
+// filtro de 3 puntos, perspectiva, LOD/mipmap, TEXEL1 en 2 ciclos) y alpha compare. Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
 // bit (rdp.cpp es la referencia; cada bloque de abajo nombra su funcion). Un hilo por pixel
 // de la caja que el CPU ya midio al cobrar el triangulo; cada hilo rehace el recorrido de
 // bordes de su fila (es barato y asi no hay datos por fila que subir).
@@ -12,12 +13,15 @@
 //
 // Espejo de RDRAM: byte de la direccion 4w+i en los bits 8*i de ram[w] (orden del anfitrion).
 // Bits ocultos: un byte por media palabra, mismo empaquetado en hid[].
+// TMEM: una instantanea por triangulo con textura (la que habia al rasterizarlo): 4 KB de TMEM
+// y luego 256 entradas de 16 bits de TLUT, 1152 palabras por ranura, bytes en orden del anfitrion.
 layout(local_size_x = 64) in;
 layout(std430, binding = 0) buffer Ram { uint ram[]; };
 layout(std430, binding = 1) buffer Hid { uint hid[]; };
 layout(std430, binding = 2) readonly buffer Recs { int rec[]; };
 layout(std430, binding = 3) readonly buffer Lut { uint lut[]; };   // divisor del blender, 32 KB
 layout(std430, binding = 4) buffer Outs { int outv[]; };
+layout(std430, binding = 5) readonly buffer Tmem { uint tm[]; };
 layout(push_constant) uniform P { uint idx; uint count; } pc;
 
 // Disposicion del registro (debe casar con gpurdp.hpp TriRec, en palabras de 32 bits).
@@ -30,10 +34,15 @@ const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6
           R_FILL = 43, R_PRIM = 44, R_ENV = 45, R_BLEND = 46, R_FOG = 47, R_FLAT = 48, R_FTEX = 49,
           R_SEL = 50,   // 4 palabras: sel[2][8] en bytes
           R_LOD = 54, R_PLOD = 55, R_PZ = 56, R_PDZ = 57, R_PDZC = 58, R_LASTX = 59, R_LASTY = 60,
-          R_SIZE = 64;
+          // Textura: S, T, (Z), W como los atributos de color; tile base | nivel maximo << 4 |
+          // prim_min_level << 8; SET_CONVERT k0..k3; ranura de TMEM; 8 tiles de 5 palabras.
+          R_TC = 64, R_TDX = 68, R_TDE = 72, R_TDY = 76, R_TINFO = 80, R_K0 = 81, R_TSLOT = 85,
+          R_TILES = 88,
+          R_SIZE = 128;
 // FLAGS
 const int F_LEFT = 1, F_DOOFF = 2, F_FILL = 4, F_SHADE = 8, F_ZACT = 16, F_ZSRC = 32, F_AA = 64,
-          F_COMB = 128, F_NOBLEND = 256, F_TWO = 512, F_NOAAGLB = 1024;
+          F_COMB = 128, F_NOBLEND = 256, F_TWO = 512, F_NOAAGLB = 1024, F_TEX = 2048,
+          F_PERSP = 4096, F_LOD = 8192, F_TEX1 = 16384, F_FILT = 32768, F_ACMP = 65536;
 
 int base;
 int R(int i) { return rec[base + i]; }
@@ -105,22 +114,27 @@ int alphaDither(int x, int y) {
 // --- combinador (SoftRdp::combineColor, camino escalar) -----------------------------------
 // Filas: CIN, TEX0, TEX1, PRIM, SHADE, ENV, CINA, TEX0A, TEX1A, PRIMA, SHADEA, ENVA, ONE, ZERO,
 // LOD, PLOD. COMBINED del primer ciclo no llega aqui (el CPU no manda triangulos que lo lean);
-// en 2 ciclos el del segundo es el resultado crudo del primero.
+// en 2 ciclos el del segundo es el resultado crudo del primero. El cruce de texels del segundo
+// ciclo ya viene en los selectores (buildCombPlan).
 int ch(uint c, int i) { return int((c >> (24 - i * 8)) & 0xffu); }
+uint gTex1;    // TEXEL1 del pixel (en 1 ciclo, el mismo TEXEL0)
+int gLod;      // LOD_FRAC del pixel
 int rowVal(uint r, int i, uint tex, uint shade, ivec4 cin) {
   switch(r) {
     case 0u: return cin[i];
-    case 1u: case 2u: return ch(tex, i);
+    case 1u: return ch(tex, i);
+    case 2u: return ch(gTex1, i);
     case 3u: return ch(U(R_PRIM), i);
     case 4u: return ch(shade, i);
     case 5u: return ch(U(R_ENV), i);
     case 6u: return cin[3];
-    case 7u: case 8u: return int(tex & 0xffu);
+    case 7u: return int(tex & 0xffu);
+    case 8u: return int(gTex1 & 0xffu);
     case 9u: return int(U(R_PRIM) & 0xffu);
     case 10u: return int(shade & 0xffu);
     case 11u: return int(U(R_ENV) & 0xffu);
     case 12u: return 0x100;
-    case 14u: return R(R_LOD);
+    case 14u: return gLod;
     case 15u: return R(R_PLOD);
     default: return 0;
   }
@@ -332,6 +346,172 @@ void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShade
   }
 }
 
+// --- textura (SoftRdp::foldOf / foldCoord / fetchK / filterK / lodSelect, perspDivide) ------
+uint tbase;   // primera palabra de la ranura de TMEM del triangulo
+uint tmB(uint off) { return (tm[tbase + (off >> 2)] >> ((off & 3u) * 8u)) & 0xffu; }
+uint exp5(uint v) { return (v << 3) | (v >> 2); }
+uint tlutEntry(uint idx) {
+  uint j = idx & 0xffu;
+  uint e = (tm[tbase + 1024u + (j >> 1)] >> ((j & 1u) * 16u)) & 0xffffu;
+  if(((U(R_OHI) >> 14) & 3u) == 3u) { uint i = (e >> 8) & 0xffu, a = e & 0xffu;
+                                       return (i << 24) | (i << 16) | (i << 8) | a; }
+  uint r = exp5((e >> 11) & 0x1fu), g = exp5((e >> 6) & 0x1fu), b = exp5((e >> 1) & 0x1fu);
+  return (r << 24) | (g << 16) | (b << 8) | ((e & 1u) != 0u ? 255u : 0u);
+}
+// Tile t: palabra 0 = shiftS | shiftT << 4 | maskS << 8 | maskT << 12 | cmS << 16 | cmT << 18 |
+// kind << 20 | palette << 24; luego sMax, tMax, bytes por fila y base en TMEM.
+const uint TK_CI4 = 0u, TK_IA4 = 1u, TK_I4 = 2u, TK_YUV = 3u, TK_IA16 = 4u, TK_RGBA16 = 5u,
+           TK_RGBA32 = 6u, TK_CI8 = 7u, TK_IA8 = 8u, TK_I8 = 9u;
+int foldCoord(int c, uint sh, uint mask, uint cm, int lim) {
+  if(sh != 0u) c = sh <= 10u ? (c >> int(sh)) : (c << int(16u - sh));
+  if((cm & 2u) != 0u || mask == 0u) {
+    if(c < 0) c = 0;
+    else if(lim >= 0 && c > lim) c = lim;
+  }
+  if(mask != 0u) {
+    if((cm & 1u) != 0u && ((c >> int(mask)) & 1) != 0) c = ~c;
+    c &= (1 << int(mask)) - 1;
+  }
+  return c;
+}
+int foldS(int tl, int c) { uint w = U(R_TILES + tl * 5);
+  return foldCoord(c, w & 15u, (w >> 8) & 15u, (w >> 16) & 3u, R(R_TILES + tl * 5 + 1)); }
+int foldT(int tl, int c) { uint w = U(R_TILES + tl * 5);
+  return foldCoord(c, (w >> 4) & 15u, (w >> 12) & 15u, (w >> 18) & 3u, R(R_TILES + tl * 5 + 2)); }
+uint fetch(int tl, int si, int ti) {
+  uint w = U(R_TILES + tl * 5), kind = (w >> 20) & 15u, pal = (w >> 24) & 15u;
+  uint rowBytes = U(R_TILES + tl * 5 + 3), base = U(R_TILES + tl * 5 + 4);
+  uint s = uint(si), t = uint(ti);
+  uint ox = (t & 1u) != 0u ? (kind == TK_RGBA32 ? 8u : 4u) : 0u;
+  uint row = base + t * rowBytes;
+  if(kind == TK_CI4 || kind == TK_IA4 || kind == TK_I4) {
+    uint off = (row + s / 2u) ^ ox;
+    if(off >= 0x1000u) return 0u;
+    uint nib = (s & 1u) != 0u ? (tmB(off) & 0xfu) : (tmB(off) >> 4);
+    if(kind == TK_CI4) return tlutEntry(pal * 16u + nib);
+    if(kind == TK_IA4) { uint i = (((nib >> 1) & 7u) * 255u) / 7u, a = (nib & 1u) != 0u ? 255u : 0u;
+                         return (i << 24) | (i << 16) | (i << 8) | a; }
+    uint i = nib * 17u;
+    return (i << 24) | (i << 16) | (i << 8) | i;
+  }
+  if(kind == TK_YUV) {
+    uint off = (row + s * 2u) ^ ox;
+    uint pairBase = (row + (s & ~1u) * 2u) ^ ox;
+    if(pairBase + 2u >= 0x1000u || off + 1u >= 0x1000u) return 0u;
+    int Y = int(tmB(off + 1u)), dU = int(tmB(pairBase)) - 128, dV = int(tmB(pairBase + 2u)) - 128;
+    int k0 = R(R_K0), k1 = R(R_K0 + 1), k2 = R(R_K0 + 2), k3 = R(R_K0 + 3);
+    uint r = uint(clamp(Y + ((k0 * dV + 0x40) >> 7), 0, 255));
+    uint g = uint(clamp(Y + ((k1 * dU + k2 * dV + 0x40) >> 7), 0, 255));
+    uint b = uint(clamp(Y + ((k3 * dU + 0x40) >> 7), 0, 255));
+    return (r << 24) | (g << 16) | (b << 8) | 0xffu;
+  }
+  if(kind == TK_IA16 || kind == TK_RGBA16) {
+    uint off = (row + s * 2u) ^ ox;
+    if(off + 1u >= 0x1000u) return 0u;
+    uint px = (tmB(off) << 8) | tmB(off + 1u);
+    if(kind == TK_IA16) { uint i = (px >> 8) & 0xffu, a = px & 0xffu;
+                          return (i << 24) | (i << 16) | (i << 8) | a; }
+    return (exp5((px >> 11) & 0x1fu) << 24) | (exp5((px >> 6) & 0x1fu) << 16)
+         | (exp5((px >> 1) & 0x1fu) << 8) | ((px & 1u) != 0u ? 255u : 0u);
+  }
+  if(kind == TK_RGBA32) {
+    uint off = (row + s * 4u) ^ ox;
+    if(off + 3u >= 0x1000u) return 0u;
+    return (tmB(off) << 24) | (tmB(off + 1u) << 16) | (tmB(off + 2u) << 8) | tmB(off + 3u);
+  }
+  if(kind == TK_CI8 || kind == TK_IA8 || kind == TK_I8) {
+    uint off = (row + s) ^ ox;
+    if(off >= 0x1000u) return 0u;
+    uint v = tmB(off);
+    if(kind == TK_CI8) return tlutEntry(v);
+    if(kind == TK_IA8) { uint i = (v >> 4) * 17u, a = (v & 0xfu) * 17u;
+                         return (i << 24) | (i << 16) | (i << 8) | a; }
+    return (v << 24) | (v << 16) | (v << 8) | v;
+  }
+  return 0xffffffffu;
+}
+// S/T en 1/32 de texel (10.5). Sin filtro: el texel de floor; con filtro: 3 puntos.
+uint sampleTex(int tl, int si, int ti) {
+  if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, si >> 5), foldT(tl, ti >> 5));
+  int fx = si & 31, fy = ti & 31, s0 = si >> 5, t0 = ti >> 5;
+  int sw0 = foldS(tl, s0), sw1 = foldS(tl, s0 + 1), tw0 = foldT(tl, t0), tw1 = foldT(tl, t0 + 1);
+  uint c10 = fetch(tl, sw1, tw0), c01 = fetch(tl, sw0, tw1);
+  bool midTexel = ((U(R_OHI) >> 12) & 1u) != 0u && fx == 16 && fy == 16;
+  int o[4];
+  if(midTexel) {
+    uint c00 = fetch(tl, sw0, tw0), c11 = fetch(tl, sw1, tw1);
+    for(int i = 0; i < 4; i++) o[i] = (ch(c00, i) + ch(c10, i) + ch(c01, i) + ch(c11, i) + 2) >> 2;
+  } else {
+    bool upper = fx + fy >= 32;
+    uint bc = upper ? fetch(tl, sw1, tw1) : fetch(tl, sw0, tw0);
+    int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
+    for(int i = 0; i < 4; i++) {
+      int b = ch(bc, i);
+      o[i] = (((ch(c10, i) - b) * wx + (ch(c01, i) - b) * wy + 0x10) >> 5) + b;
+    }
+  }
+  uint r = 0u;
+  for(int i = 0; i < 4; i++) r |= uint(clamp(o[i], 0, 255)) << (24 - i * 8);
+  return r;
+}
+// Reciproco por tabla de la division perspectiva (rdp.cpp perspDivide).
+const int kPt0[64] = int[64](0x4000, 0x3f04, 0x3e10, 0x3d22, 0x3c3c, 0x3b5d, 0x3a83, 0x39b1, 0x38e4, 0x381c, 0x375a, 0x369d, 0x35e5, 0x3532, 0x3483, 0x33d9, 0x3333, 0x3291, 0x31f4, 0x3159, 0x30c3, 0x3030, 0x2fa1, 0x2f15, 0x2e8c, 0x2e06, 0x2d83, 0x2d03, 0x2c86, 0x2c0b, 0x2b93, 0x2b1e, 0x2aab, 0x2a3a, 0x29cc, 0x2960, 0x28f6, 0x288e, 0x2828, 0x27c4, 0x2762, 0x2702, 0x26a4, 0x2648, 0x25ed, 0x2594, 0x253d, 0x24e7, 0x2492, 0x243f, 0x23ee, 0x239e, 0x234f, 0x2302, 0x22b6, 0x226c, 0x2222, 0x21da, 0x2193, 0x214d, 0x2108, 0x20c5, 0x2082, 0x2041);
+const int kPt1[64] = int[64](-1008, -976, -952, -920, -892, -872, -840, -820, -800, -776, -756, -736, -716, -700, -680, -664, -648, -628, -620, -600, -588, -572, -560, -548, -536, -524, -512, -500, -492, -480, -468, -460, -452, -440, -432, -424, -416, -408, -400, -392, -384, -376, -368, -364, -356, -348, -344, -340, -332, -324, -320, -316, -308, -304, -296, -296, -288, -284, -280, -276, -268, -268, -260, -260);
+void perspDivide(int s, int t, int w, out int os, out int ot, inout bool ovf) {
+  bool wCarry = w <= 0;
+  w &= 0x7fff;
+  int msb = findMSB(uint(w));
+  int shift = min(14 - msb, 14);
+  int normout = int(uint(w) << shift) & 0x3fff;
+  int rcp = ((kPt1[normout >> 8] * (normout & 0xff)) >> 10) + kPt0[normout >> 8];
+  int prod[2] = int[2](int(uint(s) * uint(rcp)), int(uint(t) * uint(rcp)));
+  int outv2[2];
+  int mask = ((1 << 30) - 1) & -((1 << 29) >> shift);
+  for(int i = 0; i < 2; i++) {
+    int oob = prod[i] & mask;
+    int p = shift != 14 ? (prod[i] >> (13 - shift)) : prod[i];
+    outv2[i] = shift != 14 ? p : int(uint(prod[i]) << 1);
+    if(oob != mask && oob != 0) { outv2[i] = (p & (1 << 29)) == 0 ? 0x7fff : -0x8000; ovf = true; }
+    if(wCarry) { outv2[i] = 0x7fff; ovf = true; }
+    outv2[i] = clamp(outv2[i], -0x10000, 0xffff);
+  }
+  os = outv2[0]; ot = outv2[1];
+}
+int lodSelect(int s, int t, int sdx, int tdx, int sdy, int tdy, bool ovf, uint maxLevel,
+              inout uint tile0, inout uint tile1) {
+  uint ohi = U(R_OHI);
+  bool lodEn = ((ohi >> 16) & 1u) != 0u, sharpen = ((ohi >> 17) & 1u) != 0u, detail = ((ohi >> 18) & 1u) != 0u;
+  bool magnify = false, distant = false;
+  uint off = 0u;
+  int frac = 0xff;
+  if(ovf) distant = true;
+  else {
+    int a0 = sdx - s, a1 = tdx - t, a2 = sdy - s, a3 = tdy - t;
+    int maxd = max(max(a0 ^ (a0 >> 31), a1 ^ (a1 >> 31)), max(a2 ^ (a2 >> 31), a3 ^ (a3 >> 31)));
+    if(maxd >= 0x4000) { distant = true; off = maxLevel; }
+    else if(maxd < 32) {
+      distant = maxLevel == 0u; magnify = true;
+      frac = (!sharpen && !detail) ? (distant ? 0xff : 0)
+           : (max(int((U(R_TINFO) >> 8) & 0x1fu), maxd) << 3) + (sharpen ? -0x100 : 0);
+    } else {
+      int mipBase = findMSB(uint(maxd >> 5));
+      distant = uint(mipBase) >= maxLevel;
+      if(!distant || sharpen || detail) { frac = ((maxd << 3) >> mipBase) & 0xff; off = uint(mipBase); }
+    }
+  }
+  if(lodEn) {
+    if(distant) off = maxLevel;
+    if(!detail) {
+      tile0 = (tile0 + off) & 7u;
+      tile1 = (distant || (!sharpen && magnify)) ? tile0 : (tile0 + 1u) & 7u;
+    } else {
+      tile1 = (tile0 + off + ((distant || magnify) ? 1u : 2u)) & 7u;
+      tile0 = (tile0 + off + (magnify ? 0u : 1u)) & 7u;
+    }
+  }
+  return frac;
+}
+
 // --- recorrido de bordes y pixel (SoftRdp::drawTriangle) ----------------------------------
 int quant(int x) { x = sext(uint(x), 27); return (x >> 12) | ((x & 0xfff) != 0 ? 1 : 0); }
 
@@ -375,6 +555,13 @@ void pixel(int x, int y) {
   int baseX = int(xhRow) >> 15;
   uint xfrac = (xhRow >> 7) & 0xffu;
   int dxI = x - baseX;
+  // Arranque del atributo en la fila (rowAttr de drawTriangle).
+#define ROWATTR(c0, ddx, dde, ddy, outv_) { \
+    uint diff_ = 0u; \
+    if(doOffset) { int deh_ = (dde) & ~0x1ff, dyh_ = (ddy) & ~0x1ff; \
+                   diff_ = uint(deh_) - uint(deh_ >> 2) - uint(dyh_) + uint(dyh_ >> 2); } \
+    uint v0_ = uint(c0) + uint(dde) * uint(dyRow); \
+    outv_ = int(((v0_ & ~0x1ffu) + diff_ - xfrac * uint(((ddx) >> 8) & ~1)) & ~0x3ffu); }
   // Centroide: primera muestra cubierta.
   int idx = 0;
   for(int k = 0; k < 4; k++) {
@@ -426,10 +613,51 @@ void pixel(int x, int y) {
   int pxShadeA;
   ivec4 comb = ivec4(0);
   bool combProg = (fl & F_COMB) != 0;
-  if(gouraud) {
+  gLod = R(R_LOD);
+  if((fl & F_TEX) != 0) {
+    int rT[4];
+    for(int k = 0; k < 4; k++) ROWATTR(R(R_TC + k), R(R_TDX + k), R(R_TDE + k), R(R_TDY + k), rT[k]);
+    int tdx[4];
+    for(int k = 0; k < 4; k++) tdx[k] = R(R_TDX + k);
+#define STW(k, add) (int(uint(rT[k]) + uint(tdx[k] & ~0x1f) * uint(dxI) + (add)) >> 16)
+    bool persp = (fl & F_PERSP) != 0;
+    int ps = STW(0, 0u), pt = STW(1, 0u);
+    bool ovf = false;
+    if(persp) perspDivide(ps, pt, STW(3, 0u), ps, pt, ovf);
+    uint tinfo = U(R_TINFO);
+    uint tile0 = tinfo & 7u, tile1 = (tile0 + 1u) & 7u;
+    if((fl & F_LOD) != 0) {
+      uint ldir = (fl & F_LEFT) != 0 ? 1u : ~0u;
+      uint xs0 = ldir * uint(tdx[0] & ~0x1f), xt0 = ldir * uint(tdx[1] & ~0x1f), xw0 = ldir * uint(tdx[3] & ~0x1f);
+      uint ys0 = uint(R(R_TDY + 0) & ~0x7fff), yt0 = uint(R(R_TDY + 1) & ~0x7fff), yw0 = uint(R(R_TDY + 3) & ~0x7fff);
+      int s1 = STW(0, xs0), t1 = STW(1, xt0), s2 = STW(0, ys0), t2 = STW(1, yt0);
+      if(persp) {
+        perspDivide(s1, t1, STW(3, xw0), s1, t1, ovf);
+        perspDivide(s2, t2, STW(3, yw0), s2, t2, ovf);
+      }
+      gLod = lodSelect(ps, pt, s1, t1, s2, t2, ovf, (tinfo >> 4) & 7u, tile0, tile1);
+    }
+    uint tex0 = sampleTex(int(tile0), ps, pt);
+    gTex1 = (fl & F_TEX1) != 0 ? sampleTex(int(tile1), ps, pt) : tex0;
+    c = combProg ? combine(tex0, shd, comb) : tex0;
+    pxShadeA = min(int(shd & 0xffu) + alphaDither(x, y), 0xff);
+    if((fl & F_ACMP) != 0) {   // alphaRef >= umbral de blend_color
+      int a = int(c & 0xffu);
+      if((U(R_OLO) & 0x2000u) == 0u) a = min(a + ((a + 1) >> 8) + alphaDither(x, y), 255);
+      if(a < int(U(R_BLEND) & 0xffu)) {
+        if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
+          int o = int(pc.idx) * 8;
+          outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
+        }
+        return;
+      }
+    }
+  } else if(gouraud) {
+    gTex1 = 0u;
     c = combProg ? combine(0u, shd, comb) : shd;
     pxShadeA = min(int(shd & 0xffu) + alphaDither(x, y), 0xff);
   } else {
+    gTex1 = U(R_FTEX);
     c = combProg ? combine(U(R_FTEX), 0u, comb) : U(R_FLAT);
     pxShadeA = alphaDither(x, y);
   }
@@ -443,6 +671,7 @@ void pixel(int x, int y) {
 
 void main() {
   base = int(pc.idx) * R_SIZE;
+  tbase = U(R_TSLOT) * 1152u;
   uint i = gl_GlobalInvocationID.x;
   if(i >= pc.count) return;
   uint bw = U(R_BW);

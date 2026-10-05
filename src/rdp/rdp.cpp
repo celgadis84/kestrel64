@@ -962,17 +962,21 @@ static auto perspDivide(s32 s, s32 t, s32 w, s32& os, s32& ot, bool* ovf = nullp
   os = out[0]; ot = out[1];
 }
 
-// GPU-RDP fase 1: encola el triangulo en la GPU si sale identico a pintarlo aqui (ver
-// gpurdp/shaders/tri.comp, que es el mismo recorrido, combinador y blender que este fichero).
+// GPU-RDP fases 1-2: encola el triangulo en la GPU si sale identico a pintarlo aqui (ver
+// gpurdp/shaders/tri.comp, que es el mismo recorrido, muestreo, combinador y blender que este
+// fichero).
 // Hace aqui el recorrido de cobertura, que es barato, para cobrar como el camino del CPU y para
 // darle a la GPU la caja exacta de pixeles. false = no se puede, el llamante lo pinta.
 auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMode, bool gouraud,
                           bool combProg, u32 flat, u32 flatTexel, bool zActive, bool zSrc,
                           const s32* cC, const s32* cDx, const s32* cDe, const s32* cDy,
-                          s32 zC, s32 zDx, s32 zDe, s32 zDy) -> bool {
+                          const s32* tC, const s32* tDx, const s32* tDe, const s32* tDy,
+                          bool textured, bool persp, bool usesLod, bool usesTex1, u32 texTile,
+                          u32 maxLevel) -> bool {
   if(g_rgHi || wrtag::tag || ci_size != 2 || (ci_addr & 1) || (zi_addr & 1)) return false;
   const u32 cyc = cycleType();
-  if(cyc == 2) return false;                          // COPY sin textura: no merece la pena
+  if(cyc == 2) return false;                          // COPY: aun no
+  if(textured && texpack::active()) return false;     // texturas HD: solo en el CPU
   if(sx1 > (int)ci_width) return false;               // x >= ancho pisaria la fila siguiente
   if(!fillMode && combProg) {
     if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo || combPlan.keyCyc != cyc)
@@ -1074,7 +1078,28 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   for(int c = 0; c < 4; c++) {
     r[T_CC + c] = cC[c]; r[T_CDX + c] = cDx[c]; r[T_CDE + c] = cDe[c]; r[T_CDY + c] = cDy[c];
   }
-  r[T_Z] = zC; r[T_ZDX] = zDx; r[T_ZDE] = zDe; r[T_ZDY] = zDy;
+  r[T_Z] = tC[2]; r[T_ZDX] = tDx[2]; r[T_ZDE] = tDe[2]; r[T_ZDY] = tDy[2];
+  if(textured) {
+    fl |= TF_TEX;
+    if(persp) fl |= TF_PERSP;
+    if(usesLod) fl |= TF_LOD;
+    if(usesTex1) fl |= TF_TEX1;
+    if(!g_noFilter && ((other_hi >> 13) & 1)) fl |= TF_FILT;
+    if(other_lo & 1) fl |= TF_ACMP;
+    r[T_FLAGS] = fl;
+    for(int c = 0; c < 4; c++) {
+      r[T_TC + c] = tC[c]; r[T_TDX + c] = tDx[c]; r[T_TDE + c] = tDe[c]; r[T_TDY + c] = tDy[c];
+    }
+    r[T_TINFO] = (s32)(texTile | (maxLevel << 4) | ((u32)prim_min_level << 8));
+    r[T_K0] = k0; r[T_K0 + 1] = k1; r[T_K0 + 2] = k2; r[T_K0 + 3] = k3;
+    for(u32 i = 0; i < 8; i++) {
+      const TexFold f = foldOf(i);
+      s32* d = &r[T_TILES + i * 5];
+      d[0] = (s32)(f.shiftS | (f.shiftT << 4) | (f.maskS << 8) | (f.maskT << 12) | (f.cmS << 16)
+                   | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
+      d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)f.rowBytes; d[4] = (s32)f.base;
+    }
+  }
   r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr;
   r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;
   r[T_FILL] = (s32)fill_color; r[T_PRIM] = (s32)prim_color; r[T_ENV] = (s32)env_color;
@@ -1084,7 +1109,8 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = lastX; r[T_LASTY] = lastY;
   t.lo[0] = lo[0]; t.hi[0] = hi[0]; t.lo[1] = lo[1]; t.hi[1] = hi[1];
-  if(!gpurdp::queueTri(t)) { gpuFlush(mem); gpurdp::queueTri(t); }
+  const u8* tm = textured ? tmem : nullptr;
+  if(!gpurdp::queueTri(t, tm, tlut)) { gpuFlush(mem); gpurdp::queueTri(t, tm, tlut); }
   gpuTris.push_back({acct, combProg && !fillMode});
   gpuQueued = true;
   return true;
@@ -1198,10 +1224,11 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     u32 t0 = texTile, t1 = (texTile + 1) & 7;
     lodFracV = lodSelect(0, 0, 0, 0, 0, 0, false, maxLevel, t0, t1);
   }
-  // GPU-RDP fase 1 (KESTREL_GPURDP=1): triangulo sin textura en 16 bpp a la GPU.
+  // GPU-RDP (KESTREL_GPURDP=1): triangulo en 16 bpp a la GPU, con o sin textura.
   if(gpurdp::active() && !costOnly) {
-    if(!textured && gpuTriangle(mem, w, leftMajor, fillMode, gouraud, combProg, flat, flatTexel,
-                                zActive, zSrc, cC, cDx, cDe, cDy, tC[2], tDx[2], tDe[2], tDy[2])) {
+    if(gpuTriangle(mem, w, leftMajor, fillMode, gouraud, combProg, flat, flatTexel, zActive, zSrc,
+                   cC, cDx, cDe, cDy, tC, tDx, tDe, tDy, textured, persp, usesLod, usesTex1,
+                   texTile, maxLevel)) {
       pxShadeA = 0; lodFracV = 0xff;
       return;
     }

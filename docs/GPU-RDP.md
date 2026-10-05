@@ -150,8 +150,34 @@ Prueba: `gate_gpurdp` igual que en fase 0 (krom contra la referencia de SoftRDP,
 `sm64.txt`). SM64 apenas usa triangulos sin textura; la cobertura real la dan las ROMs de
 krom Fill/Shade/ZBuffer Triangle (8-16 triangulos por GPU en cada una).
 
-Siguiente (fase 1): triangulos plano/shade + coverage + z. Ahi ya hay lecturas de RDRAM
-(z-buffer, blender), asi que toca subir zonas al espejo antes de pintar.
+### Fase 2 -- HECHA 2026-10-05
+
+Triangulos CON textura en 16 bpp a la GPU. Las cargas (LOAD_TILE/BLOCK/TLUT, intercambio de
+filas impares) siguen en SoftRDP, que es quien escribe su `tmem[]`/`tlut[]`: cada triangulo
+texturado se lleva una **instantanea de TMEM + TLUT** (4 KB + 512 B) tal como estaba al
+rasterizarlo. Las que se repiten seguidas comparten ranura (memcmp con la ultima); hasta 512
+ranuras por lote, y si se llena se vacia la cola y se reintenta. Buffer en binding 5.
+
+- Registro de 128 palabras: S/T/Z/W (inicio, DxDx, DxDe, DxDy), tile base, nivel maximo,
+  prim_min_level, SET_CONVERT k0..k3, ranura y los 8 tiles ya plegados (`foldOf`: shift,
+  mask, clamp/mirror, sMax/tMax, bytes por fila, base, paleta y formato).
+- Shader: `foldCoord`, lectura de los 10 formatos (CI4/8 por TLUT 5551 o IA16, IA4/8/16,
+  I4/8, RGBA16/32, YUV con SET_CONVERT), XOR de filas impares, filtro de 3 puntos en entero
+  (y MID_TEXEL), punto, division perspectiva con la misma tabla de 64 entradas (generada
+  desde `rdp.cpp`), unidad de LOD (`lodSelect`, SHARPEN/DETAIL, mipmap con vecinos +x/+y),
+  TEXEL1 de 2 ciclos en tile1 y LOD_FRAC por pixel al combinador.
+- Alpha compare (no COPY) con `alphaRef` (dither de alfa salvo ALPHA_CVG_SEL). Un pixel
+  descartado sigue dejando su COMBINED si es el ultimo.
+- Se quedan en CPU: texturas HD (`texpack`) y COPY.
+
+Esto cubre tambien lo que la tabla pone en fase 3 (combinador, blender, fog, alpha compare,
+dither): ya va todo en `tri.comp` desde las fases 1-2, con las mismas exclusiones (NOISE y
+COMBINED en el primer ciclo).
+
+Prueba: `gate_gpurdp` ALL OK (systemtest 0/3721, sm64 `b5521b24` interp y jit, krom 371/371
+identicas a SoftRDP). SM64 600 cuadros: 475513 triangulos por GPU, 462104 con textura, 103464
+instantaneas de TMEM, 105584 vaciados (los texrect y demas aun van por CPU y vacian la cola:
+es lo siguiente).
 
 ## Riesgos
 

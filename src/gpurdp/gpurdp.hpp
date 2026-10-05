@@ -15,6 +15,9 @@
 // combinador y blender). Esos si leen RDRAM (z-buffer, framebuffer al mezclar), asi que el
 // flush sube al espejo las filas que tocan antes de pintar. Todo lo de la cola corre en orden
 // del FIFO, con barrera entre primitivas.
+//
+// Fase 2: triangulos CON textura. Cada uno lleva una instantanea de TMEM + TLUT (la que habia
+// al rasterizarlo; las que se repiten seguidas comparten ranura) y los 8 tiles ya plegados.
 
 #include "../core/types.hpp"
 #include "../vrdp/vrdp.hpp"   // SharedVk: el presentador lo consume igual venga de quien venga
@@ -48,11 +51,14 @@ enum TriField : int {
   T_Z = 34, T_ZDX, T_ZDE, T_ZDY, T_CI, T_CIW, T_ZI, T_OLO, T_OHI,
   T_FILL, T_PRIM, T_ENV, T_BLEND, T_FOG, T_FLAT, T_FTEX, T_SEL,
   T_LOD = 54, T_PLOD, T_PZ, T_PDZ, T_PDZC, T_LASTX, T_LASTY,
-  T_SIZE = 64,
+  T_TC = 64, T_TDX = 68, T_TDE = 72, T_TDY = 76, T_TINFO = 80, T_K0 = 81, T_TSLOT = 85,
+  T_TILES = 88,             // 8 tiles x 5 palabras (ver tri.comp)
+  T_SIZE = 128,
 };
 enum TriFlag : int {
   TF_LEFT = 1, TF_DOOFF = 2, TF_FILL = 4, TF_SHADE = 8, TF_ZACT = 16, TF_ZSRC = 32, TF_AA = 64,
-  TF_COMB = 128, TF_NOBLEND = 256, TF_TWO = 512, TF_NOAA = 1024,
+  TF_COMB = 128, TF_NOBLEND = 256, TF_TWO = 512, TF_NOAA = 1024, TF_TEX = 2048,
+  TF_PERSP = 4096, TF_LOD = 8192, TF_TEX1 = 16384, TF_FILT = 32768, TF_ACMP = 65536,
 };
 struct TriRec {
   s32 w[T_SIZE];
@@ -72,7 +78,7 @@ inline auto active() -> bool { return false; }
 inline auto sharedVk() -> const vrdp::SharedVk* { return nullptr; }
 inline auto queueFill(const FillRect&) -> void {}
 inline auto pending() -> bool { return false; }
-inline auto queueTri(const TriRec&) -> bool { return false; }
+inline auto queueTri(const TriRec&, const u8* = nullptr, const u16* = nullptr) -> bool { return false; }
 inline auto flush(u8*, u32, u8*, std::vector<TriOut>* = nullptr) -> void {}
 #else
 // KESTREL_GPURDP pedido (y distinto de 0).
@@ -87,8 +93,9 @@ auto active() -> bool;
 auto sharedVk() -> const vrdp::SharedVk*;
 auto queueFill(const FillRect& r) -> void;
 auto pending() -> bool;
-// false = cola llena: vaciar (flush) y volver a encolar.
-auto queueTri(const TriRec& t) -> bool;
+// false = cola llena: vaciar (flush) y volver a encolar. Con `tmem` (4 KB) y `tlut` (256
+// entradas) el triangulo lleva textura: se guarda la instantanea y su ranura va en T_TSLOT.
+auto queueTri(const TriRec& t, const u8* tmem = nullptr, const u16* tlut = nullptr) -> bool;
 // Ejecuta la cola en la GPU (rellenos y triangulos en el orden en que llegaron), espera y copia
 // a `rdram` los bytes de cada primitiva (y a `hidden`, un byte por media palabra, los bits
 // ocultos de los de 16bpp). Antes sube al espejo las zonas que leen los triangulos. En `outs`,

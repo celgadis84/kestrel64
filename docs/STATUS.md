@@ -10251,3 +10251,11 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   orden con barreras, baja zonas. Los triangulos ya no vacian la cola en `run()`.
 - gate_gpurdp ALL OK (6 m 53 s): systemtest 0/3721, sm64 `b5521b24` x2, krom 371/371 identicas.
   gate_quick krom + thar0 ALL OK (rmse 0,1332). md5 por defecto sin cambio.
+
+## 2026-10-05 (d) -- GPU-RDP propio, fase 2 (triangulos con textura)
+
+- Instantanea de TMEM + TLUT por triangulo texturado (ranuras deduplicadas, binding 5).
+- `tri.comp`: pliegue de tiles, 10 formatos, TLUT, filtro de 3 puntos/MID_TEXEL, perspectiva,
+  LOD/mipmap, TEXEL1 en 2 ciclos, alpha compare. Fuera: texpack (HD) y COPY.
+- gate_gpurdp ALL OK (6 m 23 s), krom 371/371 identicas; gate_quick krom + thar0 ALL OK.
+  SM64: 462104 de 475513 triangulos GPU con textura.

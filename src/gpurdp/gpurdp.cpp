@@ -45,6 +45,9 @@ struct Buf {
 // Triangulos por vaciado como mucho (tamano fijo de los buffers de registros y resultados).
 constexpr u32 kMaxTri = 4096;
 
+// Instantaneas de TMEM por vaciado como mucho: 4 KB de TMEM + 512 bytes de TLUT cada una.
+constexpr u32 kMaxTmem = 512, kTmemBytes = 0x1000 + 512;
+
 // Cola unificada: rellenos y triangulos en el orden del FIFO.
 struct Op { bool tri; u32 idx; };
 
@@ -57,7 +60,7 @@ struct Ctx {
   VkCommandPool pool = VK_NULL_HANDLE;
   VkCommandBuffer cmd = VK_NULL_HANDLE;
   VkFence fence = VK_NULL_HANDLE;
-  Buf ram, hid, recs, lut, outs;
+  Buf ram, hid, recs, lut, outs, tmem;
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
   VkPipelineLayout pl = VK_NULL_HANDLE;
   VkPipeline fill = VK_NULL_HANDLE, tri = VK_NULL_HANDLE;
@@ -65,8 +68,9 @@ struct Ctx {
   VkDescriptorSet set = VK_NULL_HANDLE;
   std::vector<FillRect> q;
   std::vector<TriRec> tris;
+  std::vector<u8> tslots;    // instantaneas de TMEM del lote, kTmemBytes cada una
   std::vector<Op> ops;
-  u64 nFill = 0, nTri = 0, nFlush = 0;
+  u64 nFill = 0, nTri = 0, nFlush = 0, nTex = 0, nSlot = 0;
   vrdp::SharedVk shared{};
 };
 
@@ -202,7 +206,8 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
 
   if(!makeBuf(c, c.ram, rdramSize) || !makeBuf(c, c.hid, rdramSize / 2)
      || !makeBuf(c, c.recs, VkDeviceSize(kMaxTri) * T_SIZE * 4) || !makeBuf(c, c.lut, sizeof RDP::blender_lut)
-     || !makeBuf(c, c.outs, VkDeviceSize(kMaxTri) * 8 * 4)) {
+     || !makeBuf(c, c.outs, VkDeviceSize(kMaxTri) * 8 * 4)
+     || !makeBuf(c, c.tmem, VkDeviceSize(kMaxTmem) * kTmemBytes)) {
     std::fprintf(stderr, "[gpurdp] no hay memoria visible para el espejo de RDRAM\n"); return false;
   }
   std::memcpy(c.lut.map, RDP::blender_lut, sizeof RDP::blender_lut);
@@ -212,7 +217,7 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     vkFlushMappedMemoryRanges(c.dev, 1, &mr);
   }
 
-  constexpr u32 kBind = 5;   // ram, hid, registros, tabla del blender, resultados
+  constexpr u32 kBind = 6;   // ram, hid, registros, tabla del blender, resultados, TMEM
   VkDescriptorSetLayoutBinding b[kBind] = {};
   for(u32 i = 0; i < kBind; i++) {
     b[i].binding = i; b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -251,7 +256,7 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
   if(vkAllocateDescriptorSets(c.dev, &dai, &c.set) != VK_SUCCESS) return false;
   VkDescriptorBufferInfo bufs[kBind] = {{c.ram.buf, 0, VK_WHOLE_SIZE}, {c.hid.buf, 0, VK_WHOLE_SIZE},
                                          {c.recs.buf, 0, VK_WHOLE_SIZE}, {c.lut.buf, 0, VK_WHOLE_SIZE},
-                                         {c.outs.buf, 0, VK_WHOLE_SIZE}};
+                                         {c.outs.buf, 0, VK_WHOLE_SIZE}, {c.tmem.buf, 0, VK_WHOLE_SIZE}};
   VkWriteDescriptorSet wr[kBind] = {};
   for(u32 i = 0; i < kBind; i++) {
     wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = c.set; wr[i].dstBinding = i;
@@ -274,7 +279,7 @@ auto destroy(Ctx& c) -> void {
     if(c.pl) vkDestroyPipelineLayout(c.dev, c.pl, nullptr);
     if(c.dpool) vkDestroyDescriptorPool(c.dev, c.dpool, nullptr);
     if(c.dsl) vkDestroyDescriptorSetLayout(c.dev, c.dsl, nullptr);
-    freeBuf(c, c.ram); freeBuf(c, c.hid); freeBuf(c, c.recs); freeBuf(c, c.lut); freeBuf(c, c.outs);
+    freeBuf(c, c.ram); freeBuf(c, c.hid); freeBuf(c, c.recs); freeBuf(c, c.lut); freeBuf(c, c.outs); freeBuf(c, c.tmem);
     if(c.fence) vkDestroyFence(c.dev, c.fence, nullptr);
     if(c.pool) vkDestroyCommandPool(c.dev, c.pool, nullptr);
     vkDestroyDevice(c.dev, nullptr);
@@ -309,8 +314,9 @@ auto init(u32 rdramSize) -> bool {
   // Resumen al salir: prueba de que los rellenos pasaron de verdad por la GPU. Solo cuenta;
   // destruir Vulkan aqui seria pisar a hilos que aun pueden estar vivos.
   std::atexit([] {
-    if(g) std::fprintf(stderr, "[gpurdp] rellenos=%llu triangulos=%llu vaciados=%llu\n",
-                       (unsigned long long)g->nFill, (unsigned long long)g->nTri, (unsigned long long)g->nFlush);
+    if(g) std::fprintf(stderr, "[gpurdp] rellenos=%llu triangulos=%llu (con textura %llu, instantaneas TMEM %llu) vaciados=%llu\n",
+                       (unsigned long long)g->nFill, (unsigned long long)g->nTri,
+               (unsigned long long)g->nTex, (unsigned long long)g->nSlot, (unsigned long long)g->nFlush);
   });
   return true;
 }
@@ -318,8 +324,9 @@ auto init(u32 rdramSize) -> bool {
 auto shutdown() -> void {
   if(!g) return;
   g_live.store(false, std::memory_order_release);
-  std::fprintf(stderr, "[gpurdp] rellenos=%llu triangulos=%llu vaciados=%llu\n",
-               (unsigned long long)g->nFill, (unsigned long long)g->nTri, (unsigned long long)g->nFlush);
+  std::fprintf(stderr, "[gpurdp] rellenos=%llu triangulos=%llu (con textura %llu, instantaneas TMEM %llu) vaciados=%llu\n",
+               (unsigned long long)g->nFill, (unsigned long long)g->nTri,
+               (unsigned long long)g->nTex, (unsigned long long)g->nSlot, (unsigned long long)g->nFlush);
   destroy(*g); delete g; g = nullptr;
 }
 
@@ -333,10 +340,28 @@ auto queueFill(const FillRect& r) -> void {
   g->nFill++;
 }
 
-auto queueTri(const TriRec& t) -> bool {
+auto queueTri(const TriRec& t, const u8* tmem, const u16* tlut) -> bool {
   if(g->tris.size() >= kMaxTri) return false;
+  s32 slot = 0;
+  if(tmem) {
+    // La TMEM suele seguir igual de un triangulo al siguiente: se reutiliza la ultima ranura.
+    std::vector<u8>& v = g->tslots;
+    const size_t n = v.size() / kTmemBytes;
+    const u8* last = n ? v.data() + (n - 1) * kTmemBytes : nullptr;
+    if(last && !std::memcmp(last, tmem, 0x1000) && !std::memcmp(last + 0x1000, tlut, 512)) slot = (s32)n - 1;
+    else {
+      if(n >= kMaxTmem) return false;
+      v.resize((n + 1) * kTmemBytes);
+      std::memcpy(v.data() + n * kTmemBytes, tmem, 0x1000);
+      std::memcpy(v.data() + n * kTmemBytes + 0x1000, tlut, 512);
+      slot = (s32)n;
+      g->nSlot++;
+    }
+    g->nTex++;
+  }
   g->ops.push_back({true, (u32)g->tris.size()});
   g->tris.push_back(t);
+  g->tris.back().w[T_TSLOT] = slot;
   g->nTri++;
   return true;
 }
@@ -372,6 +397,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     for(size_t i = 0; i < c.tris.size(); i++) std::memcpy(c.recs.map + i * T_SIZE * 4, c.tris[i].w, T_SIZE * 4);
     std::memset(c.outs.map, 0, c.tris.size() * 8 * 4);
   }
+  if(!c.tslots.empty()) std::memcpy(c.tmem.map, c.tslots.data(), c.tslots.size());
   // Memoria no coherente: lo escrito desde el anfitrion se hace visible a mano.
   auto flushHost = [&](Buf& b) {
     if(b.coherent) return;
@@ -381,6 +407,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   };
   if(!zones.empty()) { flushHost(c.ram); flushHost(c.hid); }
   if(!c.tris.empty()) { flushHost(c.recs); flushHost(c.outs); }
+  if(!c.tslots.empty()) flushHost(c.tmem);
 
   vkResetCommandBuffer(c.cmd, 0);
   VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -430,7 +457,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   if(sr != VK_SUCCESS) {
     std::fprintf(stderr, "[gpurdp] vkQueueSubmit fallo (%d)\n", (int)sr);
     if(outs) outs->assign(c.tris.size(), TriOut{});
-    c.q.clear(); c.tris.clear(); c.ops.clear(); return;
+    c.q.clear(); c.tris.clear(); c.ops.clear(); c.tslots.clear(); return;
   }
   vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
   vkResetFences(c.dev, 1, &c.fence);
@@ -461,7 +488,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     outs->resize(c.tris.size());
     for(size_t i = 0; i < c.tris.size(); i++) std::memcpy(&(*outs)[i], c.outs.map + i * 8 * 4, sizeof(TriOut));
   }
-  c.q.clear(); c.tris.clear(); c.ops.clear();
+  c.q.clear(); c.tris.clear(); c.ops.clear(); c.tslots.clear();
   c.nFlush++;
 }
 
