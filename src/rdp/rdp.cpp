@@ -867,7 +867,7 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   // dentro de la RDRAM (los wrN de abajo descartan pixeles sueltos), x1 dentro del ancho (si
   // no, el pixel x >= ancho cae en la fila siguiente), base alineada al pixel, y sin las
   // herramientas de depuracion que miran cada escritura (rdpGuard, wrtag).
-  if(!pipeMode && x1 > x0 && y1 > y0 && gpurdp::active() && !g_rgHi && !wrtag::tag) {
+  if(!pipeMode && x1 > x0 && y1 > y0 && gpuOn() && !g_rgHi && !wrtag::tag) {
     const u32 bpp = ci_size == 3 ? 4 : ci_size == 1 ? 1 : 2;
     const u64 last = u64(ci_addr) + (u64(y1 - 1) * ci_width + u64(x1)) * bpp;   // un byte detras
     if(u32(x1) <= ci_width && ci_addr % bpp == 0 && last <= m.size()) {
@@ -1231,7 +1231,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     lodFracV = lodSelect(0, 0, 0, 0, 0, 0, false, maxLevel, t0, t1);
   }
   // GPU-RDP (KESTREL_GPURDP=1): triangulo en 16 bpp a la GPU, con o sin textura.
-  if(gpurdp::active() && !costOnly) {
+  if(gpuOn() && !costOnly) {
     gpuHd = hdB;
     if(gpuTriangle(mem, w, leftMajor, fillMode, gouraud, combProg, flat, flatTexel, zActive, zSrc,
                    cC, cDx, cDe, cDy, tC, tDx, tDe, tDy, textured, persp, usesLod, usesTex1,
@@ -1239,6 +1239,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       pxShadeA = 0; lodFracV = 0xff;
       return;
     }
+    if(mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallTri.fetch_add(1, std::memory_order_relaxed);
     if(gpuQueued) { gpuFlushStat(65); gpuFlush(mem); }   // va por el CPU: antes, lo encolado a la RDRAM
   }
   // Recorrido de bordes en ENTERO, como el rasterizador del RDP. Oraculo: parallel-rdp
@@ -2402,9 +2403,10 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   HdBind hdB;
   if(texpack::active() && !usesLod && !(cycleType() == 2 && ci_size == 1)) hdB = hdBind(mem, tile);
   // GPU-RDP (KESTREL_GPURDP=1): 16 bpp sin mipmap a la GPU; si no, antes lo encolado a la RDRAM.
-  if(gpurdp::active()) {
+  if(gpuOn()) {
     gpuHd = hdB;
     if(!usesLod && gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
+    if(mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallRect.fetch_add(1, std::memory_order_relaxed);
     if(gpuQueued) { gpuFlushStat(66); gpuFlush(mem); }
   }
   const double hdFp = std::max(std::abs(dsdx), std::abs(dtdy));
@@ -2601,6 +2603,8 @@ auto SoftRdp::gpuDirtyHit(u64 lo, u64 hi) const -> bool {
   return false;
 }
 
+auto SoftRdp::gpuOn() const -> bool { return gpuRun && gpurdp::active(); }
+
 auto SoftRdp::gpuFlush(Memory& mem) -> void {
   gpuQueued = false;
   gpuNDirty = 0;
@@ -2653,6 +2657,56 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   else     { cur = start & 0x00ff'ffff; end2 = end & 0x00ff'ffff; }  // overflow range unmasked
   end = end2;
   u32 executed = 0;
+  // Reparto CPU/GPU por tramo (KESTREL_GPURDP_MINPX, pixeles; 0 = todo a la GPU). Cada vaciado
+  // de la GPU cuesta un envio + fence de ida y vuelta (~300 us en la RX 570) haga lo que haga,
+  // y SM64 manda tramos de pocos triangulos pequenos: esos los pinta antes SoftRDP. Los dos
+  // caminos dan los mismos bytes y la misma contabilidad, asi que es una decision del
+  // anfitrion pura (md5 y estado del invitado no se mueven). Se estima el area de lo que trae
+  // el tramo (caja de cada triangulo / rectangulo) y por debajo del umbral va al CPU. Con
+  // escalado interno todo a la GPU: lo pintado por el CPU no tendria copia de alta.
+  {
+    static const u64 minPx = [] {
+      const char* e = std::getenv("KESTREL_GPURDP_MINPX");
+      return e && e[0] ? (u64)std::strtoull(e, nullptr, 0) : (u64)4096;
+    }();
+    gpuRun = true;
+    if(minPx && gpurdp::active() && gpurdp::upscale() <= 1) {
+      auto s14 = [](u64 v) -> s32 { return (s32)((u32)(v & 0x3fff) << 18) >> 18; };
+      double px = 0;
+      u32 a = cur, cyc = cycleType();
+      while(a < end && px < (double)minPx) {
+        const u64 c = fetch(a);
+        const u32 o = (c >> 56) & 0x3f;
+        if(o >= 0x08 && o <= 0x0f) {
+          const u32 n = 4 + ((o & 4) ? 8 : 0) + ((o & 2) ? 8 : 0) + ((o & 1) ? 2 : 0);
+          if(a + n * 8 > end) break;
+          const double yl = s14(c >> 32) / 4.0, ym = s14(c >> 16) / 4.0, yh = s14(c) / 4.0;
+          const u64 w1 = fetch(a + 8), w2 = fetch(a + 16), w3 = fetch(a + 24);
+          auto x = [](u64 w) { return (s32)(w >> 32) / 65536.0; };
+          auto d = [](u64 w) { return (s32)(u32)w / 65536.0; };
+          const double h = std::max(0.0, yl - yh);
+          const double xs[6] = {x(w2), x(w2) + d(w2) * h, x(w3), x(w3) + d(w3) * std::max(0.0, ym - yh),
+                                x(w1), x(w1) + d(w1) * std::max(0.0, yl - ym)};
+          double lo = xs[0], hi = xs[0];
+          for(double v : xs) { lo = std::min(lo, v); hi = std::max(hi, v); }
+          px += std::min(hi - lo, 2048.0) * std::min(h, 2048.0) * 0.5 + h;
+          a += n * 8; continue;
+        }
+        if(o == 0x24 || o == 0x25 || o == 0x36) {
+          const double w = (double)(((c >> 44) & 0xfff) >> 2) - (double)(((c >> 12) & 0xfff) >> 2) + 1;
+          const double h = (double)(((c >> 32) & 0xfff) >> 2) - (double)((c & 0xfff) >> 2) + 1;
+          // Relleno en FILL: el CPU escribe 8 bytes por vuelta, cuenta poco.
+          if(w > 0 && h > 0) px += o == 0x36 && cyc == 3 ? w * h / 16 : w * h;
+          a += o == 0x36 ? 8 : 16; continue;
+        }
+        if(o == 0x2f) cyc = (u32)(c >> 52) & 3;
+        a += 8;
+      }
+      gpuRun = px >= (double)minPx;
+    }
+    if(gpurdp::active() && mem.rdpStats.on.load(std::memory_order_relaxed))
+      (gpuRun ? mem.rdpStats.gpuTramos : mem.rdpStats.cpuTramos).fetch_add(1, std::memory_order_relaxed);
+  }
   u64 words[24];
   int guard = 0;
   bool split = false;                 // ultimo comando del span partido: no se ejecuta

@@ -5,6 +5,7 @@
 #include "../core/wrtag.hpp"
 #include "../core/movie.hpp"
 #include "../vrdp/vrdp.hpp"
+#include "../gpurdp/gpurdp.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -573,8 +574,10 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
     for(auto& a : st.syncPure) a.store(0, r);
     for(auto* a : {&st.gclkPixel, &st.gclkFill, &st.gclkTmem, &st.gclkSync, &st.pxWritten,
                    &st.pxImRd, &st.pxZCmp, &st.pxZUpd, &st.loads, &st.loadBytes,
-                   &st.loadRedundant, &st.loadRedundantBytes, &st.otherModesSame, &st.combineSame})
+                   &st.loadRedundant, &st.loadRedundantBytes, &st.otherModesSame, &st.combineSame,
+                   &st.gpuTramos, &st.cpuTramos, &st.gpuFallTri, &st.gpuFallRect})
       a->store(0, r);
+    gpuStats0 = gpurdp::stats();
     st.viFlips0 = rcp.viFlips; st.viFields0 = rcp.viFields;
     st.guestOps0 = system.memory.cartNow(); st.retired0 = system.cpu.retired;
     st.idleOps0 = system.cpu.idleSkipOps; st.rspCyc0 = system.memory.rsp.cyclesRun.load(r);
@@ -636,6 +639,31 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
     .set("fill", st.px[3].load(r)).set("written", st.pxWritten.load(r)).set("imRd", st.pxImRd.load(r))
     .set("zCmp", st.pxZCmp.load(r)).set("zUpd", st.pxZUpd.load(r));
   data.set("pixels", px);
+  // Que rasterizador pinto y si los pixeles son exactos. Con SoftRDP y GPU-RDP `written` y
+  // `zUpd` salen del resultado real de cada pixel (prueba de z, alpha compare); con
+  // parallel-RDP la contabilidad es un paseo de solo-coste del SoftRDP y cuenta como escrito
+  // todo pixel rasterizado (cota superior: no ve que pixeles pierden la prueba de z).
+  const bool gpu = gpurdp::active();
+  data.set("backend", gpu ? "gpurdp" : vrdp::active() ? "prdp" : "soft");
+  data.set("exactPixels", !vrdp::active() || gpu);
+  if(gpu) {
+    const gpurdp::Stats a = gpurdp::stats(), &b = gpuStats0;
+    json::Value gv = json::Value::object();
+    const u64 fl = a.flushes - b.flushes;
+    gv.set("flushes", fl).set("fills", a.fills - b.fills).set("tris", a.tris - b.tris)
+      .set("texTris", a.texTris - b.texTris).set("prims", a.prims - b.prims)
+      .set("dispatches", a.dispatches - b.dispatches)
+      .set("tramosGpu", st.gpuTramos.load(r)).set("tramosCpu", st.cpuTramos.load(r))
+      .set("fallbackTri", st.gpuFallTri.load(r)).set("fallbackRect", st.gpuFallRect.load(r));
+    const double up = (a.upNs - b.upNs) / 1e6, rec = (a.recNs - b.recNs) / 1e6,
+                 wt = (a.waitNs - b.waitNs) / 1e6, dn = (a.downNs - b.downNs) / 1e6;
+    json::Value ms = json::Value::object();
+    ms.set("upload", up).set("record", rec).set("wait", wt).set("download", dn).set("total", up + rec + wt + dn);
+    gv.set("hostMs", ms);
+    if(fl) gv.set("usPerFlush", (up + rec + wt + dn) * 1000.0 / fl);
+    if(flips) gv.set("flushesPerFlip", (double)fl * pf);
+    data.set("gpurdp", gv);
+  }
   json::Value red = json::Value::object();
   red.set("syncLoad", st.syncRedundant[0].load(r)).set("syncPipe", st.syncRedundant[1].load(r))
      .set("syncTile", st.syncRedundant[2].load(r))

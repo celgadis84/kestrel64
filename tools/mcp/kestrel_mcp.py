@@ -230,7 +230,14 @@ def rdp_stats(action: str = "read") -> dict:
     `guest`: GUEST-time split of the window (not host wall time): seconds/ms, cpuOps,
     rdpBusyPct (GCLK / 62.5 MHz), rspRunPct (cycles the RSP executed), rspPollPct (RSP
     cycles absorbed in recognized poll loops), cpuIdlePct (CPU ops in the kernel idle
-    loop), msPerFlip. Model lower bounds: 1 RSP cycle per instruction, no VU stalls."""
+    loop), msPerFlip. Model lower bounds: 1 RSP cycle per instruction, no VU stalls.
+    `backend` (soft/gpurdp/prdp) and `exactPixels`: with SoftRDP and GPU-RDP `written`/`zUpd`
+    come from each pixel's real outcome (depth test, alpha compare); with parallel-RDP they
+    come from a cost-only walk and count every rasterized pixel (upper bound).
+    `gpurdp` (GPU-RDP only): flushes, primitives, tris/texTris/fills, dispatches, tramosGpu /
+    tramosCpu (per-tramo area routing, KESTREL_GPURDP_MINPX), fallbackTri/fallbackRect
+    (primitives the GPU path refused and SoftRDP drew), hostMs upload/record/wait/download,
+    usPerFlush, flushesPerFlip."""
     cmd = {"reset": "rdp.stats.reset", "off": "rdp.stats.off"}.get(action, "rdp.stats")
     data, _ = query(cmd)
     return data

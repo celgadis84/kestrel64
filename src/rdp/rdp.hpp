@@ -45,6 +45,9 @@ struct RdpStats {
   std::atomic<u64> syncPure[3]{};
   std::atomic<u64> loads{0}, loadBytes{0}, loadRedundant{0}, loadRedundantBytes{0};
   std::atomic<u64> otherModesSame{0}, combineSame{0};
+  // GPU-RDP: tramos de run() que fueron a la GPU / que el reparto por area mando al CPU, y
+  // primitivas que la GPU no admite y pinto SoftRDP (triangulos, rects de textura).
+  std::atomic<u64> gpuTramos{0}, cpuTramos{0}, gpuFallTri{0}, gpuFallRect{0};
   bool primSince[3] = {true, true, true};
   bool workSince[3] = {true, true, true};  // primitiva o carga de TMEM
   u32 viFlips0 = 0, viFields0 = 0;
@@ -102,6 +105,9 @@ struct SoftRdp {
   // en la RDRAM. gpuFlush las baja; run() lo llama antes de cualquier comando que toque la
   // RDRAM por su cuenta y al terminar el tramo.
   bool gpuQueued = false;
+  // GPU-RDP para ESTE tramo (lo decide run() al empezar, por area estimada). Fuera de run(), si.
+  bool gpuRun = true;
+  auto gpuOn() const -> bool;
   auto gpuFlush(Memory& mem) -> void;
   // Bytes de RDRAM que lo encolado va a escribir, en hasta 8 intervalos [lo, hi). Una carga
   // de TMEM que lee fuera de ellos no necesita vaciar la cola (lo que lee ya esta al dia).

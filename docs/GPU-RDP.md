@@ -272,6 +272,53 @@ queda: ~165 us de envio + fence por vaciado, y los vaciados los marca la contabi
 invitado (ver arriba). parallel-RDP no paga eso porque no devuelve la contabilidad por
 primitiva.
 
+### Fase 5 (parte 2) -- reparto CPU/GPU por tramo y telemetria HECHO 2026-10-06
+
+**Por que la GPU iba mas lenta que parallel-RDP.** GPU-RDP vacia la cola de forma sincrona al
+final de cada tramo de `SoftRdp::run()`: la contabilidad por primitiva (`TriOut` nWrite/nZWrite
+-> GCLK, `dpc_pipebusy`/`bufbusy`, `rdpStats`) mueve el reloj del invitado y aplazarla rompe el
+determinismo. Cada vaciado cuesta ~300-550 us de envio + fence en la RX 570 haga lo que haga, y
+SM64 manda muchisimos tramos de 1-2 triangulos: 16,8 k vaciados y 5 s de espera en 200
+intercambios.
+
+**Reparto por tramo.** Al empezar `run()` una pasada barata estima el area del tramo (caja de cada
+triangulo desde los bordes XH/XM/XL y sus pendientes; ancho x alto de cada rect; un FILL_RECT en
+ciclo FILL cuenta 1/16 porque el CPU escribe 8 bytes por vuelta). Por debajo de
+`KESTREL_GPURDP_MINPX` pixeles (defecto **4096**; 0 = todo a la GPU) el tramo entero lo pinta
+SoftRDP (`SoftRdp::gpuRun`, `gpuOn()`). Los dos caminos dan los mismos bytes y la misma cuenta,
+asi que es una decision de ANFITRION pura: md5 y estado del invitado no se mueven. Con escalado
+interno (>1) todo a la GPU (lo pintado por el CPU no tendria copia de alta).
+
+Barrido SM64 200 intercambios (una corrida): 0 = 9075 ms / 16782 vaciados, 2048 = 4297 / 1619,
+8192 = 4352 / 626, 32768 = 4978 / 337, todo CPU = 7032. Intercalado 4096 vs 8192 empata con
+ligera ventaja de 4096 (SM64 3,97 contra 3,99-4,23 s; PD 3,65 contra 3,67).
+
+**Bench final** (`validate.py bench`, min de 3 SM64 / 2 PD, intercalado prdp/gpurdp dos rondas):
+
+| | parallel-RDP (prdp-jit) | GPU-RDP (gpurdp-jit) | SoftRDP (threaded-jit) |
+|---|---|---|---|
+| SM64 200 intercambios | 3,58 s (286 %) | 3,94 s (260 %) | 6,66 s (154 %) |
+| PD intro 300 intercambios | 3,52 s (350 %) | 3,58 s (344 %) | 7,01 s (176 %) |
+
+Antes del reparto GPU-RDP daba 7,63 s en SM64 y 4,76 s en PD. Queda +10 % en SM64 y +1,5 % en PD
+contra parallel-RDP, que encola sin esperar porque NO devuelve contabilidad por primitiva.
+
+**Bug latente encontrado al validar**: con todo a la GPU, SM64 a 200 intercambios divergia del
+SoftRDP en "PRESS START" (805 pixeles, un paso de 5 bits por canal en patron de dither). El
+texrect en COPY con `IM_RD` puesto entraba en `blendPixel` del shader y le aplicaba dither; en
+SoftRDP COPY/FILL son `BlendPlan.passthru` (sin blender ni dither). Arreglado en `tri.comp`
+(ciclo >= 2 = escritura directa). La puerta de 60 intercambios no lo veia.
+
+**Telemetria (ventaja sobre parallel-RDP).** `rdp.stats` (MCP `rdp_stats`) dice ahora `backend`
+(soft/gpurdp/prdp) y `exactPixels`: con SoftRDP y GPU-RDP `pixels.written`/`zUpd` salen del
+resultado real de cada pixel (prueba de z, alpha compare, devuelto por la GPU en `TriOut`); con
+parallel-RDP la cuenta es el paseo de solo-coste y todo pixel rasterizado cuenta como escrito
+(cota superior). Ademas, solo con GPU-RDP, bloque `gpurdp`: vaciados, primitivas, tris/texTris/
+fills, despachos, `tramosGpu`/`tramosCpu`, `fallbackTri`/`fallbackRect` (primitivas que la GPU no
+admite y pinto SoftRDP), `hostMs` (subir/grabar/esperar/bajar), `usPerFlush`, `flushesPerFlip`.
+Ejemplo SM64 titulo 137 intercambios: 805 vaciados (5,9/intercambio), 543 us cada uno, 353 ms de
+437 esperando al fence, 0 caidas al CPU, 917 tramos a la GPU contra 400 k al CPU.
+
 ### Fase 6 (parte 1) -- escalado interno HECHO 2026-10-06
 
 `KESTREL_GPURDP_UPSCALE=2|4` (apagado de fabrica). El invitado sigue viendo su RDRAM de 1x

@@ -71,7 +71,15 @@ struct TriOut {
   s32 nWrite, nZWrite, comb[4];
 };
 
+// Contadores acumulados desde el arranque (telemetria `rdp.stats`). Los escribe el hilo del
+// RDP; el lector los copia sin cerrojo (palabras de 64 bits alineadas: valor viejo o nuevo).
+struct Stats {
+  u64 fills = 0, tris = 0, texTris = 0, flushes = 0, prims = 0, dispatches = 0;
+  u64 upNs = 0, recNs = 0, waitNs = 0, downNs = 0;   // pared de anfitrion de los vaciados
+};
+
 #ifndef KESTREL_GPURDP
+inline auto stats() -> Stats { return {}; }
 inline auto wanted() -> bool { return false; }
 inline auto init(u32) -> bool { return false; }
 inline auto shutdown() -> void {}
@@ -119,6 +127,7 @@ auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, 
 // y da el valor de T_HD (cabecera + 1). 0 = no se puede (sin shaderFloat64, sin sitio con el
 // lote en curso): el primitivo va por el CPU.
 auto hdUpload(const void* tex, double scX, double scY) -> u32;
+auto stats() -> Stats;
 #endif
 
 }  // namespace kestrel::gpurdp

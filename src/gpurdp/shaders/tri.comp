@@ -312,7 +312,8 @@ void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShade
   bool colorOnCvg = (olo & 0x80u) != 0u, cvgXAlpha = ((olo >> 12) & 1u) != 0u;
   bool alphaCvgSel = ((olo >> 13) & 1u) != 0u;
   bool needMem = usesMem || colorOnCvg || aaEn || cvgDst != 2u || (olo & 0x10u) != 0u;
-  if((fl & F_NOBLEND) != 0) {
+  // FILL/COPY no pasan por el blender ni por el dither (SoftRdp: BlendPlan.passthru).
+  if((fl & F_NOBLEND) != 0 || ((ohi >> 20) & 3u) >= 2u) {
     if(hasZ && !depthTest(x, y, zin)) return;
     storePixel(x, y, src); return;
   }

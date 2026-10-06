@@ -505,6 +505,16 @@ auto resyncHi(Ctx& c, const u8* rdram, u32 size, const u8* hidden) -> void {
 
 auto upscale() -> u32 { return active() ? 1u << g->up : 1u; }
 
+auto stats() -> Stats {
+  Stats st;
+  if(!active()) return st;
+  const Ctx& c = *g;
+  st.fills = c.nFill; st.tris = c.nTri; st.texTris = c.nTex; st.flushes = c.nFlush;
+  st.prims = c.nOps; st.dispatches = c.nDisp;
+  st.upNs = c.tUp; st.recNs = c.tRec; st.waitNs = c.tWait; st.downNs = c.tDown;
+  return st;
+}
+
 auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, u32 type,
                std::vector<u32>& out, u32& ow, u32& oh) -> bool {
   if(!active() || !g->up || (type != 2 && type != 3) || !w || !h) return false;
