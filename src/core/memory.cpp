@@ -5,6 +5,7 @@
 #include "memory.hpp"
 #include "runtime.hpp"
 #include <chrono>
+#include <ctime>
 #include "../audio/audio.hpp"
 #include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
@@ -181,7 +182,11 @@ auto Memory::reset(bool expansionPak) -> void {
   const char* pads = std::getenv("KESTREL_PADS");
   const char* accs = std::getenv("KESTREL_PADACC");
   const char* oldMempak = std::getenv("KESTREL_MEMPAK");   // compatibilidad: solo puerto 1
+  //   KESTREL_PADTYPE=0200 tipo por puerto: 0/1 mando, 2 raton (id 0x0200; la lectura 0x01
+  //                        da botones A/B y el desplazamiento con signo en los bytes del stick)
+  const char* types = std::getenv("KESTREL_PADTYPE");
   for(int i = 0; i < 4; i++) {
+    padPort[i].mouse = types && types[0] && types[i] == '2';
     bool on = pads && pads[0] ? (pads[i] ? pads[i] != '0' : false) : (i == 0);
     u8   ac = accs && accs[i] ? (u8)(accs[i] - '0') : (u8)1;
     if(i == 0 && oldMempak && oldMempak[0] == '0') ac = 0;
@@ -531,6 +536,13 @@ auto Memory::resolveSaveType() -> void {
     for(const char* id : kEep4k)  if(is(id)) { saveType = SaveType::Eeprom4k;  goto sized; }
   }
 sized:
+  // Reloj de cartucho: KESTREL_RTC=1/0 manda; si no, bit 0 de 0x3F en la cabecera ED.
+  {
+    const char* e = std::getenv("KESTREL_RTC");
+    rtc = Rtc{};
+    rtc.on = e && e[0] ? e[0] == '1'
+                       : rom.size() > 0x3F && rom[0x3C] == 'E' && rom[0x3D] == 'D' && (rom[0x3F] & 1);
+  }
   // Size the active backing, blank to the device's erased state, and release the other
   // so exactly one save device is present (reset() pre-sized EEPROM before the type was
   // known). Existing save contents of the right size are preserved.
@@ -2265,6 +2277,54 @@ auto Memory::pifCicChallenge() -> void {
   for(int i = 0; i < 15; i++) pifram[0x30 + i] = (u8)((nib[i * 2] << 4) | nib[i * 2 + 1]);
 }
 
+// --- RTC de cartucho (ver Memory::Rtc) ---------------------------------------
+static auto bcd(u32 v) -> u8 { return (u8)(((v / 10) << 4) | (v % 10)); }
+static auto unbcd(u8 v) -> int { return (v >> 4) * 10 + (v & 0xf); }
+static auto rtcLocal(long long t) -> std::tm {
+  std::time_t tt = (std::time_t)t; std::tm tm{};
+#ifdef _WIN32
+  localtime_s(&tm, &tt);
+#else
+  localtime_r(&tt, &tm);
+#endif
+  return tm;
+}
+// Estado: bit 7 = parado (cristal y pila, bits 1 y 0, siempre bien).
+auto Memory::rtcStatus() const -> u8 { return rtc.stopped() ? 0x80 : 0x00; }
+auto Memory::rtcNow() const -> long long {
+  return rtc.stopped() ? rtc.frozen : (long long)std::time(nullptr) + rtc.offset;
+}
+auto Memory::rtcRead(u8 blk, u8* d) -> void {
+  if(blk == 0) std::memcpy(d, rtc.ctrl, 8);
+  else if(blk == 1) std::memcpy(d, rtc.nv, 8);
+  else if(blk == 2) {
+    const std::tm tm = rtcLocal(rtcNow());
+    d[0] = bcd(tm.tm_sec % 60); d[1] = bcd(tm.tm_min); d[2] = (u8)(bcd(tm.tm_hour) | 0x80);
+    d[3] = bcd(tm.tm_mday); d[4] = bcd(tm.tm_wday); d[5] = bcd(tm.tm_mon + 1);
+    d[6] = bcd(tm.tm_year % 100); d[7] = bcd(tm.tm_year / 100);   // siglo contado desde 1900
+  }
+}
+auto Memory::rtcWrite(u8 blk, const u8* d) -> void {
+  if(blk == 0) {
+    const bool was = rtc.stopped();
+    const long long now = rtcNow();
+    std::memcpy(rtc.ctrl, d, 8);
+    if(!was && rtc.stopped()) rtc.frozen = now;                       // se para: congela
+    else if(was && !rtc.stopped()) rtc.offset = rtc.frozen - (long long)std::time(nullptr);
+  } else if(blk == 1) {
+    if(!(rtc.ctrl[0] & 1)) std::memcpy(rtc.nv, d, 8);
+  } else if(blk == 2) {
+    // La hora solo se pone con el reloj parado y sin proteccion (n64brew): asi la fija el SDK.
+    if((rtc.ctrl[0] & 2) || !rtc.stopped()) return;
+    std::tm tm{};
+    tm.tm_sec = unbcd(d[0] & 0x7f); tm.tm_min = unbcd(d[1] & 0x7f); tm.tm_hour = unbcd(d[2] & 0x3f);
+    tm.tm_mday = unbcd(d[3] & 0x3f); tm.tm_mon = unbcd(d[5] & 0x1f) - 1;
+    tm.tm_year = unbcd(d[6]) + 100 * unbcd(d[7]); tm.tm_isdst = -1;
+    const std::time_t t = std::mktime(&tm);
+    if(t != (std::time_t)-1) rtc.frozen = (long long)t;
+  }
+}
+
 // Run the 64-byte PIF RAM joybus command block and fill in device responses,
 // matching what libultra's __osContGetInitData / __osEepStatus expect to read
 // back. Byte scan: 0xFE ends the block, 0x00 skips to the next channel, 0xFF is
@@ -2317,8 +2377,9 @@ auto Memory::pifProcessJoybus() -> u32 {
         // Byte de estado: CONT_CARD_ON (0x01) si hay accesorio en la ranura. CONT_CARD_PULL
         // (0x02) se deja a cero a proposito -- ambos puestos significan "pak recien
         // cambiado" y el SDK devuelve PFS_ERR_NEW_PACK, que el juego ensena como error.
-        if(rx >= 3) { rxp[0] = 0x05; rxp[1] = 0x00;   // tipo 0x0005 (mando estandar)
-                      rxp[2] = pp.accessory ? 0x01 : 0x00; }
+        if(rx >= 3 && pp.mouse) { rxp[0] = 0x02; rxp[1] = 0x00; rxp[2] = 0x00; }   // raton 0x0200
+        else if(rx >= 3) { rxp[0] = 0x05; rxp[1] = 0x00;   // tipo 0x0005 (mando estandar)
+                           rxp[2] = pp.accessory ? 0x01 : 0x00; }
         break;
       case 0x01: {                                    // read buttons
         // El mando inyectado por telemetria pisa al del anfitrion mientras le queden
@@ -2339,10 +2400,14 @@ auto Memory::pifProcessJoybus() -> u32 {
         for(int k = 0; k < rx; k++) rxp[k] = 0x00;
         if(rx >= 2) { rxp[0] = (btn >> 8) & 0xff; rxp[1] = btn & 0xff; }
         if(rx >= 4) { rxp[2] = (u8)sx; rxp[3] = (u8)sy; }  // analog stick
+        // Raton: mismos 4 bytes, botones solo A (izquierdo) y B (derecho) y el desplazamiento
+        // desde la ultima lectura donde el mando lleva la posicion del stick.
+        if(pp.mouse && rx >= 2) { rxp[0] &= 0xc0; rxp[1] = 0x00; }
         break;
       }
       case 0x02:                                      // leer 32 bytes del accesorio
       case 0x03: {                                    // escribir 32 bytes
+        if(pp.mouse) { absent(); break; }             // el raton no tiene ranura
         // La direccion viaja como (bloque << 5) | CRC5(bloque): 11 bits de bloque de 32
         // bytes, o sea 64 KiB de espacio de direcciones para 32 KiB de Controller Pak. La
         // mitad alta la usa el Rumble Pak: 0x8000 es su firma y 0xC000 el motor.
@@ -2448,6 +2513,26 @@ auto Memory::pifProcessJoybus() -> u32 {
           if(off < eeprom.size()) { eeprom[off] = pifram[txStart + 2 + k]; saveDirty = true; }
         }
         if(rx >= 1) rxp[0] = 0x00;                    // status OK
+        break;
+      }
+      case 0x06:                                      // RTC: info -> 00 10 + estado
+        if(!rtc.on) { absent(); break; }
+        if(rx >= 3) { rxp[0] = 0x00; rxp[1] = 0x10; rxp[2] = rtcStatus(); }
+        break;
+      case 0x07: {                                    // RTC: leer bloque -> 8 bytes + estado
+        if(!rtc.on) { absent(); break; }
+        u8 blk = tx >= 2 ? pifram[txStart + 1] & 3 : 0, d[8] = {};
+        rtcRead(blk, d);
+        for(int k = 0; k < rx && k < 8; k++) rxp[k] = d[k];
+        if(rx >= 9) rxp[8] = rtcStatus();
+        break;
+      }
+      case 0x08: {                                    // RTC: escribir bloque -> estado
+        if(!rtc.on) { absent(); break; }
+        u8 blk = tx >= 2 ? pifram[txStart + 1] & 3 : 0, d[8] = {};
+        for(int k = 0; k < 8 && (2 + k) < tx; k++) d[k] = pifram[txStart + 2 + k];
+        rtcWrite(blk, d);
+        if(rx >= 1) rxp[0] = rtcStatus();
         break;
       }
       default: absent(); break;

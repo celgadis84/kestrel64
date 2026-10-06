@@ -186,6 +186,23 @@ struct Memory {
   std::vector<u8> imem;
   std::vector<u8> pifram;
   std::vector<u8> eeprom;  // EEPROM save backing, joybus channel 4 (size follows saveType)
+  // Reloj de cartucho (RTC, joybus canal 4, comparte canal con la EEPROM: ordenes 0x06 info,
+  // 0x07 leer bloque, 0x08 escribir bloque; n64brew "Joybus Protocol"). KESTREL_RTC=1 o la
+  // cabecera ED (bit 0 de 0x3F) lo enchufan. Bloque 0 control (byte0 bit0/bit1 protegen los
+  // bloques 1/2, byte1 bits 1-2 paran el reloj), bloque 1 = 8 bytes de SRAM con pila, bloque 2
+  // = fecha BCD. El reloj sigue al del anfitrion con un desfase que cambia al escribir la hora.
+  // No va al fichero de partida ni al savestate (la hora viene del anfitrion).
+  struct Rtc {
+    bool on = false;
+    u8   ctrl[8] = {}, nv[8] = {};
+    long long offset = 0;    // segundos sumados a la hora del anfitrion mientras corre
+    long long frozen = 0;    // hora (time_t) fija mientras esta parado
+    auto stopped() const -> bool { return (ctrl[1] & 0x06) != 0; }
+  } rtc;
+  auto rtcStatus() const -> u8;
+  auto rtcNow() const -> long long;
+  auto rtcRead(u8 blk, u8* d) -> void;
+  auto rtcWrite(u8 blk, const u8* d) -> void;
   std::vector<u8> saveRam; // SRAM / FlashRAM backing, PI domain-2 at physical 0x08000000
   std::vector<u8> rom;     // cartridge ROM image (already byte-normalized to big-endian)
 
@@ -243,6 +260,7 @@ struct Memory {
   //    la ventana de 16 KiB sobre el bus GB en el banco elegido.
   struct PadPort {
     bool connected = false;          // hay un mando enchufado en este conector
+    bool mouse = false;              // raton N64 (id 0x0200) en vez de mando (KESTREL_PADTYPE)
     u8   accessory = 0;              // 0 nada / 1 Controller Pak / 2 Rumble Pak / 3 Transfer Pak
     u32  buttons = 0;                // byte0<<8|byte1 (A=0x8000 ... C-derecha=0x0001)
     s8   stickX = 0, stickY = 0;     // puerta octogonal del mando: +-85 en eje, +-69 en diagonal
