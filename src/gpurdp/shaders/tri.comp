@@ -2,10 +2,18 @@
 // GPU-RDP fases 1-2: triangulo (FILL, shade, plano o con textura) en 16 bpp con cobertura, z y
 // blender. Fase 2: muestreo de TMEM (todos los formatos, TLUT, pliegue clamp/mirror/mask,
 // filtro de 3 puntos, perspectiva, LOD/mipmap, TEXEL1 en 2 ciclos) y alpha compare.
-// Fase 4: TEXTURE_RECTANGLE (y FLIP) en 1/2 ciclos y COPY, mismo registro con F_RECT. Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
+// Fase 4: TEXTURE_RECTANGLE (y FLIP) en 1/2 ciclos y COPY, mismo registro con F_RECT.
+// Semantica = SoftRdp::drawTriangle + blendPixel + blendColor + combineColor, bit a
 // bit (rdp.cpp es la referencia; cada bloque de abajo nombra su funcion). Un hilo por pixel
 // de la caja que el CPU ya midio al cobrar el triangulo; cada hilo rehace el recorrido de
 // bordes de su fila (es barato y asi no hay datos por fila que subir).
+//
+// Fase 5: un despacho por TRAMO de primitivas consecutivas con la misma color image y z image
+// (registros pc.idx .. pc.idx+pc.count-1). Workgroup = tesela de 8x8 pixeles sobre la caja
+// union del tramo (pc.ux/uy/uw/uh). La tesela criba en memoria compartida que cajas la tocan,
+// y cada hilo recorre SU pixel por todas las primitivas del tramo en el orden del FIFO: el
+// orden por pixel es el de SoftRDP sin una sola barrera entre primitivas. Dos pixeles distintos
+// no comparten media palabra ni de color ni de z (el CPU corta el tramo si color y z se cruzan).
 //
 // Dentro de un triangulo dos pixeles nunca tocan la misma media palabra (ni de color ni de z:
 // el CPU solo manda aqui triangulos con x < ancho y zonas de color y z separadas), asi que no
@@ -16,14 +24,14 @@
 // Bits ocultos: un byte por media palabra, mismo empaquetado en hid[].
 // TMEM: una instantanea por triangulo con textura (la que habia al rasterizarlo): 4 KB de TMEM
 // y luego 256 entradas de 16 bits de TLUT, 1152 palabras por ranura, bytes en orden del anfitrion.
-layout(local_size_x = 64) in;
+layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) buffer Ram { uint ram[]; };
 layout(std430, binding = 1) buffer Hid { uint hid[]; };
 layout(std430, binding = 2) readonly buffer Recs { int rec[]; };
 layout(std430, binding = 3) readonly buffer Lut { uint lut[]; };   // divisor del blender, 32 KB
 layout(std430, binding = 4) buffer Outs { int outv[]; };
 layout(std430, binding = 5) readonly buffer Tmem { uint tm[]; };
-layout(push_constant) uniform P { uint idx; uint count; } pc;
+layout(push_constant) uniform P { uint idx; uint count; int ux; int uy; int uw; int uh; } pc;
 
 // Disposicion del registro (debe casar con gpurdp.hpp TriRec, en palabras de 32 bits).
 const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6, R_XM = 7,
@@ -47,6 +55,7 @@ const int F_LEFT = 1, F_DOOFF = 2, F_FILL = 4, F_SHADE = 8, F_ZACT = 16, F_ZSRC 
           F_RECT = 131072, F_FLIP = 262144, F_COPY = 524288;
 
 int base;
+uint cur;   // registro de la primitiva en curso
 int R(int i) { return rec[base + i]; }
 uint U(int i) { return uint(rec[base + i]); }
 
@@ -683,7 +692,7 @@ void pixel(int x, int y) {
       if((U(R_OLO) & 0x2000u) == 0u) a = min(a + ((a + 1) >> 8) + alphaDither(x, y), 255);
       if(a < int(U(R_BLEND) & 0xffu)) {
         if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
-          int o = int(pc.idx) * 8;
+          int o = int(cur) * 8;
           outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
         }
         return;
@@ -700,7 +709,7 @@ void pixel(int x, int y) {
   }
   // El ultimo pixel cubierto (orden de recorrido) deja COMBINED para la primitiva siguiente.
   if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
-    int o = int(pc.idx) * 8;
+    int o = int(cur) * 8;
     outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
   }
   blendPixel(x, y, c, hits, hasZ, zin, pxShadeA);
@@ -723,7 +732,7 @@ void rectPixel(int x, int y) {
   bool combProg = (fl & F_COMB) != 0;
   uint c = combProg ? combine(tex, 0u, comb) : tex;
   if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
-    int o = int(pc.idx) * 8;
+    int o = int(cur) * 8;
     outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
   }
   if((fl & F_ACMP) != 0) {
@@ -738,15 +747,36 @@ void rectPixel(int x, int y) {
   else if(x >= R(R_SX0) && x < R(R_SX1) && y >= R(R_SY0) && y < R(R_SY1)) storePixel(x, y, c);
 }
 
+shared uint sHit[64];
+
 void main() {
-  base = int(pc.idx) * R_SIZE;
-  tbase = U(R_TSLOT) * 1152u;
-  uint i = gl_GlobalInvocationID.x;
-  if(i >= pc.count) return;
-  uint bw = U(R_BW);
-  int x = R(R_BX) + int(i % bw), y = R(R_BY) + int(i / bw);
-  if((R(R_FLAGS) & F_RECT) != 0) rectPixel(x, y);
-  else pixel(x, y);
-  if(nWrite != 0)  atomicAdd(outv[int(pc.idx) * 8 + 0], nWrite);
-  if(nZWrite != 0) atomicAdd(outv[int(pc.idx) * 8 + 1], nZWrite);
+  const uint lid = gl_LocalInvocationIndex;
+  const int tx = pc.ux + int(gl_WorkGroupID.x) * 8, ty = pc.uy + int(gl_WorkGroupID.y) * 8;
+  const int x = tx + int(gl_LocalInvocationID.x), y = ty + int(gl_LocalInvocationID.y);
+  const bool inU = x < pc.ux + pc.uw && y < pc.uy + pc.uh;
+  for(uint c0 = 0u; c0 < pc.count; c0 += 64u) {
+    // Criba: cada hilo mira una primitiva del trozo contra la tesela entera.
+    uint hit = 0u;
+    if(c0 + lid < pc.count) {
+      int b = int(pc.idx + c0 + lid) * R_SIZE;
+      int bx = rec[b + R_BX], by = rec[b + R_BY], bw = rec[b + R_BW], bh = rec[b + R_BH];
+      if(bw > 0 && bh > 0 && bx < tx + 8 && tx < bx + bw && by < ty + 8 && ty < by + bh) hit = 1u;
+    }
+    sHit[lid] = hit;
+    barrier();
+    const uint n = min(64u, pc.count - c0);
+    for(uint j = 0u; j < n; j++) {
+      if(sHit[j] == 0u || !inU) continue;
+      cur = pc.idx + c0 + j;
+      base = int(cur) * R_SIZE;
+      if(x < R(R_BX) || x >= R(R_BX) + R(R_BW) || y < R(R_BY) || y >= R(R_BY) + R(R_BH)) continue;
+      tbase = U(R_TSLOT) * 1152u;
+      nWrite = 0; nZWrite = 0;
+      if((R(R_FLAGS) & F_RECT) != 0) rectPixel(x, y);
+      else pixel(x, y);
+      if(nWrite != 0)  atomicAdd(outv[int(cur) * 8 + 0], nWrite);
+      if(nZWrite != 0) atomicAdd(outv[int(cur) * 8 + 1], nZWrite);
+    }
+    barrier();
+  }
 }

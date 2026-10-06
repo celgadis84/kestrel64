@@ -210,6 +210,55 @@ krom + thar0 ALL OK.
 Prueba: `gate_gpurdp` ALL OK (7 m 29 s), krom 371/371 identicas exacto (las suites 32BPP
 incluidas); gate_quick thar0 ALL OK.
 
+### Fase 5 -- coherencia y rendimiento EN CURSO 2026-10-06
+
+Medido (SM64, 600 intercambios, RX 570, i7-870 con PCIe 2.0): **57 s con GPU-RDP contra
+13,5 s con SoftRDP**. Instrumentos nuevos: `KESTREL_GPUFLUSHSTAT=1` (por que se vacio la cola:
+opcode, fin de `run()`, primitiva al CPU, cola llena) y la linea `[gpurdp] tiempo vaciados` al
+salir (subir / grabar / enviar+esperar / bajar).
+
+- Vaciados: 73,6 k, y 73,4 k de ellos son el fin de `run()`. No se pueden aplazar: la
+  contabilidad (`nWrite`/`nZWrite` del shader -> `dpc_pipebusy`, `dpc_bufbusy`, `rdpGclk`)
+  marca el ritmo del invitado, y aplazarla rompe el determinismo (md5 de sm64). Hay que
+  abaratar cada vaciado, no quitarlos.
+- Reparto: subir 0,66 s, grabar 1,65 s, **enviar+esperar 45,1 s**, bajar 0,55 s. Sin
+  despachar nada, la espera es 12,8 s (~157 us de ida y vuelta por vaciado); el resto, ~32 s,
+  es trabajo de GPU para ~6,5 primitivas por vaciado (~68 us por triangulo: absurdo para una
+  RX 570).
+- Descartado: atomicos por pixel al contador del triangulo. Una reduccion por subgrupo (un
+  atomico por onda) dio el mismo tiempo.
+- Hipotesis: **todos los buffers vivian en memoria del anfitrion** (HOST_VISIBLE |
+  HOST_CACHED), y en una GPU discreta cada acceso del shader cruzaria el PCIe. **MEDIDA Y
+  DESCARTADA**: gemelos DEVICE_LOCAL con subida y bajada por DMA (`vkCmdCopyBuffer`) en el
+  mismo command buffer dan 37,2 s de espera contra 36,0 s del camino viejo. Ruido. El cambio se
+  queda (de fabrica) porque con el despacho por teselas el shader lee mucho mas por pixel;
+  `KESTREL_GPURDP_HOSTMEM=1` = camino viejo.
+- Cambio 2: barrera solo entre unidades cuyas huellas de RDRAM se cruzan. Huella = caja de
+  pixeles cubiertos sobre su imagen (color y z), columnas ensanchadas a grupos de 8 bytes
+  alineados (palabra del espejo y palabra de bits ocultos nunca partidas, que es lo que hace
+  falta para el relleno, que escribe palabras enteras); otra imagen = intervalo de bytes,
+  conservador. La caja es la huella exacta aunque la zona que se sube sean filas enteras: el
+  shader descarta todo pixel de fuera. Dos unidades disjuntas conmutan.
+  `KESTREL_GPURDP_ALLBAR=1` = barrera entre todas. Medido por primitiva: 407 k -> 259 k
+  barreras, espera 45,0 -> 37,2 s.
+- **Cambio 3, el que cuenta: despacho por TRAMO con teselas.** Tramo = triangulos/texrects
+  consecutivos con la misma color image y z image (y la union de color sin cruzarse con la
+  union de z). Un solo despacho sobre la caja union; workgroup = tesela de 8x8; la tesela criba
+  en memoria compartida que cajas la tocan (64 por pasada) y cada hilo recorre SU pixel por
+  todas las primitivas del tramo en orden del FIFO. El orden por pixel es el de SoftRDP sin
+  barrera ninguna entre primitivas. `KESTREL_GPURDP_NOBATCH=1` = un despacho por primitiva.
+  SM64 600 intercambios: 478 k despachos -> **72 k tramos** (~1 por vaciado), 259 k -> **90
+  barreras**, espera 37,2 -> **24,9 s**, pared 57 -> **37,4 s**. gate_gpurdp identico (krom
+  371/371, sm64 `b5521b24`).
+- Medida con marcas de tiempo de la GPU (`KESTREL_GPURDP_GPUTIME=1`, linea `[gpurdp] tiempo
+  GPU` al salir): subida 1,4 s, despachos 7,9 s, bajada 4,3 s = 13,5 s de GPU; la espera es
+  25,5 s, o sea **~12 s son ida y vuelta pura de envio + fence** (~165 us por vaciado, 73 k
+  vaciados). Lo siguiente que mas pesa es el NUMERO de vaciados, no el shader.
+- Incidente: a las 16:25 el driver AMD cayo (`VK_ERROR_DEVICE_LOST`) durante un experimento
+  con un shader que retornaba al instante, y el adaptador quedo en CM_PROB_FAILED_ADD (sin ICD
+  de Vulkan para nadie, parallel-RDP incluido) hasta reiniciar. No repetir ese experimento.
+  Ese dia hubo un corte de luz por tormenta a las 15:08, y la GPU funciono despues.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego

@@ -1112,7 +1112,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = lastX; r[T_LASTY] = lastY;
   t.lo[0] = lo[0]; t.hi[0] = hi[0]; t.lo[1] = lo[1]; t.hi[1] = hi[1];
   const u8* tm = textured ? tmem : nullptr;
-  if(!gpurdp::queueTri(t, tm, tlut)) { gpuFlush(mem); gpurdp::queueTri(t, tm, tlut); }
+  if(!gpurdp::queueTri(t, tm, tlut)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tm, tlut); }
   gpuTris.push_back({acct, combProg && !fillMode});
   gpuMark(lo[0], hi[0]);
   if(hi[1]) gpuMark(lo[1], hi[1]);
@@ -1236,7 +1236,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       pxShadeA = 0; lodFracV = 0xff;
       return;
     }
-    if(gpuQueued) gpuFlush(mem);   // va por el CPU: antes, lo encolado a la RDRAM
+    if(gpuQueued) { gpuFlushStat(65); gpuFlush(mem); }   // va por el CPU: antes, lo encolado a la RDRAM
   }
   // Recorrido de bordes en ENTERO, como el rasterizador del RDP. Oraculo: parallel-rdp
   // `span_setup.comp` (decodificacion en rdp_device.cpp) y `compute_coverage()` de
@@ -2343,7 +2343,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = X1 - 1; r[T_LASTY] = Y1 - 1;
   t.lo[0] = lo; t.hi[0] = hi;
-  if(!gpurdp::queueTri(t, tmem, tlut)) { gpuFlush(mem); gpurdp::queueTri(t, tmem, tlut); }
+  if(!gpurdp::queueTri(t, tmem, tlut)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tmem, tlut); }
   gpuTris.push_back({acct, combProg});
   gpuMark(lo, hi);
   gpuQueued = true;
@@ -2399,7 +2399,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   // GPU-RDP (KESTREL_GPURDP=1): 16 bpp sin mipmap a la GPU; si no, antes lo encolado a la RDRAM.
   if(gpurdp::active()) {
     if(!usesLod && gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
-    if(gpuQueued) gpuFlush(mem);
+    if(gpuQueued) { gpuFlushStat(66); gpuFlush(mem); }
   }
   const double hdFp = std::max(std::abs(dsdx), std::abs(dtdy));
   for(int y = Y0; y < Y1; y++) {
@@ -2560,6 +2560,24 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   }
 }
 
+// KESTREL_GPUFLUSHSTAT=1: al salir, por que se vacio la cola (opcode del comando, o el
+// final de run(), o una primitiva que cayo al CPU, o la cola llena).
+auto SoftRdp::gpuFlushStat(int why) -> void {
+  static const bool on = std::getenv("KESTREL_GPUFLUSHSTAT") != nullptr;
+  if(!on) return;
+  static u64 fh[68] = {};
+  static const bool reg = (std::atexit([] {
+    static const char* const extra[4] = {"fin de run()", "triangulo al CPU", "texrect al CPU", "cola llena"};
+    for(int i = 0; i < 68; i++) {
+      if(!fh[i]) continue;
+      if(i < 64) std::fprintf(stderr, "[gpurdp] vaciado por op %02x: %llu\n", i, (unsigned long long)fh[i]);
+      else std::fprintf(stderr, "[gpurdp] vaciado por %s: %llu\n", extra[i - 64], (unsigned long long)fh[i]);
+    }
+  }), true);
+  (void)reg;
+  fh[why]++;
+}
+
 auto SoftRdp::gpuMark(u32 lo, u32 hi) -> void {
   // Funde con un intervalo que solape o toque; si no cabe uno nuevo, agranda el ultimo
   // (sobra cobertura, nunca falta).
@@ -2656,20 +2674,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
                                   : u64(ti_addr) + ((th >> 2) + 1) * u64(ti_width) * 4 + ((sh >> 2) + 1) * 4 + 8;
         need = gpuDirtyHit(ti_addr, hi);
       }
-      if(need) {
-        // KESTREL_GPUFLUSHSTAT=1: al salir, que comandos obligaron a vaciar la cola.
-        static const bool fstat = std::getenv("KESTREL_GPUFLUSHSTAT") != nullptr;
-        if(fstat) {
-          static u64 fh[64] = {};
-          static const bool reg = (std::atexit([] {
-            for(int i = 0; i < 64; i++)
-              if(fh[i]) std::fprintf(stderr, "[gpurdp] vaciado por op %02x: %llu\n", i, (unsigned long long)fh[i]);
-          }), true);
-          (void)reg;
-          fh[op]++;
-        }
-        gpuFlush(mem);
-      }
+      if(need) { gpuFlushStat(op); gpuFlush(mem); }
     }
     const bool st = charge && mem.rdpStats.on.load(std::memory_order_relaxed);
     if(st) statsCmd(mem, op, cmd);
@@ -2867,7 +2872,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     cur += 8; executed++;
   }
   stopAt = cur;
-  if(gpuQueued) gpuFlush(mem);   // fuera de run() la RDRAM siempre esta al dia
+  if(gpuQueued) { gpuFlushStat(64); gpuFlush(mem); }   // fuera de run() la RDRAM siempre esta al dia
   if(ops) {
     // KESTREL_RDPOPS is the print interval in DP runs (default 512). Demos that
     // submit a single command buffer and then spin need =1, or the histogram

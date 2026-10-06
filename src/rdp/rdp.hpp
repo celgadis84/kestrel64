@@ -108,6 +108,7 @@ struct SoftRdp {
   u32 gpuDirtyLo[8] = {}, gpuDirtyHi[8] = {};
   int gpuNDirty = 0;
   auto gpuMark(u32 lo, u32 hi) -> void;
+  static auto gpuFlushStat(int why) -> void;
   auto gpuDirtyHit(u64 lo, u64 hi) const -> bool;
   auto colorImage() const -> u32 { return ci_addr; }
   // Zona de RDRAM que cubren las primitivas cobradas desde el ultimo reinicio: color image y
