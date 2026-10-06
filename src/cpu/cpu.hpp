@@ -704,6 +704,10 @@ struct CPU {
   // que comprueban osTvType se niegan a arrancar. 1 = NTSC.
   u32 bootTvType = 1;
   auto fastBoot(u32 entryPoint) -> void;  // HLE IPL3 hand-off state
+  // NMI del boton RESET: la CPU vuelve al vector de reset y el PIF/IPL3 arrancan en caliente
+  // (osResetType = 1 en s5 y 0x8000030C; la RDRAM y osAppNMIBuffer se quedan como estaban).
+  auto warmBoot(u32 entryPoint) -> void;
+  bool warm = false;                      // fastBoot en curso es un arranque en caliente
 
   // Execute one instruction (including its effect on pc/nextPc). No-op if halted.
   auto step() -> void;

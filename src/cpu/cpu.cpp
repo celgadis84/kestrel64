@@ -391,6 +391,23 @@ auto CPU::reset() -> void {
   if(mem) mem->cartClockPend = &jitPending;   // + lo que la cadena del JIT aun no ha commiteado
 }
 
+auto CPU::warmBoot(u32 entryPoint) -> void {
+  // El reloj de invitado no vuelve atras con el NMI: todos los plazos (VI, SI, PI, AI) estan
+  // medidos en el. Count tampoco lo toca el NMI.
+  const u64 ret = retired, sc = stallCycles, so = stallOps, sr = stallOpsRem;
+  const u64 cnt = cop0[C0_Count]; const u32 cf = countFrac;
+  warm = true;
+  fastBoot(entryPoint);
+  warm = false;
+  retired = ret; stallCycles = sc; stallOps = so; stallOpsRem = sr;
+  cop0[C0_Count] = cnt; countFrac = cf;
+  // El codigo en RDRAM/IMEM acaba de reescribirse por debajo (copia del IPL3).
+  if(jitCache) jitCache->clear();
+  jitTlbValid = false; fetchLineVBase = 1; bumpXlat();
+  jitPending = jitChain = jitChainOps = jitOpsBudget = jitGuard = 0;
+  memAbort = false;
+}
+
 auto CPU::fastBoot(u32 entryPoint) -> void {
   reset();
   // Identify the cart's CIC boot chip from its IPL3 image — sets the correct
@@ -475,7 +492,7 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
     // IPL2 -> IPL3 register hand-off (what the PIF/IPL2 leave for IPL3).
     gpr[19] = 0;                              // s3 = osRomType (cart)
     gpr[20] = (u64)bootTvType;                // s4 = osTvType (0 PAL / 1 NTSC / 2 MPAL)
-    gpr[21] = 0;                              // s5 = osResetType (cold)
+    gpr[21] = warm ? 1 : 0;                   // s5 = osResetType (0 frio, 1 NMI)
     gpr[22] = (u64)cic.seed;                 // s6 = CIC seed
     gpr[23] = pal ? 6u : 0u;                  // s7 = osVersion (PAL PIF ROM reports 6)
     // t3 apunta al PROPIO IPL3 ya copiado en DMEM. No es decorativo: el IPL3 de los
@@ -525,11 +542,11 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
     putw(0x300, bootTvType);   // osTvType (0 PAL / 1 NTSC / 2 MPAL), segun la region del cart
     putw(0x304, 0);            // osRomType (0 = cart)
     putw(0x308, 0xb000'0000);  // osRomBase (cart domain-1, KSEG1)
-    putw(0x30c, 0);            // osResetType: 0 = cold boot
+    putw(0x30c, warm ? 1 : 0); // osResetType: 0 = cold boot, 1 = NMI (boton RESET)
     putw(0x310, (u32)cicId);   // osCicId (6101/6102/6103/6105/6106, PAL 71xx)
     putw(0x314, 0);            // osVersion
     putw(0x318, (u32)mem->rdram.size());  // osMemSize (RDRAM bytes)
-    putw(0x31c, 0);            // osAppNMIBuffer[0]
+    if(!warm) putw(0x31c, 0);  // osAppNMIBuffer[0] (el arranque en caliente no lo toca)
     // The PIF's RDRAM power-on self test leaves the measured size at 0x3F0 as well;
     // the 6105 IPL3 reads it back (`lw t1,0xf0(t0)` with t0 = 0xA0000300) and forwards
     // it to osMemSize. Under HLE nothing reads it, but the word is part of the boot
@@ -551,6 +568,7 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
   gpr[10] = 0x0000'0000'0000'0040ull;      // t2
   gpr[11] = 0xffff'ffff'a400'0040ull;      // t3 = the IPL3 image still in DMEM
   gpr[20] = (u64)bootTvType;               // s4 = osTvType
+  gpr[21] = warm ? 1 : 0;                  // s5 = osResetType
   gpr[22] = (u64)cic.seed;                 // s6 = CIC seed
   gpr[23] = pal ? 6u : 0u;                 // s7 = osVersion
   gpr[24] = pal ? 0u : 3u;                 // t8 (6105/6106 override it below on PAL)

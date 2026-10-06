@@ -220,6 +220,37 @@ static auto guestQueueBroken(CPU& cpu, u32 qaddr, char* why, size_t whyN) -> boo
   return true;
 }
 
+// Boton RESET (n64brew PIF / libultra osResetType). Al pulsarlo el PIF levanta INT2 de la
+// CPU = Cause IP4 (pre-NMI) y lo mantiene; ~0,5 s despues manda el NMI: la CPU salta al
+// vector de reset, el PIF rehace su arranque y el IPL3 corre otra vez con s5 = 1, sin
+// borrar la RDRAM. IP4 se pone directo en Cause: el interprete y el JIT solo reescriben
+// IP2/IP7 al muestrear, asi que el bit se queda hasta el NMI. La RCP tambien se reinicia:
+// RSP parado y MI sin mascaras ni interrupciones pendientes.
+auto System::resetButton() -> void {
+  if(rt::resetReq.exchange(false, std::memory_order_acq_rel) && !nmiAt && !cpu.halted) {
+    cpu.cop0[CPU::C0_Cause] = (s64)(s32)((u32)cpu.cop0[CPU::C0_Cause] | 0x1000u);
+    nmiAt = memory.cartNow() + memory.usToInsns(500'000);
+    std::fprintf(stderr, "[reset] boton RESET: pre-NMI (IP4), NMI en 0,5 s\n");
+  }
+  if(!nmiAt || memory.cartNow() < nmiAt) return;
+  nmiAt = 0;
+  memory.write32(0xA404'0010u, 0x2u);             // SP_STATUS: SET_HALT
+  memory.write32(0xA430'000Cu, 0x555u);           // MI_INTR_MASK: limpiar las seis
+  memory.write32(0xA404'0010u, 0x8u);             // SP: limpiar interrupcion
+  memory.write32(0xA430'0000u, 0x800u);           // MI_MODE: limpiar DP
+  memory.write32(0xA450'000Cu, 0u);               // AI_STATUS: limpiar AI
+  memory.write32(0xA480'0018u, 0u);               // SI_STATUS: limpiar SI
+  memory.write32(0xA460'0010u, 0x2u);             // PI_STATUS: limpiar PI
+  memory.write32(0xA440'0010u, 0u);               // VI_CURRENT: limpiar VI
+  // El PIF vuelve a su modo de arranque: espera otra vez el 0x08 del cartucho, con plazo
+  // contado desde ahora.
+  memory.pifBootMode = true; memory.pifRomLocked = false;
+  memory.pifBootDeadline = memory.cartNow() + memory.usToInsns(Memory::kPifBootUs);
+  cpu.warmBoot(rom.header.entryPoint);
+  std::fprintf(stderr, "[reset] NMI: arranque en caliente, pc=0x%08x\n", (u32)cpu.pc);
+  std::fflush(stderr);
+}
+
 auto System::stepCpu(u64 n) -> u64 {
   const bool jitOn = g_jitOn;
   static const u32 qchkAddr  = std::getenv("KESTREL_QCHK")
@@ -943,6 +974,7 @@ auto System::run() -> void {
       if(viFieldPend) { fieldClosed = true; viFieldPend = false; }
       // El PIF paro la CPU (NMI sostenida): la consola se queda congelada hasta apagarla.
       if(memory.pifFrozen && !cpu.halted) cpu.halted = true;
+      resetButton();
       // Trucos: el motor del GameShark colgaba de la interrupcion del VI, asi que el ritmo
       // es el campo de video y no el fotograma del juego. Va aqui dentro, con el nucleo
       // parado bajo coreMutex, para que las escrituras no crucen con la CPU ni con el RCP.

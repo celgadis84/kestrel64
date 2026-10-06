@@ -26,6 +26,8 @@ namespace kestrel::rt {
 inline std::atomic<int> throttle{-1};
 // HUD de telemetria pintado sobre la imagen.
 inline std::atomic<bool> hud{true};
+// Boton RESET de la consola (menu / Ctrl+R / MCP reset.soft): lo recoge System al cerrar campo.
+inline std::atomic<bool> resetReq{false};
 // Salida de sonido del anfitrion y volumen 0..100 (el dispositivo sigue abierto: apagar el
 // audio a mitad de partida no puede reabrir el dispositivo desde otro hilo sin carreras).
 inline std::atomic<bool> audioOn{true};

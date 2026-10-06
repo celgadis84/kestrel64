@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "../core/runtime.hpp"
 #include "symbols.hpp"
 #include "../core/savestate.hpp"
 #include "../core/system.hpp"
@@ -108,6 +109,10 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     cmdCpuStep(args, data); done();
   } else if(cmd == "cpu.disasm") {
     if(cmdCpuDisasm(args, data)) done(); else fail("cpu.disasm: bad range");
+  } else if(cmd == "reset.soft") {
+    // Boton RESET de la consola (pre-NMI + NMI a los 0,5 s, arranque en caliente). No bloquea.
+    rt::resetReq.store(true, std::memory_order_release);
+    done();
   } else if(cmd == "pause" || cmd == "resume" || cmd == "reset") {
     cmdRunControl(cmd, data); done();
   } else if(cmd == "frame.advance") {

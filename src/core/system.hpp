@@ -44,6 +44,9 @@ struct System {
   // todos), asi que un campo = una entrada de la pelicula, que es lo que hace falta para
   // colocar una pulsacion en el sitio exacto.
   std::atomic<u32> stepFields{0};
+  // Boton RESET: instante (reloj de invitado) del NMI mientras dura el aviso pre-NMI; 0 = nada.
+  u64 nmiAt = 0;
+  auto resetButton() -> void;   // bajo coreMutex, en cada vuelta del bucle
   // Corrida por lotes (--run sin vídeo): un halt de la CPU (cap de maxinsn, fatal) es el fin
   // de la sesión, así que se sale en vez de quedarse girando. En modo MCP NO: ahí el halt es
   // un punto de inspección y el proceso tiene que seguir vivo para el cliente.

@@ -166,6 +166,7 @@ auto buildMenu() -> void {
 
   HMENU emu = CreatePopupMenu();
   addItem(emu, kPause, "&Pausa\tCtrl+P");
+  addItem(emu, kReset, "Boton &RESET\tCtrl+R");
   addSep(emu);
   addItem(emu, kSaveState, "&Guardar estado\tF5");
   addItem(emu, kLoadState, "&Cargar estado\tF7");
@@ -1491,6 +1492,9 @@ auto onCommand(UINT id) -> void {
       if(g_h.shutdown) g_h.shutdown->store(true, std::memory_order_release);
       PostMessageA(g_game, WM_CLOSE, 0, 0);
       return;
+    case kReset:
+      rt::resetReq.store(true, std::memory_order_release);
+      break;
     case kPause:
       if(g_h.paused) {
         bool now = !g_h.paused->load();
@@ -1617,6 +1621,7 @@ LRESULT CALLBACK gameProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if(w == VK_F11) onCommand(kFull);
         else if(ctrl && w == 'O') onCommand(kOpenRom);
         else if(ctrl && w == 'P') onCommand(kPause);
+        else if(ctrl && w == 'R') onCommand(kReset);
       }
       break;
     case WM_INITMENUPOPUP: {

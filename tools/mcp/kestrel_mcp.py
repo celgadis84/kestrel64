@@ -180,9 +180,13 @@ def sym_lookup(addr=None, name: str = "") -> dict:
 
 
 def run_control(action: str) -> dict:
-    """action = 'pause' | 'resume' | 'reset'."""
-    if action not in ("pause", "resume", "reset"):
-        raise KestrelError("action must be pause|resume|reset")
+    """action = 'pause' | 'resume' | 'reset' | 'reset.soft'.
+
+    'reset' = power cycle (cold boot, paused). 'reset.soft' = console RESET button:
+    pre-NMI (Cause IP4) now, NMI 0.5 s of guest time later, warm boot (osResetType=1,
+    RDRAM and the NMI buffer kept)."""
+    if action not in ("pause", "resume", "reset", "reset.soft"):
+        raise KestrelError("action must be pause|resume|reset|reset.soft")
     data, _ = query(action)
     return data
 
