@@ -5,11 +5,11 @@
 // RDRAM y de sus bits ocultos, registros, TMEM, resultados) y un pipeline de compute por
 // primitiva. Nada de Granite: todo lo que hay aqui es codigo propio.
 //
-// Fase 5: cada buffer tiene un gemelo en memoria de la GPU (DEVICE_LOCAL), que es el que lee y
-// escribe el shader; el visible desde el anfitrion queda de intermediario con los mismos
-// desplazamientos, y por vaciado se copian por DMA solo las zonas que hacen falta. Con la
-// memoria del anfitrion como unica copia, en una GPU discreta cada acceso del shader cruzaba
-// el PCIe. KESTREL_GPURDP_HOSTMEM=1 vuelve a ese camino (A/B).
+// Fase 5: KESTREL_GPURDP_LOCAL=1 da a cada buffer un gemelo en memoria de la GPU (DEVICE_LOCAL),
+// que es el que lee y escribe el shader; el visible desde el anfitrion queda de intermediario
+// con los mismos desplazamientos, y por vaciado se copian por DMA solo las zonas que hacen
+// falta. Medido (RX 570, SM64): las copias cuestan mas que leer por PCIe lo poco que toca cada
+// vaciado (32,7 s contra 28,9 s), asi que de fabrica el shader usa la memoria del anfitrion.
 #include "gpurdp.hpp"
 
 // Las estructuras de Vulkan se inicializan como {sType} y el resto a cero: es lo idiomatico,
@@ -269,8 +269,8 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     vkFlushMappedMemoryRanges(c.dev, 1, &mr);
   }
   // Gemelos en memoria de la GPU; si falta alguno, todos fuera (camino viejo entero).
-  const char* hm = std::getenv("KESTREL_GPURDP_HOSTMEM");
-  if(!(hm && hm[0] && hm[0] != '0')) {
+  const char* lm = std::getenv("KESTREL_GPURDP_LOCAL");
+  if(lm && lm[0] && lm[0] != '0') {
     Buf* all[] = {&c.ram, &c.hid, &c.recs, &c.lut, &c.outs, &c.tmem};
     c.local = true;
     for(Buf* b : all) if(!makeLocal(c, *b)) { c.local = false; break; }
@@ -725,7 +725,11 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     if(outs) outs->assign(c.tris.size(), TriOut{});
     c.q.clear(); c.tris.clear(); c.ops.clear(); c.tslots.clear(); return;
   }
-  vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
+  // KESTREL_GPURDP_SPIN=1: sondeo activo del fence en vez de dormir en el driver (A/B de la
+  // latencia de despertar; el hilo que espera no tiene otra cosa que hacer).
+  static const bool spin = [] { const char* e = std::getenv("KESTREL_GPURDP_SPIN"); return e && e[0] && e[0] != '0'; }();
+  if(spin) { while(vkGetFenceStatus(c.dev, c.fence) == VK_NOT_READY) {} }
+  else vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
   vkResetFences(c.dev, 1, &c.fence);
   const auto t3 = clk::now();
   if(c.qpool) {

@@ -210,7 +210,7 @@ krom + thar0 ALL OK.
 Prueba: `gate_gpurdp` ALL OK (7 m 29 s), krom 371/371 identicas exacto (las suites 32BPP
 incluidas); gate_quick thar0 ALL OK.
 
-### Fase 5 -- coherencia y rendimiento EN CURSO 2026-10-06
+### Fase 5 -- coherencia y rendimiento HECHA 2026-10-06
 
 Medido (SM64, 600 intercambios, RX 570, i7-870 con PCIe 2.0): **57 s con GPU-RDP contra
 13,5 s con SoftRDP**. Instrumentos nuevos: `KESTREL_GPUFLUSHSTAT=1` (por que se vacio la cola:
@@ -230,9 +230,10 @@ salir (subir / grabar / enviar+esperar / bajar).
 - Hipotesis: **todos los buffers vivian en memoria del anfitrion** (HOST_VISIBLE |
   HOST_CACHED), y en una GPU discreta cada acceso del shader cruzaria el PCIe. **MEDIDA Y
   DESCARTADA**: gemelos DEVICE_LOCAL con subida y bajada por DMA (`vkCmdCopyBuffer`) en el
-  mismo command buffer dan 37,2 s de espera contra 36,0 s del camino viejo. Ruido. El cambio se
-  queda (de fabrica) porque con el despacho por teselas el shader lee mucho mas por pixel;
-  `KESTREL_GPURDP_HOSTMEM=1` = camino viejo.
+  mismo command buffer dan 37,2 s de espera contra 36,0 s del camino viejo. Ruido. Con el
+  despacho por teselas ya PIERDE: pared 32,7 s con gemelos contra 28,9 s sin ellos (las
+  marcas de tiempo dan 5,6 s de GPU en copias por 0,06 s del camino del anfitrion). De fabrica
+  memoria del anfitrion; `KESTREL_GPURDP_LOCAL=1` = gemelos.
 - Cambio 2: barrera solo entre unidades cuyas huellas de RDRAM se cruzan. Huella = caja de
   pixeles cubiertos sobre su imagen (color y z), columnas ensanchadas a grupos de 8 bytes
   alineados (palabra del espejo y palabra de bits ocultos nunca partidas, que es lo que hace
@@ -254,10 +255,22 @@ salir (subir / grabar / enviar+esperar / bajar).
   GPU` al salir): subida 1,4 s, despachos 7,9 s, bajada 4,3 s = 13,5 s de GPU; la espera es
   25,5 s, o sea **~12 s son ida y vuelta pura de envio + fence** (~165 us por vaciado, 73 k
   vaciados). Lo siguiente que mas pesa es el NUMERO de vaciados, no el shader.
+- `KESTREL_GPURDP_SPIN=1`: sondeo activo del fence (`vkGetFenceStatus`) en vez de dormir en
+  `vkWaitForFences`. ~1 s menos en 600 intercambios (28,9 -> 27,6 s) a costa de un nucleo
+  quemado mientras la GPU trabaja; apagado de fabrica.
 - Incidente: a las 16:25 el driver AMD cayo (`VK_ERROR_DEVICE_LOST`) durante un experimento
   con un shader que retornaba al instante, y el adaptador quedo en CM_PROB_FAILED_ADD (sin ICD
   de Vulkan para nadie, parallel-RDP incluido) hasta reiniciar. No repetir ese experimento.
   Ese dia hubo un corte de luz por tormenta a las 15:08, y la GPU funciono despues.
+- Perfect Dark (PAL, intro en 3D): GPU-RDP ~2x mas rapido de pared que SoftRDP, mismo md5
+  del framebuffer a 1200 y a 4000 campos VI. Entra en la puerta: `validate.py pd` (1200 campos,
+  baseline `docs/baselines/pd.txt` = SoftRDP, que el GPU-RDP tiene que dar bit a bit; la ROM
+  se copia a `out/pd/` sin partidas guardadas).
+
+Cierre: `gate_gpurdp` ALL OK (7 m 00 s, con pd), krom 371/371 identicas a interp. Suelo que
+queda: ~165 us de envio + fence por vaciado, y los vaciados los marca la contabilidad del
+invitado (ver arriba). parallel-RDP no paga eso porque no devuelve la contabilidad por
+primitiva.
 
 ## Riesgos
 

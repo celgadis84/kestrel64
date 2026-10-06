@@ -501,6 +501,45 @@ def gate_sm64(mode, args):
     return want is None or want == md5
 
 
+def gate_pd(mode, args):
+    """Perfect Dark (PAL): intro en 3D, md5 del framebuffer VI a --pd-flips campos.
+
+    Misma idea que sm64 con una carga de RDP mucho mas pesada (cuadros enteros con
+    texturas, niebla, framebuffer leido por el CPU). La ROM se copia a out/pd/ sin sus
+    partidas guardadas: una partida vieja cambia el arranque y el md5. Referencia por
+    backend como sm64 (pd.txt = SoftRDP, que el GPU-RDP tiene que dar bit a bit).
+    """
+    src = ROMS / "Perfect Dark (Europe) (En,Fr,De,Es,It).n64"
+    if not src.exists():
+        print(f"pd: SKIP (missing {src})")
+        return True
+    work = OUT / "pd"
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    rom = work / "pd.n64"
+    shutil.copyfile(src, rom)
+    dump = OUT / f"pd-{mode}.bmp"
+    t0 = time.time()
+    rc, log = run_rom(rom, dump, mode, args.pd_insn, args.sm64_timeout, frames=(args.pd_flips, 0))
+    (OUT / f"pd-{mode}.log").write_text(log, encoding="utf-8")
+    if not dump.exists():
+        print(f"pd[{mode}]: FAIL no framebuffer dump (rc={rc})")
+        return False
+    md5 = hashlib.md5(dump.read_bytes()).hexdigest()
+    bl = BASELINES / ("pd-prdp.txt" if MODES[mode].get("KESTREL_PRDP") == "1" else "pd.txt")
+    want = bl.read_text(encoding="utf-8").split()[0] if bl.exists() else None
+    if args.update_baseline:
+        BASELINES.mkdir(parents=True, exist_ok=True)
+        bl.write_text(md5 + "\n", encoding="utf-8")
+        want = md5
+    verdict = "MATCH" if want == md5 else ("no-baseline" if want is None else "DIVERGE")
+    print(f"pd[{mode}]: {verdict} md5={md5} ({time.time()-t0:.0f}s, {args.pd_flips} campos VI)")
+    if want is not None and want != md5:
+        print(f"   baseline {want}")
+    return want is None or want == md5
+
+
 def _bench_once(mode, args, flips):
     """Una medida: N campos VI, se repite --bench-runs veces y se queda el MINIMO
     (la muestra menos contaminada por el resto del sistema). Devuelve (mejor, hb)."""
@@ -587,7 +626,7 @@ def gate_bench(mode, args):
 
 def main():
     ap = argparse.ArgumentParser(description="kestrel64 validation gates")
-    ap.add_argument("gate", choices=["systemtest", "krom", "sm64", "bench", "all"])
+    ap.add_argument("gate", choices=["systemtest", "krom", "sm64", "pd", "bench", "all"])
     ap.add_argument("--sm64-flips", type=int, default=60,
                     help="campos VI (buffer swaps) antes de volcar el framebuffer")
     ap.add_argument("--mode", default="interp", choices=sorted(MODES),
@@ -614,6 +653,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=90, help="krom: seconds per ROM")
     ap.add_argument("--sm64-insn", type=int, default=900_000_000)   # solo red de seguridad: el corte real son --sm64-flips campos
     ap.add_argument("--sm64-timeout", type=int, default=600)
+    ap.add_argument("--pd-flips", type=int, default=1200, help="pd: campos VI antes de volcar")
+    ap.add_argument("--pd-insn", type=int, default=4_000_000_000)   # red de seguridad
     ap.add_argument("--st-timeout", type=int, default=300)
     ap.add_argument("--bench-runs", type=int, default=3, help="bench: repeticiones (se queda el minimo)")
     ap.add_argument("--bench-flips", type=int, default=200, help="bench: campos VI de trabajo fijo")
@@ -639,7 +680,7 @@ def main():
     fail = False
     for g in gates:
         okg = {"systemtest": gate_systemtest, "krom": gate_krom, "sm64": gate_sm64,
-               "bench": gate_bench}[g](args.mode, args)
+               "pd": gate_pd, "bench": gate_bench}[g](args.mode, args)
         if not okg:
             fail = True
             if args.gate == "all":
