@@ -111,7 +111,9 @@ sh scripts/gate_prdp.sh                               # backend GPU (parallel-rd
 sh scripts/gate_quick.sh [krom] [lock] [phys] [thar0] # puerta RAPIDA por cambio (~1,5 min)
 ```
 
-**Politica de puertas (usuario, 2026-09-29)**: por cada cambio basta `gate_quick.sh` (systemtest
+**Politica de puertas (usuario, 2026-10-06, MANDA SOBRE LO DEMAS)**: probar SOLO lo que toca
+el cambio, con una prueba dirigida de segundos (la ROM/escena/modo afectado). Las baterias
+(`gate_*`, krom completo) solo cuando el usuario las pida. Politica anterior (2026-09-29): por cada cambio basta `gate_quick.sh` (systemtest
 threaded-jit + sm64 interp + sm64 prdp-jit sobre los exe STATIC) mas los extras que toquen al
 cambio (`thar0` si toca coste RDP, `krom` si toca rasterizador, `lock`/`phys` si toca CPU/RCP;
 statehash si toca citas RCP). `gate_all` + `gate_prdp` completos SOLO al cerrar fase o bloque
