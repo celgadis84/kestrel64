@@ -271,15 +271,17 @@ def controller_state() -> dict:
     return data
 
 
-def capture_framebuffer(path: str = "kestrel_fb.png", height: int = 240) -> dict:
+def capture_framebuffer(path: str = "kestrel_fb.png", height: int = 240, frame: int = 0) -> dict:
     """Grab the live VI framebuffer and write it as a PNG to `path`.
 
     Decodes the exact buffer the VI is scanning out (origin/width/format read from
     the RCP registers), expanding 16bpp 5551 or 32bpp 8888 to RGBA. Returns the
     geometry plus the saved path and a small pixel histogram so a blank vs. rendered
     frame is obvious without opening the image. This is kestrel's own capture path —
-    no host GPU readback, just the RDRAM the console would display."""
-    data, blob = query("vi.capture", height=int(height))
+    no host GPU readback, just the RDRAM the console would display.
+    frame=1 (interlaced/SERRATE, use height=480): both fields' frame, starting at the
+    lower of the two per-field origins, instead of the field being scanned."""
+    data, blob = query("vi.capture", height=int(height), frame=int(frame))
     w, h = data["width"], data["height"]
     _write_png(path, w, h, blob)
     data["path"] = path

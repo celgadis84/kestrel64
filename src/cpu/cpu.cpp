@@ -76,7 +76,10 @@ static int g_seenIdx = 0;
 // batch/headless run can be eyeballed. Honors 16bpp (RGBA5551) and 32bpp.
 static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   if(!mem) return;
-  u32 origin = mem->rcp.vi_origin & 0x00ff'ffff;
+  // KESTREL_FBFRAME=1: en entrelazado (SERRATE), el cuadro entero de los dos campos en vez
+  // del campo que tocaba al salir.
+  static const bool frame = [] { const char* e = std::getenv("KESTREL_FBFRAME"); return e && e[0] == '1'; }();
+  u32 origin = frame ? mem->rcp.viFrameOrigin() : mem->rcp.vi_origin & 0x00ff'ffff;
   u32 type   = mem->rcp.vi_ctrl & 3;                 // 2=16bpp, 3=32bpp
   u32 srcW = mem->rcp.vi_width ? mem->rcp.vi_width : 320;   // framebuffer line stride (source pixels)
   // Tope = los 12 bits del registro. Capar el PASO a 320 partia el entrelazado (VI_WIDTH

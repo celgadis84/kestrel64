@@ -1135,7 +1135,7 @@ auto Memory::mmioRead32(u32 a) -> u32 {
       u32 total = rcp.viHalflines();
       u64 field = viFieldInsns ? viFieldInsns : 1;
       u64 cyc = cartNow();   // mismo reloj de invitado que viTick (incluye paradas de cache)
-      return (u32)((cyc % field) * total / field);
+      return rcp.viCurrentAt(cyc, field);
     }
     case 0x14: return rcp.vi_burst;
     case 0x18: return rcp.vi_vsync;
@@ -2485,10 +2485,11 @@ auto Memory::viTick(u64 retiredNow) -> bool {
   bool intrFire   = crossings(retiredNow) > crossings(viLastRetired);
   bool fieldClose = (retiredNow / field) > (viLastRetired / field);
   viLastRetired = retiredNow;
-  rcp.vi_current = (u32)((retiredNow % field) * total / field) & ~1u;
+  rcp.vi_current = rcp.viCurrentAt(retiredNow, field) & ~(rcp.vi_ctrl & 0x40 ? 0u : 1u);
   if(intrFire) raiseIntr(MI_VI);
   if(fieldClose) {
     rcp.viFields++;
+    rcp.viFieldOrigin[(retiredNow / field - 1) & 1] = rcp.vi_origin & 0x00ffffff;
     // Plazo del PIF para el 0x08 (fin del arranque), contado desde el encendido (instante 0
     // del reloj de invitado) y mirado por campo: la congelacion llega como mucho un campo
     // tarde, que para un plazo de 5 s da igual. KESTREL_PIFBOOTWAIT=0 lo quita (solo para

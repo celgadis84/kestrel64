@@ -781,7 +781,9 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
   {
     std::lock_guard<std::mutex> lk(system.coreMutex);
     Rcp& r = system.memory.rcp;
-    origin = r.vi_origin & 0x00FFFFFF;   // physical RDRAM address
+    // frame=1: en entrelazado, el cuadro de los dos campos (ver Rcp::viFrameOrigin).
+    origin = args.has("frame") && args.get("frame").asU32() ? r.viFrameOrigin()
+                                                             : r.vi_origin & 0x00FFFFFF;
     width  = r.vi_width & 0xFFF;
     ctrl   = r.vi_ctrl;
   }

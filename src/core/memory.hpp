@@ -114,6 +114,25 @@ struct Rcp {
   // tick del VI, la lectura de VI_V_CURRENT y el alto del framebuffer tenian tres copias
   // de esta expresion con mascaras distintas (0x3ff / 0x3fe) y dos valores por defecto.
   auto viHalflines() const -> u32 { u32 t = vi_vsync & 0x3ff; return t >= 2 ? t : 525; }
+  // VI_ORIGIN que se barrio en el ultimo campo de cada paridad (lo apunta viTick al cerrar
+  // campo). Solo para volcar/capturar el cuadro entrelazado entero; no es estado del invitado.
+  u32 viFieldOrigin[2] = {};
+  // Origen del CUADRO entrelazado: con SERRATE y los dos campos apuntando a lineas contiguas
+  // del mismo framebuffer (el de arriba = filas pares), el menor de los dos; si no, VI_ORIGIN.
+  auto viFrameOrigin() const -> u32 {
+    const u32 o = vi_origin & 0x00ffffff, a = viFieldOrigin[0], b = viFieldOrigin[1];
+    if(!(vi_ctrl & 0x40) || !a || !b) return o;
+    const u32 lo = a < b ? a : b, d = (a < b ? b : a) - lo;
+    const u32 line = (vi_width & 0xfff) * ((vi_ctrl & 3) == 3 ? 4u : 2u);
+    return d <= line ? lo : o;
+  }
+  // VI_V_CURRENT en el instante `t` (reloj de invitado) con campos de `field` ops. Con SERRATE
+  // (VI_CTRL bit 6, entrelazado) el bit 0 es el CAMPO actual y alterna en cada vblank
+  // (n64brew VI: "in interlaced mode, bit 0 is the field"); sin el, media-linea a secas.
+  auto viCurrentAt(u64 t, u64 field) const -> u32 {
+    const u32 hl = (u32)((t % field) * viHalflines() / field);
+    return (vi_ctrl & 0x40) ? (hl & ~1u) | (u32)((t / field) & 1) : hl;
+  }
   // AI — models a 2-deep DMA buffer FIFO so the audio driver blocks (STATUS
   // FIFO_FULL) instead of generating frames forever, and gets MI_AI when a
   // buffer drains. Without this the audio thread spins in the frame builder and
