@@ -153,6 +153,10 @@ def save_profile(p):
     os.replace(tmp, PROFILE)
 
 
+GPURDP_DESC = ("Rasterizador propio en la GPU (Vulkan compute). Mismos pixeles que SoftRDP, "
+               "telemetria exacta, texturas HD y escalado interno.")
+
+
 def builds():
     """Compilaciones presentes. El plugin grafico se elige en tiempo de COMPILACION
     (opcion de cmake KESTREL_PRDP), asi que el lanzador elige EJECUTABLE, no una dll."""
@@ -197,6 +201,12 @@ def builds():
                     continue
                 out.append(dict(id=p2, label=l2, dir=".", exe=exe,
                                 desc=DESC[p2], mtime=int(os.path.getmtime(exe))))
+    # GPU-RDP (propio, Vulkan compute) va dentro del mismo .exe que parallel-RDP y es su
+    # defecto desde la fase 7 (2026-10-06, docs/GPU-RDP.md).
+    for x in list(out):
+        if x["id"] == "prdp":
+            out.insert(0, dict(x, id="gpurdp", label="GPU-RDP", desc=GPURDP_DESC))
+            break
     return out
 
 
@@ -204,12 +214,12 @@ def pick_exe(plugin):
     b = builds()
     if not b:
         return None
-    if plugin in ("soft", "prdp"):
+    if plugin in ("gpurdp", "soft", "prdp"):
         for x in b:
             if x["id"] == plugin:
                 return x
-    # auto: paraLLEl-RDP si esta compilado, si no el de siempre.
-    for want in ("prdp", "soft"):
+    # auto: GPU-RDP si esta compilado (el .exe de parallel-RDP lo lleva), si no SoftRDP.
+    for want in ("gpurdp", "prdp", "soft"):
         for x in b:
             if x["id"] == want:
                 return x
@@ -833,7 +843,8 @@ class H(BaseHTTPRequestHandler):
         bl = pick_exe(prof.get("plugin", "auto"))
         if not bl:
             return dict(ok=False, error="no hay ningun kestrel64.exe compilado")
-        if bl["id"] != "prdp":
+        if bl["id"] == "soft":
+            env["KESTREL_GPURDP"] = "0"
             env["KESTREL_PRDP"] = "0"   # ese exe no lleva backend GPU; que quede dicho
         # El mapeo del mando va en fichero, no en variables: son 18 asignaciones por
         # conector. El mando 1 se guarda bajo la clave "pad" (la de siempre) y los otros

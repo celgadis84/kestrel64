@@ -295,7 +295,11 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
   // hdUpload lo agranda entonces a KESTREL_GPURDP_HDMB (64 MB por defecto).
   if(!makeBuf(c, c.hd, 4)) return false;
   c.hdEpoch = texpack::g_epoch;
-  if(const char* e = std::getenv("KESTREL_GPURDP_UPSCALE"); e && e[0]) {
+  // Escalado: KESTREL_GPURDP_UPSCALE, o la opcion general KESTREL_UPSCALE (la del lanzador;
+  // 8 se queda en 4, que es el tope de aqui).
+  const char* upE = std::getenv("KESTREL_GPURDP_UPSCALE");
+  if(!upE || !upE[0]) upE = std::getenv("KESTREL_UPSCALE");
+  if(const char* e = upE; e && e[0]) {
     const int f = std::atoi(e);
     const u32 up = f >= 4 ? 2 : f >= 2 ? 1 : 0;
     if(up) {
@@ -551,8 +555,11 @@ auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, 
 }
 
 auto wanted() -> bool {
-  const char* e = std::getenv("KESTREL_GPURDP");
-  return e && e[0] && e[0] != '0';
+  // Fase 7: rasterizador de fabrica. KESTREL_GPURDP manda si esta puesto; si no, lo apaga
+  // cualquier eleccion explicita de KESTREL_PRDP (=1 parallel-RDP, =0 SoftRDP).
+  if(const char* e = std::getenv("KESTREL_GPURDP"); e && e[0]) return e[0] != '0';
+  const char* p = std::getenv("KESTREL_PRDP");
+  return !p || !p[0];
 }
 
 auto init(u32 rdramSize) -> bool {

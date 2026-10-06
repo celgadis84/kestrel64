@@ -206,11 +206,14 @@ function buildVideo() {
   const have = new Set(BUILDS.map(b => b.id));
   const defs = [
     {id: "auto", label: "Automatico", desc: "Usa la mejor compilacion disponible.", ok: true},
+    {id: "gpurdp", label: "GPU-RDP",
+     desc: "Rasterizador propio en la GPU (Vulkan compute). Mismos pixeles que SoftRDP, telemetria exacta, texturas HD y escalado.",
+     ok: have.has("gpurdp"), tag: "build-prdp/"},
     {id: "soft", label: "SoftRDP",
      desc: "Rasterizador propio en CPU. Determinista y sin GPU: es el oraculo de correccion.",
      ok: have.has("soft"), tag: "build/"},
     {id: "prdp", label: "paraLLEl-RDP",
-     desc: "RDP a bajo nivel sobre Vulkan, en la GPU. Mas rapido y mas exacto en subpixel.",
+     desc: "RDP a bajo nivel sobre Vulkan, en la GPU. Alternativa; se retirara.",
      ok: have.has("prdp"), tag: "build-prdp/"},
   ];
   const cur = CFG.plugin || "auto";

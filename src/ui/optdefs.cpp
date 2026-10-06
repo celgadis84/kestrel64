@@ -26,8 +26,9 @@ static const Choice kCh_throttle[] = {
 };
 static const Choice kCh_plugin[] = {
   {"auto", "Automatico - la compilacion disponible"},
+  {"gpurdp", "GPU-RDP - rasterizador propio en Vulkan compute, igual que SoftRDP"},
   {"soft", "SoftRDP - rasterizador propio en CPU, determinista"},
-  {"prdp", "paraLLEl-RDP - LLE por Vulkan en GPU"},
+  {"prdp", "paraLLEl-RDP - LLE por Vulkan en GPU (se retirara)"},
 };
 static const Choice kCh_winscale[] = {
   {"1", "1x - 320x240"},
@@ -137,7 +138,7 @@ static const Option kOpt_oc[] = {
 };
 
 static const Option kOpt_video[] = {
-  {"plugin", nullptr, "Rasterizador (plugin grafico)", OType::Choice, "auto", "Un solo ejecutable con los dos. Automatico = paraLLEl-RDP si hay GPU con Vulkan, si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Con texturas HD o realce, automatico elige SoftRDP. Cambiarlo relanza el emulador.", false, false, false, 0, 0, 0, kCh_plugin, 3, false},
+  {"plugin", nullptr, "Rasterizador (plugin grafico)", OType::Choice, "auto", "Un solo ejecutable con los tres. Automatico = GPU-RDP si hay GPU con Vulkan, si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Texturas HD y realce van con GPU-RDP y SoftRDP, no con paraLLEl-RDP. Cambiarlo relanza el emulador.", false, false, false, 0, 0, 0, kCh_plugin, 4, false},
   {"video", "KESTREL_VIDEO", "Abrir ventana", OType::Bool, "1", "Apagado = sin ventana (modo lote / captura).", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"winscale", "KESTREL_WINSCALE", "Escala de ventana", OType::Choice, "2", "", false, false, false, 0, 0, 0, kCh_winscale, 7, true},
   {"winsize", "KESTREL_WINSIZE", "Tamano exacto WxH", OType::Text, "", "Vacio = usar la escala. Ejemplo: 1600x900. Manda sobre la escala.", false, false, false, 0, 0, 0, nullptr, 0, true},
@@ -147,7 +148,7 @@ static const Option kOpt_video[] = {
   {"texpack", "KESTREL_TEXPACK", "Pack de texturas HD (carpeta)", OType::Path, "", "Carpeta con un pack de texturas en formato Rice / GLideN64 (ficheros <NOMBRE ROM>#crc#fmt#siz_all.png); los packs hechos para GLideN64 valen tal cual. Solo con el rasterizador SoftRDP (en automatico se elige solo): paraLLEl-RDP muestrea la textura en la GPU y no admite sustitutos. Ver docs/TEXTURAS-HD.md.", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"texfx", "KESTREL_TEXFX", "Realce de texturas", OType::Choice, "", "Retoca por algoritmo cada textura original la primera vez que se dibuja, en vez de la imagen entera como el filtro de imagen: el contorno sale donde cambia la textura, no donde cambia la escena. Un pack HD, si lo hay, manda sobre esto. Solo SoftRDP (en automatico se elige solo).", false, false, false, 0, 0, 0, kCh_texfx, 4, false},
   {"texdump", "KESTREL_TEXDUMP", "Volcar texturas en (carpeta)", OType::Path, "", "Guarda cada textura distinta que dibuja el juego como PNG con nombre de pack Rice/GLideN64, para hacer uno propio (por ejemplo escalandolas con una red como Real-ESRGAN y poniendo la carpeta resultante como pack). Solo SoftRDP.", true, false, false, 0, 0, 0, nullptr, 0, false},
-  {"upscale", "KESTREL_UPSCALE", "Escalado interno (paraLLEl-RDP)", OType::Choice, "1", "Rasteriza a N veces la resolucion del N64 dentro de la GPU. Solo con paraLLEl-RDP; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen.", false, false, false, 0, 0, 0, kCh_upscale, 4, false},
+  {"upscale", "KESTREL_UPSCALE", "Escalado interno (GPU)", OType::Choice, "1", "Rasteriza a N veces la resolucion del N64 dentro de la GPU. GPU-RDP hasta 4x (8 se queda en 4), paraLLEl-RDP hasta 8x; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen.", false, false, false, 0, 0, 0, kCh_upscale, 4, false},
   {"ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", OType::Bool, "0", "Con escalado interno, al devolver la imagen ampliada al framebuffer del juego promedia las NxN muestras en vez de coger una. Antialiasing gratis en los efectos que releen el framebuffer, a cambio de una pasada mas.", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"hud", "KESTREL_HUD_OFF", "HUD de telemetria sobre la imagen", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, true},
   {"noaa", "KESTREL_NOAA", "Antialiasing del RDP", OType::Bool, "1", "SoftRDP. Apagarlo sube el relleno y cambia el borde de los poligonos.", false, true, false, 0, 0, 0, nullptr, 0, false},

@@ -57,11 +57,11 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   this->romPath = romPath;         // base de los nombres de ranura de estado (rom.stN)
   cheats.loadForRom(romPath);      // KESTREL_CHEATS, o el .cht que haya al lado de la ROM
   texpack::init(rom.header.name); // KESTREL_TEXDUMP / KESTREL_TEXPACK / KESTREL_TEXFX
-  if(texpack::active() && vrdp::built) {
+  if(texpack::active() && vrdp::built && !(gpurdp::built && gpurdp::wanted())) {
     const char* pe = std::getenv("KESTREL_PRDP");
     if(!pe || pe[0] != '0')
-      std::printf("[texpack] texturas HD/realce solo con SoftRDP: Video > Rasterizador "
-                  "> SoftRDP (KESTREL_PRDP=0)\n");
+      std::printf("[texpack] texturas HD/realce solo con GPU-RDP o SoftRDP: Video > "
+                  "Rasterizador (parallel-RDP no las admite)\n");
   }
   std::printf("[system] loaded \"%s\" (%s, %.2f MB, entry 0x%08x)\n",
               rom.header.name.c_str(),

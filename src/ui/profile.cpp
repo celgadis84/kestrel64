@@ -383,10 +383,10 @@ auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& e
   }
 
   std::string plug = p.get("plugin");
-  if(plug == "prdp") put("KESTREL_PRDP", "1");
-  else if(plug == "soft") put("KESTREL_PRDP", "0");
-  // Texturas HD y realce solo existen en SoftRDP: en automatico, pedirlas elige ese.
-  else if(!p.get("texpack").empty() || !p.get("texfx").empty()) put("KESTREL_PRDP", "0");
+  // Automatico = el defecto del binario (GPU-RDP); texturas HD y realce van en GPU-RDP y SoftRDP.
+  if(plug == "gpurdp") put("KESTREL_GPURDP", "1");
+  else if(plug == "prdp") { put("KESTREL_GPURDP", "0"); put("KESTREL_PRDP", "1"); }
+  else if(plug == "soft") { put("KESTREL_GPURDP", "0"); put("KESTREL_PRDP", "0"); }
 
   // Relanzarse siempre es "modo usuario": corriendo Y con ventana, salvo que se pida pausa
   // o se apague el video a proposito.

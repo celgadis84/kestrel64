@@ -196,7 +196,9 @@ La eleccion de rasterizador es de **tiempo de compilacion** (`cmake -DKESTREL_PR
 una dll cargable como en la arquitectura de plugins de Zilmar. El lanzador por tanto elige
 **ejecutable**: `build/kestrel64.exe` para SoftRDP, `build-prdp/kestrel64.exe` para
 paraLLEl-RDP, y ademas pone `KESTREL_PRDP=1`. Si una compilacion no existe, su tarjeta sale
-apagada con la linea de cmake que hace falta.
+apagada con la linea de cmake que hace falta. Desde 2026-10-06 hay una tercera tarjeta,
+**GPU-RDP** (propio, Vulkan compute), que va en el mismo exe que paraLLEl-RDP y es la que
+elige "Automatico".
 
 ## Mando configurable
 

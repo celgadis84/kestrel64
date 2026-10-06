@@ -10268,3 +10268,14 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   SM64 600 cuadros: vaciados 105584 -> 73698.
 - Fase 4 parte 2: color images de 8 y 32 bits en GPU (`T_CISZ`); FILL de 32 bits crudo.
   gate_gpurdp ALL OK, krom 371/371 identicas.
+
+## 2026-10-06 -- GPU-RDP propio, fases 5-7 (rendimiento, escalado, HD, de fabrica)
+
+- Fase 5: coherencia (lecturas de framebuffer por CPU), reparto CPU/GPU por tramo
+  (`KESTREL_GPURDP_MINPX`, defecto 4096). Bench min-de-N contra parallel-RDP: SM64 3,94 vs
+  3,58 s, PD intro 3,58 vs 3,52 s (SoftRDP 6,66 / 7,01). Fix: COPY/FILL sin dither en GPU.
+- Telemetria: `rdp.stats` con `backend`, `exactPixels` y bloque `gpurdp` (vaciados, tiempos,
+  tramos GPU/CPU, caidas al CPU). Con parallel-RDP los pixeles escritos son cota superior.
+- Fase 6: escalado interno x2/x4 y texturas HD muestreadas en GPU (`tri_hd`, double), md5 igual.
+- Fase 7: GPU-RDP de fabrica en `kestrel64.exe`; parallel-RDP alternativa (`KESTREL_PRDP=1`).
+  Detalle en `docs/GPU-RDP.md`.

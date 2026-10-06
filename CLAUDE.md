@@ -56,6 +56,8 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
   (`--gates` para pasar antes `gate_all` + `gate_prdp`, `--quick` para saltarse `build/` y
   `build-prdp/` e iterar solo sobre los estaticos, `NOISS=1` para omitir el instalador). Deja
   `dist/VERSION.txt` con version, commit y md5 para que un zip suelto diga de donde salio.
+- Desde 2026-10-06 ese exe arranca con **GPU-RDP** (propio) de fabrica; parallel-RDP queda como
+  alternativa (`KESTREL_PRDP=1`) hasta retirarlo. Las puertas fijan `KESTREL_PRDP` siempre.
 - El paquete lleva **un** ejecutable (desde 2026-10-05): `kestrel64.exe` (`build-prdp-static`)
   trae parallel-RDP y SoftRDP, elegibles en Video > Rasterizador (`KESTREL_PRDP=0/1`), y sin
   Vulkan cae a SoftRDP con la ventana pintada por GDI (`KESTREL_FORCEGDI=1` lo fuerza).
@@ -208,7 +210,7 @@ SIEMPRE el `.map` de cada ROM (`rom=map`).
 
 `core/` (memory, system, rom, bus, DMA, MMIO, scheduler) · `cpu/` (R4300i interp + `jit.*`
 dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP) · `vrdp/` (parallel-rdp glue, `KESTREL_PRDP`)
-· `gpurdp/` (GPU-RDP propio en Vulkan compute, `KESTREL_GPURDP=1`, fase 1 = fill + triangulos sin textura; `docs/GPU-RDP.md`, puerta `scripts/gate_gpurdp.sh`)
+· `gpurdp/` (GPU-RDP propio en Vulkan compute, bit a bit SoftRDP; **rasterizador de fabrica desde 2026-10-06** -- `KESTREL_GPURDP=0` o un `KESTREL_PRDP=0/1` explicito lo apagan; `KESTREL_GPURDP_MINPX` reparto CPU/GPU por tramo, defecto 4096; `docs/GPU-RDP.md`, puerta `scripts/gate_gpurdp.sh`)
 · `audio/` · `video/` (`present.cpp`, VI, GLFW/Vulkan WSI) · `telemetry/` · `net/` · `main.cpp`.
 
 ## Env-var toggles

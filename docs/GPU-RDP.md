@@ -368,6 +368,23 @@ Verificado con `KESTREL_TEXFX=scale4x` (no hace falta pack): SM64 60 campos Soft
 mismo md5 `b338947b` (37 k triangulos texturizados en la GPU, ningun vaciado por rechazo); PD
 1200 campos threaded-jit y gpurdp-jit mismo md5 `a7f80f7b`. Visual a x2 correcto.
 
+### Fase 7 -- GPU-RDP de fabrica HECHA 2026-10-06
+
+- `gpurdp::wanted()`: `KESTREL_GPURDP` manda si esta puesto; si no, GPU-RDP salvo que haya un
+  `KESTREL_PRDP` explicito (`=1` parallel-RDP, `=0` SoftRDP). Sin Vulkan cae a SoftRDP como antes
+  (`vrdpFailed`). Probado el exe con las cuatro combinaciones (nada / PRDP=1 / PRDP=0 /
+  GPURDP=0) y con `KESTREL_UPSCALE=2` (la opcion general del lanzador ahora vale tambien aqui;
+  8 se queda en 4).
+- Menu nativo y lanzador (`options.py`, `profile.cpp`, `kestrel_launcher.py`, `app.js`): cuarta
+  opcion "GPU-RDP" que sale del mismo .exe que parallel-RDP; "Automatico" la prefiere.
+  parallel-RDP marcado "se retirara". Texturas HD/realce ya no fuerzan SoftRDP en automatico.
+- Puertas: todo modo de `validate.py` fija `KESTREL_PRDP`, asi que `gate_all`/`gate_prdp` no
+  cambian de rasterizador. `pdbench.py` (sesion PD-opt) fija parallel-RDP para que su tabla
+  siga comparable salvo `KESTREL_GPURDP=1` en el entorno.
+- Retirar parallel-RDP de `third_party/`: pendiente de un ciclo de uso. Lo que aun solo tiene
+  el: escalado x8 (GPU-RDP llega a x4) y su ventaja de ~10 % en SM64 (sin contabilidad por
+  primitiva no espera a la GPU).
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego
