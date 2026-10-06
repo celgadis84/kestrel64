@@ -22,7 +22,15 @@ layout(push_constant) uniform P {
   uint base;    // primera palabra (de ram o de hid segun el pase)
   uint count;   // numero de palabras
   uint pass;
+  uint sh;      // fase 6: 0 = espejo de 1x; si no, buffers de alta a S = 2^sh (ver tri.comp)
 } p;
+
+// Byte de alta resolucion -> byte de 1x que replica (bloque SxS por pixel de 1x).
+uint lowOf(uint h) {
+  if(p.sh == 0u) return h;
+  uint blk = p.bpp << (2u * p.sh);
+  return (h / blk) * p.bpp + (h % blk) % p.bpp;
+}
 
 // Pixel de byte/entrada `off` (relativo a addr) dentro del rectangulo? Devuelve x o -1.
 int inRect(uint off) {
@@ -41,7 +49,7 @@ void main() {
   if(p.pass == 0u) {
     uint v = ram[w], o = v;
     for(uint k = 0u; k < 4u; k++) {
-      uint b = w * 4u + k;
+      uint b = lowOf(w * 4u + k);
       if(b < p.addr) continue;
       uint off = b - p.addr;
       int xi = inRect(off);
@@ -56,7 +64,7 @@ void main() {
   } else {
     uint v = hid[w], o = v;
     for(uint k = 0u; k < 4u; k++) {
-      uint a = (w * 4u + k) * 2u;   // media palabra de RDRAM de esta entrada
+      uint a = lowOf((w * 4u + k) * 2u);   // media palabra de RDRAM de esta entrada
       if(a < p.addr) continue;
       int xi = inRect(a - p.addr);
       if(xi < 0) continue;

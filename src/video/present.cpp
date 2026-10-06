@@ -23,6 +23,7 @@
 #else
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include "../gpurdp/gpurdp.hpp"
 #endif
 
 #ifdef _WIN32
@@ -50,8 +51,9 @@ static constexpr u32 kSrcH = 240;
 // y 576 lineas (PAL entrelazado); con el backend de GPU el scanout ya llega a esa
 // resolucion. Solo esta para que un VI_WIDTH basura (registro a medio escribir) no intente
 // reservar una imagen absurda.
-static constexpr u32 kMaxSrcW = 1024;
-static constexpr u32 kMaxSrcH = 1024;
+// Con el escalado interno del GPU-RDP (x4 de 640x480) el cuadro llega a 2560x1920.
+static constexpr u32 kMaxSrcW = 2560;
+static constexpr u32 kMaxSrcH = 2048;
 static constexpr int kScale = 2;   // window = 640x480
 
 // All Vulkan state for the presenter lives here; torn down in reverse order.
@@ -1326,6 +1328,18 @@ auto Presenter::pumpFrame() -> bool {
       vrdpFrame = true;
     }
     vrdp::scanoutDone();
+  }
+
+  // GPU-RDP con escalado interno: barrido desde su copia de alta resolucion. Sin los filtros
+  // del VI (son de 1x; el detalle ya viene de la resolucion).
+  if(!vrdpFrame && gpurdp::upscale() > 1) {
+    std::vector<u32> hi; u32 hw = 0, hh = 0;
+    if(gpurdp::scanoutHi(ram.data(), (u32)ram.size(), origin, stride, width, height, type, hi, hw, hh)
+       && hw <= kMaxSrcW && hh <= kMaxSrcH) {
+      width = hw; height = hh;
+      frame.swap(hi);
+      vrdpFrame = true;
+    }
   }
 
   if(!vrdpFrame && std::getenv("KESTREL_VIDEO_TEST")) {

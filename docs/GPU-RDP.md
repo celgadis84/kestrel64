@@ -272,6 +272,25 @@ queda: ~165 us de envio + fence por vaciado, y los vaciados los marca la contabi
 invitado (ver arriba). parallel-RDP no paga eso porque no devuelve la contabilidad por
 primitiva.
 
+### Fase 6 (parte 1) -- escalado interno HECHO 2026-10-06
+
+`KESTREL_GPURDP_UPSCALE=2|4` (apagado de fabrica). El invitado sigue viendo su RDRAM de 1x
+bit a bit: el pase de 1x se despacha igual que antes y es el que manda (contabilidad, md5).
+Ademas, por cada tramo, un segundo despacho del mismo `tri.comp` con `sh = log2(S)` pinta en
+copias de alta (`hram`/`hhid`: cada pixel de 1x es un bloque SxS) usando las mismas aristas,
+coberturas y gradientes evaluados en el subpixel de alta. Sus barreras son las de 1x (la huella
+de alta es la de 1x en bloques).
+
+- Coherencia: antes de cada lote, lo que la RDRAM tiene distinto del espejo dentro de las zonas
+  que el lote va a leer lo escribio otro (CPU, DMA); ese pixel se replica en su bloque de alta
+  (`resyncHi`). Lo que pinto el RDP coincide con el espejo y conserva el detalle.
+- Presentacion: `gpurdp::scanoutHi` arma la imagen de alta para el presentador (tope 2560x2048):
+  fila igual a la del espejo = de la copia de alta; si no (la CPU la toco) = la de 1x replicada.
+- Sin memoria para las copias (8 MB x S^2) sigue a 1x y lo dice.
+
+Verificado: a 1x nada cambia (gate_gpurdp ALL OK 7 m 25 s: sm64 `b5521b24`, pd `a4e2cbcf`,
+krom 371/371 identicas a interp); a x2/x4 SM64 y PD salen con bordes de alta, sin grietas.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego

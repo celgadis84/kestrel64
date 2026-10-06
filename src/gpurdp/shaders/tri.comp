@@ -15,6 +15,14 @@
 // orden por pixel es el de SoftRDP sin una sola barrera entre primitivas. Dos pixeles distintos
 // no comparten media palabra ni de color ni de z (el CPU corta el tramo si color y z se cruzan).
 //
+// Fase 6 (escalado interno, pc.sh != 0): MISMO shader en una segunda pasada a S = 2^sh veces la
+// resolucion, con los buffers 0/1 cambiados por los de alta resolucion. Cada pixel de 1x es un
+// bloque contiguo de SxS pixeles (hiAddr = a1x * S^2 + (j*S + i) * bpp), asi que las huellas
+// disjuntas de 1x siguen disjuntas aqui y valen las mismas barreras. Bordes en coordenadas de
+// alta (X de arranque y Y por S, pendientes iguales), atributos con los deltas / S, LOD con los
+// deltas de 1x (mismo mip que 1x). Esta pasada no escribe resultados: la contabilidad y lo que
+// vuelve a la RDRAM son de la pasada de 1x, que sigue siendo la autoridad.
+//
 // Dentro de un triangulo dos pixeles nunca tocan la misma media palabra (ni de color ni de z:
 // el CPU solo manda aqui triangulos con x < ancho y zonas de color y z separadas), asi que no
 // hay orden que respetar entre hilos. Las medias palabras comparten palabra de 32 bits con el
@@ -31,7 +39,9 @@ layout(std430, binding = 2) readonly buffer Recs { int rec[]; };
 layout(std430, binding = 3) readonly buffer Lut { uint lut[]; };   // divisor del blender, 32 KB
 layout(std430, binding = 4) buffer Outs { int outv[]; };
 layout(std430, binding = 5) readonly buffer Tmem { uint tm[]; };
-layout(push_constant) uniform P { uint idx; uint count; int ux; int uy; int uw; int uh; } pc;
+// sh en el desplazamiento 44, como en fill.comp (gpurdp.cpp Push::sh).
+layout(push_constant) uniform P { uint idx; uint count; int ux; int uy; int uw; int uh;
+                                  uint p6; uint p7; uint p8; uint p9; uint p10; uint sh; } pc;
 
 // Disposicion del registro (debe casar con gpurdp.hpp TriRec, en palabras de 32 bits).
 const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6, R_XM = 7,
@@ -58,6 +68,17 @@ int base;
 uint cur;   // registro de la primitiva en curso
 int R(int i) { return rec[base + i]; }
 uint U(int i) { return uint(rec[base + i]); }
+
+int SC;   // 1 << pc.sh
+// Direccion del pixel (x, y) de una imagen de `bpp` bytes por pixel con base `b`: en 1x la de
+// la RDRAM; en alta, la del bloque SxS de su pixel de 1x.
+uint pa(uint b, int x, int y, uint bpp) {
+  if(pc.sh == 0u) return b + (uint(y) * U(R_CIW) + uint(x)) * bpp;
+  uint m = uint(SC - 1);
+  uint a1 = b + (uint(y >> int(pc.sh)) * U(R_CIW) + uint(x >> int(pc.sh))) * bpp;
+  return (a1 << (2u * pc.sh)) + (((uint(y) & m) << pc.sh) + (uint(x) & m)) * bpp;
+}
+int D(int i) { return R(i) >> int(pc.sh); }   // delta por pixel de la resolucion en curso
 
 int sext(uint v, int bits) { return int(v << (32 - bits)) >> (32 - bits); }
 int s16(int v) { return (v << 16) >> 16; }
@@ -236,20 +257,19 @@ uint to5551(uint c) {
 // Color image de 8 bits (byte bajo) o 32 bits (RGBA8888 tal cual), como SoftRdp::storePixel.
 void storePixel(int x, int y, uint rgba) {
   nWrite++;
-  uint pix = uint(y) * U(R_CIW) + uint(x);
   if(R(R_CISZ) == 3) {   // ci_addr alineada a 4: la palabra entera es del pixel
-    uint a = U(R_CI) + pix * 4u;
+    uint a = pa(U(R_CI), x, y, 4u);
     ram[a >> 2] = (rgba >> 24) | ((rgba >> 8) & 0xff00u) | ((rgba << 8) & 0xff0000u) | (rgba << 24);
     return;
   }
-  if(R(R_CISZ) == 1) { wr8(U(R_CI) + pix, rgba); return; }
-  uint a = U(R_CI) + pix * 2u;
+  if(R(R_CISZ) == 1) { wr8(pa(U(R_CI), x, y, 1u), rgba); return; }
+  uint a = pa(U(R_CI), x, y, 2u);
   wr16(a, to5551(rgba));
   wrHid(a >> 1, (rgba >> 5) & 3u);
 }
 bool depthTest(int x, int y, int d) {
   if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
-  uint zoff = U(R_ZI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+  uint zoff = pa(U(R_ZI), x, y, 2u);
   uint old = zDecode(rd16(zoff));
   uint olo = U(R_OLO);
   if((olo & 0x10u) != 0u && uint(d) >= old) return false;
@@ -257,13 +277,12 @@ bool depthTest(int x, int y, int d) {
   return true;
 }
 uint readFb(int x, int y) {
-  uint pix = uint(y) * U(R_CIW) + uint(x);
   if(R(R_CISZ) == 3) {
-    uint a = U(R_CI) + pix * 4u;
+    uint a = pa(U(R_CI), x, y, 4u);
     return (rd8(a) << 24) | (rd8(a + 1u) << 16) | (rd8(a + 2u) << 8) | rd8(a + 3u);
   }
-  if(R(R_CISZ) == 1) { uint v = rd8(U(R_CI) + pix); return v * 0x01010101u; }
-  uint a = U(R_CI) + pix * 2u;
+  if(R(R_CISZ) == 1) { uint v = rd8(pa(U(R_CI), x, y, 1u)); return v * 0x01010101u; }
+  uint a = pa(U(R_CI), x, y, 2u);
   uint px = rd16(a);
   uint r = ((px >> 11) & 0x1fu) << 3, g = ((px >> 6) & 0x1fu) << 3, b = ((px >> 1) & 0x1fu) << 3;
   uint al = ((((px & 1u) << 2) | (rdHid(a >> 1) & 3u)) << 5);
@@ -271,7 +290,7 @@ uint readFb(int x, int y) {
 }
 
 void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShadeA) {
-  if(x < R(R_SX0) || x >= R(R_SX1) || y < R(R_SY0) || y >= R(R_SY1) || x < 0 || y < 0) return;
+  if(x < R(R_SX0) * SC || x >= R(R_SX1) * SC || y < R(R_SY0) * SC || y >= R(R_SY1) * SC || x < 0 || y < 0) return;
   uint olo = U(R_OLO), ohi = U(R_OHI);
   int fl = R(R_FLAGS);
   // Plan del blender (SoftRdp::buildBlendPlan).
@@ -312,7 +331,7 @@ void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShade
   uint zoff = 0u; int zz = 0;
   int pxDz = R(R_PDZ), pxDzC = R(R_PDZC);
   if(hasZ) {
-    zoff = U(R_ZI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+    zoff = pa(U(R_ZI), x, y, 2u);
     zz = clamp(zin, 0, 0x3ffff);
   }
   bool overflow = (cvg + memCvg) >= 8;
@@ -553,16 +572,18 @@ int lodSelect(int s, int t, int sdx, int tdx, int sdy, int tdy, bool ovf, uint m
 }
 
 // --- recorrido de bordes y pixel (SoftRdp::drawTriangle) ----------------------------------
-int quant(int x) { x = sext(uint(x), 27); return (x >> 12) | ((x & 0xfff) != 0 ? 1 : 0); }
+int quant(int x) { x = sext(uint(x), 27 + int(pc.sh)); return (x >> 12) | ((x & 0xfff) != 0 ? 1 : 0); }
 
 void pixel(int x, int y) {
   int fl = R(R_FLAGS);
   bool leftMajor = (fl & F_LEFT) != 0;
-  int iYl = R(R_YL), iYm = R(R_YM), iYh = R(R_YH);
-  int iXl = R(R_XL), iDxl = R(R_DXL), iXh = R(R_XH), iDxh = R(R_DXH), iXm = R(R_XM), iDxm = R(R_DXM);
-  int yhBase = iYh & ~3;
-  int subLo = max(iYh, R(R_SY0) * 4), subHi = min(iYl, R(R_SY1) * 4);
-  int scLo = R(R_SX0) * 8, scHi = R(R_SX1) * 8;
+  // En alta: X de arranque e Y por S (las pendientes por subscanline no cambian), y el ancla de
+  // las ecuaciones es la de 1x escalada.
+  int iYl = R(R_YL) * SC, iYm = R(R_YM) * SC, iYh = R(R_YH) * SC;
+  int iXl = R(R_XL) * SC, iDxl = R(R_DXL), iXh = R(R_XH) * SC, iDxh = R(R_DXH), iXm = R(R_XM) * SC, iDxm = R(R_DXM);
+  int yhBase = (R(R_YH) & ~3) * SC;
+  int subLo = max(iYh, R(R_SY0) * 4 * SC), subHi = min(iYl, R(R_SY1) * 4 * SC);
+  int scLo = R(R_SX0) * 8 * SC, scHi = R(R_SX1) * 8 * SC;
   uint cov = 0u;
   for(int k = 0; k < 4; k++) {
     int ys = y * 4 + k;
@@ -581,20 +602,20 @@ void pixel(int x, int y) {
   if((fl & F_FILL) != 0) {
     uint fc = U(R_FILL);
     if(R(R_CISZ) == 3) {   // 32 bits: el color de relleno tal cual
-      uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 4u;
+      uint a = pa(U(R_CI), x, y, 4u);
       ram[a >> 2] = (fc >> 24) | ((fc >> 8) & 0xff00u) | ((fc << 8) & 0xff0000u) | (fc << 24);
       nWrite++;
       return;
     }
-    uint px = (x & 1) != 0 ? (fc & 0xffffu) : (fc >> 16);
-    uint a = U(R_CI) + (uint(y) * U(R_CIW) + uint(x)) * 2u;
+    uint px = ((x >> int(pc.sh)) & 1) != 0 ? (fc & 0xffffu) : (fc >> 16);
+    uint a = pa(U(R_CI), x, y, 2u);
     wr16(a, px);
     wrHid(a >> 1, (px & 1u) != 0u ? 3u : 0u);
     nWrite++;
     return;
   }
   // Atributos de la fila.
-  int dyRow = y - (iYh >> 2);
+  int dyRow = y - (R(R_YH) >> 2) * SC;
   uint xhRow = uint(iXh) + uint(dyRow) * (uint(iDxh) << 2);
   bool doOffset = (fl & F_DOOFF) != 0;
   if(doOffset) xhRow += 3u * uint(iDxh);
@@ -619,7 +640,7 @@ void pixel(int x, int y) {
   bool gouraud = (fl & F_SHADE) != 0;
   if(gouraud) {
     for(int c = 0; c < 4; c++) {
-      int c0 = R(R_CC + c), ddx = R(R_CDX + c), dde = R(R_CDE + c), ddy = R(R_CDY + c);
+      int c0 = R(R_CC + c), ddx = D(R_CDX + c), dde = D(R_CDE + c), ddy = D(R_CDY + c);
       uint diff = 0u;
       if(doOffset) {
         int deh = dde & ~0x1ff, dyh = ddy & ~0x1ff;
@@ -640,7 +661,7 @@ void pixel(int x, int y) {
   if(hasZ) {
     if((fl & F_ZSRC) != 0) zin = R(R_PZ);
     else {
-      int c0 = R(R_Z), ddx = R(R_ZDX), dde = R(R_ZDE), ddy = R(R_ZDY);
+      int c0 = R(R_Z), ddx = D(R_ZDX), dde = D(R_ZDE), ddy = D(R_ZDY);
       uint diff = 0u;
       if(doOffset) {
         int deh = dde & ~0x1ff, dyh = ddy & ~0x1ff;
@@ -662,9 +683,9 @@ void pixel(int x, int y) {
   gLod = R(R_LOD);
   if((fl & F_TEX) != 0) {
     int rT[4];
-    for(int k = 0; k < 4; k++) ROWATTR(R(R_TC + k), R(R_TDX + k), R(R_TDE + k), R(R_TDY + k), rT[k]);
+    for(int k = 0; k < 4; k++) ROWATTR(R(R_TC + k), D(R_TDX + k), D(R_TDE + k), D(R_TDY + k), rT[k]);
     int tdx[4];
-    for(int k = 0; k < 4; k++) tdx[k] = R(R_TDX + k);
+    for(int k = 0; k < 4; k++) tdx[k] = D(R_TDX + k);
 #define STW(k, add) (int(uint(rT[k]) + uint(tdx[k] & ~0x1f) * uint(dxI) + (add)) >> 16)
     bool persp = (fl & F_PERSP) != 0;
     int ps = STW(0, 0u), pt = STW(1, 0u);
@@ -674,7 +695,8 @@ void pixel(int x, int y) {
     uint tile0 = tinfo & 7u, tile1 = (tile0 + 1u) & 7u;
     if((fl & F_LOD) != 0) {
       uint ldir = (fl & F_LEFT) != 0 ? 1u : ~0u;
-      uint xs0 = ldir * uint(tdx[0] & ~0x1f), xt0 = ldir * uint(tdx[1] & ~0x1f), xw0 = ldir * uint(tdx[3] & ~0x1f);
+      // Paso de un pixel de 1x tambien en alta: el LOD (y el mip) sale el de 1x.
+      uint xs0 = ldir * uint(R(R_TDX + 0) & ~0x1f), xt0 = ldir * uint(R(R_TDX + 1) & ~0x1f), xw0 = ldir * uint(R(R_TDX + 3) & ~0x1f);
       uint ys0 = uint(R(R_TDY + 0) & ~0x7fff), yt0 = uint(R(R_TDY + 1) & ~0x7fff), yw0 = uint(R(R_TDY + 3) & ~0x7fff);
       int s1 = STW(0, xs0), t1 = STW(1, xt0), s2 = STW(0, ys0), t2 = STW(1, yt0);
       if(persp) {
@@ -691,7 +713,7 @@ void pixel(int x, int y) {
       int a = int(c & 0xffu);
       if((U(R_OLO) & 0x2000u) == 0u) a = min(a + ((a + 1) >> 8) + alphaDither(x, y), 255);
       if(a < int(U(R_BLEND) & 0xffu)) {
-        if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
+        if(combProg && pc.sh == 0u && x == R(R_LASTX) && y == R(R_LASTY)) {
           int o = int(cur) * 8;
           outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
         }
@@ -708,7 +730,7 @@ void pixel(int x, int y) {
     pxShadeA = alphaDither(x, y);
   }
   // El ultimo pixel cubierto (orden de recorrido) deja COMBINED para la primitiva siguiente.
-  if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
+  if(combProg && pc.sh == 0u && x == R(R_LASTX) && y == R(R_LASTY)) {
     int o = int(cur) * 8;
     outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
   }
@@ -718,11 +740,17 @@ void pixel(int x, int y) {
 // TEXTURE_RECTANGLE (SoftRdp::texRect). R_TC: S y T de arranque ya escalados, R_TDX: DsDx
 // y DtDy, R_TDE: XH/YH (en cuartos) contra los que corren. S en 1/4096 de texel (1/16384 en
 // COPY, donde DsDx va x4), T en 1/4096. FLIP cruza los ejes. Sin shade ni z.
+// d * q / S con suelo y sin desbordar: q = S*f + r.
+int rstep(int d, int q) {
+  if(pc.sh == 0u) return d * q;
+  int f = q >> int(pc.sh), rr = q & (SC - 1);
+  return d * f + ((d * rr) >> int(pc.sh));
+}
 void rectPixel(int x, int y) {
   int fl = R(R_FLAGS);
   bool flip = (fl & F_FLIP) != 0, copy = (fl & F_COPY) != 0;
-  int ns = R(R_TC) + R(R_TDX) * (4 * (flip ? y : x) - R(R_TDE));
-  int nt = R(R_TC + 1) + R(R_TDX + 1) * (4 * (flip ? x : y) - R(R_TDE + 1));
+  int ns = R(R_TC) + rstep(R(R_TDX), 4 * (flip ? y : x) - SC * R(R_TDE));
+  int nt = R(R_TC + 1) + rstep(R(R_TDX + 1), 4 * (flip ? x : y) - SC * R(R_TDE + 1));
   int shS = copy ? 14 : 12;
   int tl = int(U(R_TINFO) & 7u);
   uint tex = rectSample(tl, ns, nt, shS);
@@ -731,7 +759,7 @@ void rectPixel(int x, int y) {
   ivec4 comb = ivec4(0);
   bool combProg = (fl & F_COMB) != 0;
   uint c = combProg ? combine(tex, 0u, comb) : tex;
-  if(combProg && x == R(R_LASTX) && y == R(R_LASTY)) {
+  if(combProg && pc.sh == 0u && x == R(R_LASTX) && y == R(R_LASTY)) {
     int o = int(cur) * 8;
     outv[o + 2] = comb[0]; outv[o + 3] = comb[1]; outv[o + 4] = comb[2]; outv[o + 5] = comb[3];
   }
@@ -744,12 +772,25 @@ void rectPixel(int x, int y) {
     }
   }
   if((U(R_OLO) & 0x40u) != 0u) blendPixel(x, y, c, 8, false, 0, 0);
-  else if(x >= R(R_SX0) && x < R(R_SX1) && y >= R(R_SY0) && y < R(R_SY1)) storePixel(x, y, c);
+  else if(x >= R(R_SX0) * SC && x < R(R_SX1) * SC && y >= R(R_SY0) * SC && y < R(R_SY1) * SC) storePixel(x, y, c);
 }
 
 shared uint sHit[64];
 
+// Caja de la primitiva en la resolucion en curso. En alta un triangulo se ensancha un pixel de
+// 1x por lado: la caja de 1x es la de los pixeles con alguna muestra de 1x dentro, y en alta
+// hay muestras cubiertas en el pixel vecino (sin esto salen rendijas entre triangulos que
+// comparten borde). Los bordes y el scissor siguen recortando; el texrect no tiene bordes.
+ivec4 boxOf(int b) {
+  int bx = rec[b + R_BX], by = rec[b + R_BY], bw = rec[b + R_BW], bh = rec[b + R_BH];
+  if(pc.sh != 0u && (rec[b + R_FLAGS] & F_RECT) == 0 && bw > 0 && bh > 0) {
+    bx -= 1; by -= 1; bw += 2; bh += 2;
+  }
+  return ivec4(bx, by, bw, bh) * SC;
+}
+
 void main() {
+  SC = 1 << int(pc.sh);
   const uint lid = gl_LocalInvocationIndex;
   const int tx = pc.ux + int(gl_WorkGroupID.x) * 8, ty = pc.uy + int(gl_WorkGroupID.y) * 8;
   const int x = tx + int(gl_LocalInvocationID.x), y = ty + int(gl_LocalInvocationID.y);
@@ -758,8 +799,8 @@ void main() {
     // Criba: cada hilo mira una primitiva del trozo contra la tesela entera.
     uint hit = 0u;
     if(c0 + lid < pc.count) {
-      int b = int(pc.idx + c0 + lid) * R_SIZE;
-      int bx = rec[b + R_BX], by = rec[b + R_BY], bw = rec[b + R_BW], bh = rec[b + R_BH];
+      ivec4 bb = boxOf(int(pc.idx + c0 + lid) * R_SIZE);
+      int bx = bb.x, by = bb.y, bw = bb.z, bh = bb.w;
       if(bw > 0 && bh > 0 && bx < tx + 8 && tx < bx + bw && by < ty + 8 && ty < by + bh) hit = 1u;
     }
     sHit[lid] = hit;
@@ -769,11 +810,13 @@ void main() {
       if(sHit[j] == 0u || !inU) continue;
       cur = pc.idx + c0 + j;
       base = int(cur) * R_SIZE;
-      if(x < R(R_BX) || x >= R(R_BX) + R(R_BW) || y < R(R_BY) || y >= R(R_BY) + R(R_BH)) continue;
+      ivec4 bb = boxOf(base);
+      if(x < bb.x || x >= bb.x + bb.z || y < bb.y || y >= bb.y + bb.w) continue;
       tbase = U(R_TSLOT) * 1152u;
       nWrite = 0; nZWrite = 0;
       if((R(R_FLAGS) & F_RECT) != 0) rectPixel(x, y);
       else pixel(x, y);
+      if(pc.sh != 0u) continue;
       if(nWrite != 0)  atomicAdd(outv[int(cur) * 8 + 0], nWrite);
       if(nZWrite != 0) atomicAdd(outv[int(cur) * 8 + 1], nZWrite);
     }

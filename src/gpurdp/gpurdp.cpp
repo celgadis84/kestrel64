@@ -39,6 +39,7 @@ namespace {
 
 struct Push {
   u32 addr, width, bpp, x0, y0, x1, y1, color, base, count, pass;
+  u32 sh;   // fase 6: log2 del escalado de la pasada (0 = 1x)
 };
 
 struct Buf {
@@ -77,6 +78,11 @@ struct Ctx {
   VkPipeline fill = VK_NULL_HANDLE, tri = VK_NULL_HANDLE;
   VkDescriptorPool dpool = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
+  // Fase 6: copia de alta resolucion (S = 1 << up) de la RDRAM y de sus bits ocultos, y el set
+  // que la pone en los enlaces 0/1 (el resto, los mismos).
+  u32 up = 0;
+  Buf hram, hhid;
+  VkDescriptorSet setHi = VK_NULL_HANDLE;
   std::vector<FillRect> q;
   std::vector<TriRec> tris;
   std::vector<u8> tslots;    // instantaneas de TMEM del lote, kTmemBytes cada una
@@ -268,6 +274,18 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     mr.memory = c.lut.mem; mr.size = VK_WHOLE_SIZE;
     vkFlushMappedMemoryRanges(c.dev, 1, &mr);
   }
+  if(const char* e = std::getenv("KESTREL_GPURDP_UPSCALE"); e && e[0]) {
+    const int f = std::atoi(e);
+    const u32 up = f >= 4 ? 2 : f >= 2 ? 1 : 0;
+    if(up) {
+      if(makeBuf(c, c.hram, VkDeviceSize(rdramSize) << (2 * up))
+         && makeBuf(c, c.hhid, VkDeviceSize(rdramSize / 2) << (2 * up))) c.up = up;
+      else {
+        freeBuf(c, c.hram); freeBuf(c, c.hhid); c.hram = Buf{}; c.hhid = Buf{};
+        std::fprintf(stderr, "[gpurdp] sin memoria para escalar x%d; sigue a 1x\n", f);
+      }
+    }
+  }
   // Gemelos en memoria de la GPU; si falta alguno, todos fuera (camino viejo entero).
   const char* lm = std::getenv("KESTREL_GPURDP_LOCAL");
   if(lm && lm[0] && lm[0] != '0') {
@@ -327,9 +345,9 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
   };
   if(!makePipe(kSpv_fill, sizeof kSpv_fill, c.fill) || !makePipe(kSpv_tri, sizeof kSpv_tri, c.tri)) return false;
 
-  VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBind};
+  VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBind * 2};
   VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  dpi.maxSets = 1; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
+  dpi.maxSets = 2; dpi.poolSizeCount = 1; dpi.pPoolSizes = &ps;
   if(vkCreateDescriptorPool(c.dev, &dpi, nullptr, &c.dpool) != VK_SUCCESS) return false;
   VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
   dai.descriptorPool = c.dpool; dai.descriptorSetCount = 1; dai.pSetLayouts = &c.dsl;
@@ -344,6 +362,12 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     wr[i].pBufferInfo = &bufs[i];
   }
   vkUpdateDescriptorSets(c.dev, kBind, wr, 0, nullptr);
+  if(c.up) {
+    if(vkAllocateDescriptorSets(c.dev, &dai, &c.setHi) != VK_SUCCESS) return false;
+    bufs[0] = {c.hram.buf, 0, VK_WHOLE_SIZE}; bufs[1] = {c.hhid.buf, 0, VK_WHOLE_SIZE};
+    for(u32 i = 0; i < kBind; i++) wr[i].dstSet = c.setHi;
+    vkUpdateDescriptorSets(c.dev, kBind, wr, 0, nullptr);
+  }
 
   VkPhysicalDeviceProperties p; vkGetPhysicalDeviceProperties(c.phys, &p);
   if(const char* e = std::getenv("KESTREL_GPURDP_GPUTIME"); e && e[0] && e[0] != '0') {
@@ -355,8 +379,8 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
       if(vkCreateQueryPool(c.dev, &qi, nullptr, &c.qpool) == VK_SUCCESS) c.tsPeriod = p.limits.timestampPeriod;
     }
   }
-  std::fprintf(stderr, "[gpurdp] gpu=\"%s\" cola=%u espejo=%u KB coherente=%d local=%d\n", p.deviceName,
-               c.qfamily, (unsigned)(c.ram.size >> 10), (int)c.ram.coherent, (int)c.local);
+  std::fprintf(stderr, "[gpurdp] gpu=\"%s\" cola=%u espejo=%u KB coherente=%d local=%d escala=%u\n", p.deviceName,
+               c.qfamily, (unsigned)(c.ram.size >> 10), (int)c.ram.coherent, (int)c.local, 1u << c.up);
   return true;
 }
 
@@ -369,6 +393,7 @@ auto destroy(Ctx& c) -> void {
     if(c.dpool) vkDestroyDescriptorPool(c.dev, c.dpool, nullptr);
     if(c.dsl) vkDestroyDescriptorSetLayout(c.dev, c.dsl, nullptr);
     freeBuf(c, c.ram); freeBuf(c, c.hid); freeBuf(c, c.recs); freeBuf(c, c.lut); freeBuf(c, c.outs); freeBuf(c, c.tmem);
+    freeBuf(c, c.hram); freeBuf(c, c.hhid);
     if(c.qpool) vkDestroyQueryPool(c.dev, c.qpool, nullptr);
     if(c.fence) vkDestroyFence(c.dev, c.fence, nullptr);
     if(c.pool) vkDestroyCommandPool(c.dev, c.pool, nullptr);
@@ -414,7 +439,81 @@ auto footsMeet(const Foot& a, const Foot& b) -> bool {
   return true;   // otra imagen que se cruza en bytes: conservador
 }
 
+// Fase 6: lo que la RDRAM tiene distinto del espejo en las zonas que va a leer el lote lo
+// escribio otro (CPU, DMA): ese pixel se replica en su bloque SxS de la copia de alta antes de
+// pintar, para que el blender y la prueba de z de alta lean lo mismo que los de 1x. Lo que el
+// RDP ya pinto coincide con el espejo y conserva su detalle.
+auto resyncHi(Ctx& c, const u8* rdram, u32 size, const u8* hidden) -> void {
+  struct Z { u32 bpp, base, lo, hi; };
+  std::vector<Z> zs;
+  for(const TriRec& t : c.tris) {
+    const u32 cb = t.w[T_CISZ] == 3 ? 4u : t.w[T_CISZ] == 1 ? 1u : 2u;
+    if(t.hi[0] > t.lo[0]) zs.push_back({cb, (u32)t.w[T_CI], t.lo[0], std::min(t.hi[0], size)});
+    if(t.hi[1] > t.lo[1]) zs.push_back({2u, (u32)t.w[T_ZI], t.lo[1], std::min(t.hi[1], size)});
+  }
+  std::sort(zs.begin(), zs.end(), [](const Z& a, const Z& b) {
+    return a.bpp != b.bpp ? a.bpp < b.bpp : a.base != b.base ? a.base < b.base : a.lo < b.lo; });
+  const u32 q2 = 2 * c.up, nb = 1u << q2;
+  size_t k = 0;
+  while(k < zs.size()) {
+    Z z = zs[k++];
+    while(k < zs.size() && zs[k].bpp == z.bpp && zs[k].base == z.base && zs[k].lo <= z.hi) z.hi = std::max(z.hi, zs[k++].hi);
+    const u32 bpp = z.bpp;
+    u32 a = z.lo < z.base ? z.base : z.base + (z.lo - z.base) / bpp * bpp;
+    const u32 hi = z.hi & ~1u;   // las zonas van a media palabra; el pixel entero o nada
+    if(a >= hi) continue;
+    const bool hidOk = hidden && bpp == 2;
+    if(!std::memcmp(rdram + a, c.ram.map + a, hi - a)
+       && (!hidOk || !std::memcmp(hidden + (a >> 1), c.hid.map + (a >> 1), (hi - a) >> 1))) continue;
+    for(; a + bpp <= hi; a += bpp) {
+      const bool dc = std::memcmp(rdram + a, c.ram.map + a, bpp) != 0;
+      const bool dh = hidOk && hidden[a >> 1] != c.hid.map[a >> 1];
+      if(!dc && !dh) continue;
+      u8* d = c.hram.map + ((size_t)a << q2);
+      for(u32 j = 0; j < nb; j++) std::memcpy(d + j * bpp, rdram + a, bpp);
+      if(hidOk) std::memset(c.hhid.map + ((size_t)(a >> 1) << q2), hidden[a >> 1], nb);
+    }
+  }
+}
+
 }  // namespace
+
+auto upscale() -> u32 { return active() ? 1u << g->up : 1u; }
+
+auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, u32 type,
+               std::vector<u32>& out, u32& ow, u32& oh) -> bool {
+  if(!active() || !g->up || (type != 2 && type != 3) || !w || !h) return false;
+  const Ctx& c = *g;
+  const u32 bpp = type == 3 ? 4u : 2u, S = 1u << c.up, q2 = 2 * c.up;
+  ow = w * S; oh = h * S;
+  out.assign((size_t)ow * oh, 0xff000000u);
+  auto e5 = [](u32 v) -> u32 { return (v << 3) | (v >> 2); };
+  auto rgba = [&](const u8* p) -> u32 {
+    if(bpp == 4) return 0xff000000u | ((u32)p[2] << 16) | ((u32)p[1] << 8) | p[0];
+    const u32 px = ((u32)p[0] << 8) | p[1];
+    return 0xff000000u | (e5((px >> 1) & 31) << 16) | (e5((px >> 6) & 31) << 8) | e5(px >> 11);
+  };
+  for(u32 y = 0; y < h; y++) {
+    const u32 row = origin + y * stride * bpp;
+    if(row + w * bpp > size) break;
+    // Fila que sigue siendo la del RDP: de la copia de alta; si no, la de 1x replicada.
+    const bool hiOk = !std::memcmp(rdram + row, c.ram.map + row, w * bpp);
+    for(u32 j = 0; j < S; j++) {
+      u32* o = &out[(size_t)(y * S + j) * ow];
+      for(u32 x = 0; x < w; x++) {
+        const u32 a = row + x * bpp;
+        if(hiOk) {
+          const u8* p = c.hram.map + ((size_t)a << q2) + (size_t)j * S * bpp;
+          for(u32 i = 0; i < S; i++) o[x * S + i] = rgba(p + i * bpp);
+        } else {
+          const u32 v = rgba(rdram + a);
+          for(u32 i = 0; i < S; i++) o[x * S + i] = v;
+        }
+      }
+    }
+  }
+  return true;
+}
 
 auto wanted() -> bool {
   const char* e = std::getenv("KESTREL_GPURDP");
@@ -516,6 +615,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     else zones[nz++] = z;
   }
   zones.resize(nz);
+  if(c.up) resyncHi(c, rdram, size, hidden);
   for(auto& z : zones) {
     // Bordes a media palabra: los bits ocultos van por media palabra.
     const u32 lo = z.first & ~1u, hi = (z.second + 1) & ~1u;
@@ -535,6 +635,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     vkFlushMappedMemoryRanges(c.dev, 1, &mr);
   };
   if(!zones.empty()) { flushHost(c.ram); flushHost(c.hid); }
+  if(c.up) { flushHost(c.hram); flushHost(c.hhid); }
   if(!c.tris.empty()) { flushHost(c.recs); flushHost(c.outs); }
   if(!c.tslots.empty()) flushHost(c.tmem);
 
@@ -642,6 +743,22 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
         vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
         vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
       }
+      if(c.up) {
+        // Lo mismo en la copia de alta: el rango [lo, hi] de 1x es [lo*S^2, (hi+1)*S^2) alli.
+        const u32 q2 = 2 * c.up;
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.setHi, 0, nullptr);
+        p.sh = c.up; p.pass = 0;
+        p.base = (lo << q2) >> 2; p.count = ((((hi + 1) << q2) - 1) >> 2) - p.base + 1;
+        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+        vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+        if(r.bpp == 2) {
+          p.pass = 1;
+          p.base = ((lo >> 1) << q2) >> 2; p.count = (((((hi >> 1) + 1) << q2) - 1) >> 2) - p.base + 1;
+          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+        }
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
+      }
       i++;
       continue;
     }
@@ -694,6 +811,19 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
       vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
       vkCmdDispatch(c.cmd, (p.y0 + 7) / 8, (p.x1 + 7) / 8, 1);
       c.nDisp++;
+      if(c.up) {
+        // Pasada de alta: la union crecida un pixel de 1x por lado (tri.comp boxOf) y escalada.
+        // Las huellas de alta son las de 1x en bloques, asi que las barreras de 1x valen.
+        const s32 S = 1 << c.up;
+        Push h = p;
+        h.bpp = (u32)((ux0 - 1) * S); h.x0 = (u32)((uy0 - 1) * S);
+        h.y0 = (u32)((ux1 - ux0 + 2) * S); h.x1 = (u32)((uy1 - uy0 + 2) * S);
+        h.sh = c.up;
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.setHi, 0, nullptr);
+        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof h, &h);
+        vkCmdDispatch(c.cmd, (h.y0 + 7) / 8, (h.x1 + 7) / 8, 1);
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
+      }
     }
     i = j;
   }
@@ -747,6 +877,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     vkInvalidateMappedMemoryRanges(c.dev, 1, &mr);
   };
   invalidate(c.ram); invalidate(c.hid); invalidate(c.outs);
+  if(c.up) { invalidate(c.hram); invalidate(c.hhid); }
   // De vuelta solo los bytes de las primitivas: el resto del espejo puede estar viejo.
   for(const FillRect& r : c.q) {
     const u32 n = (r.x1 - r.x0) * r.bpp;

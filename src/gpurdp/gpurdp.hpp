@@ -81,6 +81,8 @@ inline auto queueFill(const FillRect&) -> void {}
 inline auto pending() -> bool { return false; }
 inline auto queueTri(const TriRec&, const u8* = nullptr, const u16* = nullptr) -> bool { return false; }
 inline auto flush(u8*, u32, u8*, std::vector<TriOut>* = nullptr) -> void {}
+inline auto upscale() -> u32 { return 1; }
+inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&) -> bool { return false; }
 #else
 // KESTREL_GPURDP pedido (y distinto de 0).
 auto wanted() -> bool;
@@ -102,6 +104,16 @@ auto queueTri(const TriRec& t, const u8* tmem = nullptr, const u16* tlut = nullp
 // ocultos de los de 16bpp). Antes sube al espejo las zonas que leen los triangulos. En `outs`,
 // uno por triangulo y en orden, lo que devolvio cada uno.
 auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs = nullptr) -> void;
+// Fase 6, KESTREL_GPURDP_UPSCALE=2|4: factor de escalado interno (1 = apagado). Con escalado
+// cada primitiva se pinta ademas en una copia de la RDRAM a S veces la resolucion (bloque SxS
+// por pixel de 1x); la RDRAM y todo lo que ve el invitado siguen siendo los de 1x.
+auto upscale() -> u32;
+// Barrido del VI desde la copia de alta: imagen de `type` (2 = 5551, 3 = 8888) en `origin`, paso
+// `stride` pixeles, w x h. Sale (w*S) x (h*S) en el formato del cuadro del presentador
+// (0xAABBGGRR). Fila cuya RDRAM ya no es la que dejo el RDP (la escribio el CPU o un DMA): se
+// replica la de 1x. false = sin escalado o formato no soportado.
+auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, u32 type,
+               std::vector<u32>& out, u32& ow, u32& oh) -> bool;
 #endif
 
 }  // namespace kestrel::gpurdp
