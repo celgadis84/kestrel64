@@ -355,6 +355,7 @@ private:
   };
   struct HdMemo { u32 gen = 0, mode = ~0u; Tile tile{}; HdBind b; };
   HdMemo hdMemo[8];
+  HdBind gpuHd;          // la del primitivo en curso, para gpuTriangle / gpuTexRect
   auto hdNoteLoad(u32 tile, bool block, u64 cmd) -> void;
   auto hdNoteTlut(Memory& mem, u32 tile, u64 cmd) -> void;
   auto hdBind(Memory& mem, u32 tile) -> HdBind;

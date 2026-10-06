@@ -50,7 +50,7 @@ enum TriField : int {
   T_CC = 18, T_CDX = 22, T_CDE = 26, T_CDY = 30,
   T_Z = 34, T_ZDX, T_ZDE, T_ZDY, T_CI, T_CIW, T_ZI, T_OLO, T_OHI,
   T_FILL, T_PRIM, T_ENV, T_BLEND, T_FOG, T_FLAT, T_FTEX, T_SEL,
-  T_LOD = 54, T_PLOD, T_PZ, T_PDZ, T_PDZC, T_LASTX, T_LASTY,
+  T_LOD = 54, T_PLOD, T_PZ, T_PDZ, T_PDZC, T_LASTX, T_LASTY, T_HD,
   T_TC = 64, T_TDX = 68, T_TDE = 72, T_TDY = 76, T_TINFO = 80, T_K0 = 81, T_TSLOT = 85, T_CISZ = 86,
   T_TILES = 88,             // 8 tiles x 5 palabras (ver tri.comp)
   T_SIZE = 128,
@@ -83,6 +83,7 @@ inline auto queueTri(const TriRec&, const u8* = nullptr, const u16* = nullptr) -
 inline auto flush(u8*, u32, u8*, std::vector<TriOut>* = nullptr) -> void {}
 inline auto upscale() -> u32 { return 1; }
 inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&) -> bool { return false; }
+inline auto hdUpload(const void*, double, double) -> u32 { return 0; }
 #else
 // KESTREL_GPURDP pedido (y distinto de 0).
 auto wanted() -> bool;
@@ -114,6 +115,10 @@ auto upscale() -> u32;
 // replica la de 1x. false = sin escalado o formato no soportado.
 auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, u32 type,
                std::vector<u32>& out, u32& ow, u32& oh) -> bool;
+// Textura HD (texpack::Tex) con su escala sobre la original: la sube al buffer HD si no estaba
+// y da el valor de T_HD (cabecera + 1). 0 = no se puede (sin shaderFloat64, sin sitio con el
+// lote en curso): el primitivo va por el CPU.
+auto hdUpload(const void* tex, double scX, double scY) -> u32;
 #endif
 
 }  // namespace kestrel::gpurdp

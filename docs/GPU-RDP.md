@@ -291,6 +291,36 @@ de alta es la de 1x en bloques).
 Verificado: a 1x nada cambia (gate_gpurdp ALL OK 7 m 25 s: sm64 `b5521b24`, pd `a4e2cbcf`,
 krom 371/371 identicas a interp); a x2/x4 SM64 y PD salen con bordes de alta, sin grietas.
 
+### Fase 6 (parte 2) -- texturas HD en la GPU HECHO 2026-10-06
+
+Antes cualquier primitiva texturizada con texpack activo (`KESTREL_TEXPACK` / `KESTREL_TEXFX`)
+se iba al CPU. Ahora la GPU muestrea el sustituto HD con la MISMA cuenta que
+`SoftRdp::hdSample`, en double:
+
+- Variante de shader: `tools/gen_gpurdp_shaders.py` compila `tri.comp` dos veces; `tri_hd` lleva
+  `-DHD=1` (doubles, pide `shaderFloat64`). El dispositivo activa `shaderFloat64` si lo tiene;
+  sin el no hay `tri_hd` y lo HD sigue yendo al CPU. Un tramo usa `tri_hd` solo si alguna de sus
+  primitivas lleva HD; lo demas no paga los doubles.
+- Buffer HD (enlace 6): una palabra hasta la primera textura HD; entonces `hdUpload` lo agranda a
+  `KESTREL_GPURDP_HDMB` (64 MB por defecto) y reescribe el descriptor con la cola vacia. Cache
+  por (Tex*, escala S, escala T) -> cabecera (niveles, escalas en double; por nivel ancho, alto,
+  inicio y las razones `lw/w`, `lh/h` precalculadas en el anfitrion, sin divisiones en la GPU)
+  + texeles. Lleno: se vacia entero si la cola esta vacia; si no, esa primitiva al CPU.
+  `texpack::g_epoch` sube en cada `texpack::init` y vacia la cache (los Tex* de antes mueren).
+- Registro: palabra `T_HD` (61) = cabecera + 1, 0 = sin sustituto. `rdp.cpp` pasa el `HdBind`
+  del primitivo (`gpuHd`) y ya no se niega por texpack.
+- Muestreo bit a bit: pliegue con `ldexp` para el shift, `floor`, clamp/mirror/mask como el CPU;
+  nivel por la huella del pixel (mismos vecinos que la unidad de LOD, pasos de 1x, sin hacer
+  falta F_LOD), punto o bilineal entero segun `other_hi` bit 13. `precise` en todas las
+  cuentas para que el compilador no contraiga a FMA. Solo sustituye TEXEL0 (tile base), igual
+  que el CPU. Texrect: S/T desde la esquina XH/YH en double como el bucle de `SoftRdp::texRect`.
+- Escalado: en la pasada de alta la coordenada sale del subpixel de alta y la huella se divide
+  por S, asi que el nivel HD sale mas fino: el detalle del pack se ve de verdad a x2/x4.
+
+Verificado con `KESTREL_TEXFX=scale4x` (no hace falta pack): SM64 60 campos SoftRDP y GPU-RDP
+mismo md5 `b338947b` (37 k triangulos texturizados en la GPU, ningun vaciado por rechazo); PD
+1200 campos threaded-jit y gpurdp-jit mismo md5 `a7f80f7b`. Visual a x2 correcto.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego

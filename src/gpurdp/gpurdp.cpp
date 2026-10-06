@@ -11,6 +11,7 @@
 // falta. Medido (RX 570, SM64): las copias cuestan mas que leer por PCIe lo poco que toca cada
 // vaciado (32,7 s contra 28,9 s), asi que de fabrica el shader usa la memoria del anfitrion.
 #include "gpurdp.hpp"
+#include "../rdp/texpack.hpp"
 
 // Las estructuras de Vulkan se inicializan como {sType} y el resto a cero: es lo idiomatico,
 // no un olvido.
@@ -27,6 +28,8 @@
 #include <algorithm>
 #include <utility>
 #include <vector>
+#include <map>
+#include <tuple>
 
 // Tabla del divisor del blender (parallel-rdp luts.hpp, vendorizado; la misma que usa SoftRDP).
 #include "../../third_party/parallel-rdp/parallel-rdp/luts.hpp"
@@ -76,6 +79,15 @@ struct Ctx {
   VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
   VkPipelineLayout pl = VK_NULL_HANDLE;
   VkPipeline fill = VK_NULL_HANDLE, tri = VK_NULL_HANDLE;
+  // Fase 6: texturas HD. tri_hd = tri.comp con HD (doubles); `hd` = cabeceras y niveles de las
+  // texturas subidas, por (Tex*, escala S, escala T), asignadas en orden y vaciadas enteras
+  // cuando no caben y la cola esta vacia (o cuando texpack se reinicia).
+  VkPipeline triHd = VK_NULL_HANDLE;
+  bool f64 = false, hdFail = false;
+  Buf hd;
+  u32 hdUsed = 0, hdEpoch = 0;
+  bool hdDirty = false;
+  std::map<std::tuple<const void*, u64, u64>, u32> hdMap;
   VkDescriptorPool dpool = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
   // Fase 6: copia de alta resolucion (S = 1 << up) de la RDRAM y de sus bits ocultos, y el set
@@ -247,6 +259,11 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
   VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
   dci.enabledExtensionCount = (u32)dext.size(); dci.ppEnabledExtensionNames = dext.data();
+  VkPhysicalDeviceFeatures have{}, en{};
+  vkGetPhysicalDeviceFeatures(c.phys, &have);
+  en.shaderFloat64 = have.shaderFloat64;   // tri_hd
+  c.f64 = have.shaderFloat64 == VK_TRUE;
+  dci.pEnabledFeatures = &en;
   if(vkCreateDevice(c.phys, &dci, nullptr, &c.dev) != VK_SUCCESS) {
     std::fprintf(stderr, "[gpurdp] vkCreateDevice fallo\n"); c.dev = VK_NULL_HANDLE; return false;
   }
@@ -274,6 +291,10 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     mr.memory = c.lut.mem; mr.size = VK_WHOLE_SIZE;
     vkFlushMappedMemoryRanges(c.dev, 1, &mr);
   }
+  // Buffer HD: una palabra hasta la primera textura HD (el enlace 6 tiene que apuntar a algo);
+  // hdUpload lo agranda entonces a KESTREL_GPURDP_HDMB (64 MB por defecto).
+  if(!makeBuf(c, c.hd, 4)) return false;
+  c.hdEpoch = texpack::g_epoch;
   if(const char* e = std::getenv("KESTREL_GPURDP_UPSCALE"); e && e[0]) {
     const int f = std::atoi(e);
     const u32 up = f >= 4 ? 2 : f >= 2 ? 1 : 0;
@@ -315,7 +336,7 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     }
   }
 
-  constexpr u32 kBind = 6;   // ram, hid, registros, tabla del blender, resultados, TMEM
+  constexpr u32 kBind = 7;   // ram, hid, registros, tabla del blender, resultados, TMEM, HD
   VkDescriptorSetLayoutBinding b[kBind] = {};
   for(u32 i = 0; i < kBind; i++) {
     b[i].binding = i; b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -344,6 +365,7 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     return r == VK_SUCCESS;
   };
   if(!makePipe(kSpv_fill, sizeof kSpv_fill, c.fill) || !makePipe(kSpv_tri, sizeof kSpv_tri, c.tri)) return false;
+  if(c.f64 && !makePipe(kSpv_tri_hd, sizeof kSpv_tri_hd, c.triHd)) c.triHd = VK_NULL_HANDLE;
 
   VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBind * 2};
   VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -354,7 +376,8 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
   if(vkAllocateDescriptorSets(c.dev, &dai, &c.set) != VK_SUCCESS) return false;
   VkDescriptorBufferInfo bufs[kBind] = {{c.ram.shaderBuf(), 0, VK_WHOLE_SIZE}, {c.hid.shaderBuf(), 0, VK_WHOLE_SIZE},
                                          {c.recs.shaderBuf(), 0, VK_WHOLE_SIZE}, {c.lut.shaderBuf(), 0, VK_WHOLE_SIZE},
-                                         {c.outs.shaderBuf(), 0, VK_WHOLE_SIZE}, {c.tmem.shaderBuf(), 0, VK_WHOLE_SIZE}};
+                                         {c.outs.shaderBuf(), 0, VK_WHOLE_SIZE}, {c.tmem.shaderBuf(), 0, VK_WHOLE_SIZE},
+                                         {c.hd.buf, 0, VK_WHOLE_SIZE}};
   VkWriteDescriptorSet wr[kBind] = {};
   for(u32 i = 0; i < kBind; i++) {
     wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = c.set; wr[i].dstBinding = i;
@@ -379,8 +402,9 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
       if(vkCreateQueryPool(c.dev, &qi, nullptr, &c.qpool) == VK_SUCCESS) c.tsPeriod = p.limits.timestampPeriod;
     }
   }
-  std::fprintf(stderr, "[gpurdp] gpu=\"%s\" cola=%u espejo=%u KB coherente=%d local=%d escala=%u\n", p.deviceName,
-               c.qfamily, (unsigned)(c.ram.size >> 10), (int)c.ram.coherent, (int)c.local, 1u << c.up);
+  std::fprintf(stderr, "[gpurdp] gpu=\"%s\" cola=%u espejo=%u KB coherente=%d local=%d escala=%u hd=%u\n", p.deviceName,
+               c.qfamily, (unsigned)(c.ram.size >> 10), (int)c.ram.coherent, (int)c.local, 1u << c.up,
+               c.triHd ? 1u : 0u);
   return true;
 }
 
@@ -389,11 +413,12 @@ auto destroy(Ctx& c) -> void {
     vkDeviceWaitIdle(c.dev);
     if(c.fill) vkDestroyPipeline(c.dev, c.fill, nullptr);
     if(c.tri) vkDestroyPipeline(c.dev, c.tri, nullptr);
+    if(c.triHd) vkDestroyPipeline(c.dev, c.triHd, nullptr);
     if(c.pl) vkDestroyPipelineLayout(c.dev, c.pl, nullptr);
     if(c.dpool) vkDestroyDescriptorPool(c.dev, c.dpool, nullptr);
     if(c.dsl) vkDestroyDescriptorSetLayout(c.dev, c.dsl, nullptr);
     freeBuf(c, c.ram); freeBuf(c, c.hid); freeBuf(c, c.recs); freeBuf(c, c.lut); freeBuf(c, c.outs); freeBuf(c, c.tmem);
-    freeBuf(c, c.hram); freeBuf(c, c.hhid);
+    freeBuf(c, c.hram); freeBuf(c, c.hhid); freeBuf(c, c.hd);
     if(c.qpool) vkDestroyQueryPool(c.dev, c.qpool, nullptr);
     if(c.fence) vkDestroyFence(c.dev, c.fence, nullptr);
     if(c.pool) vkDestroyCommandPool(c.dev, c.pool, nullptr);
@@ -593,6 +618,74 @@ auto queueTri(const TriRec& t, const u8* tmem, const u16* tlut) -> bool {
 
 auto pending() -> bool { return g && !g->ops.empty(); }
 
+auto hdUpload(const void* tp, double scX, double scY) -> u32 {
+  if(!g || !g->triHd || !tp || g->hdFail) return 0;
+  Ctx& c = *g;
+  if(c.hd.size <= 4) {
+    // Primera textura HD: el buffer de verdad. Con la cola vacia no hay command buffer en vuelo
+    // que use los conjuntos de descriptores, asi que se pueden reescribir.
+    if(!c.ops.empty()) return 0;
+    u32 mb = 64;
+    if(const char* e = std::getenv("KESTREL_GPURDP_HDMB"); e && e[0]) mb = (u32)std::max(1, std::min(1024, std::atoi(e)));
+    Buf nb;
+    if(!makeBuf(c, nb, VkDeviceSize(mb) << 20)) {
+      freeBuf(c, nb);
+      c.hdFail = true;
+      std::fprintf(stderr, "[gpurdp] sin memoria para %u MB de texturas HD; van por el CPU\n", mb);
+      return 0;
+    }
+    freeBuf(c, c.hd);
+    c.hd = nb;
+    VkDescriptorBufferInfo bi = {c.hd.buf, 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet wd[2] = {};
+    u32 n = 0;
+    for(VkDescriptorSet ds : {c.set, c.setHi}) {
+      if(!ds) continue;
+      wd[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wd[n].dstSet = ds; wd[n].dstBinding = 6;
+      wd[n].descriptorCount = 1; wd[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wd[n].pBufferInfo = &bi;
+      n++;
+    }
+    vkUpdateDescriptorSets(c.dev, n, wd, 0, nullptr);
+    c.hdMap.clear(); c.hdUsed = 0;
+  }
+  auto reset = [&] { c.hdMap.clear(); c.hdUsed = 0; c.hdEpoch = texpack::g_epoch; };
+  if(c.hdEpoch != texpack::g_epoch) {
+    if(!c.ops.empty()) return 0;   // punteros de antes del reinicio: primero vaciar
+    reset();
+  }
+  u64 bx, by;
+  std::memcpy(&bx, &scX, 8); std::memcpy(&by, &scY, 8);
+  const auto key = std::make_tuple(tp, bx, by);
+  if(auto it = c.hdMap.find(key); it != c.hdMap.end()) return it->second;
+  const texpack::Tex& t = *(const texpack::Tex*)tp;
+  const u32 nl = (u32)t.lv.size();
+  if(!nl) return 0;
+  u64 need = 6 + 8ull * nl;
+  for(u32 l = 0; l < nl; l++) need += (u64)t.lw[l] * t.lh[l];
+  const u64 cap = c.hd.size / 4;
+  if(c.hdUsed + need > cap) {
+    if(!c.ops.empty() || need > cap) return 0;   // el lote en curso aun lee lo de dentro
+    reset();
+  }
+  u32* w = (u32*)c.hd.map + c.hdUsed;
+  auto putD = [](u32* p, double d) { u64 b; std::memcpy(&b, &d, 8); p[0] = (u32)b; p[1] = (u32)(b >> 32); };
+  w[0] = nl; w[1] = 0; putD(w + 2, scX); putD(w + 4, scY);
+  u32 data = c.hdUsed + 6 + 8 * nl;
+  for(u32 l = 0; l < nl; l++) {
+    u32* d = w + 6 + 8 * l;
+    d[0] = (u32)t.lw[l]; d[1] = (u32)t.lh[l]; d[2] = data; d[3] = 0;
+    // Mismas razones que SoftRdp::hdSample: (double)lw / tx.w y (double)lh / tx.h.
+    putD(d + 4, (double)t.lw[l] / t.w); putD(d + 6, (double)t.lh[l] / t.h);
+    std::memcpy((u32*)c.hd.map + data, t.lv[l].data(), (size_t)t.lw[l] * t.lh[l] * 4);
+    data += (u32)t.lw[l] * (u32)t.lh[l];
+  }
+  const u32 off = c.hdUsed + 1;
+  c.hdUsed = data;
+  c.hdDirty = true;
+  c.hdMap[key] = off;
+  return off;
+}
+
 auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   if(outs) outs->clear();
   if(!g || g->ops.empty()) return;
@@ -638,6 +731,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   if(c.up) { flushHost(c.hram); flushHost(c.hhid); }
   if(!c.tris.empty()) { flushHost(c.recs); flushHost(c.outs); }
   if(!c.tslots.empty()) flushHost(c.tmem);
+  if(c.hdDirty) { flushHost(c.hd); c.hdDirty = false; }
 
   const auto t1 = clk::now();
   vkResetCommandBuffer(c.cmd, 0);
@@ -801,7 +895,10 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
       }
     }
     fence(f, nf);
-    if(bound != c.tri) { vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.tri); bound = c.tri; }
+    VkPipeline want = c.tri;
+    if(c.triHd)
+      for(size_t k = i; k < j; k++) if(c.tris[c.ops[k].idx].w[T_HD]) { want = c.triHd; break; }
+    if(bound != want) { vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, want); bound = want; }
     Push p = {};
     p.addr = op.idx;                       // tri.comp: idx
     p.width = (u32)(j - i);                // tri.comp: count

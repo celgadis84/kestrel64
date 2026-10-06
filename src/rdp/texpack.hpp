@@ -51,6 +51,7 @@ auto init(const std::string& ident) -> void;
 
 extern bool g_dump;   // KESTREL_TEXDUMP puesto
 extern bool g_load;   // KESTREL_TEXPACK puesto y con algun fichero valido
+extern u32 g_epoch;   // sube en cada init(): los Tex* de antes ya no valen (cache del GPU-RDP)
 inline auto active() -> bool { return g_dump || g_load || g_fx != FxNone; }
 
 // RiceCRC32 sobre una vista de bytes `hb(i)` (i con signo: el original lee antes del

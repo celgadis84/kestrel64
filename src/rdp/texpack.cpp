@@ -20,6 +20,7 @@ namespace kestrel::texpack {
 
 bool g_dump = false;
 bool g_load = false;
+u32 g_epoch = 0;
 int g_fx = FxNone;
 
 namespace {
@@ -376,6 +377,7 @@ auto init(const std::string& ident) -> void {
   std::lock_guard<std::mutex> lk(g_mu);
   g_ident = ident;
   g_full.clear(); g_byCrc.clear(); g_dumpedKeys.clear(); g_fxCache.clear();
+  g_epoch++;
   g_dump = g_load = false;
   g_fx = FxNone;
   if(const char* f = std::getenv("KESTREL_TEXFX"); f && *f) {

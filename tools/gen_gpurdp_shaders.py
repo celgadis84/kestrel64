@@ -25,21 +25,28 @@ def glslc():
     sys.exit("glslc no encontrado")
 
 
-def compile_one(src):
+def compile_one(src, defs=()):
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "o.spv")
         subprocess.run([glslc(), "-O", "--target-env=vulkan1.1", "-fshader-stage=compute",
-                        src, "-o", out], check=True)
+                        *defs, src, "-o", out], check=True)
         data = open(out, "rb").read()
     return [int.from_bytes(data[i:i + 4], "little") for i in range(0, len(data), 4)]
 
 
+# Variantes: el mismo fuente con macros. tri_hd = tri con texturas HD (doubles, pide
+# shaderFloat64; el anfitrion solo la crea si el dispositivo lo tiene).
+VARIANTS = {"tri_hd": ("tri", ["-DHD=1"])}
+
+
 def main():
     names = sorted(f[:-5] for f in os.listdir(SHD) if f.endswith(".comp"))
+    names = sorted(names + list(VARIANTS))
     lines = ["// GENERADO por tools/gen_gpurdp_shaders.py. NO EDITAR A MANO.",
              "// Regenerar: python tools/gen_gpurdp_shaders.py", ""]
     for n in names:
-        words = compile_one(os.path.join(SHD, n + ".comp"))
+        src, defs = VARIANTS.get(n, (n, []))
+        words = compile_one(os.path.join(SHD, src + ".comp"), defs)
         lines.append("static const uint32_t kSpv_%s[] = {" % n)
         for i in range(0, len(words), 8):
             lines.append("  " + " ".join("0x%08xu," % w for w in words[i:i + 8]))

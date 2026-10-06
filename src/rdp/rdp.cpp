@@ -978,7 +978,8 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   if(fillMode && ci_size == 1) return false;   // el CPU lo pinta a 16 bits: otra zona
   const u32 cyc = cycleType();
   if(cyc == 2) return false;                          // COPY: aun no
-  if(textured && texpack::active()) return false;     // texturas HD: solo en el CPU
+  u32 hdOff = 0;                                      // textura HD: tri_hd (doubles) o CPU
+  if(textured && gpuHd.tex && !(hdOff = gpurdp::hdUpload(gpuHd.tex, gpuHd.scX, gpuHd.scY))) return false;
   if(sx1 > (int)ci_width) return false;               // x >= ancho pisaria la fila siguiente
   if(!fillMode && combProg) {
     if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo || combPlan.keyCyc != cyc)
@@ -1093,6 +1094,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
       r[T_TC + c] = tC[c]; r[T_TDX + c] = tDx[c]; r[T_TDE + c] = tDe[c]; r[T_TDY + c] = tDy[c];
     }
     r[T_TINFO] = (s32)(texTile | (maxLevel << 4) | ((u32)prim_min_level << 8));
+    r[T_HD] = (s32)hdOff;
     r[T_K0] = k0; r[T_K0 + 1] = k1; r[T_K0 + 2] = k2; r[T_K0 + 3] = k3;
     for(u32 i = 0; i < 8; i++) {
       const TexFold f = foldOf(i);
@@ -1230,6 +1232,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   }
   // GPU-RDP (KESTREL_GPURDP=1): triangulo en 16 bpp a la GPU, con o sin textura.
   if(gpurdp::active() && !costOnly) {
+    gpuHd = hdB;
     if(gpuTriangle(mem, w, leftMajor, fillMode, gouraud, combProg, flat, flatTexel, zActive, zSrc,
                    cC, cDx, cDe, cDy, tC, tDx, tDe, tDy, textured, persp, usesLod, usesTex1,
                    texTile, maxLevel)) {
@@ -2272,7 +2275,8 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
 auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, int Y0, int Y1,
                          bool usesTex1) -> bool {
   if(g_rgHi || wrtag::tag || !gpuCiOk()) return false;
-  if(texpack::active()) return false;
+  u32 hdOff = 0;                                      // textura HD: tri_hd (doubles) o CPU
+  if(gpuHd.tex && !(hdOff = gpurdp::hdUpload(gpuHd.tex, gpuHd.scX, gpuHd.scY))) return false;
   if(X1 > (int)ci_width) return false;
   const u32 cyc = cycleType();
   const bool copy = cyc == 2;
@@ -2327,6 +2331,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   r[T_TDX] = D; r[T_TDX + 1] = DT;
   r[T_TDE] = flip ? YH : XH; r[T_TDE + 1] = flip ? XH : YH;
   r[T_TINFO] = (s32)((c0 >> 24) & 7);
+  r[T_HD] = (s32)hdOff;
   r[T_K0] = k0; r[T_K0 + 1] = k1; r[T_K0 + 2] = k2; r[T_K0 + 3] = k3;
   for(u32 i = 0; i < 8; i++) {
     const TexFold f = foldOf(i);
@@ -2398,6 +2403,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   if(texpack::active() && !usesLod && !(cycleType() == 2 && ci_size == 1)) hdB = hdBind(mem, tile);
   // GPU-RDP (KESTREL_GPURDP=1): 16 bpp sin mipmap a la GPU; si no, antes lo encolado a la RDRAM.
   if(gpurdp::active()) {
+    gpuHd = hdB;
     if(!usesLod && gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
     if(gpuQueued) { gpuFlushStat(66); gpuFlush(mem); }
   }
