@@ -49,6 +49,8 @@ ROOT = Path(__file__).resolve().parent.parent
 ROMS = Path(os.environ.get("KESTREL_TESTROMS", r"E:\Claude\N64\test_roms"))
 KESTREL = Path(os.environ.get("KESTREL_EXE", ROOT / "build-prdp-static" / "kestrel64.exe"))
 FAITHFUL = {"KESTREL_SPLEAD": "0", "KESTREL_SPSIGQ": "0", "KESTREL_DPLOGLEAD": "0"}
+# RDP backend, fixed explicitly: the shipped exe starts on GPU-RDP, which is not complete yet.
+RDP_ENV = {"prdp": {"KESTREL_PRDP": "1"}, "gpu": {"KESTREL_GPURDP": "1"}, "soft": {"KESTREL_PRDP": "0"}}
 ARES = Path(os.environ.get("ARES_EXE", r"E:\Claude\N64\ares-64\build_win\desktop-ui\rundir\ares.exe"))
 OUT = ROOT / "out" / "fidelity"
 KPORT = 9133
@@ -74,6 +76,8 @@ class Emu:
             env["KESTREL_AUDIO"] = "0"
             if ARGS.kmode == "faithful":
                 env.update(FAITHFUL)
+            env.pop("KESTREL_PRDP", None)          # an explicit KESTREL_PRDP turns GPU-RDP off
+            env.update(RDP_ENV[ARGS.rdp])
             cmd = [str(KESTREL), str(rom), "--run", "--port", str(self.port)]
         else:
             cmd = [str(ARES), str(rom), "--system", "Nintendo 64", "--mcp"]
@@ -486,6 +490,8 @@ def main():
     ap.add_argument("--libdragon-rom", default="testrom_emu.z64")
     ap.add_argument("--kmode", default="faithful", choices=["faithful", "default"],
                     help="kestrel: faithful (gate settings) or default (shipped speed settings)")
+    ap.add_argument("--rdp", default="prdp", choices=sorted(RDP_ENV),
+                    help="kestrel RDP backend: prdp (parallel-rdp, reference), gpu (GPU-RDP), soft")
     ap.add_argument("--report", default=str(OUT / "fidelity.md"))
     ap.add_argument("--quiet", action="store_true")
     ARGS = args = ap.parse_args()
@@ -505,7 +511,7 @@ def main():
                 sys.stderr.write("\n")
             (OUT / f"{k}-{s}.json").write_text(json.dumps(rows, indent=1))
 
-    lines = ["# Fidelity score", "", f"kestrel: {KESTREL} ({args.kmode}); set {args.set}; libdragon ROM: {args.libdragon_rom}", "", "| suite | " + " | ".join(emus) + " |",
+    lines = ["# Fidelity score", "", f"kestrel: {KESTREL} ({args.kmode}, rdp {args.rdp}); set {args.set}; libdragon ROM: {args.libdragon_rom}", "", "| suite | " + " | ".join(emus) + " |",
              "|---|" + "---|" * len(emus)]
     for s in suites:
         cells = []
