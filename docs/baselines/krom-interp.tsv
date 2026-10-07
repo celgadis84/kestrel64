@@ -245,7 +245,7 @@ RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cyc
 RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle32BPPTLUTRGBA4B320X240	89.77	94.81	28.69	
 RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle32BPPTLUTRGBA8B320X240	96.17	98.07	27.23	
 RDP/8BPP/Rectangle/TextureRectangle/TLUT/InternalPalette/InternalPalette	0.00	66.80	63.43	SIZE 160x240 vs ref 320x240
-RDP/AlphaCompare/AlphaCompare	96.86	99.96	2.89	
+RDP/AlphaCompare/AlphaCompare	99.96	99.96	2.77	
 RDP/AlphaCoverage/AlphaCoverage	74.82	74.84	64.33	
 RDP/CombinerLongTailConstants/CombinerLongTailConstants	74.31	75.53	78.47	
 RDP/CombinerOverflow/CombinerOverflow	45.41	48.79	78.20	
@@ -265,24 +265,24 @@ RDP/LoadTLUT/LoadTLUT_b8_b4	98.92	98.98	13.60
 RDP/LoadTLUT/LoadTLUT_b8_b8	98.92	98.98	13.54	
 RDP/RDPModeInput/RDPModeInput	59.49	59.55	95.90	REF-DEDUP 3
 RDP/RDPTex0And1/RDPTex0And1	98.83	98.83	10.63	
-RDP/TEXRECT_Palette/TEXRECT_Palette	88.83	90.42	38.40	
-RDP/TextureCoordinates/TextureCoordinates	93.50	98.00	11.49	
+RDP/TEXRECT_Palette/TEXRECT_Palette	88.31	90.27	38.52	
+RDP/TextureCoordinates/TextureCoordinates	99.15	99.15	11.39	
 RDP/TextureCoordinates1/TextureCoordinates1	100.00	100.00	0.00	
 RDP/TextureCoordinates1b/TextureCoordinates1b	95.31	95.31	26.72	
 RDP/TextureCoordinates2/TextureCoordinates2	95.29	95.46	11.67	
 RDP/TextureCoordinates2b/TextureCoordinates2b	97.35	97.35	26.27	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_1	98.28	100.00	0.68	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_2	87.76	87.76	66.51	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_3	78.18	78.18	85.97	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_4	84.74	84.77	69.99	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT15_1	98.07	100.00	0.72	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_1	100.00	100.00	0.00	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_2	87.76	87.76	66.52	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_3	78.18	78.18	85.98	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT0_4	84.77	84.77	70.00	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT15_1	100.00	100.00	0.00	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT15_2	88.85	88.85	63.12	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT15_3	76.65	76.65	88.93	
 RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT15_4	87.55	87.55	62.40	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_1	98.83	100.00	0.56	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_2	83.62	83.62	77.31	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_3	74.39	74.39	92.47	
-RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_4	81.29	81.32	77.64	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_1	100.00	100.00	0.00	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_2	83.62	83.62	77.32	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_3	74.39	74.39	92.49	
+RDP/TexturesMaskShiftMirror/TexturesMaskCMShiftT1_4	81.32	81.32	77.66	
 RDPTest/CPU/RDPTestCPU	99.74	99.74	11.24	
 RDPTest/RSP/RDPTestRSP	99.74	99.74	11.26	
 RDRAMTest/RDRAMTest	78.76	78.76	87.32	
@@ -363,10 +363,10 @@ Video/GRB15LZDIFFRLEVideo/GRB15LZDIFFRLEVideo	0.02	0.77	54.54	REF-DEDUP 3
 Video/GRB24Decode/CPU/CPUGRB24Decode	100.00	100.00	0.00	REF-DEDUP 3
 Video/GRB24Decode/RDP/RDPGRB24Decode	100.00	100.00	0.00	REF-DEDUP 3
 Video/I4Decode/CPU/CPUI4Decode	33.13	33.34	13.00	REF-DEDUP 3
-Video/I4Decode/RDP/RDPI4Decode	33.47	99.97	0.87	REF-DEDUP 3
+Video/I4Decode/RDP/RDPI4Decode	82.53	100.00	0.44	REF-DEDUP 3
 Video/I4LZRLEVideo/I4LZRLEVideo	33.28	33.28	206.67	REF-DEDUP 3
 Video/I8Decode/CPU/CPUI8Decode	32.55	96.15	35.71	
-Video/I8Decode/RDP/RDPI8Decode	78.73	97.20	25.92	
+Video/I8Decode/RDP/RDPI8Decode	63.73	97.24	25.98	
 Video/I8LZRLEVideo/I8LZRLEVideo	32.78	33.09	204.10	
 Video/YUV16LZDIFFRLEVideo/YUV16LZDIFFRLEVideo	0.00	0.23	141.06	REF-DEDUP 3
 Video/YUV8LZDIFFRLEVideo/YUV8LZDIFFRLEVideo	0.00	0.23	141.06	REF-DEDUP 3

@@ -704,10 +704,6 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg, const s32*
     if(z && !depthTest(mem, x, y, *z)) return;
     storePixel(mem, x, y, src); return;
   }
-  if(bp.usesMem && !bp.imRd) {
-    if(z && !depthTest(mem, x, y, *z)) return;
-    storePixel(mem, x, y, ditherRgb(x, y, src)); return;
-  }
 
   // --- color y cobertura de memoria -------------------------------------------------
   // IM_RD deshabilitado no significa "cobertura cero": el hardware entrega 7 (pixel lleno),
@@ -733,6 +729,22 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg, const s32*
   // Un pixel sin cobertura no existe. Solo con antialias encendido: con AA apagado el
   // hardware ya decidio la vida del pixel con una sola toma en el recorte del tramo.
   if(bp.aaEn && cvg == 0) return;
+  // Sin lecturas el color pasa tal cual, pero el byte de alfa sigue siendo la cobertura de
+  // CVG_DEST con la de memoria a 7 (parallel-rdp `write_color(u8x4(rgb, new_coverage << 5))`
+  // y `decode_memory_color`): un RGBA32 sin IM_RD guarda 0xE0, no el alfa del texel
+  // (libdragon test_rdpq_tex_upload).
+  if(bp.usesMem && !bp.imRd) {
+    if(z && !depthTest(mem, x, y, *z)) return;
+    const bool blendEn = bp.force || (cvg + 7 < 8 && bp.aaEn);
+    int newCvg;
+    switch(bp.cvgDst) {
+      case 1:  newCvg = (cvg + 7) & 7; break;
+      case 2:  newCvg = 7; break;
+      case 3:  newCvg = 7; break;
+      default: newCvg = blendEn ? 7 : ((cvg - 1) & 7); break;
+    }
+    storePixel(mem, x, y, (ditherRgb(x, y, src) & ~0xffu) | (u32)(newCvg << 5)); return;
+  }
 
   // --- etapa de profundidad (parallel-rdp `depth_test`) -----------------------------
   // Desbordar (cobertura entrante + la que ya hay >= 8) significa que el pixel es de OTRA
@@ -2461,8 +2473,11 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       if(other_lo & 1) {
         if(copy ? (c & 0xff) == 0 : alphaRef(x, y, c) < (int)(blend_color & 0xff)) continue;
       }
-      if(other_lo & 0x40) blendPixel(mem, x, y, c);      // blend against framebuffer
-      else putPixel(mem, x, y, c);                        // opaque write
+      // 1-/2-cycle: todo pixel pasa por el blender con cobertura llena, lea o no la
+      // memoria (IM_RD solo decide si la lee): asi el alfa guardado es la cobertura de
+      // CVG_DEST y el dither se aplica (libdragon test_rdpq_tex_upload: RGBA32 = 0xE0).
+      if(copy) putPixel(mem, x, y, c);
+      else blendPixel(mem, x, y, c);
     }
   }
   lodFracV = 0xff;

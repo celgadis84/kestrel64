@@ -317,10 +317,6 @@ void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShade
     if(hasZ && !depthTest(x, y, zin)) return;
     storePixel(x, y, src); return;
   }
-  if(usesMem && !imRd) {
-    if(hasZ && !depthTest(x, y, zin)) return;
-    storePixel(x, y, ditherRgb(x, y, src)); return;
-  }
   uint memc = 0u; int memCvg = 7;
   if(imRd && needMem) { memc = readFb(x, y); memCvg = int((memc & 0xffu) >> 5); }
   {
@@ -334,6 +330,19 @@ void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShade
     src = (src & ~0xffu) | uint(expanded < 0 ? 0 : expanded > 255 ? 255 : expanded);
   }
   if(aaEn && cvg == 0) return;
+  // Sin lecturas: color tal cual, alfa = cobertura de CVG_DEST con memoria a 7 (SoftRdp).
+  if(usesMem && !imRd) {
+    if(hasZ && !depthTest(x, y, zin)) return;
+    bool be = force || (cvg + 7 < 8 && aaEn);
+    int nc;
+    switch(cvgDst) {
+      case 1u: nc = (cvg + 7) & 7; break;
+      case 2u: nc = 7; break;
+      case 3u: nc = 7; break;
+      default: nc = be ? 7 : ((cvg - 1) & 7); break;
+    }
+    storePixel(x, y, (ditherRgb(x, y, src) & ~0xffu) | uint(nc << 5)); return;
+  }
   bool zCmp = hasZ && (olo & 0x10u) != 0u, zUpd = hasZ && (olo & 0x20u) != 0u;
   uint zoff = 0u; int zz = 0;
   int pxDz = R(R_PDZ), pxDzC = R(R_PDZC);
@@ -868,7 +877,8 @@ void rectPixel(int x, int y) {
       if(a < int(U(R_BLEND) & 0xffu)) return;
     }
   }
-  if((U(R_OLO) & 0x40u) != 0u) blendPixel(x, y, c, 8, false, 0, 0);
+  // 1-/2-cycle: siempre por el blender (alfa = cobertura de CVG_DEST), como SoftRdp::texRect.
+  if(!copy) blendPixel(x, y, c, 8, false, 0, 0);
   else if(x >= R(R_SX0) * SC && x < R(R_SX1) * SC && y >= R(R_SY0) * SC && y < R(R_SY1) * SC) storePixel(x, y, c);
 }
 
