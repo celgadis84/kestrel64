@@ -205,6 +205,10 @@ private:
   int combined[4] = {0, 0, 0, 0};
 
   int sx0 = 0, sy0 = 0, sx1 = 320, sy1 = 240;   // scissor box (pixels)
+  // Borde derecho exclusivo en FILL/COPY: ahi el ultimo pixel es inclusivo, (xh>>2)+1 en vez
+  // del redondeo hacia arriba de 1/2 ciclos (parallel-rdp binning.h, x_bias 4 contra 3).
+  int sx1fc = 320;
+  auto scX1() const -> int { return cycleType() >= 2 ? sx1fc : sx1; }
 
   // Pixels that actually reached the color / z images since boot. Only feeds the
   // DPC counters: a pixel killed by alpha or depth compare performs its reads but
@@ -310,6 +314,7 @@ private:
     u32 shiftS, shiftT, maskS, maskT, cmS, cmT;
     int sMax, tMax;
     u32 rowBytes, base, palette, kind;
+    u32 slo, tlo;                         // origen del tile (SL/TL, 10.2) que resta el muestreo
     // Caso comun del pliegue: sin SHIFT, con mask y sin clamp ni mirror. Ahi las dos
     // etapas de `foldCoord` se reducen a un AND, y el tile decide el camino una vez.
     bool fastS, fastT;

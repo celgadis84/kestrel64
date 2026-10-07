@@ -27,3 +27,21 @@ Fixed in kestrel while getting here (commit 71a6909):
   bits 23:3, so the low 3 bits of the skip field are lost (ares `skip.bit(3,11)`). libdragon
   `DMAExec` writes skip = pitch - width unrounded (17-byte rows of a 128 pitch); kestrel
   added the raw skip and every row after the first came from the wrong address.
+
+## libdragon on SoftRDP and GPU-RDP (2026-10-08)
+
+Both backends now give the same result as parallel-rdp: 211/217 (7 skipped), and the only
+failures are the 6 test-side ones above. They were at 209/217. What was missing:
+
+- **Tile origin in sampling.** The hardware subtracts SL/TL (10.2) from S/T after the tile
+  SHIFT, in 10.5 fixed point (parallel-rdp `shift_coord`). SoftRDP and `tri.comp` never did,
+  so any tile with SL/TL != 0 (texture scroll, `rdpq_tex_upload_sub`) sampled shifted. The
+  SHIFT now also acts on the fixed-point value, so with a left shift the fraction moves into
+  the integer part. krom `TexturesMaskShiftMirror`: 16 ROMs improve, 0 regress.
+- **LOAD_BLOCK source row.** SL/TL of LOAD_BLOCK are whole texels, and the RDRAM source is
+  `tex_addr + (ti_width*TL + SL) * bpp`. TL was ignored.
+- **IA4 intensity.** The 3 bits expand by bit replication (`I<<5|I<<2|I>>1`, 6 -> 0xDB), not
+  `*255/7`.
+- **RGBA32 split TMEM.** RG in the low half and BA at +0x800 (load and sample).
+- **Scissor and rect edges.** The high scissor bound is exclusive in 1/2-cycle (`(x+3)>>2`)
+  and `(x>>2)+1` in FILL/COPY. FILL/COPY rects have inclusive right/bottom edges.

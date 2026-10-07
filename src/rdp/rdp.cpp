@@ -837,7 +837,7 @@ auto SoftRdp::blendPixel(Memory& mem, int x, int y, u32 src, int cvg, const s32*
 
 auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   x0 = std::max(x0, sx0); y0 = std::max(y0, sy0);
-  x1 = std::min(x1, sx1); y1 = std::min(y1, sy1);
+  x1 = std::min(x1, scX1()); y1 = std::min(y1, sy1);
   auto& m = mem.rdram;
   // FILL_RECTANGLE behaves per cycle type: in FILL (3) / COPY (2) modes it blasts the
   // packed fill colour straight to memory. In 1-/2-cycle modes the rect is a shadeless
@@ -1113,7 +1113,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
       s32* d = &r[T_TILES + i * 5];
       d[0] = (s32)(f.shiftS | (f.shiftT << 4) | (f.maskS << 8) | (f.maskT << 12) | (f.cmS << 16)
                    | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
-      d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)f.rowBytes; d[4] = (s32)f.base;
+      d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)(f.rowBytes | f.slo << 16); d[4] = (s32)(f.base | f.tlo << 16);
     }
   }
   r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr; r[T_CISZ] = (s32)ci_size;
@@ -1543,6 +1543,7 @@ auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
   f.rowBytes = tl.line * 8;
   f.base     = tl.tmem * 8;
   f.palette  = tl.palette;
+  f.slo = tl.sl; f.tlo = tl.tl;
   // Camino rapido del pliegue: SHIFT nulo + mask activa + ni clamp ni mirror => la etapa
   // de clamp no se ejecuta (cm & 2 == 0 y mask != 0) y la de mask se queda en el AND.
   f.fastS = tl.shiftS == 0 && tl.maskS != 0 && (tl.cmS & 3) == 0;
@@ -1572,6 +1573,22 @@ auto SoftRdp::tlutEntry(u32 idx) const -> u32 {
   u32 r = exp5((e >> 11) & 0x1f), g = exp5((e >> 6) & 0x1f);
   u32 b = exp5((e >> 1)  & 0x1f), a = (e & 1) ? 255 : 0;   // RGBA5551 palette
   return (r << 24) | (g << 16) | (b << 8) | a;
+}
+
+// Coordenada S/T del rasterizador (10.5) -> coordenada dentro del tile, como el hardware
+// (parallel-rdp texture.h shift_coord): recorte a 16 bits con signo, SHIFT del tile sobre el
+// valor en punto fijo (las fracciones entran en la parte entera con un shift a la izquierda) y
+// resta del origen SL/TL del tile (10.2, o sea << 3). Despues van clamp y mask (`foldCoord`
+// con sh = 0).
+static inline auto tileCoord(int c, u32 sh, u32 lo) -> int {
+  c = c < -0x8000 ? -0x8000 : c > 0x7fff ? 0x7fff : c;
+  if(sh) c = sh <= 10 ? (c >> sh) : (int)(s16)(u16)((u32)c << (16 - sh));
+  return c - (int)(lo << 3);
+}
+// S/T en double -> 10.5 truncando hacia abajo (muestreo puntual), sin desbordar el int.
+static inline auto fix105(double v) -> int {
+  v = std::floor(v * 32.0);
+  return v < -32768.0 ? -32768 : v > 32767.0 ? 32767 : (int)v;
 }
 
 auto SoftRdp::foldCoord(int c, u32 sh, u32 mask, u32 cm, int lim) -> int {
@@ -1607,15 +1624,17 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
   const u32 rowBytes = f.rowBytes, base = f.base;
   // Filas impares de TMEM van con las dos mitades de 32 bits de cada palabra de 64
   // intercambiadas (las cargas las escriben asi, ver `loadTile`); el muestreador las deshace
-  // con la paridad de la fila T ya plegada. 32 bpp: el intercambio es de pares de texeles.
-  const u32 ox = (t & 1) ? (K == TK_RGBA32 ? 8u : 4u) : 0u;
+  // con la paridad de la fila T ya plegada.
+  const u32 ox = (t & 1) ? 4u : 0u;
   if constexpr(K == TK_CI4 || K == TK_IA4 || K == TK_I4) {     // 4-bit texels
     u32 off = (base + (u32)t * rowBytes + (u32)s / 2) ^ ox;
     if(off >= 0x1000) return 0;
     u8 nib = (s & 1) ? (tmem[off] & 0xf) : (tmem[off] >> 4);
     if constexpr(K == TK_CI4) return tlutEntry(f.palette * 16 + nib);  // 16-entry sub-palette
     else if constexpr(K == TK_IA4) {
-      u32 i = (((nib >> 1) & 7) * 255) / 7, a = (nib & 1) ? 255 : 0;   // IA4 (3I/1A)
+      // IA4 (3I/1A): la intensidad de 3 bits se expande replicando bits (I<<5|I<<2|I>>1),
+      // como el TX del hardware; no es un escalado exacto *255/7 (6 -> 0xDB, no 0xDA).
+      u32 i3 = nib & 0xe, i = (i3 << 4) | (i3 << 1) | (i3 >> 2), a = (nib & 1) ? 255 : 0;
       return (i << 24) | (i << 16) | (i << 8) | a;
     } else {
       u32 i = nib * 17;                      // I4 -> intensity replicated to R,G,B AND alpha
@@ -1650,9 +1669,11 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
       return (r << 24) | (g << 16) | (b << 8) | a;
     }
   } else if constexpr(K == TK_RGBA32) {                        // 32-bit RGBA8888
-    u32 off = (base + (u32)t * rowBytes + (u32)s * 4) ^ ox;
-    if(off + 3 >= 0x1000) return 0;
-    return ((u32)tmem[off] << 24) | ((u32)tmem[off+1] << 16) | ((u32)tmem[off+2] << 8) | tmem[off+3];
+    // TMEM partida como el hardware: 16 bits por texel en cada mitad, RG en la baja y BA en la
+    // alta (+0x800). TMEM address y LINE cuentan dentro de la mitad y la direccion da la vuelta
+    // en 2 KB. Ref: parallel-rdp tmem_update.comp (update_tmem_32) y el muestreo de 32 bpp.
+    const u32 off = ((base + (u32)t * rowBytes + (u32)s * 2) ^ ox) & 0x7fe, hi = off | 0x800;
+    return ((u32)tmem[off] << 24) | ((u32)tmem[off+1] << 16) | ((u32)tmem[hi] << 8) | tmem[hi+1];
   } else if constexpr(K == TK_CI8 || K == TK_IA8 || K == TK_I8) {   // 8-bit texels
     u32 off = (base + (u32)t * rowBytes + (u32)s) ^ ox;
     if(off >= 0x1000) return 0;
@@ -1699,11 +1720,7 @@ auto SoftRdp::sampleRawIndex(u32 tileIdx, int s, int t) -> int {
   // an 8bpp colour-index framebuffer, where hardware stores the index byte verbatim
   // (the "internal palette": the framebuffer holds indices, VI displays them raw).
   const Tile& tl = tiles[tileIdx & 7];
-  auto applyShift = [](int c, u32 sh) -> int {
-    if(!sh) return c;
-    return sh <= 10 ? (c >> sh) : (c << (16 - sh));
-  };
-  s = applyShift(s, tl.shiftS); t = applyShift(t, tl.shiftT);
+  s = tileCoord(s, tl.shiftS, tl.sl) >> 5; t = tileCoord(t, tl.shiftT, tl.tl) >> 5;   // s, t en 10.5
   int sMax = (int)(tl.sh >> 2) - (int)(tl.sl >> 2);
   int tMax = (int)(tl.th >> 2) - (int)(tl.tl >> 2);
   auto wrap = [](int c, u32 mask, u32 cm, int lim) -> int {   // clamp→mask sequential (see sampleTexel)
@@ -1731,7 +1748,8 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   // texels around the sample and lerps by the fractional coords. No -0.5 GL-style bias: the
   // RDP addresses texel origins directly, sfrac/tfrac are the low fractional bits of S/T.
   if(g_noFilter || !((other_hi >> 13) & 1))
-    return texelK<K>(f, (int)std::floor(s), (int)std::floor(t));
+    return fetchK<K>(f, foldCoord(tileCoord(fix105(s), f.shiftS, f.slo) >> 5, 0, f.maskS, f.cmS, f.sMax),
+                        foldCoord(tileCoord(fix105(t), f.shiftT, f.tlo) >> 5, 0, f.maskT, f.cmT, f.tMax));
   // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double lerp
   // rounded at the end lands on a different level whenever the exact result sits on a .5
   // boundary, and the 5-bit framebuffer then quantizes that difference into a visible band.
@@ -1739,18 +1757,19 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   // negative slope truncates toward -inf, as on HW).
 #if defined(__SSE4_1__)
   const __m128i sti = stFixed(s, t);
-  const int si = _mm_cvtsi128_si32(sti), ti = _mm_extract_epi32(sti, 1);
+  int si = _mm_cvtsi128_si32(sti), ti = _mm_extract_epi32(sti, 1);
 #else
   int si = lroundExact(s * 32.0), ti = lroundExact(t * 32.0);
 #endif
+  si = tileCoord(si, f.shiftS, f.slo); ti = tileCoord(ti, f.shiftT, f.tlo);
   int fx = si & 31, fy = ti & 31;
   int s0 = si >> 5, t0 = ti >> 5;
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   // Cuatro pliegues, no seis: las tres tomas se reparten s0/s0+1 y t0/t0+1.
-  const int sw0 = f.fastS ? (s0 & f.andS)     : foldCoord(s0,     f.shiftS, f.maskS, f.cmS, f.sMax),
-            sw1 = f.fastS ? ((s0 + 1) & f.andS) : foldCoord(s0 + 1, f.shiftS, f.maskS, f.cmS, f.sMax),
-            tw0 = f.fastT ? (t0 & f.andT)     : foldCoord(t0,     f.shiftT, f.maskT, f.cmT, f.tMax),
-            tw1 = f.fastT ? ((t0 + 1) & f.andT) : foldCoord(t0 + 1, f.shiftT, f.maskT, f.cmT, f.tMax);
+  const int sw0 = f.fastS ? (s0 & f.andS)     : foldCoord(s0,     0, f.maskS, f.cmS, f.sMax),
+            sw1 = f.fastS ? ((s0 + 1) & f.andS) : foldCoord(s0 + 1, 0, f.maskS, f.cmS, f.sMax),
+            tw0 = f.fastT ? (t0 & f.andT)     : foldCoord(t0,     0, f.maskT, f.cmT, f.tMax),
+            tw1 = f.fastT ? ((t0 + 1) & f.andT) : foldCoord(t0 + 1, 0, f.maskT, f.cmT, f.tMax);
   u32 c10 = fetchK<K>(f, sw1, tw0), c01 = fetchK<K>(f, sw0, tw1);
   const bool midTexel = ((other_hi >> 12) & 1) && fx == 16 && fy == 16;
 #if defined(__SSE4_1__)
@@ -1940,6 +1959,7 @@ auto SoftRdp::hdBind(Memory& mem, u32 t) -> HdBind {
     // clamp ni shift): texel (s, t) de la imagen cargada.
     TexFold f = foldOf(t);
     f.shiftS = f.shiftT = f.maskS = f.maskT = f.cmS = f.cmT = 0;
+    f.slo = f.tlo = 0;
     f.sMax = f.tMax = 4095;
     f.fastS = f.fastT = false;
     std::vector<u32> px((usize)w * h);
@@ -2338,7 +2358,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   if(!g_noFilter && ((other_hi >> 13) & 1)) fl |= TF_FILT;
   if(other_lo & 1) fl |= TF_ACMP;
   r[T_FLAGS] = fl;
-  r[T_SX0] = sx0; r[T_SY0] = sy0; r[T_SX1] = sx1; r[T_SY1] = sy1;
+  r[T_SX0] = sx0; r[T_SY0] = sy0; r[T_SX1] = scX1(); r[T_SY1] = sy1;
   r[T_BX] = X0; r[T_BY] = Y0; r[T_BW] = X1 - X0; r[T_BH] = Y1 - Y0;
   r[T_TC] = S * 128 * (copy ? 4 : 1); r[T_TC + 1] = T * 128;
   r[T_TDX] = D; r[T_TDX + 1] = DT;
@@ -2351,7 +2371,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
     s32* d = &r[T_TILES + i * 5];
     d[0] = (s32)(f.shiftS | (f.shiftT << 4) | (f.maskS << 8) | (f.maskT << 12) | (f.cmS << 16)
                  | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
-    d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)f.rowBytes; d[4] = (s32)f.base;
+    d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)(f.rowBytes | f.slo << 16); d[4] = (s32)(f.base | f.tlo << 16);
   }
   r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr; r[T_CISZ] = (s32)ci_size;
   r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;
@@ -2399,8 +2419,13 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   auto yCut = [](s32 r) -> double { return (double)(s32)(((u32)r << 11) & ~0x7fffu) / 65536.0; };
   const double lxS = flip ? 0 : rdsdx / 32.0, lxT = flip ? rdtdy / 32.0 : 0;
   const double lyS = flip ? yCut(rdsdx) : 0,  lyT = flip ? 0 : yCut(rdtdy);
-  int X0 = std::max((int)std::ceil(xh), sx0), X1 = std::min((int)std::ceil(xl), sx1);
-  int Y0 = std::max((int)std::ceil(yh), sy0), Y1 = std::min((int)std::ceil(yl), sy1);
+  // En COPY/FILL el borde derecho/inferior es inclusivo, como en FILL_RECTANGLE (parallel-rdp
+  // op_texture_rectangle: yl |= 3 y el tramo incluye el pixel de xl).
+  const bool incl = cycleType() >= 2;
+  const int xlEx = incl ? (int)std::floor(xl) + 1 : (int)std::ceil(xl);
+  const int ylEx = incl ? (int)std::floor(yl) + 1 : (int)std::ceil(yl);
+  int X0 = std::max((int)std::ceil(xh), sx0), X1 = std::min(xlEx, scX1());
+  int Y0 = std::max((int)std::ceil(yh), sy0), Y1 = std::min(ylEx, sy1);
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
   // Solo-coste: un texrect es un rectangulo recortado al scissor y NUNCA escribe el z
   // (no lleva pendiente de profundidad), asi que su coste sale del area sin rasterizar.
@@ -2457,7 +2482,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
         // 1-bit key uses the INDEX itself as coverage (index 0 = transparent), NOT the TLUT
         // alpha: this demo's TLUT entries (idx<<8) all have LSB 0, yet hardware draws every
         // non-zero index — so the key is index==0, the coverage carried by the CI value.
-        int idx = sampleRawIndex(tile, (int)std::floor(s), (int)std::floor(t));
+        int idx = sampleRawIndex(tile, fix105(s), fix105(t));
         if((other_lo & 1) && idx == 0) continue;   // transparent index → skip
         putPixel(mem, x, y, (u32)idx);             // 8bpp path stores low byte = index
         continue;
@@ -2508,19 +2533,37 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   // cuando T es impar y la coloca en i + T*line (el LINE del tile de carga, casi siempre 0).
   // Con DXT bien puesto la textura queda igual que con LOAD_TILE; con DXT = 0 no intercambia
   // nada, y quien carga asi tiene que traer las filas impares ya intercambiadas en RDRAM
-  // (port nativo de PD). Ref: parallel-rdp tmem_update.comp. En 32 bpp el intercambio es de
-  // pares de texeles: en este TMEM lineal de 4 B/texel, XOR 8 en vez de 4.
+  // (port nativo de PD). Ref: parallel-rdp tmem_update.comp.
+  //
+  // 32 bpp: cada texel se parte en dos mitades de 16 bits, RG a la mitad baja de TMEM y BA a
+  // la alta (+0x800), con direcciones y LINE contadas dentro de la mitad (ver fetchK). Cada
+  // palabra de 64 bits de RDRAM (dos texeles) deja 4 bytes en cada mitad, y en las filas
+  // impares se intercambia con su vecina (XOR 4 dentro de la mitad).
   Tile& tl = tiles[t & 7];
   const auto& m = mem.rdram;
   u32 bpt = ti_size == 3 ? 4 : ti_size == 2 ? 2 : ti_size == 1 ? 1 : 0;   // bytes/texel (0 = 4-bit)
-  const u32 oxb = bpt == 4 ? 8u : 4u;
+  // Un texel de 32 bpp (4 bytes de RDRAM desde sa) a la direccion d de la mitad baja.
+  auto put32 = [&](u32 d, u32 sa) {
+    d &= 0x7fe;
+    if(sa + 3 >= m.size()) return;
+    tmem[d] = m[sa]; tmem[d + 1] = m[sa + 1]; tmem[d | 0x800] = m[sa + 2]; tmem[(d | 0x800) + 1] = m[sa + 3];
+  };
   // LOAD_BLOCK: nb bytes de RDRAM desde src, palabra a palabra con el contador DXT.
   auto blockCopy = [&](u32 src, u32 nb, u32 dxt) {
     const u32 dst = tl.tmem * 8;
+    if(bpt == 4) {
+      for(u32 i = 0, done = 0; done < nb; i++, done += 8) {
+        const u32 tt = (u32)(((u64)i * dxt) >> 11);
+        const u32 w = (dst + i * 4 + tt * tl.line * 8) ^ ((tt & 1) ? 4u : 0u);
+        put32(w, src + done);
+        if(done + 4 < nb) put32(w + 2, src + done + 4);
+      }
+      return;
+    }
     if(!dxt && !tl.line) { copyRun(m, src, dst, nb); return; }   // T = 0 siempre: copia recta
     for(u32 i = 0, done = 0; done < nb; i++, done += 8) {
       const u32 tt = (u32)(((u64)i * dxt) >> 11);
-      const u32 w = dst + (i + tt * tl.line) * 8, x = (tt & 1) ? oxb : 0u;
+      const u32 w = dst + (i + tt * tl.line) * 8, x = (tt & 1) ? 4u : 0u;
       const u32 n = std::min(8u, nb - done);
       for(u32 b = 0; b < n; b++) {
         const u32 d = (w + b) ^ x, sa = src + done + b;
@@ -2536,7 +2579,7 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     tl.sl = sl; tl.tl = tlo; tl.sh = sh; tl.th = th;
     if(block) {
       u32 count = (sh >= sl) ? (sh - sl + 1) : 1, nb = (count + 1) / 2;
-      blockCopy(ti_addr + (sl >> 1), nb, th);
+      blockCopy(ti_addr + ((tlo * ti_width + sl) >> 1), nb, th);   // SL/TL en texeles (ver abajo)
       accountLoad(mem, 1, nb);
     } else {
       u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2, rowBytes = tl.line * 8;
@@ -2561,7 +2604,9 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   if(block) {
     u32 count = (sh >= sl) ? (sh - sl + 1) : 1;        // linear texel count
     u32 nb = count * bpt;
-    blockCopy(ti_addr + sl * bpt, nb, th);
+    // LOAD_BLOCK lleva SL y TL en texeles enteros (no 10.2), y el origen en RDRAM es la fila
+    // TL del texture image: tex_addr + (ti_width*TL + SL) * bpp (parallel-rdp load_tile).
+    blockCopy(ti_addr + (tlo * ti_width + sl) * bpt, nb, th);
     accountLoad(mem, 1, nb);
     return;
   }
@@ -2572,12 +2617,20 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   // TMEM (paso `bpt` desde el inicio de la fila), asi que la fila entera es un solo run.
   // Copiar byte a byte con dos comprobaciones de limite POR BYTE salia el 7 % del hilo.
   const u32 rowRun = (s1 - s0 + 1) * bpt;
+  if(bpt == 4) {
+    for(u32 ty = t0; ty <= t1; ty++) {
+      const u32 src = ti_addr + (ty * ti_width + s0) * 4, x = ((ty - t0) & 1) ? 4u : 0u;
+      const u32 dst = tl.tmem * 8 + (ty - t0) * rowBytes;
+      for(u32 k = 0; k <= s1 - s0; k++) put32((dst + k * 2) ^ x, src + k * 4);
+    }
+    return;
+  }
   for(u32 ty = t0; ty <= t1; ty++) {
     u32 src = ti_addr + (ty * ti_width + s0) * bpt;
     u32 dst = tl.tmem * 8 + (ty - t0) * rowBytes;
     if(!((ty - t0) & 1)) { copyRun(m, src, dst, rowRun); continue; }
     for(u32 b = 0; b < rowRun; b++) {                 // fila impar: mitades intercambiadas
-      const u32 d = (dst + b) ^ oxb;
+      const u32 d = (dst + b) ^ 4u;
       if(d < 0x1000 && src + b < m.size()) tmem[d] = m[src + b];
     }
   }
@@ -2800,10 +2853,15 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       cur += 16; executed++; continue;
     }
     case 0x2d:                                          // SET_SCISSOR
+      // Coordenadas 10.2. El limite bajo trunca; el alto es exclusivo y redondea hacia
+      // arriba: una fraccion deja dentro el pixel parcial (libdragon pone xl = w*4-1, o sea
+      // 31.75 para un ancho de 32, y el pixel 31 se pinta). En FILL/COPY el ultimo pixel
+      // es inclusivo: limite (xh>>2)+1. Mismo criterio que parallel-rdp (binning.h).
       sx0 = (int)(((cmd >> 44) & 0xfff) >> 2);
       sy0 = (int)(((cmd >> 32) & 0xfff) >> 2);
-      sx1 = (int)(((cmd >> 12) & 0xfff) >> 2);
-      sy1 = (int)(((cmd >> 0)  & 0xfff) >> 2);
+      sx1 = (int)((((cmd >> 12) & 0xfff) + 3) >> 2);
+      sy1 = (int)((((cmd >> 0)  & 0xfff) + 3) >> 2);
+      sx1fc = (int)(((cmd >> 12) & 0xfff) >> 2) + 1;
       break;
     case 0x2c: {                                        // SET_CONVERT (YUV→RGB coeffs)
       auto s9 = [](u32 v) -> int { v &= 0x1ff; return (int)(v ^ 0x100) - 0x100; };  // 9-bit sign-extend
@@ -2867,11 +2925,17 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     }
     case 0x33: loadTile(mem, (cmd >> 24) & 7, true, cmd); break;   // LOAD_BLOCK
     case 0x34: loadTile(mem, (cmd >> 24) & 7, false, cmd); break;  // LOAD_TILE
-    case 0x36:                                          // FILL_RECTANGLE
-      fillRect(mem,
-               (int)(((cmd >> 12) & 0xfff) >> 2), (int)(((cmd >> 0) & 0xfff) >> 2),
-               (int)(((cmd >> 44) & 0xfff) >> 2) + 1, (int)(((cmd >> 32) & 0xfff) >> 2) + 1);
+    case 0x36: {                                        // FILL_RECTANGLE
+      // 10.2. En FILL/COPY el borde derecho/inferior es inclusivo (parallel-rdp pone yl |= 3
+      // y el tramo incluye el pixel de xl). En 1/2 ciclos el rect es un primitivo mas: un
+      // pixel entra si su muestra (x, y enteros) cae en [xh, xl) x [yh, yl), o sea limites
+      // redondeados hacia arriba.
+      const int qxh = (int)((cmd >> 12) & 0xfff), qyh = (int)(cmd & 0xfff);
+      const int qxl = (int)((cmd >> 44) & 0xfff), qyl = (int)((cmd >> 32) & 0xfff);
+      if(cycleType() >= 2) fillRect(mem, qxh >> 2, qyh >> 2, (qxl >> 2) + 1, (qyl >> 2) + 1);
+      else fillRect(mem, (qxh + 3) >> 2, (qyh + 3) >> 2, (qxl + 3) >> 2, (qyl + 3) >> 2);
       break;
+    }
     case 0x37: fill_color  = (u32)cmd; break;           // SET_FILL_COLOR
     case 0x38: fog_color   = (u32)cmd; break;           // SET_FOG_COLOR
     case 0x39: blend_color = (u32)cmd; break;           // SET_BLEND_COLOR

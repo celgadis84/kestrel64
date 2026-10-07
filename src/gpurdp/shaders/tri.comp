@@ -424,9 +424,17 @@ uint tlutEntry(uint idx) {
   return (r << 24) | (g << 16) | (b << 8) | ((e & 1u) != 0u ? 255u : 0u);
 }
 // Tile t: palabra 0 = shiftS | shiftT << 4 | maskS << 8 | maskT << 12 | cmS << 16 | cmT << 18 |
-// kind << 20 | palette << 24; luego sMax, tMax, bytes por fila y base en TMEM.
+// kind << 20 | palette << 24; luego sMax, tMax, bytes por fila | SL << 16 y base en TMEM |
+// TL << 16 (origen del tile en 10.2).
 const uint TK_CI4 = 0u, TK_IA4 = 1u, TK_I4 = 2u, TK_YUV = 3u, TK_IA16 = 4u, TK_RGBA16 = 5u,
            TK_RGBA32 = 6u, TK_CI8 = 7u, TK_IA8 = 8u, TK_I8 = 9u;
+// 10.5 -> coordenada del tile: recorte a 16 bits, SHIFT en punto fijo y resta de SL/TL << 3
+// (SoftRdp tileCoord, parallel-rdp shift_coord).
+int tileCoord(int c, uint sh, uint lo) {
+  c = clamp(c, -0x8000, 0x7fff);
+  if(sh != 0u) c = sh <= 10u ? (c >> int(sh)) : ((c << int(32u - sh)) >> 16);
+  return c - int(lo << 3);
+}
 int foldCoord(int c, uint sh, uint mask, uint cm, int lim) {
   if(sh != 0u) c = sh <= 10u ? (c >> int(sh)) : (c << int(16u - sh));
   if((cm & 2u) != 0u || mask == 0u) {
@@ -440,21 +448,21 @@ int foldCoord(int c, uint sh, uint mask, uint cm, int lim) {
   return c;
 }
 int foldS(int tl, int c) { uint w = U(R_TILES + tl * 5);
-  return foldCoord(c, w & 15u, (w >> 8) & 15u, (w >> 16) & 3u, R(R_TILES + tl * 5 + 1)); }
+  return foldCoord(c, 0u, (w >> 8) & 15u, (w >> 16) & 3u, R(R_TILES + tl * 5 + 1)); }
 int foldT(int tl, int c) { uint w = U(R_TILES + tl * 5);
-  return foldCoord(c, (w >> 4) & 15u, (w >> 12) & 15u, (w >> 18) & 3u, R(R_TILES + tl * 5 + 2)); }
+  return foldCoord(c, 0u, (w >> 12) & 15u, (w >> 18) & 3u, R(R_TILES + tl * 5 + 2)); }
 uint fetch(int tl, int si, int ti) {
   uint w = U(R_TILES + tl * 5), kind = (w >> 20) & 15u, pal = (w >> 24) & 15u;
-  uint rowBytes = U(R_TILES + tl * 5 + 3), base = U(R_TILES + tl * 5 + 4);
+  uint rowBytes = U(R_TILES + tl * 5 + 3) & 0xffffu, base = U(R_TILES + tl * 5 + 4) & 0xffffu;
   uint s = uint(si), t = uint(ti);
-  uint ox = (t & 1u) != 0u ? (kind == TK_RGBA32 ? 8u : 4u) : 0u;
+  uint ox = (t & 1u) != 0u ? 4u : 0u;
   uint row = base + t * rowBytes;
   if(kind == TK_CI4 || kind == TK_IA4 || kind == TK_I4) {
     uint off = (row + s / 2u) ^ ox;
     if(off >= 0x1000u) return 0u;
     uint nib = (s & 1u) != 0u ? (tmB(off) & 0xfu) : (tmB(off) >> 4);
     if(kind == TK_CI4) return tlutEntry(pal * 16u + nib);
-    if(kind == TK_IA4) { uint i = (((nib >> 1) & 7u) * 255u) / 7u, a = (nib & 1u) != 0u ? 255u : 0u;
+    if(kind == TK_IA4) { uint i3 = nib & 0xeu, i = (i3 << 4) | (i3 << 1) | (i3 >> 2), a = (nib & 1u) != 0u ? 255u : 0u;
                          return (i << 24) | (i << 16) | (i << 8) | a; }
     uint i = nib * 17u;
     return (i << 24) | (i << 16) | (i << 8) | i;
@@ -480,9 +488,9 @@ uint fetch(int tl, int si, int ti) {
          | (exp5((px >> 1) & 0x1fu) << 8) | ((px & 1u) != 0u ? 255u : 0u);
   }
   if(kind == TK_RGBA32) {
-    uint off = (row + s * 4u) ^ ox;
-    if(off + 3u >= 0x1000u) return 0u;
-    return (tmB(off) << 24) | (tmB(off + 1u) << 16) | (tmB(off + 2u) << 8) | tmB(off + 3u);
+    // TMEM partida como el hardware: RG en la mitad baja, BA en la alta (ver SoftRdp::fetchK).
+    uint off = ((row + s * 2u) ^ ox) & 0x7feu, hi = off | 0x800u;
+    return (tmB(off) << 24) | (tmB(off + 1u) << 16) | (tmB(hi) << 8) | tmB(hi + 1u);
   }
   if(kind == TK_CI8 || kind == TK_IA8 || kind == TK_I8) {
     uint off = (row + s) ^ ox;
@@ -519,6 +527,9 @@ uint sampleFilt(int tl, int si, int ti) {
   return r;
 }
 uint sampleTex(int tl, int si, int ti) {
+  uint w = U(R_TILES + tl * 5);
+  si = tileCoord(si, w & 15u, U(R_TILES + tl * 5 + 3) >> 16);
+  ti = tileCoord(ti, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16);
   if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, si >> 5), foldT(tl, ti >> 5));
   return sampleFilt(tl, si, ti);
 }
@@ -526,8 +537,8 @@ uint sampleTex(int tl, int si, int ti) {
 // redondeados con el empate lejos del cero (lroundExact de SoftRdp::filterK).
 int rha(int n, int k) { int h = 1 << (k - 1); return n >= 0 ? (n + h) >> k : -((h - n) >> k); }
 uint rectSample(int tl, int ns, int nt, int shS) {
-  if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, ns >> shS), foldT(tl, nt >> 12));
-  return sampleFilt(tl, rha(ns, shS - 5), rha(nt, 7));
+  if((R(R_FLAGS) & F_FILT) == 0) return sampleTex(tl, ns >> (shS - 5), nt >> 7);
+  return sampleTex(tl, rha(ns, shS - 5), rha(nt, 7));
 }
 #ifdef HD
 // SoftRdp::hdSample en double, operacion por operacion (precise: sin FMA contraida), para
