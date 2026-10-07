@@ -1835,7 +1835,10 @@ auto Memory::spDma(bool toRam) -> void {
   // both the SP address and the RDRAM address are ignored (8-byte aligned engine).
   u32 length = ((len & 0xfff) + 8) & ~7u;
   u32 count  = ((len >> 12) & 0xff) + 1;
-  u32 skip   = (len >> 20) & 0xfff;
+  // El motor solo tiene los bits 23:3 de la direccion de RDRAM (ares: skip.bit(3,11)), asi que
+  // los 3 bits bajos del salto se pierden. libdragon DMAExec pone skip = pitch - ancho sin
+  // redondear y cuenta con eso (rsp_mpeg1 block_predict: 17 bytes por fila, pitch 128).
+  u32 skip   = (len >> 20) & 0xff8;
   // Ocupacion del bus: el salto entre filas no se transfiere, solo se saltan direcciones.
   const int slot = tlIsRspThread ? 1 : 0;
   ramBytesRsp.add(slot, (u64)length * count);
@@ -1959,7 +1962,7 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   if(diag || watchAddr || spTrace() || wrtag::tag) return false;   // wrtag marca en spDma
   const u32 length = ((len & 0xfff) + 8) & ~7u;
   const u32 count  = ((len >> 12) & 0xff) + 1;
-  const u32 skip   = (len >> 20) & 0xfff;
+  const u32 skip   = (len >> 20) & 0xff8;   // bits 2:0 no existen (ver spDma)
   const u64 total  = (u64)length * count;
   if(total > kDmaPayN / 4) return false;
   const u32 memAddr = rcp.sp_mem_addr & 0x1fff;
@@ -4776,6 +4779,23 @@ auto Memory::rspDmaRdpWait(u32 lo, u32 hi) -> void {
     if(!hit) return;
   }
   rspDmaRdpWaits.fetch_add(1, std::memory_order_relaxed);
+  rspRdpHostDrain();
+}
+
+// El RSP acaba de LEER el RDP parado (DPC_STATUS sin CMD_BUSY/DMA_BUSY) en su horario de
+// invitado. Eso es informacion que el microcodigo le pasa a la CPU (libdragon rdpq_fence:
+// SYNC_FULL + bucle sobre DPC_STATUS, y luego la CPU lee el framebuffer), asi que en el
+// anfitrion los pixeles tienen que estar ya en la RDRAM: esperar al drenado entero del worker
+// (bit2 de rcpPend, que con parallel-rdp incluye el fence de la GPU). Solo tiempo de
+// anfitrion: el reloj del RSP no avanza mientras, el invitado sale identico.
+auto Memory::rspRdpIdleWait() -> void {
+  if(!tlIsRspThread || !dpBarrierOn()) return;
+  if(!(rcpPend.load(std::memory_order_acquire) & 4u)) return;
+  rspIdleRdpWaits.fetch_add(1, std::memory_order_relaxed);
+  rspRdpHostDrain();
+}
+
+auto Memory::rspRdpHostDrain() -> void {
   const u32 bits = 4u;
   u64 waited = 0;
   while(rcpPend.load(std::memory_order_acquire) & bits) {

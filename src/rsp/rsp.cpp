@@ -692,6 +692,8 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       if(aw) mem->rdpAwaitGuest(now);
       const u64 ep0 = mem->dpcEpoch.load(std::memory_order_acquire);
       const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
+      // RDP parado visto por el RSP => pixeles en la RDRAM del anfitrion (ver rspRdpIdleWait).
+      if(r == 3 && !(val & 0x140u)) mem->rspRdpIdleWait();
       setR(rt, val);
       if(r == 2) dpcFastFill(now, ep0, val);
       idleSkip(now, val, r == 2);
@@ -803,7 +805,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   // que fuera la CPU (kestrel64-sdk 11_audio, estado ADPCM releido por el record siguiente).
   if(((rd & 7) == 2 || (rd & 7) == 3) && mem->rcpMode == Memory::RcpMode::Threaded) {
     const u32 lo = mem->rcp.sp_dram_addr & 0xfffff8;
-    const u64 span = (u64)((((v & 0xfff) + 8) & ~7u) + ((v >> 20) & 0xfff)) * (((v >> 12) & 0xff) + 1);
+    const u64 span = (u64)((((v & 0xfff) + 8) & ~7u) + ((v >> 20) & 0xff8)) * (((v >> 12) & 0xff) + 1);
     if(mem->dmaPgAny(lo, (u64)lo + span)) { publishExact(); mem->dpLogWait(0, false); }
   }
   // Un DMA del SP lee o escribe RDRAM en SU instante de invitado. En Threaded el RSP va por

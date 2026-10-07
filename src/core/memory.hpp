@@ -658,7 +658,9 @@ struct Memory {
   auto dpLogApply(u64 upTo) -> void;                // aplica lo fechado hasta upTo
   auto dpLogWait(u64 now, bool clock) -> void;      // SOLO hilo del RSP
   auto rspDmaRdpWait(u32 lo, u32 hi) -> void;          // SOLO hilo del RSP (ver spDma)
-  std::atomic<u64> rspDmaRdpWaits{0};
+  auto rspRdpIdleWait() -> void;                       // SOLO hilo del RSP (lee RDP parado)
+  auto rspRdpHostDrain() -> void;
+  std::atomic<u64> rspDmaRdpWaits{0}, rspIdleRdpWaits{0};
   // Zona que puede estar pintando el RDP (ver rspDmaRdpWait): SoftRdp::kWrSlots intervalos
   // publicados bajo seqlock (dpWrSeq impar = a medias).
   std::atomic<u32> dpWrLo[4] = {~0u, ~0u, ~0u, ~0u}, dpWrHi[4] = {0, 0, 0, 0};
