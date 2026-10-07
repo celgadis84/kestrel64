@@ -749,6 +749,15 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
   pi.set("rd_len", (u64)r.pi_rd_len);
   pi.set("wr_len", (u64)r.pi_wr_len);
   pi.set("status", (u64)r.pi_status);
+  // Latch del bus del cartucho (IO_BUSY): valor, si sigue vivo y cuanto le queda en ops.
+  {
+    const Memory& m = system.memory;
+    const u64 now = m.cartNow();
+    pi.set("latch", (u64)m.cartLatch);
+    pi.set("latchValid", m.cartLatchValid);
+    pi.set("latchLeft", (s64)(m.cartLatchExpiry - now));
+    pi.set("cartNow", now);
+  }
   data.set("pi", pi);
   json::Value si = json::Value::object();
   si.set("dram_addr", (u64)r.si_dram_addr);

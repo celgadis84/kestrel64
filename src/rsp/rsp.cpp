@@ -821,6 +821,15 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
     if(mem->cartNow() < now) { publishExact(); mem->spReadSync(now, 4); }
   }
   mem->rcpRegWrite32(PHYS_SP + ((rd & 7) << 2), v);
+  // Lo que baja el DMA lo escribio la CPU despues de sus senales: verlas ya (Memory::spSigUpTo).
+  // La copia lee la RDRAM viva, o sea todo lo que la CPU hizo hasta su reloj DESPUES de copiar:
+  // con adelanto (KESTREL_SPLEAD) eso pasa de `now`, y las senales de ese tramo van con ello.
+  if((rd & 7) == 2 && Memory::spSigQuant() > 1) {
+    const u64 now = mem->rspGuestNowAt(exactCycles());
+    u64 t = now;
+    if(mem->rcpMode == Memory::RcpMode::Threaded) t = std::max(t, mem->cartNow());
+    mem->spSigUpTo(t, now);
+  }
   // Writing SET_HALT to SP_STATUS from within the RSP halts the core immediately,
   // without a BREAK â€” so Status.broke is NOT set (unlike the BREAK instruction).
   if((rd & 7) == 4 && (mem->rcp.sp_status.load(std::memory_order_acquire) & 1u)) halt = true;
@@ -2134,7 +2143,7 @@ auto Rsp::benchStep(u64 iters) -> void {
   };
   runOnce();                       // calentar I$/predictor
   double dt = runOnce();
-  std::fprintf(stderr, "[rspbench] %llu instrucciones: %.3fs (%.2f ns/op, %.1f Mips) — el N64 pide 62.5\n",
+  std::fprintf(stderr, "[rspbench] %llu instrucciones: %.3fs (%.2f ns/op, %.1f Mips) ï¿½ el N64 pide 62.5\n",
                (unsigned long long)iters, dt, dt * 1e9 / iters, iters / dt / 1e6);
   std::fflush(stderr);
 }

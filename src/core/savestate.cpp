@@ -26,7 +26,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 18;  // 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 19;  // 19: fin de IO_BUSY del PI aparte del valor del bus (cartIoBusyUntil), se aceptan v14..v18; 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -237,6 +237,8 @@ auto visitMemory(StateIO& io, Memory& m) -> void {
   io.pod(m.flashStatus); io.pod(m.flashErasePage); io.pod(m.flashWritePage);
   io.blob(m.flashPageBuf, sizeof(m.flashPageBuf));
   io.pod(m.cartLatch); io.pod(m.cartLatchValid); io.pod(m.cartLatchExpiry);
+  if(io.version >= 19) io.pod(m.cartIoBusyUntil);
+  else if(!io.writing) m.cartIoBusyUntil = m.cartLatchExpiry;   // antes eran el mismo plazo
   io.pod(m.viLastRetired);
   io.pod(m.viNextAt); io.pod(m.aiNextAt); io.pod(m.evNextAt);      // plazo del VI armado: la instruccion exacta del proximo cruce de
                            // VI_INTR o cierre de campo. Se guarda por lo mismo que el del PI:
@@ -436,7 +438,7 @@ auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> b
   std::memcpy(&h, data, sizeof(h));
   Header want = makeHeader(sys);
   if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
+  if(h.version != kVersion && h.version != 18 && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
   if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
   if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
 

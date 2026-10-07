@@ -802,6 +802,7 @@ struct Memory {
   // de CPU). 1 = exacto. Ver Memory::spSigQuant.
   static auto spSigQuant() -> u64;
   auto spSigAtKick() -> void;              // lanzamiento: lo pendiente pasa a su instante real
+  auto spSigUpTo(u64 upto, u64 now) -> void;   // DMA RDRAM->SP en `now`: lo fechado hasta `upto`, visible ya
   auto spLateClearHalt(u64 now) -> u32;    // SOLO quien ejecuta el RSP, en BREAK (ver rsp.cpp)
   auto spClearHaltAfter(u64 tBreak) -> u32; // SOLO hilo de CPU, al vencer el fin de tarea
   static auto spDateOps() -> u64;          // retraso del plazo de fin de tarea sobre el BREAK
@@ -1377,6 +1378,9 @@ public:
   u32  cartLatch = 0;
   bool cartLatchValid = false;
   u64  cartLatchExpiry = 0;
+  // IO_BUSY (PI_STATUS bit 1) NO dura lo mismo que el valor del bus: es el ciclo de escritura
+  // del PI, con los tiempos del dominio (PI_BSD_DOM*), y cae solo al acabar. Ver cartWrite.
+  u64  cartIoBusyUntil = 0;
   const u64* cartClock = nullptr;       // CPU retired-instruction counter (decay clock)
   // Ops ya ejecutadas por una cadena de bloques del JIT y aun sin sumar a `retired` (el
   // commit es diferido, por cadena). Sin esto el reloj de decaimiento se congela dentro de

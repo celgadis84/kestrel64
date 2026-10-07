@@ -861,11 +861,19 @@ auto Memory::cartRom32(u32 phys) -> u32 {
 // width=0, ctrl=0 tras 1151 campos. El plazo es el mismo latch que ya existia
 // (cartLatchTtl), medido en el reloj de invitado, asi que una lectura inmediata de
 // PI_STATUS despues de la escritura sigue viendo IO_BUSY como en HW.
+//
+// Son dos plazos distintos. IO_BUSY es el ciclo de escritura del bus (n64brew "Peripheral
+// Interface": ALE, LAT+1, y por cada media palabra PWD+1 abajo y RLS+1 arriba con los tiempos
+// del dominio), unos 110 ciclos del RCP con los de fabrica. El valor que queda en las lineas
+// es carga y dura mas (~330 ciclos de CPU, ver CART_LATCH_TTL_CYCLES): una lectura del
+// cartucho lo devuelve aunque el PI ya este libre. Atarlos colgaba libdragon: su sondeo de
+// flashcart hace io_write y en seguida encola un DMA; pi_enqueue ve IO_BUSY y no lo arranca,
+// y dma_wait ya no vuelve a leer PI_STATUS (la cola no vacia corta la condicion), asi que
+// se queda esperando una interrupcion que nunca llega (test_debug_sdfs, pc en dma.c:483).
 auto Memory::piIoDecay() -> void {
-  if(cartLatchValid && cartNow() >= cartLatchExpiry) {
-    cartLatchValid = false;
-    rcp.pi_status &= ~0x2u;
-  }
+  const u64 now = cartNow();
+  if((rcp.pi_status & 0x2u) && now >= cartIoBusyUntil) rcp.pi_status &= ~0x2u;
+  if(cartLatchValid && now >= cartLatchExpiry) cartLatchValid = false;
 }
 
 // CPU read from cart space. If a write recently latched a value onto the PI bus
@@ -896,9 +904,9 @@ auto Memory::cartRead(u32 phys, u32 nbytes) -> u32 {
 // writes are ignored until the latch is consumed or decays). Sub-word writes place
 // their bytes in the upper bits; a 64-bit store keeps only its upper 32 bits.
 auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
-  (void)phys;
   u64 now = cartNow();
-  if(cartLatchValid && now >= cartLatchExpiry) cartLatchValid = false;
+  piIoDecay();
+  if(rcp.pi_status & 0x2u) return;          // el PI ignora escrituras mientras esta ocupado
   if(cartLatchValid) return;                // first-write-wins
   u32 v;
   switch(nbytes) {
@@ -910,6 +918,7 @@ auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
   cartLatch = v;
   cartLatchValid = true;
   cartLatchExpiry = now + cartLatchTtl;
+  cartIoBusyUntil = now + rcpCyclesToInsns(piXferCycles(phys, 4));
   rcp.pi_status |= 0x2u;                     // IOBUSY set while the bus write is pending
 }
 
@@ -4496,6 +4505,25 @@ auto Memory::spSigAtKick() -> void {
   for(u32 k = 0; k < spSigCount; ++k) {
     SpSigWr& w = spSigRing[(spSigHead + k) % kSpSigN];
     w.stamp = w.raw; w.flags &= ~1u;
+  }
+}
+
+// DMA RDRAM -> SP del RSP en `now`. El grano solo vale mientras el RSP no pueda saber que
+// hora es en la CPU, y un DMA se lo dice: baja lo que la CPU escribio en RDRAM hasta `now`.
+// Si las senales escritas ANTES siguieran aplazadas, el microcodigo veria el efecto sin la
+// causa. Es el orden de rspq en libdragon: SET_SIG_HIGHPRI_REQUESTED, luego el comando
+// WRITE_STATUS en la cola y luego SIG_MORE; con REQUESTED aun invisible el RSP bajaba la cola,
+// no entraba en highpri, paraba y REQUESTED quedaba colgado (test_rspq_highpri_multiple:
+// "rspq_highpri_sync wait loop timed out", y rapid_flush igual con SPLEAD). Las que ya tocan
+// pasan a su flanco real, como en el lanzamiento; las de despues siguen con su grano. `upto`
+// puede pasar de `now` (la CPU va por delante con KESTREL_SPLEAD y la copia ya trajo lo suyo):
+// esas se ven desde `now`, no desde su flanco, o el RSP tendria el dato sin la senal.
+auto Memory::spSigUpTo(u64 upto, u64 now) -> void {
+  std::lock_guard<std::mutex> lk(spSigMx);
+  for(u32 k = 0; k < spSigCount; ++k) {
+    SpSigWr& w = spSigRing[(spSigHead + k) % kSpSigN];
+    if(w.raw > upto) break;
+    w.stamp = std::min(w.raw, now); w.flags &= ~1u;
   }
 }
 
