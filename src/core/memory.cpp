@@ -3837,6 +3837,7 @@ auto Memory::dpScheduleReload(u32 addr) -> void {
 
 auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 kick) -> void {
   const u64 gclk0 = rcp.rdpGclk.load(std::memory_order_relaxed);
+  const u32 pipe0 = rcp.dpc_pipebusy.load(std::memory_order_relaxed);
   u32 costCur = current;
   if(rdpCostHasResume && current == rdpCostLastEnd) costCur = rdpCostResume;
   rdpCostHasResume = false;
@@ -3876,6 +3877,23 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpcEpoch.fetch_add(1, std::memory_order_release);
   // Sin pase de coste no se sabe si trae SYNC_FULL: se da por hecho. Un tramo vacio no trae nada.
   dpLastSpanSync = costed ? softCost.sawSyncFull : (current != end && rdpCostOn()) || !rdpCostOn();
+  // CMD_BUSY y PIPE_BUSY se separan en los huecos (n64brew, "Reality Display Processor/
+  // Interface"): CMD_BUSY cuenta mientras el FIFO tiene comandos, PIPE_BUSY desde el primer
+  // comando hasta el SYNC_FULL, tambien con el FIFO vacio esperando al RSP. El modelo de coste
+  // ya suma el trabajo a los dos; al cerrar con SYNC_FULL, PIPE_BUSY recibe ademas el tiempo
+  // de invitado de la ventana que no fue trabajo. Sin huecos (un tramo, como Thar0) no cambia.
+  // Si el invitado borro el contador dentro de la ventana, lo trabajado sale mayor que la
+  // ventana y no se suma nada.
+  if(costed && current != end) {
+    const u32 pbNow = rcp.dpc_pipebusy.load(std::memory_order_relaxed);
+    if(!dpPipeFrom) { dpPipeFrom = t0 ? t0 : 1; dpPipeBusy0 = pipe0; }
+    if(softCost.sawSyncFull) {
+      const u64 span   = insnsToRcpCycles(t1) - insnsToRcpCycles(dpPipeFrom);
+      const u32 worked = pbNow - dpPipeBusy0;
+      if(span > worked) rcp.dpc_pipebusy.fetch_add((u32)(span - worked), std::memory_order_relaxed);
+      dpPipeFrom = 0;
+    }
+  }
   // Si el RSP esta aparcado esperando justo esto, su instante de despertar es el lanzamiento
   // de ESTE tramo -- un valor de invitado, o sea determinista. El primero que llega manda.
   // ORDEN: primero se publica el tramo (dpSubSeq, arriba) y DESPUES se mira el aparcamiento,

@@ -728,6 +728,11 @@ struct Memory {
   std::deque<u64>   dpSyncEnds;
   std::atomic<bool> dpBarSyncOnly{false};
   bool dpLastSpanSync = true;
+  // Ventana de PIPE_BUSY (n64brew: del primer comando al SYNC_FULL), en reloj de invitado.
+  // dpPipeFrom = arranque del primer tramo tras el ultimo SYNC_FULL (0 = pipeline parado);
+  // dpPipeBusy0 = DPC_PIPE_BUSY en ese instante. Solo bajo rdpMx (ver dpScheduleSpan).
+  u64 dpPipeFrom = 0;
+  u32 dpPipeBusy0 = 0;
   // HORARIO DE TRABAJOS DEL RDP EN TIEMPO DE INVITADO.
   //
   // Todo lo que el invitado puede ver del motor -- ocupado/libre, DPC_CURRENT, END_VALID -- se

@@ -185,6 +185,17 @@ Still not modelled: a per-primitive setup cost (edge walker / command fetch). No
 gives a number for it, so none is invented. The command words themselves still cost
 nothing beyond the FIFO.
 
+## CMD_BUSY vs PIPE_BUSY (2026-10-07)
+
+n64brew ("Reality Display Processor/Interface"): CMD_BUSY counts while the FIFO holds commands,
+PIPE_BUSY from the first command until SYNC_FULL. The cost model charges work to both (TMEM loads
+only to CMD_BUSY). `Memory::dpScheduleSpan` now also tracks the PIPE_BUSY window in guest time:
+from the start of the first span after a SYNC_FULL to the end of the span that carries the next
+one. On close, the part of that window that was not work (empty FIFO waiting on the RSP) is
+added to PIPE_BUSY. A single span (Thar0) is unchanged: rmse 0.1332, Buf = Pipe within 1. SM64
+after ~1435 fields: Pipe 653 M, Buf 363 M, clock ~1490 M. ares keeps the counters as 0/1 flags
+and libdragon only defines them, so neither gives numbers.
+
 ## Texture loads: fixed cost per burst (2026-10-04, specification, not measured)
 
 `SoftRdp::accountLoad` charges every TMEM load as RDRAM bursts on the 64-bit texture port:
