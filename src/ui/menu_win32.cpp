@@ -51,6 +51,9 @@ enum : UINT {
   // va el ULTIMO y con sitio de sobra: CheckMenuRadioItem desmarca todo el rango que se le
   // da, y solaparlo con otro grupo borraria sus marcas.
   kVol0    = 0x8200,              // +0..+100
+  // Opciones del catalogo colgadas de la barra: 16 identificadores por opcion (una por
+  // eleccion; los bool usan solo el primero).
+  kOpt0    = 0x8300,
 };
 
 // ---------------------------------------------------------------- utilidades
@@ -153,8 +156,28 @@ auto addSub(HMENU parent, HMENU sub, const char* text) -> void {
   InsertMenuItemA(parent, GetMenuItemCount(parent), TRUE, &mi);
 }
 
+// Las opciones de uso diario salen tambien en la barra, sin abrir "Todas las opciones". Se
+// montan desde el MISMO catalogo (optdefs): etiquetas, elecciones y si se aplican en caliente
+// o piden relanzar vienen de ahi, asi que el menu no se desincroniza del dialogo.
+constexpr int kMenuOptMax = 24;
+const Option* g_mopt[kMenuOptMax];
+int g_nmopt = 0;
+
+auto addOptMenu(HMENU parent, const char* id, const char* text) -> void {
+  const Option* o = findOption(id);
+  if(!o || g_nmopt >= kMenuOptMax) return;
+  const UINT base = kOpt0 + (UINT)g_nmopt * 16;
+  g_mopt[g_nmopt++] = o;
+  if(o->type == OType::Bool) { addItem(parent, base, text); return; }
+  HMENU sub = CreatePopupMenu();
+  for(int c = 0; c < o->nchoices && c < 16; c++)
+    addItem(sub, base + (UINT)c, o->choices[c].label, false, true);
+  addSub(parent, sub, text);
+}
+
 auto buildMenu() -> void {
   g_menu = CreateMenu();
+  g_nmopt = 0;
 
   HMENU file = CreatePopupMenu();
   addItem(file, kOpenRom, "&Biblioteca de ROMs...\tCtrl+O");
@@ -186,6 +209,7 @@ auto buildMenu() -> void {
   addItem(thr, kThrOn, "Siempre a 59.94 campos/s", false, true);
   addItem(thr, kThrOff, "Sin limite (a tope)", false, true);
   addSub(emu, thr, "&Velocidad");
+  addOptMenu(emu, "rewind", "Re&bobinado (tecla Retroceso)");
   addSub(g_menu, emu, "&Emulacion");
 
   HMENU vid = CreatePopupMenu();
@@ -196,7 +220,15 @@ auto buildMenu() -> void {
   };
   for(int i = 0; i < 7; i++) addItem(sc, kScale1 + i, kScaleTxt[i], i == 1, true);
   addSub(vid, sc, "&Escala");
+  addOptMenu(vid, "aspect", "&Aspecto");
+  addOptMenu(vid, "filter", "&Filtro de imagen");
   addItem(vid, kFull, "&Pantalla completa\tF11");
+  addSep(vid);
+  addOptMenu(vid, "plugin", "&Rasterizador");
+  addOptMenu(vid, "upscale", "Escalado &interno");
+  addOptMenu(vid, "texfx", "Realce de &texturas");
+  addOptMenu(vid, "noaa", "Antialiasing del R&DP");
+  addSep(vid);
   addItem(vid, kHud, "&HUD de telemetria", true);
   addSub(g_menu, vid, "&Video");
 
@@ -208,6 +240,15 @@ auto buildMenu() -> void {
   for(int i = 0; i < 5; i++) addItem(vol, kVol0 + (UINT)kVols[i], kVolTxt[i], i == 4, true);
   addSub(aud, vol, "&Volumen");
   addSub(g_menu, aud, "&Audio");
+
+  // Lo que en la maquina de verdad es hardware enchufado: cambiarlo es apagar y encender.
+  HMENU con = CreatePopupMenu();
+  addOptMenu(con, "tvtype", "&Norma de television");
+  addOptMenu(con, "rdram", "&Memoria (Expansion Pak)");
+  addOptMenu(con, "savetype", "Tipo de &guardado");
+  addOptMenu(con, "rtc", "&Reloj de cartucho");
+  addOptMenu(con, "mouse", "Rat&on N64");
+  addSub(g_menu, con, "&Consola");
 
   HMENU cfg = CreatePopupMenu();
   addItem(cfg, kPadCfg, "&Mando...");
@@ -262,6 +303,20 @@ auto syncMenu() -> void {
   const bool hw = g_prof.get("speedmode") == "hw";
   CheckMenuRadioItem(g_menu, kThrHw, kThrOff,
                      hw ? kThrHw : th < 0 ? kThrAuto : th ? kThrOn : kThrOff, MF_BYCOMMAND);
+  for(int i = 0; i < g_nmopt; i++) {
+    const Option* o = g_mopt[i];
+    const UINT base = kOpt0 + (UINT)i * 16;
+    if(o->type == OType::Bool) {
+      CheckMenuItem(g_menu, base, MF_BYCOMMAND | (g_prof.getBool(o->id) ? MF_CHECKED : MF_UNCHECKED));
+      continue;
+    }
+    const std::string v = g_prof.get(o->id);
+    for(int c = 0; c < o->nchoices && c < 16; c++)
+      if(v == o->choices[c].value) {
+        CheckMenuRadioItem(g_menu, base, base + (UINT)o->nchoices - 1, base + (UINT)c, MF_BYCOMMAND);
+        break;
+      }
+  }
   DrawMenuBar(g_game);
 }
 
@@ -1550,6 +1605,26 @@ auto onCommand(UINT id) -> void {
       return;
     default: break;
   }
+  if(id >= kOpt0 && id < kOpt0 + (UINT)g_nmopt * 16) {
+    const Option* o = g_mopt[(id - kOpt0) / 16];
+    const int c = (int)((id - kOpt0) % 16);
+    std::string val, what;
+    if(o->type == OType::Bool) {
+      val = g_prof.getBool(o->id) ? "0" : "1";
+      what = std::string(o->label) + (val == "1" ? ": encendido." : ": apagado.");
+    } else {
+      if(c >= o->nchoices) return;
+      val = o->choices[c].value;
+      what = std::string(o->label) + ":\n" + o->choices[c].label;
+    }
+    if(val == g_prof.get(o->id)) return;
+    g_prof.set(o->id, val);
+    saveProfile(g_prof);
+    if(o->live) applyLive(g_prof, false);
+    syncMenu();
+    if(!o->live) askRelaunch(g_game, what.c_str());
+    return;
+  }
   if(id >= kScale1 && id < kScale1 + 7) {
     int n = (int)(id - kScale1) + 1;
     g_prof.set("winscale", std::to_string(n));
@@ -1666,6 +1741,14 @@ auto attach(void* hwnd, const Hooks& h) -> void {
     g_prof.set("fullscreen", fs[0] == '0' ? "0" : "1");
 
   buildMenu();
+  // Igual con las opciones colgadas de la barra que viajan en el entorno.
+  for(int i = 0; i < g_nmopt; i++) {
+    const Option* o = g_mopt[i];
+    const char* e = o->env ? std::getenv(o->env) : nullptr;
+    if(!e) continue;
+    if(o->type == OType::Bool) g_prof.set(o->id, (e[0] == '0') == o->invert ? "1" : "0");
+    else g_prof.set(o->id, e);
+  }
   SetMenu(g_game, g_menu);
   // Poner la barra encoge el area de cliente: se agranda la ventana justo lo que ocupa, o la
   // imagen del juego perderia una franja por abajo. En pantalla completa no: ahi la ventana

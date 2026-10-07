@@ -285,6 +285,17 @@ CATEGORIES = [
            "Perfect Dark EXIGEN los 8. La RDRAM se dimensiona una sola vez, asi que "
            "cambiarlo pide relanzar, y un estado guardado con un tamano no se puede "
            "cargar con el otro."),
+    O("rtc", "KESTREL_RTC", "Reloj de cartucho (RTC)", "choice", "auto",
+      values=[["auto", "Automatico - por cabecera de homebrew"],
+              ["1", "Enchufado"], ["0", "Sin reloj"]],
+      help="Reloj con pila del cartucho (Animal Forest, homebrew), en el canal 4 del joybus "
+           "junto a la EEPROM. Da la hora del anfitrion; el juego puede pararlo y ponerla."),
+    O("mouse", "KESTREL_PADTYPE", "Raton N64", "choice", "",
+      values=[["", "Ninguno - todo mandos"], ["2000", "En el puerto 1"],
+              ["0200", "En el puerto 2"], ["0020", "En el puerto 3"],
+              ["0002", "En el puerto 4"]],
+      help="Cambia el mando de ese conector por un raton (Mario Artist). Botones A/B y el "
+           "desplazamiento sale del stick. El puerto tiene que estar enchufado (Mando...)."),
     O("cheats", "KESTREL_CHEATS", "Fichero de trucos (.cht)", "path", "",
       help="Codigos tipo GameShark, aplicados en cada campo de video igual que el cartucho "
            "de verdad. Sin fichero se usa el .cht que haya al lado de la ROM con su mismo "

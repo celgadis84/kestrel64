@@ -86,6 +86,18 @@ static const Choice kCh_rdram[] = {
   {"8", "8 MB - con Expansion Pak"},
   {"4", "4 MB - consola de serie"},
 };
+static const Choice kCh_rtc[] = {
+  {"auto", "Automatico - por cabecera de homebrew"},
+  {"1", "Enchufado"},
+  {"0", "Sin reloj"},
+};
+static const Choice kCh_mouse[] = {
+  {"", "Ninguno - todo mandos"},
+  {"2000", "En el puerto 1"},
+  {"0200", "En el puerto 2"},
+  {"0020", "En el puerto 3"},
+  {"0002", "En el puerto 4"},
+};
 
 static const Option kOpt_cpu[] = {
   {"jit", "KESTREL_JIT", "Recompilador dinamico (JIT)", OType::Bool, "1", "Traduce bloques MIPS a x86-64. Apagado = interprete puro, que es el oraculo de correccion: si un juego falla con JIT, comprobar aqui primero.", false, false, true, 0, 0, 0, nullptr, 0, false},
@@ -171,6 +183,8 @@ static const Option kOpt_save[] = {
   {"savetype", "KESTREL_SAVETYPE", "Tipo de guardado", OType::Choice, "auto", "Se resuelve por la cabecera avanzada de homebrew (ID 'ED') o por ID de cartucho; esto lo fuerza cuando la ROM no esta en la tabla.", false, false, false, 0, 0, 0, kCh_savetype, 8, false},
   {"tvtype", "KESTREL_TVTYPE", "Norma de television", OType::Choice, "auto", "Lo que el juego lee en osTvType, y de donde sale el ritmo de campo. En la consola de verdad lo fija la maquina, y la region del cartucho coincide con ella; algunos juegos se niegan a funcionar con la norma equivocada.", false, false, false, 0, 0, 0, kCh_tvtype, 4, false},
   {"rdram", "KESTREL_RDRAM", "Memoria RDRAM", OType::Choice, "8", "La N64 trae 4 MB y el Expansion Pak la sube a 8. Los juegos lo leen en osMemSize y algunos cambian de comportamiento: reservan menos buferes o bajan la resolucion con 4 MB, y Donkey Kong 64 y el modo de un jugador de Perfect Dark EXIGEN los 8. La RDRAM se dimensiona una sola vez, asi que cambiarlo pide relanzar, y un estado guardado con un tamano no se puede cargar con el otro.", false, false, false, 0, 0, 0, kCh_rdram, 2, false},
+  {"rtc", "KESTREL_RTC", "Reloj de cartucho (RTC)", OType::Choice, "auto", "Reloj con pila del cartucho (Animal Forest, homebrew), en el canal 4 del joybus junto a la EEPROM. Da la hora del anfitrion; el juego puede pararlo y ponerla.", false, false, false, 0, 0, 0, kCh_rtc, 3, false},
+  {"mouse", "KESTREL_PADTYPE", "Raton N64", OType::Choice, "", "Cambia el mando de ese conector por un raton (Mario Artist). Botones A/B y el desplazamiento sale del stick. El puerto tiene que estar enchufado (Mando...).", false, false, false, 0, 0, 0, kCh_mouse, 5, false},
   {"cheats", "KESTREL_CHEATS", "Fichero de trucos (.cht)", OType::Path, "", "Codigos tipo GameShark, aplicados en cada campo de video igual que el cartucho de verdad. Sin fichero se usa el .cht que haya al lado de la ROM con su mismo nombre. Formato: [Nombre] abre un truco ([-Nombre] lo deja apagado) y debajo van las lineas AAAAAAAA VVVV tal como se publican.", false, false, false, 0, 0, 0, nullptr, 0, false},
 };
 
