@@ -58,3 +58,20 @@ failures are the 6 test-side ones above. They were at 209/217. What was missing:
 - **Combiner constants.** sub_b 6 = KEY_CENTER, sub_b 7 = K4 (9 raw bits through
   special_expand), mul 6 = KEY_SCALE, mul 15 = K5 (9 bits sign-extended). They were 0.
   SET_KEY_R / SET_KEY_GB are now stored (savestate v21).
+
+## krom texture clamp/mask on SoftRDP and GPU-RDP (2026-10-08)
+
+`TexturesMaskShiftMirror` T0_3/T0_4/T15_3/T15_4/T1_3/T1_4 (84.7-91.7) -> 100 and
+`TextureCoordinates` 99.46 -> 100, on both backends. `RDP/` subset: 0 regress, SoftRDP and
+GPU-RDP give identical scores on all 133. SM64 md5 unchanged.
+
+- **Clamp stage** (parallel-rdp `clamp_and_shift_coord`). After the SHIFT the high edge is
+  compared in 10.2 against the ABSOLUTE SH/TH (before subtracting SL/TL) and pins the texel
+  `((SH>>2) - (SL>>2)) & 0x3ff` with zero fraction; otherwise the origin is subtracted and
+  negatives go to 0. It only applies to the sampled coordinate: the filter neighbour
+  (s0 + 1, t0 + 1) goes through the mask alone. MASK > 10 acts as 10.
+- **T to 8 bits** in 1/2-cycle sampling, with the filter neighbour kept as a difference
+  clamped to -255.
+- **COPY** has no clamp stage, no T truncation and no filter (`sample_texture_copy`), even
+  with SAMPLE_TYPE set.
+- GPU tile record: words 1/2 carry `sMax/tMax | SH/TH << 16`.

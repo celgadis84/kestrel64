@@ -319,6 +319,8 @@ private:
     int sMax, tMax;
     u32 rowBytes, base, palette, kind;
     u32 slo, tlo;                         // origen del tile (SL/TL, 10.2) que resta el muestreo
+    u32 shi, thi;                         // borde SH/TH (10.2) del clamp
+    bool clS, clT;                        // clamp activo: bit CLAMP o mask 0
     // Caso comun del pliegue: sin SHIFT, con mask y sin clamp ni mirror. Ahi las dos
     // etapas de `foldCoord` se reducen a un AND, y el tile decide el camino una vez.
     bool fastS, fastT;

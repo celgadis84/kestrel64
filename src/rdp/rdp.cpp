@@ -1113,7 +1113,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
       s32* d = &r[T_TILES + i * 5];
       d[0] = (s32)(f.shiftS | (f.shiftT << 4) | (f.maskS << 8) | (f.maskT << 12) | (f.cmS << 16)
                    | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
-      d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)(f.rowBytes | f.slo << 16); d[4] = (s32)(f.base | f.tlo << 16);
+      d[1] = (s32)((u32)(f.sMax & 0xffff) | f.shi << 16); d[2] = (s32)((u32)(f.tMax & 0xffff) | f.thi << 16); d[3] = (s32)(f.rowBytes | f.slo << 16); d[4] = (s32)(f.base | f.tlo << 16);
     }
   }
   r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr; r[T_CISZ] = (s32)ci_size;
@@ -1537,7 +1537,8 @@ auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
   const Tile& tl = tiles[tileIdx & 7];
   TexFold f;
   f.shiftS = tl.shiftS;  f.shiftT = tl.shiftT;
-  f.maskS  = tl.maskS;   f.maskT  = tl.maskT;
+  // MASK por encima de 10 actua como 10 (parallel-rdp op_set_tile): TMEM no pasa de 1024.
+  f.maskS  = std::min<u32>(tl.maskS, 10); f.maskT = std::min<u32>(tl.maskT, 10);
   f.cmS    = tl.cmS;     f.cmT    = tl.cmT;
   f.sMax   = (int)(tl.sh >> 2) - (int)(tl.sl >> 2);
   f.tMax   = (int)(tl.th >> 2) - (int)(tl.tl >> 2);
@@ -1545,12 +1546,15 @@ auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
   f.base     = tl.tmem * 8;
   f.palette  = tl.palette;
   f.slo = tl.sl; f.tlo = tl.tl;
+  f.shi = tl.sh; f.thi = tl.th;
+  f.clS = (tl.cmS & 2) || f.maskS == 0;
+  f.clT = (tl.cmT & 2) || f.maskT == 0;
   // Camino rapido del pliegue: SHIFT nulo + mask activa + ni clamp ni mirror => la etapa
   // de clamp no se ejecuta (cm & 2 == 0 y mask != 0) y la de mask se queda en el AND.
   f.fastS = tl.shiftS == 0 && tl.maskS != 0 && (tl.cmS & 3) == 0;
   f.fastT = tl.shiftT == 0 && tl.maskT != 0 && (tl.cmT & 3) == 0;
-  f.andS  = (1 << tl.maskS) - 1;
-  f.andT  = (1 << tl.maskT) - 1;
+  f.andS  = (1 << f.maskS) - 1;
+  f.andT  = (1 << f.maskT) - 1;
   switch(tl.size) {                       // (size, fmt) -> un solo `kind`
     case 0:  f.kind = tl.fmt == 2 ? TK_CI4 : tl.fmt == 3 ? TK_IA4  : TK_I4;     break;
     case 1:  f.kind = tl.fmt == 2 ? TK_CI8 : tl.fmt == 3 ? TK_IA8  : TK_I8;     break;
@@ -1585,6 +1589,27 @@ static inline auto tileCoord(int c, u32 sh, u32 lo) -> int {
   c = c < -0x8000 ? -0x8000 : c > 0x7fff ? 0x7fff : c;
   if(sh) c = sh <= 10 ? (c >> sh) : (int)(s16)(u16)((u32)c << (16 - sh));
   return c - (int)(lo << 3);
+}
+// Coordenada 10.5 -> coordenada del tile con la etapa de CLAMP del hardware (parallel-rdp
+// clamp_and_shift_coord): tras el SHIFT, el borde alto se compara en 10.2 contra SH/TH
+// ABSOLUTO (antes de restar SL/TL) y fija el texel ((SH>>2) - (SL>>2)) & 0x3ff con fraccion 0;
+// si no, se resta el origen y los negativos se fijan a 0. Con SL > SH (tile volteado) el borde
+// salta enseguida y el resultado da la vuelta en 10 bits. El clamp solo toca esta coordenada:
+// el texel vecino del filtro (s0 + 1) ya no pasa por el, solo por el mask.
+static inline auto tileCoordClamp(int c, u32 sh, u32 lo, u32 hi, bool cl) -> int {
+  c = c < -0x8000 ? -0x8000 : c > 0x7fff ? 0x7fff : c;
+  if(sh) c = sh <= 10 ? (c >> sh) : (int)(s16)(u16)((u32)c << (16 - sh));
+  if(!cl) return c - (int)(lo << 3);
+  if((c >> 3) >= (int)hi) return ((((int)hi >> 2) - ((int)lo >> 2)) & 0x3ff) << 5;
+  c -= (int)(lo << 3);
+  return c < 0 ? 0 : c;
+}
+// Etapa de MASK (parallel-rdp texel_mask_s/t): espejo en periodos impares y luego AND.
+static inline auto maskCoord(int c, u32 mask, u32 cm) -> int {
+  if(!mask) return c;
+  const int m = 1 << mask;
+  if(cm & 1) { const int k = (c & m) - 1; c ^= k > 0 ? k : 0; }
+  return c & (m - 1);
 }
 // S/T en double -> 10.5 truncando hacia abajo (muestreo puntual), sin desbordar el int.
 static inline auto fix105(double v) -> int {
@@ -1748,9 +1773,15 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   // 3-point ("bilinear") filter. The RDP is not a 4-tap bilinear: it picks the triangle of
   // texels around the sample and lerps by the fractional coords. No -0.5 GL-style bias: the
   // RDP addresses texel origins directly, sfrac/tfrac are the low fractional bits of S/T.
-  if(g_noFilter || !((other_hi >> 13) & 1))
-    return fetchK<K>(f, foldCoord(tileCoord(fix105(s), f.shiftS, f.slo) >> 5, 0, f.maskS, f.cmS, f.sMax),
-                        foldCoord(tileCoord(fix105(t), f.shiftT, f.tlo) >> 5, 0, f.maskT, f.cmT, f.tMax));
+  // COPY no tiene etapa de clamp (parallel-rdp sample_texture_copy: shift_coord + mask), ni el
+  // recorte de T a 8 bits del muestreo normal, ni filtro (sample_texture_copy toma texeles sueltos).
+  const bool copy = cycleType() == 2;
+  const bool clS = f.clS && !copy, clT = f.clT && !copy;
+  if(g_noFilter || copy || !((other_hi >> 13) & 1)) {
+    const int ps = maskCoord(tileCoordClamp(fix105(s), f.shiftS, f.slo, f.shi, clS) >> 5, f.maskS, f.cmS);
+    const int pt = maskCoord(tileCoordClamp(fix105(t), f.shiftT, f.tlo, f.thi, clT) >> 5, f.maskT, f.cmT);
+    return fetchK<K>(f, ps, copy ? pt : (pt & 0xff));
+  }
   // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double lerp
   // rounded at the end lands on a different level whenever the exact result sits on a .5
   // boundary, and the 5-bit framebuffer then quantizes that difference into a visible band.
@@ -1762,15 +1793,19 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
 #else
   int si = lroundExact(s * 32.0), ti = lroundExact(t * 32.0);
 #endif
-  si = tileCoord(si, f.shiftS, f.slo); ti = tileCoord(ti, f.shiftT, f.tlo);
+  si = tileCoordClamp(si, f.shiftS, f.slo, f.shi, clS);
+  ti = tileCoordClamp(ti, f.shiftT, f.tlo, f.thi, clT);
   int fx = si & 31, fy = ti & 31;
   int s0 = si >> 5, t0 = ti >> 5;
   auto ch = [](u32 c, int i) -> int { return (int)((c >> (24 - i * 8)) & 0xff); };
   // Cuatro pliegues, no seis: las tres tomas se reparten s0/s0+1 y t0/t0+1.
-  const int sw0 = f.fastS ? (s0 & f.andS)     : foldCoord(s0,     0, f.maskS, f.cmS, f.sMax),
-            sw1 = f.fastS ? ((s0 + 1) & f.andS) : foldCoord(s0 + 1, 0, f.maskS, f.cmS, f.sMax),
-            tw0 = f.fastT ? (t0 & f.andT)     : foldCoord(t0,     0, f.maskT, f.cmT, f.tMax),
-            tw1 = f.fastT ? ((t0 + 1) & f.andT) : foldCoord(t0 + 1, 0, f.maskT, f.cmT, f.tMax);
+  const int sw0 = f.fastS ? (s0 & f.andS)     : maskCoord(s0,     f.maskS, f.cmS),
+            sw1 = f.fastS ? ((s0 + 1) & f.andS) : maskCoord(s0 + 1, f.maskS, f.cmS);
+  int       tw0 = f.fastT ? (t0 & f.andT)     : maskCoord(t0,     f.maskT, f.cmT),
+            tw1 = f.fastT ? ((t0 + 1) & f.andT) : maskCoord(t0 + 1, f.maskT, f.cmT);
+  // T del filtro va a 8 bits y el vecino se lleva como diferencia acotada a -255 (parallel-rdp
+  // sample_texture, "very specific weird logic" de t0/t1).
+  { const int td = std::max(tw1 - tw0, -255); tw0 &= 0xff; tw1 = tw0 + td; }
   u32 c10 = fetchK<K>(f, sw1, tw0), c01 = fetchK<K>(f, sw0, tw1);
   const bool midTexel = ((other_hi >> 12) & 1) && fx == 16 && fy == 16;
 #if defined(__SSE4_1__)
@@ -2393,7 +2428,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
     s32* d = &r[T_TILES + i * 5];
     d[0] = (s32)(f.shiftS | (f.shiftT << 4) | (f.maskS << 8) | (f.maskT << 12) | (f.cmS << 16)
                  | (f.cmT << 18) | (f.kind << 20) | (f.palette << 24));
-    d[1] = f.sMax; d[2] = f.tMax; d[3] = (s32)(f.rowBytes | f.slo << 16); d[4] = (s32)(f.base | f.tlo << 16);
+    d[1] = (s32)((u32)(f.sMax & 0xffff) | f.shi << 16); d[2] = (s32)((u32)(f.tMax & 0xffff) | f.thi << 16); d[3] = (s32)(f.rowBytes | f.slo << 16); d[4] = (s32)(f.base | f.tlo << 16);
   }
   r[T_CI] = (s32)ci_addr; r[T_CIW] = (s32)ci_width; r[T_ZI] = (s32)zi_addr; r[T_CISZ] = (s32)ci_size;
   r[T_OLO] = (s32)other_lo; r[T_OHI] = (s32)other_hi;

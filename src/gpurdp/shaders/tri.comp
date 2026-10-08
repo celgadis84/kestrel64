@@ -429,33 +429,29 @@ uint tlutEntry(uint idx) {
   return (r << 24) | (g << 16) | (b << 8) | ((e & 1u) != 0u ? 255u : 0u);
 }
 // Tile t: palabra 0 = shiftS | shiftT << 4 | maskS << 8 | maskT << 12 | cmS << 16 | cmT << 18 |
-// kind << 20 | palette << 24; luego sMax, tMax, bytes por fila | SL << 16 y base en TMEM |
-// TL << 16 (origen del tile en 10.2).
+// kind << 20 | palette << 24; luego sMax | SH << 16, tMax | TH << 16 (sMax/tMax de 16 bits con
+// signo, SH/TH en 10.2), bytes por fila | SL << 16 y base en TMEM | TL << 16 (origen en 10.2).
 const uint TK_CI4 = 0u, TK_IA4 = 1u, TK_I4 = 2u, TK_YUV = 3u, TK_IA16 = 4u, TK_RGBA16 = 5u,
            TK_RGBA32 = 6u, TK_CI8 = 7u, TK_IA8 = 8u, TK_I8 = 9u;
-// 10.5 -> coordenada del tile: recorte a 16 bits, SHIFT en punto fijo y resta de SL/TL << 3
-// (SoftRdp tileCoord, parallel-rdp shift_coord).
-int tileCoord(int c, uint sh, uint lo) {
+// 10.5 -> coordenada del tile: recorte a 16 bits, SHIFT en punto fijo, resta de SL/TL << 3
+// (parallel-rdp shift_coord) y, con la etapa de CLAMP (SoftRdp tileCoordClamp, parallel-rdp clamp_and_shift_coord): borde
+// alto en 10.2 contra SH/TH absoluto, texel ((hi>>2)-(lo>>2)) & 0x3ff con fraccion 0.
+int tileCoordClamp(int c, uint sh, uint lo, uint hi, bool cl) {
   c = clamp(c, -0x8000, 0x7fff);
   if(sh != 0u) c = sh <= 10u ? (c >> int(sh)) : ((c << int(32u - sh)) >> 16);
-  return c - int(lo << 3);
+  if(!cl) return c - int(lo << 3);
+  if((c >> 3) >= int(hi)) return (((int(hi) >> 2) - (int(lo) >> 2)) & 0x3ff) << 5;
+  return max(c - int(lo << 3), 0);
 }
-int foldCoord(int c, uint sh, uint mask, uint cm, int lim) {
-  if(sh != 0u) c = sh <= 10u ? (c >> int(sh)) : (c << int(16u - sh));
-  if((cm & 2u) != 0u || mask == 0u) {
-    if(c < 0) c = 0;
-    else if(lim >= 0 && c > lim) c = lim;
-  }
-  if(mask != 0u) {
-    if((cm & 1u) != 0u && ((c >> int(mask)) & 1) != 0) c = ~c;
-    c &= (1 << int(mask)) - 1;
-  }
-  return c;
+// Etapa de MASK (SoftRdp maskCoord): espejo en periodos impares y AND.
+int maskCoord(int c, uint mask, uint cm) {
+  if(mask == 0u) return c;
+  int m = 1 << int(mask);
+  if((cm & 1u) != 0u) c ^= max((c & m) - 1, 0);
+  return c & (m - 1);
 }
-int foldS(int tl, int c) { uint w = U(R_TILES + tl * 5);
-  return foldCoord(c, 0u, (w >> 8) & 15u, (w >> 16) & 3u, R(R_TILES + tl * 5 + 1)); }
-int foldT(int tl, int c) { uint w = U(R_TILES + tl * 5);
-  return foldCoord(c, 0u, (w >> 12) & 15u, (w >> 18) & 3u, R(R_TILES + tl * 5 + 2)); }
+int foldS(int tl, int c) { uint w = U(R_TILES + tl * 5); return maskCoord(c, (w >> 8) & 15u, (w >> 16) & 3u); }
+int foldT(int tl, int c) { uint w = U(R_TILES + tl * 5); return maskCoord(c, (w >> 12) & 15u, (w >> 18) & 3u); }
 uint fetch(int tl, int si, int ti) {
   uint w = U(R_TILES + tl * 5), kind = (w >> 20) & 15u, pal = (w >> 24) & 15u;
   uint rowBytes = U(R_TILES + tl * 5 + 3) & 0xffffu, base = U(R_TILES + tl * 5 + 4) & 0xffffu;
@@ -512,6 +508,7 @@ uint fetch(int tl, int si, int ti) {
 uint sampleFilt(int tl, int si, int ti) {
   int fx = si & 31, fy = ti & 31, s0 = si >> 5, t0 = ti >> 5;
   int sw0 = foldS(tl, s0), sw1 = foldS(tl, s0 + 1), tw0 = foldT(tl, t0), tw1 = foldT(tl, t0 + 1);
+  { int td = max(tw1 - tw0, -255); tw0 &= 0xff; tw1 = tw0 + td; }   // T a 8 bits (SoftRdp filterK)
   uint c10 = fetch(tl, sw1, tw0), c01 = fetch(tl, sw0, tw1);
   bool midTexel = ((U(R_OHI) >> 12) & 1u) != 0u && fx == 16 && fy == 16;
   int o[4];
@@ -533,9 +530,16 @@ uint sampleFilt(int tl, int si, int ti) {
 }
 uint sampleTex(int tl, int si, int ti) {
   uint w = U(R_TILES + tl * 5);
-  si = tileCoord(si, w & 15u, U(R_TILES + tl * 5 + 3) >> 16);
-  ti = tileCoord(ti, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16);
-  if((R(R_FLAGS) & F_FILT) == 0) return fetch(tl, foldS(tl, si >> 5), foldT(tl, ti >> 5));
+  // COPY sin etapa de clamp ni recorte de T (SoftRdp filterK).
+  bool copy = (R(R_FLAGS) & F_COPY) != 0;
+  bool clS = !copy && (((w >> 16) & 2u) != 0u || ((w >> 8) & 15u) == 0u);
+  bool clT = !copy && (((w >> 18) & 2u) != 0u || ((w >> 12) & 15u) == 0u);
+  si = tileCoordClamp(si, w & 15u, U(R_TILES + tl * 5 + 3) >> 16, U(R_TILES + tl * 5 + 1) >> 16, clS);
+  ti = tileCoordClamp(ti, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16, U(R_TILES + tl * 5 + 2) >> 16, clT);
+  if(copy || (R(R_FLAGS) & F_FILT) == 0) {   // COPY no filtra (parallel-rdp sample_texture_copy)
+    int pt = foldT(tl, ti >> 5);
+    return fetch(tl, foldS(tl, si >> 5), copy ? pt : (pt & 0xff));
+  }
   return sampleFilt(tl, si, ti);
 }
 // Texrect: S y T en 1/2^sh de texel. Sin filtro el texel de floor; con filtro, S/T a 1/32
@@ -569,8 +573,8 @@ int hdIx(int i, int n) { return i >= 0 ? i % n : (n - 1) - ((-i - 1) % n); }
 uint hdSample(int tl, double s, double t, double fp) {
   uint hb = uint(R(R_HD)) - 1u, w = U(R_TILES + tl * 5);
   double scX = hdD(hb + 2u), scY = hdD(hb + 4u);
-  precise double u = hdFold(s, w & 15u, (w >> 8) & 15u, (w >> 16) & 3u, R(R_TILES + tl * 5 + 1)) * scX;
-  precise double v = hdFold(t, (w >> 4) & 15u, (w >> 12) & 15u, (w >> 18) & 3u, R(R_TILES + tl * 5 + 2)) * scY;
+  precise double u = hdFold(s, w & 15u, (w >> 8) & 15u, (w >> 16) & 3u, bitfieldExtract(R(R_TILES + tl * 5 + 1), 0, 16)) * scX;
+  precise double v = hdFold(t, (w >> 4) & 15u, (w >> 12) & 15u, (w >> 18) & 3u, bitfieldExtract(R(R_TILES + tl * 5 + 2), 0, 16)) * scY;
   // Nivel: texeles HD por pixel = fp * escala, log2 entero hacia abajo.
   int L = 0;
   precise double k = fp * max(scX, scY);
