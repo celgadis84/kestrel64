@@ -109,5 +109,11 @@ all 14. `RDP/` subset: 0 regress, both backends identical on all 133. SM64 md5 u
 - TLUT + BI_LERP of the cycle without SAMPLE_TYPE still runs the 3-tap filter, with all taps
   on the same texel (s0, t0) and only the bank changing ("bilinear footprint with the 4
   banks of TLUT"). BI_LERP_0 for cycle 0, BI_LERP_1 for TEXEL1.
-- Not yet: COPY with TLUT picks the bank from the pixel's position in the 64-bit group
-  (parallel-rdp `sample_texture_copy_word`); we still read bank 0.
+- COPY triangles at 16 bpp follow parallel-rdp `interpolate_st_copy` (SoftRDP; GPU-RDP
+  sends COPY triangles to the CPU): a pixel is drawn when it lies in the span
+  [start_x, end_x], coverage is not checked, S/T/W are stepped once per 64-bit word
+  (4 pixels) counting from the span's start edge, and pixel `s_offset` of the group reads
+  texel s + s_offset and, with TLUT, palette bank s_offset. `CopyTextureTriangle*` (RGBA16,
+  TLUT RGBA4/RGBA8) 96.86/99.06 -> 99.40/99.54, pixel-identical to parallel-rdp.
+- Not yet: the same grouping for COPY texture rectangles (they score the same as
+  parallel-rdp already at 1:1 scale), nor COPY at 8/32 bpp.

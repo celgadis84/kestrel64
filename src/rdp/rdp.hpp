@@ -352,6 +352,7 @@ private:
   // el rasterizador lo arma una vez por triangulo en vez de una vez por pixel.
   auto sampleTexFold(const TexFold& f, double s, double t, bool cyc1 = false) const -> u32;
   auto sampleTexel(u32 tile, int s, int t) -> u32;
+  auto sampleCopy(const TexFold& f, int s, int t, int soff) const -> u32;   // COPY: texel s+soff, banco soff
   auto sampleRawIndex(u32 tile, int s, int t) -> int;   // raw CI index (pre-TLUT) for 8bpp CI blits
   auto sampleTexFiltered(u32 tile, double s, double t) -> u32;  // point or N64 3-point
   // --- texturas HD / realce (texpack.hpp, docs/TEXTURAS-HD.md). Inerte sin variables. ---

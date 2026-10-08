@@ -1238,6 +1238,9 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   // mipmap del propio juego (los niveles serian de otra textura) ni en solo-coste.
   HdBind hdB;
   if(texpack::active() && textured && !usesLod && !costOnly && !fillMode) hdB = hdBind(mem, texTile);
+  // COPY a 16 bpp: el pixel vale por estar dentro del tramo [start_x, end_x], sin mirar la
+  // cobertura, y S/T van por grupos de 4 (parallel-rdp shading.h `copy_en`).
+  const bool copy16 = copyCy && ci_size == 2 && textured && !hdB.tex;
   lodFracV = 0xff;
   if(usesLod && !textured) {   // sin coordenadas: S=T=W=0 en todo el primitivo -> magnify
     u32 t0 = texTile, t1 = (texTile + 1) & 7;
@@ -1303,13 +1306,14 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       }
       return c;
     };
-    const int xs = std::max(std::min(std::min(qL[0], qL[1]), std::min(qL[2], qL[3])) >> 3, 0);
-    const int xe = (std::max(std::max(qR[0], qR[1]), std::max(qR[2], qR[3])) >> 3) + 1;
+    const int spanX0 = std::min(std::min(qL[0], qL[1]), std::min(qL[2], qL[3])) >> 3;
+    const int spanX1 = std::max(std::max(qR[0], qR[1]), std::max(qR[2], qR[3])) >> 3;
+    const int xs = std::max(spanX0, 0), xe = spanX1 + 1;
     // Solo-coste: misma decision de pixel que el bucle largo (la de la cobertura), asi que
     // la cuenta es IDENTICA; se salta el trabajo por pixel (textura, combinador, mezcla).
     const u64 rowPx0 = rasterPx;
     if(costOnly) {
-      for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(aaOn ? c != 0 : (c & 1) != 0) rasterPx++; }
+      for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(copy16 || (aaOn ? c != 0 : (c & 1) != 0)) rasterPx++; }
       addSpan(xs, rasterPx - rowPx0);
       continue;
     }
@@ -1382,7 +1386,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     };
     for(int x = xs; x < xe; x++) {
       const u32 cov = coverage(x);
-      if(aaOn ? cov == 0 : (cov & 1) == 0) continue;
+      if(!copy16 && (aaOn ? cov == 0 : (cov & 1) == 0)) continue;
       rasterPx++;      // DPC counters: pixel entered the pipeline (may still be killed)
       const int hits = __builtin_popcount(cov);
       if(fillMode) {   // raw packed fill color straight to the color image (no AA)
@@ -1392,6 +1396,17 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
                wr16(m, a, px);
                if(a + 1 < m.size()) hiddenBits(mem)[a >> 1] = (px & 1) ? 3 : 0; }
         pxWrites++;
+      } else if(copy16) {
+        // parallel-rdp interpolate_st_copy: S/T/W una vez por palabra de 64 bits (4 pixeles),
+        // contando grupos desde el borde de arranque del tramo, sin la fraccion de X; cada
+        // pixel lee el texel s + s_offset y, con TLUT, el banco s_offset de la paleta.
+        const int dx = leftMajor ? x - spanX0 : spanX1 - x;
+        const u32 lerp = (u32)(dx >> 2) * ldir;
+        auto stw = [&](int c) -> s32 { return (s32)((u32)rT[c] + (u32)(tDx[c] & ~0x1f) * lerp) >> 16; };
+        s32 ps = stw(0), pt = stw(1);
+        if(persp) perspDivide(ps, pt, stw(3), ps, pt);
+        const u32 c = sampleCopy(texF, ps, pt, dx & 3);
+        if(!alphaCmpEn || (c & 0xff) != 0) blendPixel(mem, x, y, c, hits, nullptr);
       } else if(textured) {
         const s32 dxI = x - baseX;
         int xo, yo; centroid(cov, xo, yo);
@@ -1899,6 +1914,20 @@ auto SoftRdp::sampleTexFold(const TexFold& f, double s, double t, bool cyc1) con
   // bucle). A partir de aqui el filtro entero va especializado, con las 3-4 tomas alineadas.
   switch(f.kind) {
 #define KEST_CASE(K) case K: return filterK<K>(f, s, t, cyc1);
+    KEST_TEXKINDS(KEST_CASE)
+#undef KEST_CASE
+    default: return 0xffffffff;
+  }
+}
+
+auto SoftRdp::sampleCopy(const TexFold& f, int s, int t, int soff) const -> u32 {
+  // parallel-rdp sample_texture_copy_word: shift + mascara, sin clamp ni filtro ni recorte de
+  // T; el pixel soff del grupo lee el texel s + soff y, con TLUT, el banco soff de la paleta.
+  const int ps = maskCoord((tileCoordClamp(s, f.shiftS, f.slo, f.shi, false) >> 5) + soff, f.maskS, f.cmS);
+  const int pt = maskCoord(tileCoordClamp(t, f.shiftT, f.tlo, f.thi, false) >> 5, f.maskT, f.cmT);
+  const u32 bank = (tlutMode() & 2) ? (u32)soff : 0u;
+  switch(f.kind) {
+#define KEST_CASE(K) case K: return fetchK<K>(f, ps, pt, bank);
     KEST_TEXKINDS(KEST_CASE)
 #undef KEST_CASE
     default: return 0xffffffff;
