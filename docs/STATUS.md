@@ -10166,6 +10166,7 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   contra prdp: close 86,23 % -> 87,24 %, exact 68,31 -> 68,50; las costuras del logo
   desaparecen. Nuevo md5 SoftRDP sm64 `8c0b9ee6` (todos los modos soft iguales).
 - Atributos (shade/z/tex) siguen en double desde yh; pendiente pasarlos al mismo ancla.
+  (CERRADO 2026-10-03 (c): atributos en entero con el mismo ancla.)
 - Puertas: krom 371/371 regress=0, thar0 rmse=0.1332 sin cambio, gate_quick lock ALL OK.
 
 ## 2026-10-01 (c) -- modelo de ciclos del pipeline RSP (peticion n64-be)
@@ -10279,3 +10280,13 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Fase 6: escalado interno x2/x4 y texturas HD muestreadas en GPU (`tri_hd`, double), md5 igual.
 - Fase 7: GPU-RDP de fabrica en `kestrel64.exe`; parallel-RDP alternativa (`KESTREL_PRDP=1`).
   Detalle en `docs/GPU-RDP.md`.
+
+## 2026-10-08 -- SoftRDP/GPU-RDP a la par de parallel-rdp en RDP/
+
+- Cerrados los huecos de textura frente a parallel-rdp, los dos backends: texrect como triangulo
+  plano (b8c2d67), YUV (4fb6d40), FILL cubre el tramo entero (e3b457d), TEXEL1 de 1 ciclo
+  canalizado = TEXEL0 del pixel siguiente (60855b6). Detalle en docs/FIDELITY.md.
+- krom RDP/ (133): framebuffer identico a parallel-rdp en todas las que este gana o empata;
+  RDPTex0And1 98,83 -> 99,42, HelloWorldRDP16BPP 99,06 -> 100. RSPXBUSRDP ya = prdp.
+- Lo que queda por debajo de prdp en krom-prdp.tsv no es rasterizador: FastZigZag (carrera
+  CPU/RSP contra DPC_CURRENT, los dos lejos del PNG) y SNES PPU (programas con animacion).
