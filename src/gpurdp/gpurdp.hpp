@@ -87,7 +87,7 @@ inline auto active() -> bool { return false; }
 inline auto sharedVk() -> const vrdp::SharedVk* { return nullptr; }
 inline auto queueFill(const FillRect&) -> void {}
 inline auto pending() -> bool { return false; }
-inline auto queueTri(const TriRec&, const u8* = nullptr, const u16* = nullptr) -> bool { return false; }
+inline auto queueTri(const TriRec&, const u8* = nullptr) -> bool { return false; }
 inline auto flush(u8*, u32, u8*, std::vector<TriOut>* = nullptr) -> void {}
 inline auto upscale() -> u32 { return 1; }
 inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&) -> bool { return false; }
@@ -105,9 +105,9 @@ auto active() -> bool;
 auto sharedVk() -> const vrdp::SharedVk*;
 auto queueFill(const FillRect& r) -> void;
 auto pending() -> bool;
-// false = cola llena: vaciar (flush) y volver a encolar. Con `tmem` (4 KB) y `tlut` (256
-// entradas) el triangulo lleva textura: se guarda la instantanea y su ranura va en T_TSLOT.
-auto queueTri(const TriRec& t, const u8* tmem = nullptr, const u16* tlut = nullptr) -> bool;
+// false = cola llena: vaciar (flush) y volver a encolar. Con `tmem` (4 KB, paleta incluida en
+// la mitad alta) el triangulo lleva textura: se guarda la instantanea y su ranura va en T_TSLOT.
+auto queueTri(const TriRec& t, const u8* tmem = nullptr) -> bool;
 // Ejecuta la cola en la GPU (rellenos y triangulos en el orden en que llegaron), espera y copia
 // a `rdram` los bytes de cada primitiva (y a `hidden`, un byte por media palabra, los bits
 // ocultos de los de 16bpp). Antes sube al espejo las zonas que leen los triangulos. En `outs`,

@@ -75,3 +75,21 @@ GPU-RDP give identical scores on all 133. SM64 md5 unchanged.
 - **COPY** has no clamp stage, no T truncation and no filter (`sample_texture_copy`), even
   with SAMPLE_TYPE set.
 - GPU tile record: words 1/2 carry `sMax/tMax | SH/TH << 16`.
+
+## LOAD_TLUT writes real TMEM (2026-10-08)
+
+11 `LoadTLUT` ROMs (95.7-99.0) -> 100 on SoftRDP and GPU-RDP; now equal to parallel-rdp on
+all 14. `RDP/` subset: 0 regress, both backends identical on all 133. SM64 md5 unchanged.
+
+- The palette is no longer a separate `tlut[256]` array: it lives in the upper half of TMEM,
+  one 64-bit word per entry with the value in all four banks, and CI sampling reads
+  `0x800 + idx * 8` (parallel-rdp `sample_texel_ci*_tlut`, bank 0).
+- LOAD_TLUT follows parallel-rdp `update_tmem_lut`: starts at the destination tile's TMEM
+  address, wraps across the 4 KB, and the image size vs tile size decides which 16-bit TMEM
+  words get written and from which texel (16b->4b tile = contiguous quadrupled entries;
+  same size = first 8 bytes of every 32; etc.). A LOAD_BLOCK/TILE into the upper half now
+  overwrites the palette, as on HW.
+- Not modelled (parallel-rdp neither): 4-bit image, 32-bit tile (`*_b32` stay at prdp's
+  score), height > 1.
+- GPU-RDP TMEM slot shrinks to 4 KB (palette included). Savestate v22; v14-v21 states are
+  converted on load.

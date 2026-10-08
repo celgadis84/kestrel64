@@ -26,7 +26,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 21;  // 21: SET_KEY_R/GB (centro/escala/ancho), se aceptan v14..v20; 20: borde de tijera de FILL/COPY (sx1fc), se aceptan v14..v19; 19: fin de IO_BUSY del PI aparte del valor del bus (cartIoBusyUntil), se aceptan v14..v18; 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 22;  // 22: la paleta (TLUT) vive en TMEM, sin bloque aparte; se aceptan v14..v21; 21: SET_KEY_R/GB (centro/escala/ancho), se aceptan v14..v20; 20: borde de tijera de FILL/COPY (sx1fc), se aceptan v14..v19; 19: fin de IO_BUSY del PI aparte del valor del bus (cartIoBusyUntil), se aceptan v14..v18; 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -149,7 +149,13 @@ struct StateVisitor {
     io.pod(d.pxWrites); io.pod(d.pxZWrites);
     io.arr(d.tiles, 8);
     io.blob(d.tmem, sizeof(d.tmem));
-    io.arr(d.tlut, 256);
+    // Hasta v21 la paleta iba aparte; ahora vive en la mitad alta de TMEM (entrada repetida en
+    // los cuatro bancos). Un estado viejo se convierte al leerlo.
+    if(io.version < 22 && !io.writing) {
+      u16 tl[256]; io.arr(tl, 256);
+      for(u32 i = 0; i < 256; i++)
+        for(u32 b = 0; b < 4; b++) { d.tmem[0x800 + i * 8 + b * 2] = (u8)(tl[i] >> 8); d.tmem[0x801 + i * 8 + b * 2] = (u8)tl[i]; }
+    }
     if(io.version >= 16) io.pod(d.prim_min_level);   // v16: suelo de LOD
     if(io.version >= 17) io.pod(d.prim_dz);          // v17: delta-z de la primitiva
     if(io.version >= 20) io.pod(d.sx1fc);            // v20: borde de tijera FILL/COPY
@@ -441,7 +447,7 @@ auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> b
   std::memcpy(&h, data, sizeof(h));
   Header want = makeHeader(sys);
   if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion && h.version != 20 && h.version != 19 && h.version != 18 && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
+  if(h.version != kVersion && h.version != 21 && h.version != 20 && h.version != 19 && h.version != 18 && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
   if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
   if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
 

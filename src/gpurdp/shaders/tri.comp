@@ -31,7 +31,7 @@
 // Espejo de RDRAM: byte de la direccion 4w+i en los bits 8*i de ram[w] (orden del anfitrion).
 // Bits ocultos: un byte por media palabra, mismo empaquetado en hid[].
 // TMEM: una instantanea por triangulo con textura (la que habia al rasterizarlo): 4 KB de TMEM
-// y luego 256 entradas de 16 bits de TLUT, 1152 palabras por ranura, bytes en orden del anfitrion.
+// con la paleta en la mitad alta, 1024 palabras por ranura, bytes en orden del anfitrion.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) buffer Ram { uint ram[]; };
 layout(std430, binding = 1) buffer Hid { uint hid[]; };
@@ -422,7 +422,7 @@ uint tmB(uint off) { return (tm[tbase + (off >> 2)] >> ((off & 3u) * 8u)) & 0xff
 uint exp5(uint v) { return (v << 3) | (v >> 2); }
 uint tlutEntry(uint idx) {
   uint j = idx & 0xffu;
-  uint e = (tm[tbase + 1024u + (j >> 1)] >> ((j & 1u) * 16u)) & 0xffffu;
+  uint e = (tmB(0x800u + j * 8u) << 8) | tmB(0x801u + j * 8u);   // banco 0 (SoftRdp tlutEntry)
   if(((U(R_OHI) >> 14) & 3u) == 3u) { uint i = (e >> 8) & 0xffu, a = e & 0xffu;
                                        return (i << 24) | (i << 16) | (i << 8) | a; }
   uint r = exp5((e >> 11) & 0x1fu), g = exp5((e >> 6) & 0x1fu), b = exp5((e >> 1) & 0x1fu);
@@ -940,7 +940,7 @@ void main() {
       base = int(cur) * R_SIZE;
       ivec4 bb = boxOf(base);
       if(x < bb.x || x >= bb.x + bb.z || y < bb.y || y >= bb.y + bb.w) continue;
-      tbase = U(R_TSLOT) * 1152u;
+      tbase = U(R_TSLOT) * 1024u;
       nWrite = 0; nZWrite = 0;
       if((R(R_FLAGS) & F_RECT) != 0) rectPixel(x, y);
       else pixel(x, y);

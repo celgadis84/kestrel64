@@ -227,7 +227,6 @@ private:
   } tiles[8];
   u8  tmem[0x1000] = {};   // 4 KB texture memory
   auto statsCmd(Memory& mem, u32 op, u64 cmd) -> void;     // rdp.stats: antes de ejecutar
-  u16 tlut[256] = {};      // palette RAM (LOAD_TLUT); CI4/CI8 index into this
   u32 tlutMode() const { return (other_hi >> 14) & 3; }  // TEXTLUT: 0 none,2 RGBA16,3 IA16
 
   // --- helpers ----------------------------------------------------------------

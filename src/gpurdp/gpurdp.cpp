@@ -60,8 +60,8 @@ struct Buf {
 // Triangulos por vaciado como mucho (tamano fijo de los buffers de registros y resultados).
 constexpr u32 kMaxTri = 4096;
 
-// Instantaneas de TMEM por vaciado como mucho: 4 KB de TMEM + 512 bytes de TLUT cada una.
-constexpr u32 kMaxTmem = 512, kTmemBytes = 0x1000 + 512;
+// Instantaneas de TMEM por vaciado como mucho: 4 KB de TMEM (con la paleta) cada una.
+constexpr u32 kMaxTmem = 512, kTmemBytes = 0x1000;
 
 // Cola unificada: rellenos y triangulos en el orden del FIFO.
 struct Op { bool tri; u32 idx; };
@@ -607,7 +607,7 @@ auto queueFill(const FillRect& r) -> void {
   g->nFill++;
 }
 
-auto queueTri(const TriRec& t, const u8* tmem, const u16* tlut) -> bool {
+auto queueTri(const TriRec& t, const u8* tmem) -> bool {
   if(g->tris.size() >= kMaxTri) return false;
   s32 slot = 0;
   if(tmem) {
@@ -615,12 +615,11 @@ auto queueTri(const TriRec& t, const u8* tmem, const u16* tlut) -> bool {
     std::vector<u8>& v = g->tslots;
     const size_t n = v.size() / kTmemBytes;
     const u8* last = n ? v.data() + (n - 1) * kTmemBytes : nullptr;
-    if(last && !std::memcmp(last, tmem, 0x1000) && !std::memcmp(last + 0x1000, tlut, 512)) slot = (s32)n - 1;
+    if(last && !std::memcmp(last, tmem, 0x1000)) slot = (s32)n - 1;
     else {
       if(n >= kMaxTmem) return false;
       v.resize((n + 1) * kTmemBytes);
       std::memcpy(v.data() + n * kTmemBytes, tmem, 0x1000);
-      std::memcpy(v.data() + n * kTmemBytes + 0x1000, tlut, 512);
       slot = (s32)n;
       g->nSlot++;
     }

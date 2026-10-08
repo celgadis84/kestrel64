@@ -1127,7 +1127,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = lastX; r[T_LASTY] = lastY;
   t.lo[0] = lo[0]; t.hi[0] = hi[0]; t.lo[1] = lo[1]; t.hi[1] = hi[1];
   const u8* tm = textured ? tmem : nullptr;
-  if(!gpurdp::queueTri(t, tm, tlut)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tm, tlut); }
+  if(!gpurdp::queueTri(t, tm)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tm); }
   gpuTris.push_back({acct, combProg && !fillMode});
   gpuMark(lo[0], hi[0]);
   if(hi[1]) gpuMark(lo[1], hi[1]);
@@ -1567,7 +1567,11 @@ auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
 
 auto SoftRdp::tlutEntry(u32 idx) const -> u32 {
   // Decode one palette entry (CI formats). TEXTLUT mode picks RGBA5551 vs IA16.
-  u16 e = tlut[idx & 0xff];
+  // La paleta vive en la mitad alta de TMEM, una palabra de 64 bits por entrada con el valor
+  // repetido en los cuatro bancos (parallel-rdp sample_texel_ci*_tlut: 0x400 | idx << 2).
+  // Se lee el banco 0; LOAD_TLUT escribe los cuatro iguales.
+  const u32 o = 0x800 + (idx & 0xff) * 8;
+  u16 e = (u16)(tmem[o] << 8 | tmem[o + 1]);
   if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
                         return (i << 24) | (i << 16) | (i << 8) | a; }
   // A palette entry expands exactly like a texel: 5 bits replicated into 8 (v<<3 | v>>2), as
@@ -2439,7 +2443,7 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = X1 - 1; r[T_LASTY] = Y1 - 1;
   t.lo[0] = lo; t.hi[0] = hi; t.lo[1] = zlo; t.hi[1] = zhi;
-  if(!gpurdp::queueTri(t, tmem, tlut)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tmem, tlut); }
+  if(!gpurdp::queueTri(t, tmem)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tmem); }
   gpuTris.push_back({acct, combProg});
   gpuMark(lo, hi);
   if(zhi) gpuMark(zlo, zhi);
@@ -2899,12 +2903,12 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       cur += n * 8; executed++; continue;
     }
 
-    // Carga TMEM redundante (rdp.stats): TMEM+TLUT identicas antes y despues de la carga.
-    u8 snap[sizeof tmem + sizeof tlut];
+    // Carga TMEM redundante (rdp.stats): TMEM (con la paleta) identica antes y despues.
+    u8 snap[sizeof tmem];
     const bool stLoad = st && (op == 0x30 || op == 0x33 || op == 0x34);
     u64 stBytes0 = 0;
     if(stLoad) {
-      std::memcpy(snap, tmem, sizeof tmem); std::memcpy(snap + sizeof tmem, tlut, sizeof tlut);
+      std::memcpy(snap, tmem, sizeof tmem);
       stBytes0 = mem.rdpStats.loadBytes.load(std::memory_order_relaxed);
     }
     switch(op) {
@@ -2979,30 +2983,42 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       break;
     }
     case 0x30: {                                        // LOAD_TLUT (palette load)
-      // Copy 16-bit palette entries from the texture image (ti_addr) into `tlut`.
-      // SL/SH (10.2) give the first/last source index; each entry is 2 bytes in RDRAM.
-      //
-      // The destination is NOT index SL: on HW the palette lives in the high 2 KB of TMEM
-      // (64-bit words 0x100..0x1ff, one word per entry, the 16-bit value replicated 4x), and
-      // LOAD_TLUT writes starting at the *destination tile's* TMEM address. `tlut[]` models
-      // that region flat, so entry n of the load lands at (tile.tmem & 0xff) + n -- which is
-      // exactly the sub-palette a CI4 draw then selects with its PALETTE field
-      // (palette p covers flat entries p*16 .. p*16+15).
+      // LOAD_TLUT escribe la TMEM de verdad (parallel-rdp tmem_update.comp update_tmem_lut),
+      // desde la direccion del tile destino y dando la vuelta a los 4 KB. La fuente es la de
+      // un LOAD_TILE de una sola fila: texel (SL..SH, TL) de la imagen. Cada palabra de 16 bits
+      // de TMEM (indice po desde el tile) toma un texel segun el tamano de la imagen (vs) frente
+      // al del tile (ts):
+      //  - 16 b -> tile 4 b (lo normal): cada entrada repetida en los cuatro bancos, 8 B por
+      //    entrada y seguidas; la mitad alta queda como la lee el muestreo CI (0x800 + idx*8).
+      //  - 16 b -> tile 8 b / 16 b: solo la primera palabra de 64 bits de cada 16 / 32 B; el
+      //    resto de TMEM no se toca.
+      //  - imagen de 8 b / 32 b: el mismo esquema con el paso de su tamano.
+      // Imagen de 4 b (el HW se cuelga) y tile de 32 b no se modelan (parallel-rdp tampoco).
       u32 t  = (cmd >> 24) & 7;
-      u32 dst = tiles[t].tmem & 0xff;
       if(texpack::active()) hdNoteTlut(mem, t, cmd);
-      //
-      // La fuente es la de un LOAD_TILE de una sola fila: texel (SL..SH, TL) de la imagen,
-      // o sea ti_addr + (TL * ti_width + s) * 2. Con TL = 0 sale lo de siempre, pero quien
-      // guarda la paleta DETRAS de los texeles en el mismo bloque la direcciona con TL != 0
-      // (ancho 1, TL = fila de la paleta); ignorar TL leia los texeles como paleta.
-      u32 sl = ((u32)(cmd >> 44) & 0xfff) >> 2, sh = ((u32)(cmd >> 12) & 0xfff) >> 2;
-      u32 row = ti_addr + (((u32)(cmd >> 32) & 0xfff) >> 2) * ti_width * 2;
-      for(u32 i = sl; i <= sh; i++) {
-        u32 src = row + i * 2;
-        if(src + 1 < m.size()) tlut[(dst + (i - sl)) & 0xff] = ((u16)m[src] << 8) | m[src + 1];
+      const u32 slo = (u32)(cmd >> 44) & 0xfff, tlo = (u32)(cmd >> 32) & 0xfff;
+      const u32 shi = (u32)(cmd >> 12) & 0xfff;
+      const int vs = (int)ti_size, ts = (int)tiles[t].size;
+      const u32 w = (((shi >> 2) - (slo >> 2)) + 1) & 0xfff;
+      if(vs == 0 || ts == 3 || !w) break;
+      const int effW = vs == 1 ? (int)((w + 7) & ~7u) : vs == 2 ? (int)w : (int)((w + 1) & ~1u);
+      const u32 vaddr = ti_addr + ((ti_width * (tlo >> 2) + (slo >> 2)) << (vs - 1));
+      const u32 off16 = ((tiles[t].tmem * 8) & 0xfff) >> 1;
+      for(u32 L = 0; L < 0x800; L++) {
+        const int po = (int)((L - off16) & 0x7ff), d = vs - ts;
+        int sp;
+        if(d == 2) sp = (po >> 2) << (vs - 2);
+        else if(d == 1) { if(po & 4) continue;   sp = (po & ~7) >> (ts + (vs == 2 ? 2 : 0)); }
+        else if(d == 0) { if(po & 0xc) continue; sp = (po & ~3) >> (ts + (vs == 2 ? 2 : 0)); }
+        else if(d == -1) { if(po & 0x1c) continue; sp = (po >> ts) & ~7; }
+        else { sp = (po >> 2) * 4; if(sp + 2 < effW) sp += 2; }   // tile 4 b, imagen 32 b
+        if(sp >= effW) continue;
+        u32 ra = vaddr + ((u32)sp << (vs - 1));
+        ra += 2 * (ra & 1) * (u32)(po & 3);                // fuente impar: desplazamiento raro del HW
+        if(ra + 1 >= m.size()) continue;
+        tmem[L * 2] = m[ra]; tmem[L * 2 + 1] = m[ra + 1];
       }
-      if(sh >= sl) accountLoad(mem, 1, u64(sh - sl + 1) * 2);   // antes no cobraba nada
+      accountLoad(mem, 1, u64(w) * 2);   // antes no cobraba nada
       break;
     }
     case 0x33: loadTile(mem, (cmd >> 24) & 7, true, cmd); break;   // LOAD_BLOCK
@@ -3083,7 +3099,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     if(stLoad) {
       auto& rs = mem.rdpStats;
       rs.loads.fetch_add(1, std::memory_order_relaxed);
-      if(!std::memcmp(snap, tmem, sizeof tmem) && !std::memcmp(snap + sizeof tmem, tlut, sizeof tlut)) {
+      if(!std::memcmp(snap, tmem, sizeof tmem)) {
         rs.loadRedundant.fetch_add(1, std::memory_order_relaxed);
         rs.loadRedundantBytes.fetch_add(rs.loadBytes.load(std::memory_order_relaxed) - stBytes0,
                                         std::memory_order_relaxed);
