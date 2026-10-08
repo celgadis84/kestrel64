@@ -46,6 +46,23 @@ failures are the 6 test-side ones above. They were at 209/217. What was missing:
 - **Scissor and rect edges.** The high scissor bound is exclusive in 1/2-cycle (`(x+3)>>2`)
   and `(x>>2)+1` in FILL/COPY. FILL/COPY rects have inclusive right/bottom edges.
 
+## TEXTURE_RECTANGLE as a flat triangle (2026-10-08)
+
+`TextureCoordinates1b` 96.67, `TextureCoordinates2` 95.29, `TextureCoordinates2b` 97.35 -> 100
+on SoftRDP and GPU-RDP (= parallel-rdp). `RDP/` subset: 133 ROMs, 0 regress, both backends
+identical on all 133. SM64 md5 unchanged on both.
+
+- The rect is built as a triangle (parallel-rdp `op_texture_rectangle`): major edge at XH,
+  XM = XL, YM = YL, YL |= 3 in COPY/FILL; S/T = s10.5 << 16, DsDx/DtDy << 11 along +x/+y
+  (axes crossed with FLIP). SoftRDP feeds it to `drawTriangle`, so the rect inherits the
+  integer row anchor, the XH fraction discount (none in COPY), coverage (AA-on rects with a
+  fractional edge get partial coverage) and COPY's 4-pixel word grouping.
+  No perspective on rects (prdp does apply it; W = 0 here).
+- COPY to an 8-bit framebuffer (raw indices) keeps the old loop.
+- GPU-RDP: 1/2-cycle rects go through `gpuTriangle`; COPY 16bpp rects keep the rect record
+  with the triangle's box (columns [XH>>2, XL>>2], rows with a sub-scanline in [YH, YL|3))
+  and group stepping in the shader (`copyRectPixel`).
+
 ## krom coverage/combiner on SoftRDP and GPU-RDP (2026-10-08)
 
 `AlphaCoverage` 74.82 -> 100, `CombinerOverflow` 45.41 -> 100, `CombinerLongTailConstants`

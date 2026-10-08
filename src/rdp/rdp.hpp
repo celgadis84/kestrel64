@@ -93,6 +93,8 @@ struct SoftRdp {
   // en 1/2 ciclos si se evalua (alpha constante, z de primitiva constante contra la z de
   // RDRAM, solo lectura): Thar0 mide justo eso y sin ello se iba de 0.13 a 0.99 cyc/px.
   bool costOnly = false;
+  // texRect dibujando por la ruta del triangulo (sin perspectiva ni GPU: ver texRect).
+  bool rectTri = false;
   // Cobrar o no los contadores del RDP (DPC_CLOCK/PIPEBUSY/BUFBUSY/TMEM y el reloj de coste
   // rdpGclk). El coste de un tramo se paga UNA vez: si delante ha ido un paseo solo-coste,
   // el paseo que pinta ya no cobra. Ver Memory::rdpRunJob.

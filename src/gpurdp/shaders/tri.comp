@@ -880,9 +880,29 @@ int rstep(int d, int q) {
   int f = q >> int(pc.sh), rr = q & (SC - 1);
   return d * f + ((d * rr) >> int(pc.sh));
 }
+// COPY a 16 bpp (SoftRdp copy16 / sampleCopy): el rect es un triangulo plano; S/T/W una vez
+// por palabra de 4 pixeles desde el arranque del tramo (R_TDE), fila anclada en YH>>2 (R_TDE+1),
+// sin fraccion de X. El pixel soff del grupo lee el texel s + soff y, con TLUT, el banco soff.
+void copyRectPixel(int x, int y, bool flip) {
+  int x1 = x >> int(pc.sh), y1 = y >> int(pc.sh);
+  int dyRow = y1 - R(R_TDE + 1), dx = x1 - R(R_TDE);
+  int dS = R(R_TDX), dT = R(R_TDX + 1);
+  int dxS = flip ? 0 : dS, dxT = flip ? dT : 0, dyS = flip ? dS : 0, dyT = flip ? 0 : dT;
+  int ps = (((R(R_TC) + dyS * dyRow) & ~0x3ff) + (dxS & ~0x1f) * (dx >> 2)) >> 16;
+  int pt = (((R(R_TC + 1) + dyT * dyRow) & ~0x3ff) + (dxT & ~0x1f) * (dx >> 2)) >> 16;
+  int tl = int(U(R_TINFO) & 7u), soff = dx & 3;
+  uint w = U(R_TILES + tl * 5);
+  ps = tileCoordClamp(ps, w & 15u, U(R_TILES + tl * 5 + 3) >> 16, U(R_TILES + tl * 5 + 1) >> 16, false);
+  pt = tileCoordClamp(pt, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16, U(R_TILES + tl * 5 + 2) >> 16, false);
+  uint bank = ((U(R_OHI) >> 15) & 1u) != 0u ? uint(soff) : 0u;
+  uint c = fetch(tl, foldS(tl, (ps >> 5) + soff), foldT(tl, pt >> 5), bank);
+  if((R(R_FLAGS) & F_ACMP) != 0 && (c & 0xffu) == 0u) return;
+  if(x >= R(R_SX0) * SC && x < R(R_SX1) * SC && y >= R(R_SY0) * SC && y < R(R_SY1) * SC) storePixel(x, y, c);
+}
 void rectPixel(int x, int y) {
   int fl = R(R_FLAGS);
   bool flip = (fl & F_FLIP) != 0, copy = (fl & F_COPY) != 0;
+  if(copy) { copyRectPixel(x, y, flip); return; }
   int ns = R(R_TC) + rstep(R(R_TDX), 4 * (flip ? y : x) - SC * R(R_TDE));
   int nt = R(R_TC + 1) + rstep(R(R_TDX + 1), 4 * (flip ? x : y) - SC * R(R_TDE + 1));
   int shS = copy ? 14 : 12;

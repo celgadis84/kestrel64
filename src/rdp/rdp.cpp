@@ -1193,7 +1193,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   }
   setPrimDz(zSrc, tDx[2], tDy[2]);
   // TEX_PERSP (other_hi bit 19): el RSP manda S/W, T/W y 1/W, y el RDP divide por pixel.
-  const bool persp = textured && ((other_hi >> 19) & 1);
+  const bool persp = textured && !rectTri && ((other_hi >> 19) & 1);
 
   // Flat (non-shade, non-texture) triangle colour. Without a full combiner/blender
   // model the constant source is a guess; use the register a demo most likely put it
@@ -2428,6 +2428,20 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   const u32 cyc = cycleType();
   const bool copy = cyc == 2;
   if(copy && ci_size == 1) return false;   // COPY a 8 bits: indice crudo, va por CPU
+  if(copy && (ci_size != 2 || gpuHd.tex)) return false;   // fuera del camino copy16 del triangulo
+  // COPY: la caja es la del tramo del triangulo plano de texRect, bordes inclusivos con
+  // yl |= 3 y sin fraccion: columnas [XH>>2, XL>>2]; filas = las que tienen alguna
+  // sub-scanline en [YH, YL|3) recortado a la tijera.
+  const s32 rXH = (s32)((w[0] >> 12) & 0xfff), rXL = (s32)((w[0] >> 44) & 0xfff);
+  const s32 rYH = (s32)(w[0] & 0xfff), rYL = (s32)((w[0] >> 32) & 0xfff);
+  const s32 spanX0 = std::max(rXH >> 2, sx0);
+  if(copy) {
+    X0 = std::max(spanX0, 0); X1 = std::min((rXL >> 2) + 1, scX1());
+    const s32 subLo = std::max(rYH, sy0 * 4), subHi = std::min(rYL | 3, sy1 * 4);
+    Y0 = std::max(subLo, 0) >> 2; Y1 = ((subHi - 1) >> 2) + 1;
+    if(rXH > rXL) X1 = X0;
+    if(subHi <= subLo) Y1 = Y0;
+  }
   const bool combProg = (combine_hi | combine_lo) != 0 && !copy;
   if(combProg) {
     if(combPlan.keyHi != combine_hi || combPlan.keyLo != combine_lo || combPlan.keyCyc != cyc)
@@ -2488,6 +2502,11 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   r[T_TC] = S * 128 * (copy ? 4 : 1); r[T_TC + 1] = T * 128;
   r[T_TDX] = D; r[T_TDX + 1] = DT;
   r[T_TDE] = flip ? YH : XH; r[T_TDE + 1] = flip ? XH : YH;
+  if(copy) {   // s15.16 y pasos << 11 como el triangulo; anclas = arranque del tramo y fila de YH
+    r[T_TC] = (s32)((u32)S << 16); r[T_TC + 1] = (s32)((u32)T << 16);
+    r[T_TDX] = (s32)((u32)D << 11); r[T_TDX + 1] = (s32)((u32)DT << 11);
+    r[T_TDE] = spanX0; r[T_TDE + 1] = rYH >> 2;
+  }
   r[T_TINFO] = (s32)((c0 >> 24) & 7);
   r[T_HD] = (s32)hdOff;
   r[T_K0] = k0; r[T_K0 + 1] = k1; r[T_K0 + 2] = k2; r[T_K0 + 3] = k3;
@@ -2577,12 +2596,40 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   // Textura HD / realce (texpack). No en COPY a framebuffer de 8 bits (escribe indices).
   HdBind hdB;
   if(texpack::active() && !usesLod && !(cycleType() == 2 && ci_size == 1)) hdB = hdBind(mem, tile);
-  // GPU-RDP (KESTREL_GPURDP=1): 16 bpp sin mipmap a la GPU; si no, antes lo encolado a la RDRAM.
-  if(gpuOn()) {
+  // GPU-RDP (KESTREL_GPURDP=1): el COPY va por el rect de la GPU (gpuTexRect); el resto entra
+  // como triangulo abajo y drawTriangle lo manda a la GPU por gpuTriangle.
+  if(gpuOn() && cycleType() == 2) {
     gpuHd = hdB;
-    if(!usesLod && gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
+    if(gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
     if(mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallRect.fetch_add(1, std::memory_order_relaxed);
     if(gpuQueued) { gpuFlushStat(66); gpuFlush(mem); }
+  }
+  // El HW dibuja el rect como un triangulo plano (parallel-rdp op_texture_rectangle): borde
+  // mayor a la izquierda en XH, XL/XM a la derecha, Y en 11.2 con yl |= 3 en COPY/FILL, S/T
+  // en s15.16 desde s10.5 << 16 y pasos DsDx/DtDy << 11 por +x/+y (ejes cruzados con FLIP).
+  // Asi hereda el ancla entera de fila, la fraccion de XH descontada (salvo en COPY), la
+  // cobertura y la agrupacion por palabras de COPY. Queda fuera COPY a framebuffer de 8 bits,
+  // que guarda indices crudos (abajo). La perspectiva no se aplica a los rects (W = 0).
+  if(!(cycleType() == 2 && ci_size == 1)) {
+    const u32 yl2 = (u32)((c0 >> 32) & 0xfff) | (incl ? 3u : 0u), yh2 = (u32)(c0 & 0xfff);
+    const u64 xl2 = (u64)((c0 >> 44) & 0xfff) << 14, xh2 = (u64)((c0 >> 12) & 0xfff) << 14;
+    const s32 sv = (s32)((u32)(s16)((c1 >> 48) & 0xffff) << 16), tv = (s32)((u32)(s16)((c1 >> 32) & 0xffff) << 16);
+    const s32 ds = (s32)((u32)rdsdx << 11), dt = (s32)((u32)rdtdy << 11);
+    // Valor s15.16 a sus mitades: entero en la palabra alta, fraccion en la baja.
+    auto hi16 = [](s32 v, int c) -> u64 { return (u64)(((u32)v >> 16) & 0xffff) << (48 - 16 * c); };
+    auto lo16 = [](s32 v, int c) -> u64 { return (u64)((u32)v & 0xffff) << (48 - 16 * c); };
+    const s32 dxS = flip ? 0 : ds, dxT = flip ? dt : 0, dyS = flip ? ds : 0, dyT = flip ? 0 : dt;
+    u64 tw[12] = {};
+    tw[0] = (u64)0x0a << 56 | (u64)1 << 55 | (u64)tile << 48 | (u64)yl2 << 32 | (u64)yl2 << 16 | yh2;
+    tw[1] = xl2 << 32; tw[2] = xh2 << 32; tw[3] = xl2 << 32;
+    tw[4]  = hi16(sv, 0) | hi16(tv, 1);   tw[6]  = lo16(sv, 0) | lo16(tv, 1);
+    tw[5]  = hi16(dxS, 0) | hi16(dxT, 1); tw[7]  = lo16(dxS, 0) | lo16(dxT, 1);
+    tw[8]  = hi16(dyS, 0) | hi16(dyT, 1); tw[10] = lo16(dyS, 0) | lo16(dyT, 1);
+    tw[9]  = tw[8];                       tw[11] = tw[10];
+    rectTri = true;
+    drawTriangle(mem, tw, 12, 0x0a);
+    rectTri = false;
+    return;
   }
   const double hdFp = std::max(std::abs(dsdx), std::abs(dtdy));
   for(int y = Y0; y < Y1; y++) {
