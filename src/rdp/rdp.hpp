@@ -355,6 +355,13 @@ private:
   auto sampleTexFold(const TexFold& f, double s, double t, bool cyc1 = false) const -> u32;
   auto sampleTexel(u32 tile, int s, int t) -> u32;
   auto sampleCopy(const TexFold& f, int s, int t, int soff) const -> u32;   // COPY: texel s+soff, banco soff
+  // YUV (parallel-rdp sample_texel_yuv16): toma cruda (U-128, V-128, Y) con la croma en la
+  // columna cx; filtro de croma y luma por separado; conversion SET_CONVERT del TX.
+  auto yuvTap(const TexFold& f, int s, int t, int cx, int* o) const -> void;
+  auto yuvFilter(const TexFold& f, int s0, int s1, int t0, int t1, int fx, int fy, bool cyc1) const -> u32;
+  auto texConvert(u32 tex, bool signedRG) const -> u32;
+  // TEXEL1: con CONVERT_ONE y sin BI_LERP_1 es la conversion de TEXEL0, no un muestreo.
+  auto sampleTex1(const TexFold& f1, double s, double t, u32 tex0, const TexFold& f0) const -> u32;
   auto sampleRawIndex(u32 tile, int s, int t) -> int;   // raw CI index (pre-TLUT) for 8bpp CI blits
   auto sampleTexFiltered(u32 tile, double s, double t) -> u32;  // point or N64 3-point
   // --- texturas HD / realce (texpack.hpp, docs/TEXTURAS-HD.md). Inerte sin variables. ---

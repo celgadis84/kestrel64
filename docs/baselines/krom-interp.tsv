@@ -171,7 +171,7 @@ RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleIA4B320x240/Cycle1Tex
 RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleIA8B320x240/Cycle1TextureRectangle16BPPIA8B320X240	95.93	97.50	27.93	
 RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleRGBA16B320x240/Cycle1TextureRectangle16BPPRGBA16B320X240	95.93	97.80	27.73	
 RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleRGBA32B320x240/Cycle1TextureRectangle16BPPRGBA32B320X240	96.17	97.80	27.73	
-RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleYUV16B320x240/Cycle1TextureRectangle16BPPYUV16B320X240	97.37	97.91	20.55	
+RDP/16BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleYUV16B320x240/Cycle1TextureRectangle16BPPYUV16B320X240	99.74	99.74	7.49	
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/CopyTextureRectangleTLUTRGBA4B320x240/CopyTextureRectangle16BPPTLUTRGBA4B320X240	99.40	99.40	15.76	
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/CopyTextureRectangleTLUTRGBA8B320x240/CopyTextureRectangle16BPPTLUTRGBA8B320X240	99.54	99.54	13.76	
 RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA4B320x240/Cycle1TextureRectangle16BPPTLUTIA4B320X240	89.73	90.31	30.70	
@@ -196,7 +196,7 @@ RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA4B320x240/Cycle1Textur
 RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA8B320x240/Cycle1TextureTriangle16BPPIA8B320X240	95.93	97.50	27.93	
 RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA16B320x240/Cycle1TextureTriangle16BPPRGBA16B320X240	95.93	97.80	27.73	
 RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA32B320x240/Cycle1TextureTriangle16BPPRGBA32B320X240	96.17	97.80	27.73	
-RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle16BPPYUV16B320X240	98.92	99.57	7.13	
+RDP/16BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle16BPPYUV16B320X240	99.73	99.73	8.05	
 RDP/16BPP/Triangle/TextureTriangle/TLUT/CopyTextureTriangleTLUTRGBA4B320x240/CopyTextureTriangle16BPPTLUTRGBA4B320X240	99.40	99.40	15.76	
 RDP/16BPP/Triangle/TextureTriangle/TLUT/CopyTextureTriangleTLUTRGBA8B320x240/CopyTextureTriangle16BPPTLUTRGBA8B320X240	99.54	99.54	13.76	
 RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA4B320x240/Cycle1TextureTriangle16BPPTLUTIA4B320X240	89.73	90.31	30.70	
@@ -217,7 +217,7 @@ RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleIA4B320x240/Cycle1Tex
 RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleIA8B320x240/Cycle1TextureRectangle32BPPIA8B320X240	96.11	97.66	27.45	
 RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleRGBA16B320x240/Cycle1TextureRectangle32BPPRGBA16B320X240	96.11	97.97	27.30	
 RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleRGBA32B320x240/Cycle1TextureRectangle32BPPRGBA32B320X240	96.33	97.97	27.30	
-RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleYUV16B320x240/Cycle1TextureRectangle32BPPYUV16B320X240	96.98	97.91	20.03	
+RDP/32BPP/Rectangle/TextureRectangle/Cycle1TextureRectangleYUV16B320x240/Cycle1TextureRectangle32BPPYUV16B320X240	99.74	99.74	7.31	
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA4B320x240/Cycle1TextureRectangle32BPPTLUTIA4B320X240	89.77	90.52	30.88	
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTIA8B320x240/Cycle1TextureRectangle32BPPTLUTIA8B320X240	96.11	97.66	27.48	
 RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA4B320x240/Cycle1TextureRectangle32BPPTLUTRGBA4B320X240	89.77	94.81	28.69	
@@ -239,7 +239,7 @@ RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA4B320x240/Cycle1Textur
 RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleIA8B320x240/Cycle1TextureTriangle32BPPIA8B320X240	96.11	97.66	27.45	
 RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA16B320x240/Cycle1TextureTriangle32BPPRGBA16B320X240	96.11	97.97	27.30	
 RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleRGBA32B320x240/Cycle1TextureTriangle32BPPRGBA32B320X240	96.33	97.97	27.30	
-RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle32BPPYUV16B320X240	98.49	99.57	6.96	
+RDP/32BPP/Triangle/TextureTriangle/Cycle1TextureTriangleYUV16B320x240/Cycle1TextureTriangle32BPPYUV16B320X240	99.73	99.73	7.87	
 RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA4B320x240/Cycle1TextureTriangle32BPPTLUTIA4B320X240	89.77	90.52	30.88	
 RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cycle1TextureTriangle32BPPTLUTIA8B320X240	96.11	97.66	27.48	
 RDP/32BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle32BPPTLUTRGBA4B320X240	89.77	94.81	28.69	

@@ -1453,7 +1453,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
           tex = sampleTexFold(usesLod ? folds[tile0] : texF, su, tu);
         }
         // 2-cycle: TEXEL1 es un segundo muestreo, de tile1, en el mismo S/T.
-        u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], su, tu, true) : tex;
+        u32 tex1 = usesTex1 ? sampleTex1(folds[tile1], su, tu, tex, usesLod ? folds[tile0] : texF) : tex;
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.
         u32 shd = gouraud ? shadeAt(dxI, xo, yo) : 0;
@@ -1701,20 +1701,13 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t, u32 bank) const -> u32 {
       u32 i = nib * 17;                      // I4 -> intensity replicated to R,G,B AND alpha
       return (i << 24) | (i << 16) | (i << 8) | i;   // HW: I formats set alpha = intensity
     }
-  } else if constexpr(K == TK_YUV) {              // YUV 4:2:2 (UYVY pairs) via SET_CONVERT
-    // TMEM layout per 32-bit texel pair [U, Y0, V, Y1]: luma at the odd byte of each texel,
-    // chroma at the even bytes and shared across the pair (4:2:2). Convert with the
-    // SET_CONVERT coefficients: R=Y+K0*V, G=Y+K1*U+K2*V, B=Y+K3*U (V,U signed about 128,
-    // K/128 scale, HW rounds the >>7).
-    u32 off = (base + (u32)t * rowBytes + (u32)s * 2) ^ ox;
-    u32 pairBase = (base + (u32)t * rowBytes + (s & ~1u) * 2) ^ ox;
-    if(pairBase + 2 >= 0x1000 || off + 1 >= 0x1000) return 0;
-    int Y = tmem[off + 1], dU = (int)tmem[pairBase] - 128, dV = (int)tmem[pairBase + 2] - 128;
-    auto cl = [](int v) -> u32 { return (u32)(v < 0 ? 0 : v > 255 ? 255 : v); };
-    u32 r = cl(Y + ((k0 * dV + 0x40) >> 7));
-    u32 g = cl(Y + ((k1 * dU + k2 * dV + 0x40) >> 7));
-    u32 b = cl(Y + ((k3 * dU + 0x40) >> 7));
-    return (r << 24) | (g << 16) | (b << 8) | 0xff;   // opaque
+  } else if constexpr(K == TK_YUV) {              // YUV 4:2:2: texel CRUDO, sin convertir
+    // Devuelve (U-128, V-128, Y, Y) en bytes; la conversion la hace el llamador segun
+    // BI_LERP (ver yuvFilter/texConvert). La croma es la de la pareja (columna s >> 1).
+    (void)ox; (void)bank;
+    int o[3];
+    yuvTap(f, s, t, s >> 1, o);
+    return (u32)(o[0] & 0xff) << 24 | (u32)(o[1] & 0xff) << 16 | (u32)o[2] << 8 | (u32)o[2];
   } else if constexpr(K == TK_IA16 || K == TK_RGBA16) {        // 16-bit texels
     u32 off = (base + (u32)t * rowBytes + (u32)s * 2) ^ ox;
     if(off + 1 >= 0x1000) return 0;
@@ -1821,6 +1814,10 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t, bool cyc1) const -> 
   if(g_noFilter || copy || !(quad || bankFoot)) {
     const int ps = maskCoord(tileCoordClamp(fix105(s), f.shiftS, f.slo, f.shi, clS) >> 5, f.maskS, f.cmS);
     const int pt = maskCoord(tileCoordClamp(fix105(t), f.shiftT, f.tlo, f.thi, clT) >> 5, f.maskT, f.cmT);
+    if constexpr(K == TK_YUV) {   // sin BI_LERP del ciclo el TX convierte (parallel-rdp sample_texture)
+      const u32 raw = fetchK<K>(f, ps, copy ? pt : (pt & 0xff));
+      return copy || !((other_hi >> (cyc1 ? 10 : 11)) & 1) ? texConvert(raw, true) : raw;
+    }
     return fetchK<K>(f, ps, copy ? pt : (pt & 0xff));
   }
   // Hardware works in 10.5 fixed point and lerps in integers, so do the same: a double lerp
@@ -1847,6 +1844,7 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t, bool cyc1) const -> 
   // T del filtro va a 8 bits y el vecino se lleva como diferencia acotada a -255 (parallel-rdp
   // sample_texture, "very specific weird logic" de t0/t1).
   { const int td = std::max(tw1 - tw0, -255); tw0 &= 0xff; tw1 = tw0 + td; }
+  if constexpr(K == TK_YUV) return yuvFilter(f, sw0, sw1, tw0, tw1, fx, fy, cyc1);
   int sb1 = sw1;
   if(bankFoot) { sb1 = sw0; tw1 = tw0; }   // la huella entera sobre (s0, t0)
   const bool midTexel = ((other_hi >> 12) & 1) && fx == 16 && fy == 16;
@@ -1909,6 +1907,71 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t, bool cyc1) const -> 
   return r;
 }
 
+auto SoftRdp::yuvTap(const TexFold& f, int s, int t, int cx, int* o) const -> void {
+  // TMEM de YUV (parallel-rdp tmem_update.comp update_tmem_32 + sample_texel_yuv16): la
+  // mitad baja guarda U,V de cada pareja de pixeles y la alta Y0,Y1, las dos con la fila y
+  // el LINE contados dentro de la mitad (vuelta en 2 KB) y las filas impares con XOR 4.
+  const u32 row = f.base + (u32)t * f.rowBytes, ox = (t & 1) ? 4u : 0u;
+  const u32 c = ((row + (u32)cx * 2) & 0x7fe) ^ ox;
+  o[0] = (int)tmem[c] - 128;
+  o[1] = (int)tmem[c + 1] - 128;
+  o[2] = tmem[0x800 | (((row + (u32)s) & 0x7ff) ^ ox)];
+}
+
+auto SoftRdp::texConvert(u32 tex, bool signedRG) const -> u32 {
+  // parallel-rdp texture_convert_factors: factores 2K+1 (set_convert) sobre los 9 bits del
+  // texel; R = B + K0*G, G = B + K1*R + K2*G, B = B + K3*R, A = B. Con texel YUV crudo R/G son
+  // U-128/V-128 con signo y B la luma. El TX da 9 bits y aqui el texel es de 8: se recorta
+  // con la regla del clamp de 9 bits del combinador (parallel-rdp clamp_9bit), que es lo
+  // que sale cuando el combinador pasa el texel tal cual: [-256,-129] -> 255, [-128,-1] -> 0.
+  auto ch = [&](int sh) -> int { return signedRG ? (int)(s8)(tex >> sh) : (int)((tex >> sh) & 0xff); };
+  const int x = ch(24), y = ch(16), z = (int)((tex >> 8) & 0xff);
+  const int f0 = 2 * k0 + 1, f1 = 2 * k1 + 1, f2 = 2 * k2 + 1, f3 = 2 * k3 + 1;
+  auto cl = [](int v) -> u32 {
+    v = (((v - 0x80) & 0x1ff) ^ 0x100) - 0x100 + 0x80;
+    return (u32)(v < 0 ? 0 : v > 255 ? 255 : v);
+  };
+  return cl(z + ((f0 * y + 0x80) >> 8)) << 24 | cl(z + ((f1 * x + f2 * y + 0x80) >> 8)) << 16
+       | cl(z + ((f3 * x + 0x80) >> 8)) << 8 | (u32)z;
+}
+
+auto SoftRdp::yuvFilter(const TexFold& f, int s0, int s1, int t0, int t1, int fx, int fy, bool cyc1) const -> u32 {
+  // parallel-rdp sample_texture, rama YUV: la croma de las tomas en s1 sale de la columna
+  // (2*s1 - s0) >> 1 y filtra con su propia fraccion ((s0 & 1) << 4 | fx >> 1); la luma con
+  // la normal. Con BI_LERP del ciclo sale el texel filtrado crudo; sin el, cada plano elige
+  // t00 o t11 por su diagonal y el TX convierte.
+  const int cx0 = s0 >> 1, cx1 = (s1 + (s1 - s0)) >> 1;
+  int a[3], b[3], c[3], d[3];                       // t00, t10, t01, t11
+  yuvTap(f, s0, t0, cx0, a); yuvTap(f, s1, t0, cx1, b);
+  yuvTap(f, s0, t1, cx0, c); yuvTap(f, s1, t1, cx1, d);
+  const int cf = ((s0 & 1) << 4) | (fx >> 1);
+  const bool midSt = (other_hi >> 12) & 1;
+  int o[3];
+  if((other_hi >> (cyc1 ? 10 : 11)) & 1) {
+    auto tap3 = [&](int i, int px, int py) -> int {
+      const bool up = px + py >= 32;
+      const int base = up ? d[i] : a[i], wx = up ? 32 - py : px, wy = up ? 32 - px : py;
+      return (((b[i] - base) * wx + (c[i] - base) * wy + 0x10) >> 5) + base;
+    };
+    auto avg = [&](int i) -> int { return (a[i] + b[i] + c[i] + d[i] + 2) >> 2; };
+    const bool midC = midSt && cf == 16 && fy == 16, midL = midSt && fx == 16 && fy == 16;
+    for(int i = 0; i < 2; i++) o[i] = midC ? avg(i) : tap3(i, cf, fy);
+    o[2] = midL ? avg(2) : tap3(2, fx, fy);
+    return (u32)(o[0] & 0xff) << 24 | (u32)(o[1] & 0xff) << 16 | (u32)(o[2] & 0xff) << 8 | (u32)(o[2] & 0xff);
+  }
+  for(int i = 0; i < 2; i++) o[i] = cf + fy >= 32 ? d[i] : a[i];
+  o[2] = fx + fy >= 32 ? d[2] : a[2];
+  return texConvert((u32)(o[0] & 0xff) << 24 | (u32)(o[1] & 0xff) << 16 | (u32)o[2] << 8 | (u32)o[2], true);
+}
+
+auto SoftRdp::sampleTex1(const TexFold& f1, double s, double t, u32 tex0, const TexFold& f0) const -> u32 {
+  // CONVERT_ONE sin BI_LERP_1: el ciclo 1 no muestrea, convierte TEXEL0 (parallel-rdp
+  // shading.h). TEXEL0 sale crudo con signo solo si es YUV filtrado (BI_LERP_0).
+  if(((other_hi >> 9) & 1) && !((other_hi >> 10) & 1))
+    return texConvert(tex0, f0.kind == TK_YUV && ((other_hi >> 11) & 1));
+  return sampleTexFold(f1, s, t, true);
+}
+
 auto SoftRdp::sampleTexFold(const TexFold& f, double s, double t, bool cyc1) const -> u32 {
   // Despacho de formato: una vez por pixel (o por primitiva si el llamador ya lo saco del
   // bucle). A partir de aqui el filtro entero va especializado, con las 3-4 tomas alineadas.
@@ -1926,6 +1989,7 @@ auto SoftRdp::sampleCopy(const TexFold& f, int s, int t, int soff) const -> u32 
   const int ps = maskCoord((tileCoordClamp(s, f.shiftS, f.slo, f.shi, false) >> 5) + soff, f.maskS, f.cmS);
   const int pt = maskCoord(tileCoordClamp(t, f.shiftT, f.tlo, f.thi, false) >> 5, f.maskT, f.cmT);
   const u32 bank = (tlutMode() & 2) ? (u32)soff : 0u;
+  if(f.kind == TK_YUV) return texConvert(fetchK<TK_YUV>(f, ps, pt, 0), true);
   switch(f.kind) {
 #define KEST_CASE(K) case K: return fetchK<K>(f, ps, pt, bank);
     KEST_TEXKINDS(KEST_CASE)
@@ -2651,7 +2715,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       // point or N64 3-point per SAMPLE_TYPE
       u32 tex = hdB.tex ? hdSample(hdB, s, t, hdFp)
               : usesLod ? sampleTexFold(folds[tile0], s, t) : sampleTexFiltered(tile, s, t);
-      u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], s, t, true) : tex;
+      u32 tex1 = usesTex1 ? sampleTex1(folds[tile1], s, t, tex, usesLod ? folds[tile0] : foldOf(tile)) : tex;
       // COPY cycle writes the raw texel; 1-/2-cycle route it through the combiner
       // (texrect carries no shade → SHADE input is 0).
       bool combProg = (combine_hi | combine_lo) != 0;
@@ -2728,15 +2792,19 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   const auto& m = mem.rdram;
   u32 bpt = ti_size == 3 ? 4 : ti_size == 2 ? 2 : ti_size == 1 ? 1 : 0;   // bytes/texel (0 = 4-bit)
   // Un texel de 32 bpp (4 bytes de RDRAM desde sa) a la direccion d de la mitad baja.
+  // YUV a 16 bpp (parallel-rdp update_tmem_32 con yuv): cada pareja U Y0 V Y1 se sube como
+  // un texel de 32 bpp, U,V a la mitad baja y Y0,Y1 a la alta.
+  const bool yuv = tl.fmt == 1 && ti_size == 2;
   auto put32 = [&](u32 d, u32 sa) {
     d &= 0x7fe;
     if(sa + 3 >= m.size()) return;
+    if(yuv) { tmem[d] = m[sa]; tmem[d + 1] = m[sa + 2]; tmem[d | 0x800] = m[sa + 1]; tmem[(d | 0x800) + 1] = m[sa + 3]; return; }
     tmem[d] = m[sa]; tmem[d + 1] = m[sa + 1]; tmem[d | 0x800] = m[sa + 2]; tmem[(d | 0x800) + 1] = m[sa + 3];
   };
   // LOAD_BLOCK: nb bytes de RDRAM desde src, palabra a palabra con el contador DXT.
   auto blockCopy = [&](u32 src, u32 nb, u32 dxt) {
     const u32 dst = tl.tmem * 8;
-    if(bpt == 4) {
+    if(bpt == 4 || yuv) {
       for(u32 i = 0, done = 0; done < nb; i++, done += 8) {
         const u32 tt = (u32)(((u64)i * dxt) >> 11);
         const u32 w = (dst + i * 4 + tt * tl.line * 8) ^ ((tt & 1) ? 4u : 0u);
@@ -2802,6 +2870,15 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
   // TMEM (paso `bpt` desde el inicio de la fila), asi que la fila entera es un solo run.
   // Copiar byte a byte con dos comprobaciones de limite POR BYTE salia el 7 % del hilo.
   const u32 rowRun = (s1 - s0 + 1) * bpt;
+  if(yuv) {   // parejas de pixeles; el ancho se redondea a 4 pixeles (parallel-rdp upload.width)
+    const u32 pairs = (((s1 - s0 + 1) + 3) & ~3u) >> 1;
+    for(u32 ty = t0; ty <= t1; ty++) {
+      const u32 src = ti_addr + (ty * ti_width + s0) * 2, x = ((ty - t0) & 1) ? 4u : 0u;
+      const u32 dst = tl.tmem * 8 + (ty - t0) * rowBytes;
+      for(u32 k = 0; k < pairs; k++) put32((dst + k * 2) ^ x, src + k * 4);
+    }
+    return;
+  }
   if(bpt == 4) {
     for(u32 ty = t0; ty <= t1; ty++) {
       const u32 src = ti_addr + (ty * ti_width + s0) * 4, x = ((ty - t0) & 1) ? 4u : 0u;

@@ -451,6 +451,26 @@ int maskCoord(int c, uint mask, uint cm) {
   return c & (m - 1);
 }
 int foldS(int tl, int c) { uint w = U(R_TILES + tl * 5); return maskCoord(c, (w >> 8) & 15u, (w >> 16) & 3u); }
+// YUV (SoftRdp::yuvTap): U-128, V-128 de la pareja en la columna cx (mitad baja) y la luma
+// del pixel s (mitad alta), filas impares con XOR 4.
+ivec3 yuvTap(int tl, int s, int t, int cx) {
+  uint rowBytes = U(R_TILES + tl * 5 + 3) & 0xffffu, base = U(R_TILES + tl * 5 + 4) & 0xffffu;
+  uint row = base + uint(t) * rowBytes, ox = (t & 1) != 0 ? 4u : 0u;
+  uint c = ((row + uint(cx) * 2u) & 0x7feu) ^ ox;
+  return ivec3(int(tmB(c)) - 128, int(tmB(c + 1u)) - 128, int(tmB(0x800u | (((row + uint(s)) & 0x7ffu) ^ ox))));
+}
+uint yuvPack(ivec3 o) {
+  return (uint(o.x & 0xff) << 24) | (uint(o.y & 0xff) << 16) | (uint(o.z & 0xff) << 8) | uint(o.z & 0xff);
+}
+// SoftRdp::texConvert: factores 2K+1 de SET_CONVERT y recorte con el clamp de 9 bits.
+int convCl(int v) { v = ((((v - 0x80) & 0x1ff) ^ 0x100) - 0x100) + 0x80; return clamp(v, 0, 255); }
+uint texConvert(uint tex, bool signedRG) {
+  int x = int((tex >> 24) & 0xffu), y = int((tex >> 16) & 0xffu), z = int((tex >> 8) & 0xffu);
+  if(signedRG) { x = (x ^ 0x80) - 0x80; y = (y ^ 0x80) - 0x80; }
+  int f0 = 2 * R(R_K0) + 1, f1 = 2 * R(R_K0 + 1) + 1, f2 = 2 * R(R_K0 + 2) + 1, f3 = 2 * R(R_K0 + 3) + 1;
+  return (uint(convCl(z + ((f0 * y + 0x80) >> 8))) << 24) | (uint(convCl(z + ((f1 * x + f2 * y + 0x80) >> 8))) << 16)
+       | (uint(convCl(z + ((f3 * x + 0x80) >> 8))) << 8) | uint(z);
+}
 int foldT(int tl, int c) { uint w = U(R_TILES + tl * 5); return maskCoord(c, (w >> 12) & 15u, (w >> 18) & 3u); }
 uint fetch(int tl, int si, int ti, uint bank) {
   uint w = U(R_TILES + tl * 5), kind = (w >> 20) & 15u, pal = (w >> 24) & 15u;
@@ -475,17 +495,7 @@ uint fetch(int tl, int si, int ti, uint bank) {
     uint i = nib * 17u;
     return (i << 24) | (i << 16) | (i << 8) | i;
   }
-  if(kind == TK_YUV) {
-    uint off = (row + s * 2u) ^ ox;
-    uint pairBase = (row + (s & ~1u) * 2u) ^ ox;
-    if(pairBase + 2u >= 0x1000u || off + 1u >= 0x1000u) return 0u;
-    int Y = int(tmB(off + 1u)), dU = int(tmB(pairBase)) - 128, dV = int(tmB(pairBase + 2u)) - 128;
-    int k0 = R(R_K0), k1 = R(R_K0 + 1), k2 = R(R_K0 + 2), k3 = R(R_K0 + 3);
-    uint r = uint(clamp(Y + ((k0 * dV + 0x40) >> 7), 0, 255));
-    uint g = uint(clamp(Y + ((k1 * dU + k2 * dV + 0x40) >> 7), 0, 255));
-    uint b = uint(clamp(Y + ((k3 * dU + 0x40) >> 7), 0, 255));
-    return (r << 24) | (g << 16) | (b << 8) | 0xffu;
-  }
+  if(kind == TK_YUV) return yuvPack(yuvTap(tl, si, ti, si >> 1));   // crudo, sin convertir
   if(kind == TK_IA16 || kind == TK_RGBA16) {
     uint off = (row + s * 2u) ^ ox;
     if(off + 1u >= 0x1000u) return 0u;
@@ -549,6 +559,38 @@ uint sampleFilt(int tl, int si, int ti, bool foot) {
   for(int i = 0; i < 4; i++) r |= uint(clamp(o[i], 0, 255)) << (24 - i * 8);
   return r;
 }
+// SoftRdp::yuvFilter: croma con columna (2*s1 - s0) >> 1 y fraccion propia, luma con la normal;
+// con BI_LERP del ciclo sale crudo filtrado, sin el elige por diagonal y convierte.
+uint yuvFilt(int tl, int si, int ti, bool cyc1) {
+  int fx = si & 31, fy = ti & 31, s0 = si >> 5, t0 = ti >> 5;
+  int sw0 = foldS(tl, s0), sw1 = foldS(tl, s0 + 1), tw0 = foldT(tl, t0), tw1 = foldT(tl, t0 + 1);
+  { int td = max(tw1 - tw0, -255); tw0 &= 0xff; tw1 = tw0 + td; }
+  int cx0 = sw0 >> 1, cx1 = (sw1 + (sw1 - sw0)) >> 1;
+  ivec3 a = yuvTap(tl, sw0, tw0, cx0), b = yuvTap(tl, sw1, tw0, cx1);
+  ivec3 c = yuvTap(tl, sw0, tw1, cx0), d = yuvTap(tl, sw1, tw1, cx1);
+  int cf = ((sw0 & 1) << 4) | (fx >> 1);
+  bool midSt = ((U(R_OHI) >> 12) & 1u) != 0u;
+  ivec3 o;
+  if(((U(R_OHI) >> (cyc1 ? 10u : 11u)) & 1u) != 0u) {
+    ivec3 avg = (a + b + c + d + 2) >> 2;
+    bool upC = cf + fy >= 32, upL = fx + fy >= 32;
+    ivec3 bC = upC ? d : a, bL = upL ? d : a;
+    int wxC = upC ? 32 - fy : cf, wyC = upC ? 32 - cf : fy, wxL = upL ? 32 - fy : fx, wyL = upL ? 32 - fx : fy;
+    ivec3 tC = (((b - bC) * wxC + (c - bC) * wyC + 0x10) >> 5) + bC;
+    ivec3 tL = (((b - bL) * wxL + (c - bL) * wyL + 0x10) >> 5) + bL;
+    bool midC = midSt && cf == 16 && fy == 16, midL = midSt && fx == 16 && fy == 16;
+    o = ivec3(midC ? avg.xy : tC.xy, midL ? avg.z : tL.z);
+    return yuvPack(o);
+  }
+  o = ivec3(cf + fy >= 32 ? d.xy : a.xy, fx + fy >= 32 ? d.z : a.z);
+  return texConvert(yuvPack(o), true);
+}
+// TEXEL1 con CONVERT_ONE y sin BI_LERP_1 = conversion de TEXEL0 (SoftRdp::sampleTex1).
+bool convOne() { return ((U(R_OHI) >> 9) & 1u) != 0u && ((U(R_OHI) >> 10) & 1u) == 0u; }
+uint convTex1(int tl0, uint tex0) {
+  bool yuv0 = ((U(R_TILES + tl0 * 5) >> 20) & 15u) == TK_YUV;
+  return texConvert(tex0, yuv0 && ((U(R_OHI) >> 11) & 1u) != 0u);
+}
 uint sampleTex(int tl, int si, int ti, bool cyc1) {
   uint w = U(R_TILES + tl * 5);
   // COPY sin etapa de clamp ni recorte de T (SoftRdp filterK).
@@ -558,10 +600,14 @@ uint sampleTex(int tl, int si, int ti, bool cyc1) {
   si = tileCoordClamp(si, w & 15u, U(R_TILES + tl * 5 + 3) >> 16, U(R_TILES + tl * 5 + 1) >> 16, clS);
   ti = tileCoordClamp(ti, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16, U(R_TILES + tl * 5 + 2) >> 16, clT);
   bool foot = !copy && bankFoot(tl, cyc1);
+  bool yuv = ((w >> 20) & 15u) == TK_YUV;
   if(copy || ((R(R_FLAGS) & F_FILT) == 0 && !foot)) {   // COPY no filtra (parallel-rdp sample_texture_copy)
     int pt = foldT(tl, ti >> 5);
-    return fetch(tl, foldS(tl, si >> 5), copy ? pt : (pt & 0xff), 0u);
+    uint raw = fetch(tl, foldS(tl, si >> 5), copy ? pt : (pt & 0xff), 0u);
+    if(yuv && (copy || ((U(R_OHI) >> (cyc1 ? 10u : 11u)) & 1u) == 0u)) return texConvert(raw, true);
+    return raw;
   }
+  if(yuv) return yuvFilt(tl, si, ti, cyc1);
   return sampleFilt(tl, si, ti, foot);
 }
 // Texrect: S y T en 1/2^sh de texel. Sin filtro el texel de floor; con filtro, S/T a 1/32
@@ -840,7 +886,7 @@ void pixel(int x, int y) {
 #else
     uint tex0 = sampleTex(int(tile0), ps, pt, false);
 #endif
-    gTex1 = (fl & F_TEX1) != 0 ? sampleTex(int(tile1), ps, pt, true) : tex0;
+    gTex1 = (fl & F_TEX1) == 0 ? tex0 : convOne() ? convTex1(int(tile0), tex0) : sampleTex(int(tile1), ps, pt, true);
     c = combProg ? combine(tex0, shd, comb) : tex0;
     pxShadeA = min(int(shd & 0xffu) + alphaDither(x, y), 0xff);
     if((fl & F_ACMP) != 0) {   // alphaRef >= umbral de blend_color
@@ -896,6 +942,7 @@ void copyRectPixel(int x, int y, bool flip) {
   pt = tileCoordClamp(pt, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16, U(R_TILES + tl * 5 + 2) >> 16, false);
   uint bank = ((U(R_OHI) >> 15) & 1u) != 0u ? uint(soff) : 0u;
   uint c = fetch(tl, foldS(tl, (ps >> 5) + soff), foldT(tl, pt >> 5), bank);
+  if(((w >> 20) & 15u) == TK_YUV) c = texConvert(c, true);
   if((R(R_FLAGS) & F_ACMP) != 0 && (c & 0xffu) == 0u) return;
   if(x >= R(R_SX0) * SC && x < R(R_SX1) * SC && y >= R(R_SY0) * SC && y < R(R_SY1) * SC) storePixel(x, y, c);
 }
@@ -923,7 +970,7 @@ void rectPixel(int x, int y) {
 #else
   uint tex = rectSample(tl, ns, nt, shS, false);
 #endif
-  gTex1 = (fl & F_TEX1) != 0 ? rectSample((tl + 1) & 7, ns, nt, shS, true) : tex;
+  gTex1 = (fl & F_TEX1) == 0 ? tex : convOne() ? convTex1(tl, tex) : rectSample((tl + 1) & 7, ns, nt, shS, true);
   gLod = R(R_LOD);
   ivec4 comb = ivec4(0);
   bool combProg = (fl & F_COMB) != 0;

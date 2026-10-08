@@ -46,6 +46,27 @@ failures are the 6 test-side ones above. They were at 209/217. What was missing:
 - **Scissor and rect edges.** The high scissor bound is exclusive in 1/2-cycle (`(x+3)>>2`)
   and `(x>>2)+1` in FILL/COPY. FILL/COPY rects have inclusive right/bottom edges.
 
+## YUV textures (2026-10-08)
+
+`Cycle1TextureRectangle/Triangle 16/32BPP YUV16B`: 97.37/96.98/98.92/98.49 -> 99.74/99.74/99.73/99.73
+on SoftRDP and GPU-RDP (= parallel-rdp; rect16 framebuffer identical to prdp pixel for pixel).
+`RDP/` subset: 133 ROMs, 0 regress, both backends identical. SM64 md5 unchanged on both.
+
+- Load: a YUV 16bpp load uploads each pixel pair U Y0 V Y1 as one 32bpp texel, U,V in the low
+  TMEM half and Y0,Y1 in the high half (prdp `update_tmem_32` with yuv); LOAD_TILE width
+  rounded up to 4 pixels.
+- Sample: luma from the high half at pixel s, chroma from the low half at column s>>1. The
+  filter takes chroma at columns `s0>>1` and `(2*s1-s0)>>1` with its own fraction
+  `(s0&1)<<4 | fx>>1`; luma uses the normal one (prdp `sample_texture`).
+- Convert (TX): without BI_LERP for the cycle the texel is converted with factors `2K+1`,
+  `>>8` with `+0x80` rounding, U/V signed, alpha = Y; with BI_LERP it passes raw.
+  CONVERT_ONE without BI_LERP_1 makes TEXEL1 = convert(TEXEL0).
+- The converted value is 9-bit; with 8-bit texels it is cut with the combiner's 9-bit clamp
+  ([-256,-129] -> 255). Exact when the combiner passes the texel through; approximate when it
+  is a multiplier.
+- GPU-RDP: same in `tri.comp`. The bigger shader costs ~45 s of AMD driver pipeline compile on
+  the first run after a change (cached afterwards).
+
 ## TEXTURE_RECTANGLE as a flat triangle (2026-10-08)
 
 `TextureCoordinates1b` 96.67, `TextureCoordinates2` 95.29, `TextureCoordinates2b` 97.35 -> 100
