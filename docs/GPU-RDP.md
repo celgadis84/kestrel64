@@ -303,6 +303,17 @@ ligera ventaja de 4096 (SM64 3,97 contra 3,99-4,23 s; PD 3,65 contra 3,67).
 Antes del reparto GPU-RDP daba 7,63 s en SM64 y 4,76 s en PD. Queda +10 % en SM64 y +1,5 % en PD
 contra parallel-RDP, que encola sin esperar porque NO devuelve contabilidad por primitiva.
 
+**Re-bench 2026-10-08** (tras FILL de tramo entero, YUV y TEXEL1 canalizado; exe `build-prdp-static`,
+peer ocioso, intercalado dos rondas, min de 3 SM64 / 2 PD; la ROM de PD es la PAL, 300 intercambios = 413 campos):
+
+| | parallel-RDP (prdp-jit) | GPU-RDP (gpurdp-jit) |
+|---|---|---|
+| SM64 200 intercambios | 4,13 / 4,16 s | 4,56 / 4,50 s (+9 %) |
+| PD intro 300 intercambios | 1,57 / 1,55 s | 1,49 / 1,48 s (-4,5 %) |
+
+Misma foto que antes: en SM64 GPU-RDP sigue ~10 % detras (espera de fence por vaciado), en PD va
+por delante. Los cambios de fidelidad de hoy no movieron el coste de forma visible.
+
 **Bug latente encontrado al validar**: con todo a la GPU, SM64 a 200 intercambios divergia del
 SoftRDP en "PRESS START" (805 pixeles, un paso de 5 bits por canal en patron de dither). El
 texrect en COPY con `IM_RD` puesto entraba en `blendPixel` del shader y le aplicaba dither; en
