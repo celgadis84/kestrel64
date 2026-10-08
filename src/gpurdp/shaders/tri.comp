@@ -420,9 +420,9 @@ void blendPixel(int x, int y, uint src, int cvg, bool hasZ, int zin, int pxShade
 uint tbase;   // primera palabra de la ranura de TMEM del triangulo
 uint tmB(uint off) { return (tm[tbase + (off >> 2)] >> ((off & 3u) * 8u)) & 0xffu; }
 uint exp5(uint v) { return (v << 3) | (v >> 2); }
-uint tlutEntry(uint idx) {
-  uint j = idx & 0xffu;
-  uint e = (tmB(0x800u + j * 8u) << 8) | tmB(0x801u + j * 8u);   // banco 0 (SoftRdp tlutEntry)
+uint tlutEntry(uint idx, uint bank) {
+  uint o = 0x800u + (idx & 0xffu) * 8u + (bank & 3u) * 2u;   // SoftRdp tlutEntry
+  uint e = (tmB(o) << 8) | tmB(o + 1u);
   if(((U(R_OHI) >> 14) & 3u) == 3u) { uint i = (e >> 8) & 0xffu, a = e & 0xffu;
                                        return (i << 24) | (i << 16) | (i << 8) | a; }
   uint r = exp5((e >> 11) & 0x1fu), g = exp5((e >> 6) & 0x1fu), b = exp5((e >> 1) & 0x1fu);
@@ -432,7 +432,7 @@ uint tlutEntry(uint idx) {
 // kind << 20 | palette << 24; luego sMax | SH << 16, tMax | TH << 16 (sMax/tMax de 16 bits con
 // signo, SH/TH en 10.2), bytes por fila | SL << 16 y base en TMEM | TL << 16 (origen en 10.2).
 const uint TK_CI4 = 0u, TK_IA4 = 1u, TK_I4 = 2u, TK_YUV = 3u, TK_IA16 = 4u, TK_RGBA16 = 5u,
-           TK_RGBA32 = 6u, TK_CI8 = 7u, TK_IA8 = 8u, TK_I8 = 9u;
+           TK_RGBA32 = 6u, TK_CI8 = 7u, TK_IA8 = 8u, TK_I8 = 9u, TK_CI16 = 10u;
 // 10.5 -> coordenada del tile: recorte a 16 bits, SHIFT en punto fijo, resta de SL/TL << 3
 // (parallel-rdp shift_coord) y, con la etapa de CLAMP (SoftRdp tileCoordClamp, parallel-rdp clamp_and_shift_coord): borde
 // alto en 10.2 contra SH/TH absoluto, texel ((hi>>2)-(lo>>2)) & 0x3ff con fraccion 0.
@@ -452,17 +452,24 @@ int maskCoord(int c, uint mask, uint cm) {
 }
 int foldS(int tl, int c) { uint w = U(R_TILES + tl * 5); return maskCoord(c, (w >> 8) & 15u, (w >> 16) & 3u); }
 int foldT(int tl, int c) { uint w = U(R_TILES + tl * 5); return maskCoord(c, (w >> 12) & 15u, (w >> 18) & 3u); }
-uint fetch(int tl, int si, int ti) {
+uint fetch(int tl, int si, int ti, uint bank) {
   uint w = U(R_TILES + tl * 5), kind = (w >> 20) & 15u, pal = (w >> 24) & 15u;
   uint rowBytes = U(R_TILES + tl * 5 + 3) & 0xffffu, base = U(R_TILES + tl * 5 + 4) & 0xffffu;
   uint s = uint(si), t = uint(ti);
   uint ox = (t & 1u) != 0u ? 4u : 0u;
   uint row = base + t * rowBytes;
-  if(kind == TK_CI4 || kind == TK_IA4 || kind == TK_I4) {
+  // Indices de color: mitad baja de TMEM, la direccion da la vuelta en 2 KB (SoftRdp fetchK).
+  if(kind == TK_CI4) {
+    uint off = ((row + s / 2u) & 0x7ffu) ^ ox;
+    uint nib = (s & 1u) != 0u ? (tmB(off) & 0xfu) : (tmB(off) >> 4);
+    return tlutEntry(pal * 16u + nib, bank);
+  }
+  if(kind == TK_CI8) return tlutEntry(tmB(((row + s) & 0x7ffu) ^ ox), bank);
+  if(kind == TK_CI16) return tlutEntry(tmB(((row + s * 2u) & 0x7ffu) ^ ox), bank);
+  if(kind == TK_IA4 || kind == TK_I4) {
     uint off = (row + s / 2u) ^ ox;
     if(off >= 0x1000u) return 0u;
     uint nib = (s & 1u) != 0u ? (tmB(off) & 0xfu) : (tmB(off) >> 4);
-    if(kind == TK_CI4) return tlutEntry(pal * 16u + nib);
     if(kind == TK_IA4) { uint i3 = nib & 0xeu, i = (i3 << 4) | (i3 << 1) | (i3 >> 2), a = (nib & 1u) != 0u ? 255u : 0u;
                          return (i << 24) | (i << 16) | (i << 8) | a; }
     uint i = nib * 17u;
@@ -493,11 +500,10 @@ uint fetch(int tl, int si, int ti) {
     uint off = ((row + s * 2u) ^ ox) & 0x7feu, hi = off | 0x800u;
     return (tmB(off) << 24) | (tmB(off + 1u) << 16) | (tmB(hi) << 8) | tmB(hi + 1u);
   }
-  if(kind == TK_CI8 || kind == TK_IA8 || kind == TK_I8) {
+  if(kind == TK_IA8 || kind == TK_I8) {
     uint off = (row + s) ^ ox;
     if(off >= 0x1000u) return 0u;
     uint v = tmB(off);
-    if(kind == TK_CI8) return tlutEntry(v);
     if(kind == TK_IA8) { uint i = (v >> 4) * 17u, a = (v & 0xfu) * 17u;
                          return (i << 24) | (i << 16) | (i << 8) | a; }
     return (v << 24) | (v << 16) | (v << 8) | v;
@@ -505,19 +511,34 @@ uint fetch(int tl, int si, int ti) {
   return 0xffffffffu;
 }
 // S/T en 1/32 de texel (10.5). Sin filtro: el texel de floor; con filtro: 3 puntos.
-uint sampleFilt(int tl, int si, int ti) {
+// Tile con indice de color y EN_TLUT (SoftRdp filterK `tlut`).
+bool tlutTile(int tl) {
+  uint k = (U(R_TILES + tl * 5) >> 20) & 15u;
+  return (k == TK_CI4 || k == TK_CI8 || k == TK_CI16) && ((U(R_OHI) >> 15) & 1u) != 0u;
+}
+// Huella de bancos de paleta: TLUT + BI_LERP del ciclo sin SAMPLE_TYPE (SoftRdp filterK).
+bool bankFoot(int tl, bool cyc1) {
+  return tlutTile(tl) && (R(R_FLAGS) & F_FILT) == 0 && ((U(R_OHI) >> (cyc1 ? 10u : 11u)) & 1u) != 0u;
+}
+uint sampleFilt(int tl, int si, int ti, bool foot) {
   int fx = si & 31, fy = ti & 31, s0 = si >> 5, t0 = ti >> 5;
   int sw0 = foldS(tl, s0), sw1 = foldS(tl, s0 + 1), tw0 = foldT(tl, t0), tw1 = foldT(tl, t0 + 1);
   { int td = max(tw1 - tw0, -255); tw0 &= 0xff; tw1 = tw0 + td; }   // T a 8 bits (SoftRdp filterK)
-  uint c10 = fetch(tl, sw1, tw0), c01 = fetch(tl, sw0, tw1);
+  if(foot) { sw1 = sw0; tw1 = tw0; }
   bool midTexel = ((U(R_OHI) >> 12) & 1u) != 0u && fx == 16 && fy == 16;
+  // Banco de paleta por toma (SoftRdp filterK).
+  bool tlut = tlutTile(tl);
+  uint xr = tlut && fx + fy >= 32 ? 2u : 1u;
+  uint bk10 = tlut ? 1u ^ xr ^ 1u : 0u, bk01 = tlut ? 2u ^ xr ^ 1u : 0u;
+  uint bk00 = tlut && midTexel ? xr ^ 1u : 0u, bk11 = tlut ? 3u ^ xr ^ 1u : 0u;
+  uint c10 = fetch(tl, sw1, tw0, bk10), c01 = fetch(tl, sw0, tw1, bk01);
   int o[4];
   if(midTexel) {
-    uint c00 = fetch(tl, sw0, tw0), c11 = fetch(tl, sw1, tw1);
+    uint c00 = fetch(tl, sw0, tw0, bk00), c11 = fetch(tl, sw1, tw1, bk11);
     for(int i = 0; i < 4; i++) o[i] = (ch(c00, i) + ch(c10, i) + ch(c01, i) + ch(c11, i) + 2) >> 2;
   } else {
     bool upper = fx + fy >= 32;
-    uint bc = upper ? fetch(tl, sw1, tw1) : fetch(tl, sw0, tw0);
+    uint bc = upper && !foot ? fetch(tl, sw1, tw1, 0u) : fetch(tl, sw0, tw0, 0u);
     int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
     for(int i = 0; i < 4; i++) {
       int b = ch(bc, i);
@@ -528,7 +549,7 @@ uint sampleFilt(int tl, int si, int ti) {
   for(int i = 0; i < 4; i++) r |= uint(clamp(o[i], 0, 255)) << (24 - i * 8);
   return r;
 }
-uint sampleTex(int tl, int si, int ti) {
+uint sampleTex(int tl, int si, int ti, bool cyc1) {
   uint w = U(R_TILES + tl * 5);
   // COPY sin etapa de clamp ni recorte de T (SoftRdp filterK).
   bool copy = (R(R_FLAGS) & F_COPY) != 0;
@@ -536,18 +557,20 @@ uint sampleTex(int tl, int si, int ti) {
   bool clT = !copy && (((w >> 18) & 2u) != 0u || ((w >> 12) & 15u) == 0u);
   si = tileCoordClamp(si, w & 15u, U(R_TILES + tl * 5 + 3) >> 16, U(R_TILES + tl * 5 + 1) >> 16, clS);
   ti = tileCoordClamp(ti, (w >> 4) & 15u, U(R_TILES + tl * 5 + 4) >> 16, U(R_TILES + tl * 5 + 2) >> 16, clT);
-  if(copy || (R(R_FLAGS) & F_FILT) == 0) {   // COPY no filtra (parallel-rdp sample_texture_copy)
+  bool foot = !copy && bankFoot(tl, cyc1);
+  if(copy || ((R(R_FLAGS) & F_FILT) == 0 && !foot)) {   // COPY no filtra (parallel-rdp sample_texture_copy)
     int pt = foldT(tl, ti >> 5);
-    return fetch(tl, foldS(tl, si >> 5), copy ? pt : (pt & 0xff));
+    return fetch(tl, foldS(tl, si >> 5), copy ? pt : (pt & 0xff), 0u);
   }
-  return sampleFilt(tl, si, ti);
+  return sampleFilt(tl, si, ti, foot);
 }
 // Texrect: S y T en 1/2^sh de texel. Sin filtro el texel de floor; con filtro, S/T a 1/32
 // redondeados con el empate lejos del cero (lroundExact de SoftRdp::filterK).
 int rha(int n, int k) { int h = 1 << (k - 1); return n >= 0 ? (n + h) >> k : -((h - n) >> k); }
-uint rectSample(int tl, int ns, int nt, int shS) {
-  if((R(R_FLAGS) & F_FILT) == 0) return sampleTex(tl, ns >> (shS - 5), nt >> 7);
-  return sampleTex(tl, rha(ns, shS - 5), rha(nt, 7));
+uint rectSample(int tl, int ns, int nt, int shS, bool cyc1) {
+  if((R(R_FLAGS) & F_FILT) == 0 && ((R(R_FLAGS) & F_COPY) != 0 || !bankFoot(tl, cyc1)))
+    return sampleTex(tl, ns >> (shS - 5), nt >> 7, cyc1);
+  return sampleTex(tl, rha(ns, shS - 5), rha(nt, 7), cyc1);
 }
 #ifdef HD
 // SoftRdp::hdSample en double, operacion por operacion (precise: sin FMA contraida), para
@@ -813,11 +836,11 @@ void pixel(int x, int y) {
       double fp = max(max(abs(double(s1) - dps), abs(double(t1) - dpt)),
                       max(abs(double(s2) - dps), abs(double(t2) - dpt))) * 0.03125LF;
       tex0 = hdSample(int(tile0), dps * 0.03125LF, dpt * 0.03125LF, ldexp(fp, -int(pc.sh)));
-    } else tex0 = sampleTex(int(tile0), ps, pt);
+    } else tex0 = sampleTex(int(tile0), ps, pt, false);
 #else
-    uint tex0 = sampleTex(int(tile0), ps, pt);
+    uint tex0 = sampleTex(int(tile0), ps, pt, false);
 #endif
-    gTex1 = (fl & F_TEX1) != 0 ? sampleTex(int(tile1), ps, pt) : tex0;
+    gTex1 = (fl & F_TEX1) != 0 ? sampleTex(int(tile1), ps, pt, true) : tex0;
     c = combProg ? combine(tex0, shd, comb) : tex0;
     pxShadeA = min(int(shd & 0xffu) + alphaDither(x, y), 0xff);
     if((fl & F_ACMP) != 0) {   // alphaRef >= umbral de blend_color
@@ -876,11 +899,11 @@ void rectPixel(int x, int y) {
     precise double ft = ldexp(double(flip ? x : y), -int(pc.sh)) - double(R(R_TDE + 1)) * 0.25LF;
     precise double hs = s0 + dsdx * fs, ht = t0 + dtdy * ft;
     tex = hdSample(tl, hs, ht, ldexp(max(abs(dsdx), abs(dtdy)), -int(pc.sh)));
-  } else tex = rectSample(tl, ns, nt, shS);
+  } else tex = rectSample(tl, ns, nt, shS, false);
 #else
-  uint tex = rectSample(tl, ns, nt, shS);
+  uint tex = rectSample(tl, ns, nt, shS, false);
 #endif
-  gTex1 = (fl & F_TEX1) != 0 ? rectSample((tl + 1) & 7, ns, nt, shS) : tex;
+  gTex1 = (fl & F_TEX1) != 0 ? rectSample((tl + 1) & 7, ns, nt, shS, true) : tex;
   gLod = R(R_LOD);
   ivec4 comb = ivec4(0);
   bool combProg = (fl & F_COMB) != 0;

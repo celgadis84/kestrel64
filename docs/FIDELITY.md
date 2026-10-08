@@ -93,3 +93,21 @@ all 14. `RDP/` subset: 0 regress, both backends identical on all 133. SM64 md5 u
   score), height > 1.
 - GPU-RDP TMEM slot shrinks to 4 KB (palette included). Savestate v22; v14-v21 states are
   converted on load.
+
+## TLUT sampling: color-index by tile size and per-tap palette banks (2026-10-08)
+
+`TEXRECT_Palette` 88.07 -> 100 on SoftRDP and GPU-RDP (= parallel-rdp). `RDP/` subset:
+0 regress on both backends, identical scores. SM64 md5 unchanged.
+
+- With EN_TLUT the TX treats RGBA/CI/IA/I as a colour index chosen by tile SIZE
+  (parallel-rdp `sample_texture`): 4b = nibble | PALETTE << 4, 8b = the byte, 16b/32b = the
+  high byte of the 16-bit texel (new kind `TK_CI16`). Index reads wrap at 2 KB (& 0x7ff).
+  YUV and formats 5..7 keep their own path.
+- Each filter tap reads its own palette bank: base 0, the two neighbours 1 and 2 (swapped
+  past the diagonal), MID_TEXEL 3/2/1/0. Irrelevant when LOAD_TLUT quadrupled the entries,
+  visible when the palette came in through LOAD_BLOCK.
+- TLUT + BI_LERP of the cycle without SAMPLE_TYPE still runs the 3-tap filter, with all taps
+  on the same texel (s0, t0) and only the bank changing ("bilinear footprint with the 4
+  banks of TLUT"). BI_LERP_0 for cycle 0, BI_LERP_1 for TEXEL1.
+- Not yet: COPY with TLUT picks the bank from the pixel's position in the 64-bit group
+  (parallel-rdp `sample_texture_copy_word`); we still read bank 0.

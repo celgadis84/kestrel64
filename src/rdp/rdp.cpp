@@ -1438,7 +1438,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
           tex = sampleTexFold(usesLod ? folds[tile0] : texF, su, tu);
         }
         // 2-cycle: TEXEL1 es un segundo muestreo, de tile1, en el mismo S/T.
-        u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], su, tu) : tex;
+        u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], su, tu, true) : tex;
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.
         u32 shd = gouraud ? shadeAt(dxI, xo, yo) : 0;
@@ -1555,22 +1555,27 @@ auto SoftRdp::foldOf(u32 tileIdx) const -> TexFold {
   f.fastT = tl.shiftT == 0 && tl.maskT != 0 && (tl.cmT & 3) == 0;
   f.andS  = (1 << f.maskS) - 1;
   f.andT  = (1 << f.maskT) - 1;
+  // Con EN_TLUT el TX trata RGBA/CI/IA/I como indice de color segun el TAMANO del tile
+  // (parallel-rdp sample_texture): 4 b nibble | PALETTE << 4, 8 b el byte, 16/32 b el byte
+  // alto del texel de 16 bits. YUV y los formatos 5..7 no pasan por la paleta.
+  const bool ci = (tlutMode() & 2) && (tl.fmt == 0 || (tl.fmt >= 2 && tl.fmt <= 4));
   switch(tl.size) {                       // (size, fmt) -> un solo `kind`
-    case 0:  f.kind = tl.fmt == 2 ? TK_CI4 : tl.fmt == 3 ? TK_IA4  : TK_I4;     break;
-    case 1:  f.kind = tl.fmt == 2 ? TK_CI8 : tl.fmt == 3 ? TK_IA8  : TK_I8;     break;
-    case 2:  f.kind = tl.fmt == 1 ? TK_YUV : tl.fmt == 3 ? TK_IA16 : TK_RGBA16; break;
-    case 3:  f.kind = TK_RGBA32; break;
+    case 0:  f.kind = ci || tl.fmt == 2 ? TK_CI4 : tl.fmt == 3 ? TK_IA4  : TK_I4;     break;
+    case 1:  f.kind = ci || tl.fmt == 2 ? TK_CI8 : tl.fmt == 3 ? TK_IA8  : TK_I8;     break;
+    case 2:  f.kind = ci ? TK_CI16 : tl.fmt == 1 ? TK_YUV : tl.fmt == 3 ? TK_IA16 : TK_RGBA16; break;
+    case 3:  f.kind = ci ? TK_CI16 : TK_RGBA32; break;
     default: f.kind = TK_BAD;    break;   // inalcanzable: `size` son 2 bits
   }
   return f;
 }
 
-auto SoftRdp::tlutEntry(u32 idx) const -> u32 {
+auto SoftRdp::tlutEntry(u32 idx, u32 bank) const -> u32 {
   // Decode one palette entry (CI formats). TEXTLUT mode picks RGBA5551 vs IA16.
   // La paleta vive en la mitad alta de TMEM, una palabra de 64 bits por entrada con el valor
   // repetido en los cuatro bancos (parallel-rdp sample_texel_ci*_tlut: 0x400 | idx << 2).
-  // Se lee el banco 0; LOAD_TLUT escribe los cuatro iguales.
-  const u32 o = 0x800 + (idx & 0xff) * 8;
+  // LOAD_TLUT escribe los cuatro iguales; una paleta subida con LOAD_BLOCK no, y entonces
+  // importa que banco lee cada toma del filtro (ver filterK).
+  const u32 o = 0x800 + (idx & 0xff) * 8 + (bank & 3) * 2;
   u16 e = (u16)(tmem[o] << 8 | tmem[o + 1]);
   if(tlutMode() == 3) { u32 i = (e >> 8) & 0xff, a = e & 0xff;   // IA16 palette
                         return (i << 24) | (i << 16) | (i << 8) | a; }
@@ -1648,7 +1653,7 @@ auto SoftRdp::foldCoord(int c, u32 sh, u32 mask, u32 cm, int lim) -> int {
 }
 
 template<u32 K>
-auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
+auto SoftRdp::fetchK(const TexFold& f, int s, int t, u32 bank) const -> u32 {
   // Lee UN texel de TMEM con las coordenadas YA plegadas (ver `foldCoord`). `K` fija el
   // formato en tiempo de compilacion: la decodificacion sale sin ramas.
   const u32 rowBytes = f.rowBytes, base = f.base;
@@ -1656,12 +1661,23 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
   // intercambiadas (las cargas las escriben asi, ver `loadTile`); el muestreador las deshace
   // con la paridad de la fila T ya plegada.
   const u32 ox = (t & 1) ? 4u : 0u;
-  if constexpr(K == TK_CI4 || K == TK_IA4 || K == TK_I4) {     // 4-bit texels
+  if constexpr(K == TK_CI4) {                                   // indice de 4 bits
+    // Los indices se leen de la mitad baja: la direccion da la vuelta en 2 KB
+    // (parallel-rdp sample_texel_ci4_tlut, byte_offset & 0x7ff).
+    const u32 off = ((base + (u32)t * rowBytes + (u32)s / 2) & 0x7ff) ^ ox;
+    const u8 nib = (s & 1) ? (tmem[off] & 0xf) : (tmem[off] >> 4);
+    return tlutEntry(f.palette * 16 + nib, bank);               // 16-entry sub-palette
+  } else if constexpr(K == TK_CI8) {                            // indice de 8 bits
+    return tlutEntry(tmem[((base + (u32)t * rowBytes + (u32)s) & 0x7ff) ^ ox], bank);
+  } else if constexpr(K == TK_CI16) {
+    // Tile de 16/32 b con TLUT: el indice es el byte alto del texel de 16 bits
+    // (parallel-rdp sample_texel_ci32_tlut).
+    return tlutEntry(tmem[((base + (u32)t * rowBytes + (u32)s * 2) & 0x7ff) ^ ox], bank);
+  } else if constexpr(K == TK_IA4 || K == TK_I4) {              // 4-bit texels
     u32 off = (base + (u32)t * rowBytes + (u32)s / 2) ^ ox;
     if(off >= 0x1000) return 0;
     u8 nib = (s & 1) ? (tmem[off] & 0xf) : (tmem[off] >> 4);
-    if constexpr(K == TK_CI4) return tlutEntry(f.palette * 16 + nib);  // 16-entry sub-palette
-    else if constexpr(K == TK_IA4) {
+    if constexpr(K == TK_IA4) {
       // IA4 (3I/1A): la intensidad de 3 bits se expande replicando bits (I<<5|I<<2|I>>1),
       // como el TX del hardware; no es un escalado exacto *255/7 (6 -> 0xDB, no 0xDA).
       u32 i3 = nib & 0xe, i = (i3 << 4) | (i3 << 1) | (i3 >> 2), a = (nib & 1) ? 255 : 0;
@@ -1704,12 +1720,11 @@ auto SoftRdp::fetchK(const TexFold& f, int s, int t) const -> u32 {
     // en 2 KB. Ref: parallel-rdp tmem_update.comp (update_tmem_32) y el muestreo de 32 bpp.
     const u32 off = ((base + (u32)t * rowBytes + (u32)s * 2) ^ ox) & 0x7fe, hi = off | 0x800;
     return ((u32)tmem[off] << 24) | ((u32)tmem[off+1] << 16) | ((u32)tmem[hi] << 8) | tmem[hi+1];
-  } else if constexpr(K == TK_CI8 || K == TK_IA8 || K == TK_I8) {   // 8-bit texels
+  } else if constexpr(K == TK_IA8 || K == TK_I8) {              // 8-bit texels
     u32 off = (base + (u32)t * rowBytes + (u32)s) ^ ox;
     if(off >= 0x1000) return 0;
     u8 v = tmem[off];
-    if constexpr(K == TK_CI8) return tlutEntry(v);              // full 256-entry palette
-    else if constexpr(K == TK_IA8) {
+    if constexpr(K == TK_IA8) {
       u32 i = (v >> 4) * 17, a = (v & 0xf) * 17;                // IA8 (4/4)
       return (i << 24) | (i << 16) | (i << 8) | a;
     } else {
@@ -1729,7 +1744,7 @@ auto SoftRdp::texelK(const TexFold& f, int s, int t) const -> u32 {
 // Despacho de formato -> especializacion. `KEST_TEXKINDS(X)` lista los formatos una sola vez
 // para que el muestreo suelto y el filtro compartan exactamente el mismo juego.
 #define KEST_TEXKINDS(X) X(TK_CI4) X(TK_IA4) X(TK_I4) X(TK_YUV) X(TK_IA16) \
-                         X(TK_RGBA16) X(TK_RGBA32) X(TK_CI8) X(TK_IA8) X(TK_I8)
+                         X(TK_RGBA16) X(TK_RGBA32) X(TK_CI8) X(TK_IA8) X(TK_I8) X(TK_CI16)
 
 auto SoftRdp::texelAt(const TexFold& f, int s, int t) const -> u32 {
   switch(f.kind) {
@@ -1772,7 +1787,7 @@ auto SoftRdp::sampleRawIndex(u32 tileIdx, int s, int t) -> int {
 }
 
 template<u32 K>
-auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
+auto SoftRdp::filterK(const TexFold& f, double s, double t, bool cyc1) const -> u32 {
   // Point sample unless SAMPLE_TYPE (other_hi bit 13 = full mode bit 45) selects the N64's
   // 3-point ("bilinear") filter. The RDP is not a 4-tap bilinear: it picks the triangle of
   // texels around the sample and lerps by the fractional coords. No -0.5 GL-style bias: the
@@ -1781,7 +1796,14 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   // recorte de T a 8 bits del muestreo normal, ni filtro (sample_texture_copy toma texeles sueltos).
   const bool copy = cycleType() == 2;
   const bool clS = f.clS && !copy, clT = f.clT && !copy;
-  if(g_noFilter || copy || !((other_hi >> 13) & 1)) {
+  // Con TLUT y BI_LERP del ciclo el filtro corre aunque SAMPLE_TYPE pida punto: las cuatro
+  // tomas caen en el MISMO texel y solo cambia el banco de paleta que lee cada una
+  // (parallel-rdp sample_texture, "bilinear footprint with the 4 banks of TLUT").
+  constexpr bool ciK = K == TK_CI4 || K == TK_CI8 || K == TK_CI16;
+  const bool quad = (other_hi >> 13) & 1;
+  const bool tlut = ciK && (tlutMode() & 2);
+  const bool bankFoot = tlut && !quad && ((other_hi >> (cyc1 ? 10 : 11)) & 1);
+  if(g_noFilter || copy || !(quad || bankFoot)) {
     const int ps = maskCoord(tileCoordClamp(fix105(s), f.shiftS, f.slo, f.shi, clS) >> 5, f.maskS, f.cmS);
     const int pt = maskCoord(tileCoordClamp(fix105(t), f.shiftT, f.tlo, f.thi, clT) >> 5, f.maskT, f.cmT);
     return fetchK<K>(f, ps, copy ? pt : (pt & 0xff));
@@ -1810,21 +1832,34 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   // T del filtro va a 8 bits y el vecino se lleva como diferencia acotada a -255 (parallel-rdp
   // sample_texture, "very specific weird logic" de t0/t1).
   { const int td = std::max(tw1 - tw0, -255); tw0 &= 0xff; tw1 = tw0 + td; }
-  u32 c10 = fetchK<K>(f, sw1, tw0), c01 = fetchK<K>(f, sw0, tw1);
+  int sb1 = sw1;
+  if(bankFoot) { sb1 = sw0; tw1 = tw0; }   // la huella entera sobre (s0, t0)
   const bool midTexel = ((other_hi >> 12) & 1) && fx == 16 && fy == 16;
+  // Banco de paleta por toma (parallel-rdp: lut_offset ^ addr_xor sobre el indice de 16 bits
+  // de TMEM, que va con las palabras de 16 bits intercambiadas por parejas): la base lee el 0,
+  // las otras dos tomas el 1 y el 2 (al reves pasada la diagonal) y en MID_TEXEL las cuatro
+  // leen 3/2/1/0. Con la paleta repetida en los cuatro bancos da igual.
+  const u32 xr = tlut ? (fx + fy >= 32 ? 2u : 1u) : 1u;
+  const u32 bk10 = tlut ? 1u ^ xr ^ 1u : 0u, bk01 = tlut ? 2u ^ xr ^ 1u : 0u;
+  const u32 bk00 = tlut && midTexel ? xr ^ 1u : 0u, bk11 = tlut ? 3u ^ xr ^ 1u : 0u;
+  u32 c10 = fetchK<K>(f, sb1, tw0, bk10), c01 = fetchK<K>(f, sw0, tw1, bk01);
+  // Base del filtro: pasada la diagonal la esquina opuesta, salvo en la huella de bancos.
+  auto baseTap = [&](bool upper) -> u32 {
+    return upper && !bankFoot ? fetchK<K>(f, sb1, tw1, 0) : fetchK<K>(f, sw0, tw0, 0);
+  };
 #if defined(__SSE4_1__)
   // Los cuatro canales hacen la misma cuenta entera: un vector de 4x int32. Mismos
   // operandos, mismos desplazamientos aritmeticos, mismo clamp final => mismos valores.
   {
     const __m128i v10 = unpackRgba16(c10), v01 = unpackRgba16(c01);
     if(midTexel) {
-      const __m128i v00 = unpackRgba16(fetchK<K>(f, sw0, tw0)),
-                    v11 = unpackRgba16(fetchK<K>(f, sw1, tw1));
+      const __m128i v00 = unpackRgba16(fetchK<K>(f, sw0, tw0, bk00)),
+                    v11 = unpackRgba16(fetchK<K>(f, sb1, tw1, bk11));
       __m128i sum = _mm_add_epi16(_mm_add_epi16(v00, v10), _mm_add_epi16(v01, v11));
       return packRgba16Clamped(_mm_srai_epi16(_mm_add_epi16(sum, _mm_set1_epi16(2)), 2));
     }
     const bool upper = fx + fy >= 32;
-    const __m128i b = unpackRgba16(upper ? fetchK<K>(f, sw1, tw1) : fetchK<K>(f, sw0, tw0));
+    const __m128i b = unpackRgba16(baseTap(upper));
     const int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
     __m128i acc = _mm_add_epi16(_mm_mullo_epi16(_mm_sub_epi16(v10, b), _mm_set1_epi16((short)wx)),
                                 _mm_mullo_epi16(_mm_sub_epi16(v01, b), _mm_set1_epi16((short)wy)));
@@ -1836,7 +1871,7 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   if(midTexel) {
     // MID_TEXEL: at the exact centre of the quad the filter degenerates to the average of all
     // four texels (MPEG half-pel motion compensation).
-    u32 c00 = fetchK<K>(f, sw0, tw0), c11 = fetchK<K>(f, sw1, tw1);
+    u32 c00 = fetchK<K>(f, sw0, tw0, bk00), c11 = fetchK<K>(f, sb1, tw1, bk11);
     for(int i = 0; i < 4; i++)
       o[i] = (ch(c00, i) + ch(c10, i) + ch(c01, i) + ch(c11, i) + 2) >> 2;
   } else {
@@ -1844,7 +1879,7 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
     // falls in. Past the diagonal the base flips to the opposite corner and the weights flip
     // with it (and swap axes).
     bool upper = fx + fy >= 32;
-    u32 base = upper ? fetchK<K>(f, sw1, tw1) : fetchK<K>(f, sw0, tw0);
+    u32 base = baseTap(upper);
     int wx = upper ? 32 - fy : fx, wy = upper ? 32 - fx : fy;
     for(int i = 0; i < 4; i++) {
       int b = ch(base, i);
@@ -1859,11 +1894,11 @@ auto SoftRdp::filterK(const TexFold& f, double s, double t) const -> u32 {
   return r;
 }
 
-auto SoftRdp::sampleTexFold(const TexFold& f, double s, double t) const -> u32 {
+auto SoftRdp::sampleTexFold(const TexFold& f, double s, double t, bool cyc1) const -> u32 {
   // Despacho de formato: una vez por pixel (o por primitiva si el llamador ya lo saco del
   // bucle). A partir de aqui el filtro entero va especializado, con las 3-4 tomas alineadas.
   switch(f.kind) {
-#define KEST_CASE(K) case K: return filterK<K>(f, s, t);
+#define KEST_CASE(K) case K: return filterK<K>(f, s, t, cyc1);
     KEST_TEXKINDS(KEST_CASE)
 #undef KEST_CASE
     default: return 0xffffffff;
@@ -2540,7 +2575,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       // point or N64 3-point per SAMPLE_TYPE
       u32 tex = hdB.tex ? hdSample(hdB, s, t, hdFp)
               : usesLod ? sampleTexFold(folds[tile0], s, t) : sampleTexFiltered(tile, s, t);
-      u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], s, t) : tex;
+      u32 tex1 = usesTex1 ? sampleTexFold(folds[tile1], s, t, true) : tex;
       // COPY cycle writes the raw texel; 1-/2-cycle route it through the combiner
       // (texrect carries no shade → SHADE input is 0).
       bool combProg = (combine_hi | combine_lo) != 0;

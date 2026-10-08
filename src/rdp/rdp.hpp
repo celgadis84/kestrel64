@@ -326,7 +326,7 @@ private:
     int  andS, andT;
   };
   enum : u32 { TK_CI4, TK_IA4, TK_I4, TK_YUV, TK_IA16, TK_RGBA16, TK_RGBA32,
-               TK_CI8, TK_IA8, TK_I8, TK_BAD };
+               TK_CI8, TK_IA8, TK_I8, TK_CI16, TK_BAD };
   auto foldOf(u32 tile) const -> TexFold;
   // Unidad de LOD (mipmap): vecinos +x/+y en 1/32 de texel -> LOD_FRAC, y con TEX_LOD_EN
   // elige tile0/tile1 (entrada: tile base y base+1).
@@ -334,7 +334,7 @@ private:
                  u32& tile0, u32& tile1) const -> int;
   // Que pide la primitiva al TX: unidad de LOD y segundo muestreo (TEXEL1 de tile1).
   auto texNeeds(bool& lod, bool& tex1) const -> void;
-  auto tlutEntry(u32 idx) const -> u32;          // entrada de paleta -> RGBA8888
+  auto tlutEntry(u32 idx, u32 bank = 0) const -> u32;   // entrada de paleta -> RGBA8888
   // Muestreo y filtro ESPECIALIZADOS por formato. El despacho (size, fmt) se hace una sola
   // vez por pixel en `sampleTexFiltered`; a partir de ahi las 3-4 tomas del filtro son codigo
   // sin ramas de formato y se alinean dentro del filtro, en vez de tres llamadas a una
@@ -344,13 +344,13 @@ private:
   // Pliegue de una coordenada (SHIFT + clamp/mirror/mask) separado de la lectura: el
   // filtro de 3 puntos comparte cuatro pliegues entre sus tres tomas.
   [[gnu::always_inline]] static inline auto foldCoord(int c, u32 sh, u32 mask, u32 cm, int lim) -> int;
-  template<u32 K> [[gnu::always_inline]] inline auto fetchK(const TexFold& f, int s, int t) const -> u32;
+  template<u32 K> [[gnu::always_inline]] inline auto fetchK(const TexFold& f, int s, int t, u32 bank = 0) const -> u32;
   template<u32 K> [[gnu::always_inline]] inline auto texelK(const TexFold& f, int s, int t) const -> u32;
-  template<u32 K> auto filterK(const TexFold& f, double s, double t) const -> u32;
+  template<u32 K> auto filterK(const TexFold& f, double s, double t, bool cyc1) const -> u32;
   auto texelAt(const TexFold& f, int s, int t) const -> u32;   // version generica (despacha)
   // Filtro con el pliegue YA armado: el tile es constante dentro de una primitiva, asi que
   // el rasterizador lo arma una vez por triangulo en vez de una vez por pixel.
-  auto sampleTexFold(const TexFold& f, double s, double t) const -> u32;
+  auto sampleTexFold(const TexFold& f, double s, double t, bool cyc1 = false) const -> u32;
   auto sampleTexel(u32 tile, int s, int t) -> u32;
   auto sampleRawIndex(u32 tile, int s, int t) -> int;   // raw CI index (pre-TLUT) for 8bpp CI blits
   auto sampleTexFiltered(u32 tile, double s, double t) -> u32;  // point or N64 3-point
