@@ -904,11 +904,11 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
         // Alpha compare (1-/2-cycle form): COMBINED alpha against the blend_color
         // threshold. A fill rect is a primitive like any other here.
         if((other_lo & 1) && alphaRef(x, y, c) < (int)(blend_color & 0xff)) continue;
-        // Depth: a fill rect carries no z slope, so its only defined depth source is
-        // SET_PRIM_DEPTH (Z_SOURCE_SEL, other_lo bit 2). Without that bit the span z
-        // the rect never programs is undefined, so leave the z image alone.
-        const s32 pz = (s32)prim_z;
-        blendPixel(mem, x, y, c, 8, ((other_lo & 4) && zi_addr && (other_lo & 0x30)) ? &pz : nullptr);
+        // Depth: un rect no programa coeficientes de z, asi que su z de tramo es 0 (los
+        // atributos del primitivo van a cero, parallel-rdp op_fill_rectangle); con
+        // Z_SOURCE_SEL manda SET_PRIM_DEPTH. La prueba y la escritura corren igual.
+        const s32 pz = (other_lo & 4) ? (s32)prim_z : 0;
+        blendPixel(mem, x, y, c, 8, (zi_addr && (other_lo & 0x30)) ? &pz : nullptr);
       } else if(ci_size == 3) {
         wr32(m, ci_addr + (u32(y) * ci_width + u32(x)) * 4, fill_color);
         pxWrites++;
@@ -1122,6 +1122,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   r[T_BLEND] = (s32)blend_color; r[T_FOG] = (s32)fog_color; r[T_FLAT] = (s32)flat;
   r[T_FTEX] = (s32)flatTexel;
   if(combProg) std::memcpy(&r[T_SEL], combPlan.sel, 16);
+  if(combProg) { r[T_KCONV] = (k4 & 0x1ff) | (k5 & 0x1ff) << 16; r[T_KEYC] = (s32)key_center; r[T_KEYS] = (s32)key_scale; }
   r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = lastX; r[T_LASTY] = lastY;
   t.lo[0] = lo[0]; t.hi[0] = hi[0]; t.lo[1] = lo[1]; t.hi[1] = hi[1];
@@ -2035,17 +2036,17 @@ auto SoftRdp::buildCombPlan() -> void {
       case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
       case 6: return CR_ONE; case 7: return CR_NOISE; default: return CR_ZERO; }
   };
-  auto mapB = [](int i) -> u32 {   // RGB sub_b (0..15); 6 = key center, 7 = K4 -> 0
+  auto mapB = [](int i) -> u32 {   // RGB sub_b (0..15); 6 = key center, 7 = K4
     switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
       case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
-      default: return CR_ZERO; }
+      case 6: return CR_KEYC; case 7: return CR_K4; default: return CR_ZERO; }
   };
-  auto mapC = [](int i) -> u32 {   // RGB mul (0..31); 6 = key scale, 15 = K5 -> 0
+  auto mapC = [](int i) -> u32 {   // RGB mul (0..31); 6 = key scale, 15 = K5
     switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
       case 3: return CR_PRIM; case 4: return CR_SHADE; case 5: return CR_ENV;
-      case 7: return CR_CINA; case 8: return CR_TEX0A; case 9: return CR_TEX1A;
+      case 6: return CR_KEYS; case 7: return CR_CINA; case 8: return CR_TEX0A; case 9: return CR_TEX1A;
       case 10: return CR_PRIMA; case 11: return CR_SHADEA; case 12: return CR_ENVA;
-      case 13: return CR_LOD; case 14: return CR_PLOD; default: return CR_ZERO; }
+      case 13: return CR_LOD; case 14: return CR_PLOD; case 15: return CR_K5; default: return CR_ZERO; }
   };
   auto mapD = [](int i) -> u32 {   // RGB add (0..7); 6 = ONE
     switch(i) { case 0: return CR_CIN; case 1: return CR_TEX0; case 2: return CR_TEX1;
@@ -2124,6 +2125,10 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
     if(need & (1u << CR_ZERO))  rowv[CR_ZERO]  = _mm_setzero_si128();
     if(need & (1u << CR_LOD))   rowv[CR_LOD]   = _mm_set1_epi32(lodFrac());
     if(need & (1u << CR_PLOD))  rowv[CR_PLOD]  = _mm_set1_epi32((int)prim_lod_frac);
+    if(need & (1u << CR_K4))    rowv[CR_K4]    = _mm_set1_epi32(k4 & 0x1ff);
+    if(need & (1u << CR_K5))    rowv[CR_K5]    = _mm_set1_epi32(k5);
+    if(need & (1u << CR_KEYC))  put4(CR_KEYC, key_center << 8);
+    if(need & (1u << CR_KEYS))  put4(CR_KEYS, key_scale << 8);
     // special_expand vectorizado: (v-0x80) & 0x1ff, extension de signo desde el bit 8, +0x80.
     auto sexpv = [&](__m128i v) -> __m128i {
       __m128i x = _mm_and_si128(_mm_sub_epi32(v, k80), k1ff);
@@ -2181,6 +2186,10 @@ auto SoftRdp::combineColor(u32 tex0, u32 tex1, u32 shade) -> u32 {
   if(need & (1u << CR_ZERO))  bc(CR_ZERO, 0);
   if(need & (1u << CR_LOD))   bc(CR_LOD,  lodFrac());
   if(need & (1u << CR_PLOD))  bc(CR_PLOD, (int)prim_lod_frac);
+  if(need & (1u << CR_K4))    bc(CR_K4, k4 & 0x1ff);
+  if(need & (1u << CR_K5))    bc(CR_K5, k5);
+  if(need & (1u << CR_KEYC))  put4(CR_KEYC, key_center << 8);
+  if(need & (1u << CR_KEYS))  put4(CR_KEYS, key_scale << 8);
   // special_expand + ecuacion de 9 bits, identicas a la version generica.
   auto sexp = [](int v) -> int { int x = (v - 0x80) & 0x1ff; if(x & 0x100) x |= ~0x1ff; return x + 0x80; };
   auto eq = [&](int a, int b, int c, int dd) -> int {
@@ -2239,9 +2248,10 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
       case 3: return ch(prim_color, i); case 4: return ch(shade, i); case 5: return ch(env_color, i);
       case 6: return 0x100; case 7: return std::rand() & 0xff; default: return 0; }
   };
-  auto srcB = [&](int idx, int i, const int* cin) -> int {   // sub_b (0..15); 6=key center,7=K4 → 0
+  auto srcB = [&](int idx, int i, const int* cin) -> int {   // sub_b (0..15); 6=key center,7=K4
     switch(idx) { case 0: return cin[i]; case 1: return ch(tex0, i); case 2: return ch(tex1, i);
       case 3: return ch(prim_color, i); case 4: return ch(shade, i); case 5: return ch(env_color, i);
+      case 6: return ch(key_center << 8, i); case 7: return k4 & 0x1ff;
       default: return 0; }
   };
   auto srcC = [&](int idx, int i, const int* cin) -> int {   // mul (0..31)
@@ -2250,7 +2260,8 @@ auto SoftRdp::combineColorSlow(u32 tex0, u32 tex1, u32 shade) -> u32 {
       case 7: return cin[3]; case 8: return ch(tex0, 3); case 9: return ch(tex1, 3);
       case 10: return ch(prim_color, 3); case 11: return ch(shade, 3); case 12: return ch(env_color, 3);
       case 13: return lodFrac(); case 14: return (int)prim_lod_frac;
-      default: return 0; }   // 6 key-scale, 15 K5 → 0
+      case 6: return ch(key_scale << 8, i); case 15: return k5;
+      default: return 0; }
   };
   auto srcD = [&](int idx, int i, const int* cin) -> int {   // add (0..7); 6=ONE(0x100)
     switch(idx) { case 0: return cin[i]; case 1: return ch(tex0, i); case 2: return ch(tex1, i);
@@ -2330,6 +2341,15 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
     if(cHi > mem.rdram.size()) return false;
     lo = (u32)cLo; hi = (u32)cHi;
   }
+  // Z del rect (ver texRect): zona del z image por filas, sin solapar el color.
+  const bool zOn = !copy && zi_addr && (other_lo & 0x30);
+  u32 zlo = 0, zhi = 0;
+  if(any && zOn) {
+    const u64 zRowB = u64(ci_width) * 2;
+    const u64 zLo = zi_addr + u64(Y0) * zRowB, zHi = zi_addr + u64(Y1) * zRowB;
+    if(zHi > mem.rdram.size() || (zLo < hi && lo < zHi)) return false;
+    zlo = (u32)zLo; zhi = (u32)zHi;
+  }
   u64 rasterPx = 0;
   for(int y = Y0; y < Y1; y++) {
     if(y < 0) continue;
@@ -2357,6 +2377,8 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   if(g_noAA) fl |= TF_NOAA;
   if(!g_noFilter && ((other_hi >> 13) & 1)) fl |= TF_FILT;
   if(other_lo & 1) fl |= TF_ACMP;
+  if(zOn) fl |= TF_ZACT;
+  if(other_lo & 4) fl |= TF_ZSRC;
   r[T_FLAGS] = fl;
   r[T_SX0] = sx0; r[T_SY0] = sy0; r[T_SX1] = scX1(); r[T_SY1] = sy1;
   r[T_BX] = X0; r[T_BY] = Y0; r[T_BW] = X1 - X0; r[T_BH] = Y1 - Y0;
@@ -2378,12 +2400,14 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   r[T_FILL] = (s32)fill_color; r[T_PRIM] = (s32)prim_color; r[T_ENV] = (s32)env_color;
   r[T_BLEND] = (s32)blend_color; r[T_FOG] = (s32)fog_color;
   if(combProg) std::memcpy(&r[T_SEL], combPlan.sel, 16);
+  if(combProg) { r[T_KCONV] = (k4 & 0x1ff) | (k5 & 0x1ff) << 16; r[T_KEYC] = (s32)key_center; r[T_KEYS] = (s32)key_scale; }
   r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = X1 - 1; r[T_LASTY] = Y1 - 1;
-  t.lo[0] = lo; t.hi[0] = hi;
+  t.lo[0] = lo; t.hi[0] = hi; t.lo[1] = zlo; t.hi[1] = zhi;
   if(!gpurdp::queueTri(t, tmem, tlut)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tmem, tlut); }
   gpuTris.push_back({acct, combProg});
   gpuMark(lo, hi);
+  if(zhi) gpuMark(zlo, zhi);
   gpuQueued = true;
   return true;
 }
@@ -2427,13 +2451,24 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   int X0 = std::max((int)std::ceil(xh), sx0), X1 = std::min(xlEx, scX1());
   int Y0 = std::max((int)std::ceil(yh), sy0), Y1 = std::min(ylEx, sy1);
   u64 rasterPx = 0, accW0 = pxWrites, accZ0 = pxZWrites;   // DPC counter accounting
-  // Solo-coste: un texrect es un rectangulo recortado al scissor y NUNCA escribe el z
-  // (no lleva pendiente de profundidad), asi que su coste sale del area sin rasterizar.
+  // Profundidad del texrect: como en FILL_RECTANGLE de 1/2 ciclos, z de tramo 0 (atributos a
+  // cero, parallel-rdp op_texture_rectangle) o SET_PRIM_DEPTH con Z_SOURCE_SEL; con
+  // Z_CMP/Z_UPD el rect se prueba y escribe en el z-buffer como cualquier primitivo.
+  const s32 rectZ = (other_lo & 4) ? (s32)prim_z : 0;
+  const bool rectZOn = cycleType() < 2 && zi_addr && (other_lo & 0x30);
+  // Solo-coste: un texrect es un rectangulo recortado al scissor; su coste sale del area sin
+  // rasterizar (la z es constante: los que fallan Z_CMP ni pintan ni escriben z).
   if(costOnly) {
     int bx = X0 < 0 ? 0 : X0, by = Y0 < 0 ? 0 : Y0;
     u64 npx = u64(std::max(0, X1 - bx)) * u64(std::max(0, Y1 - by));
     for(int y = by; y < Y1 && X1 > bx; y++) addSpan(bx, u64(X1 - bx));
-    accountPixels(mem, npx, npx, 0);
+    u64 pass = npx;
+    if(rectZOn && (other_lo & 0x10)) {
+      pass = 0;
+      for(int y = by; y < Y1; y++)
+        for(int x = bx; x < X1; x++) pass += depthPasses(mem, x, y, rectZ);
+    }
+    accountPixels(mem, npx, pass, (rectZOn && (other_lo & 0x20)) ? pass : 0);
     return;
   }
   // Textura HD / realce (texpack). No en COPY a framebuffer de 8 bits (escribe indices).
@@ -2502,7 +2537,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
       // memoria (IM_RD solo decide si la lee): asi el alfa guardado es la cobertura de
       // CVG_DEST y el dither se aplica (libdragon test_rdpq_tex_upload: RGBA32 = 0xE0).
       if(copy) putPixel(mem, x, y, c);
-      else blendPixel(mem, x, y, c);
+      else blendPixel(mem, x, y, c, 8, rectZOn ? &rectZ : nullptr);
     }
   }
   lodFracV = 0xff;
@@ -2862,6 +2897,18 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       sx1 = (int)((((cmd >> 12) & 0xfff) + 3) >> 2);
       sy1 = (int)((((cmd >> 0)  & 0xfff) + 3) >> 2);
       sx1fc = (int)(((cmd >> 12) & 0xfff) >> 2) + 1;
+      break;
+    // SET_KEY_GB / SET_KEY_R: centro y escala de 8 bits por canal (combinador) y ancho de
+    // 12 bits (chroma key). Disposicion de parallel-rdp op_set_key_gb / op_set_key_r.
+    case 0x2a:
+      key_width[1] = (u16)((cmd >> 44) & 0xfff); key_width[2] = (u16)((cmd >> 32) & 0xfff);
+      key_center = (key_center & 0xff0000u) | (u32)((cmd >> 24) & 0xff) << 8 | (u32)((cmd >> 8) & 0xff);
+      key_scale  = (key_scale  & 0xff0000u) | (u32)((cmd >> 16) & 0xff) << 8 | (u32)(cmd & 0xff);
+      break;
+    case 0x2b:
+      key_width[0] = (u16)((cmd >> 16) & 0xfff);
+      key_center = (key_center & 0x00ffffu) | (u32)((cmd >> 8) & 0xff) << 16;
+      key_scale  = (key_scale  & 0x00ffffu) | (u32)(cmd & 0xff) << 16;
       break;
     case 0x2c: {                                        // SET_CONVERT (YUV→RGB coeffs)
       auto s9 = [](u32 v) -> int { v &= 0x1ff; return (int)(v ^ 0x100) - 0x100; };  // 9-bit sign-extend

@@ -45,3 +45,16 @@ failures are the 6 test-side ones above. They were at 209/217. What was missing:
 - **RGBA32 split TMEM.** RG in the low half and BA at +0x800 (load and sample).
 - **Scissor and rect edges.** The high scissor bound is exclusive in 1/2-cycle (`(x+3)>>2`)
   and `(x>>2)+1` in FILL/COPY. FILL/COPY rects have inclusive right/bottom edges.
+
+## krom coverage/combiner on SoftRDP and GPU-RDP (2026-10-08)
+
+`AlphaCoverage` 74.82 -> 100, `CombinerOverflow` 45.41 -> 100, `CombinerLongTailConstants`
+74.31 -> 100, on both backends (same as parallel-rdp). `RDP/` subset: 133 ROMs, 0 regress.
+
+- **Rect depth.** TEXTURE_RECTANGLE and 1/2-cycle FILL_RECTANGLE are primitives with zeroed
+  attributes (parallel-rdp `op_texture_rectangle` / `op_fill_rectangle`): span z = 0, or
+  SET_PRIM_DEPTH with Z_SOURCE_SEL, and Z_COMPARE / Z_UPDATE apply as for any primitive.
+  The texrect never touched the z-buffer, and the fill rect only did with Z_SOURCE_SEL.
+- **Combiner constants.** sub_b 6 = KEY_CENTER, sub_b 7 = K4 (9 raw bits through
+  special_expand), mul 6 = KEY_SCALE, mul 15 = K5 (9 bits sign-extended). They were 0.
+  SET_KEY_R / SET_KEY_GB are now stored (savestate v21).

@@ -187,6 +187,10 @@ private:
   u32 prim_dz = 0;     // SET_PRIM_DEPTH delta Z (bits 15:0), the dz paired with prim_z
 
   int k0 = 0, k1 = 0, k2 = 0, k3 = 0, k4 = 0, k5 = 0;  // SET_CONVERT (YUV→RGB coeffs, 9-bit signed)
+  // SET_KEY_R / SET_KEY_GB: centro y escala por canal (R<<16|G<<8|B), entradas KEY_CENTER
+  // (sub_b) y KEY_SCALE (mul) del combinador; anchos de 12 bits del chroma key.
+  u32 key_center = 0, key_scale = 0;
+  u16 key_width[3] = {};
 
   u32 other_lo = 0, other_hi = 0;   // SET_OTHER_MODES (cycle type etc.)
   u32 combine_lo = 0, combine_hi = 0;
@@ -383,7 +387,8 @@ private:
   // savestate, MCP) invalida el plan sola, sin bandera que se pueda quedar rancia.
   enum : u32 { CR_CIN, CR_TEX0, CR_TEX1, CR_PRIM, CR_SHADE, CR_ENV,
                CR_CINA, CR_TEX0A, CR_TEX1A, CR_PRIMA, CR_SHADEA, CR_ENVA,
-               CR_ONE, CR_ZERO, CR_LOD, CR_PLOD, CR_ROWS, CR_NOISE = 0xff };
+               CR_ONE, CR_ZERO, CR_LOD, CR_PLOD, CR_K4, CR_K5, CR_KEYC, CR_KEYS,
+               CR_ROWS, CR_NOISE = 0xff };
   struct CombPlan {
     u8   sel[2][8] = {};   // [ciclo][aR,bR,cR,dR,aA,bA,cA,dA] -> fila
     u32  need = 0;         // filas a materializar (bitmask)

@@ -26,7 +26,7 @@ namespace kestrel {
 
 namespace {
 constexpr u32 kMagic   = 0x4b535436;   // 'KST6'
-constexpr u32 kVersion = 20;  // 20: borde de tijera de FILL/COPY (sx1fc), se aceptan v14..v19; 19: fin de IO_BUSY del PI aparte del valor del bus (cartIoBusyUntil), se aceptan v14..v18; 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
+constexpr u32 kVersion = 21;  // 21: SET_KEY_R/GB (centro/escala/ancho), se aceptan v14..v20; 20: borde de tijera de FILL/COPY (sx1fc), se aceptan v14..v19; 19: fin de IO_BUSY del PI aparte del valor del bus (cartIoBusyUntil), se aceptan v14..v18; 18: modo de arranque del PIF (pifBootMode, ROM bloqueada, checksum, plazo de 0x08), se aceptan v14..v17; 17: delta-z de SET_PRIM_DEPTH (prim_dz), se aceptan v14..v16; 16: min_level de SET_PRIM_COLOR (LOD), se aceptan v14/v15; 15: Transfer Pak (registros + MBC y RAM del cartucho GB), se aceptan estados v14; 14: plazos armados de VI y AI (viNextAt/aiNextAt/evNextAt); 13: plazo del PI en vuelo (piBusy/piDoneAt);
                               // 12: pareja pendiente de la tuberia (enclavamientos);
                               // 11: fines de tarea de SP/DP armados y aun sin vencer;
                               // 10: ciclos de parada pendientes (coste de fallo de cache);
@@ -154,6 +154,7 @@ struct StateVisitor {
     if(io.version >= 17) io.pod(d.prim_dz);          // v17: delta-z de la primitiva
     if(io.version >= 20) io.pod(d.sx1fc);            // v20: borde de tijera FILL/COPY
     else d.sx1fc = d.sx1;
+    if(io.version >= 21) { io.pod(d.key_center); io.pod(d.key_scale); io.arr(d.key_width, 3); }  // v21: SET_KEY
   }
 
   // Punteros de reanudacion del consumidor del FIFO. Con la cola drenada valen "nada
@@ -440,7 +441,7 @@ auto restoreState(System& sys, const u8* data, usize len, std::string& err) -> b
   std::memcpy(&h, data, sizeof(h));
   Header want = makeHeader(sys);
   if(h.magic != kMagic)     { err = "no es un estado de kestrel64"; return false; }
-  if(h.version != kVersion && h.version != 19 && h.version != 18 && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
+  if(h.version != kVersion && h.version != 20 && h.version != 19 && h.version != 18 && h.version != 17 && h.version != 16 && h.version != 15 && h.version != 14) { err = "version de estado incompatible"; return false; }
   if(h.crc1 != want.crc1 || h.crc2 != want.crc2) { err = "el estado es de otra ROM"; return false; }
   if(h.rdramSize != want.rdramSize) { err = "tamano de RDRAM distinto"; return false; }
 

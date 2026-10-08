@@ -59,9 +59,10 @@ const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6
           R_SEL = 50,   // 4 palabras: sel[2][8] en bytes
           R_LOD = 54, R_PLOD = 55, R_PZ = 56, R_PDZ = 57, R_PDZC = 58, R_LASTX = 59, R_LASTY = 60,
           R_HD = 61,    // textura HD: cabecera + 1 en el buffer Hd (0 = sin sustituto)
+          R_KCONV = 62, R_KEYC = 63,   // K4 | K5 << 16 (9 bits crudos); centro de key R<<16|G<<8|B
           // Textura: S, T, (Z), W como los atributos de color; tile base | nivel maximo << 4 |
           // prim_min_level << 8; SET_CONVERT k0..k3; ranura de TMEM; 8 tiles de 5 palabras.
-          R_TC = 64, R_TDX = 68, R_TDE = 72, R_TDY = 76, R_TINFO = 80, R_K0 = 81, R_TSLOT = 85, R_CISZ = 86,
+          R_TC = 64, R_TDX = 68, R_TDE = 72, R_TDY = 76, R_TINFO = 80, R_K0 = 81, R_TSLOT = 85, R_CISZ = 86, R_KEYS = 87,
           R_TILES = 88,
           R_SIZE = 128;
 // FLAGS
@@ -179,6 +180,10 @@ int rowVal(uint r, int i, uint tex, uint shade, ivec4 cin) {
     case 12u: return 0x100;
     case 14u: return gLod;
     case 15u: return R(R_PLOD);
+    case 16u: return R(R_KCONV) & 0x1ff;                                 // K4 (sub_b, special_expand)
+    case 17u: { int k = (R(R_KCONV) >> 16) & 0x1ff; return (k ^ 0x100) - 0x100; }   // K5 con signo
+    case 18u: return i < 3 ? int((U(R_KEYC) >> (16 - i * 8)) & 0xffu) : 0;
+    case 19u: return i < 3 ? int((U(R_KEYS) >> (16 - i * 8)) & 0xffu) : 0;
     default: return 0;
   }
 }
@@ -841,7 +846,7 @@ void pixel(int x, int y) {
 
 // TEXTURE_RECTANGLE (SoftRdp::texRect). R_TC: S y T de arranque ya escalados, R_TDX: DsDx
 // y DtDy, R_TDE: XH/YH (en cuartos) contra los que corren. S en 1/4096 de texel (1/16384 en
-// COPY, donde DsDx va x4), T en 1/4096. FLIP cruza los ejes. Sin shade ni z.
+// COPY, donde DsDx va x4), T en 1/4096. FLIP cruza los ejes. Sin shade; z constante (F_ZACT).
 // d * q / S con suelo y sin desbordar: q = S*f + r.
 int rstep(int d, int q) {
   if(pc.sh == 0u) return d * q;
@@ -889,7 +894,8 @@ void rectPixel(int x, int y) {
     }
   }
   // 1-/2-cycle: siempre por el blender (alfa = cobertura de CVG_DEST), como SoftRdp::texRect.
-  if(!copy) blendPixel(x, y, c, 8, false, 0, 0);
+  // Z del rect: 0 (atributos a cero) o SET_PRIM_DEPTH con Z_SOURCE_SEL (SoftRdp::texRect).
+  if(!copy) blendPixel(x, y, c, 8, (fl & F_ZACT) != 0, (fl & F_ZSRC) != 0 ? R(R_PZ) : 0, 0);
   else if(x >= R(R_SX0) * SC && x < R(R_SX1) * SC && y >= R(R_SY0) * SC && y < R(R_SY1) * SC) storePixel(x, y, c);
 }
 
