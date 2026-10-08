@@ -1099,6 +1099,9 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
     if(persp) fl |= TF_PERSP;
     if(usesLod) fl |= TF_LOD;
     if(usesTex1) fl |= TF_TEX1;
+    // TEXEL1 de 1 ciclo = TEXEL0 del pixel siguiente (ver drawTriangle)
+    if(cyc == 0 && [](const CombSet& c) { return c.aR == 2 || c.bR == 2 || c.cR == 2 || c.cR == 9 || c.dR == 2 || c.aA == 2 || c.bA == 2 || c.cA == 2 || c.dA == 2; }(comb[1]))
+      fl |= TF_PIPE1;
     if(!g_noFilter && ((other_hi >> 13) & 1)) fl |= TF_FILT;
     if(other_lo & 1) fl |= TF_ACMP;
     r[T_FLAGS] = fl;
@@ -1230,6 +1233,10 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   // bajos), divididos por W si hay perspectiva. Nivel maximo = bits 53:51 del comando.
   bool usesLod = false, usesTex1 = false;
   if(!fillMode && !copyCy) texNeeds(usesLod, usesTex1);
+  // TEXEL1 en 1 ciclo: el HW lee el TEXEL0 del pixel SIGUIENTE del recorrido (parallel-rdp
+  // combiner_uses_pipelined_texel1); en el ultimo pixel de un tramo largo, el del arranque
+  // de la fila siguiente.
+  const bool pipeTex1 = textured && cycleType() == 0 && [](const CombSet& c) { return c.aR == 2 || c.bR == 2 || c.cR == 2 || c.cR == 9 || c.dR == 2 || c.aA == 2 || c.bA == 2 || c.cA == 2 || c.dA == 2; }(comb[1]);
   const u32 maxLevel = (u32)(w0 >> 51) & 7;
   TexFold folds[8];
   if(textured && (usesLod || usesTex1)) for(u32 i = 0; i < 8; i++) folds[i] = foldOf(i);
@@ -1342,6 +1349,40 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     for(int c = 0; c < 4; c++) {
       rC[c] = rowAttr(cC[c], cDx[c], cDe[c], cDy[c]);
       rT[c] = rowAttr(tC[c], tDx[c], tDe[c], tDy[c]);
+    }
+    // TEXEL1 de 1 ciclo en el ultimo pixel (prdp shading.h): tramo con lodlength >= 8 y la
+    // fila siguiente valida (alguna sub-scanline viva y no entera fuera de la tijera) -> S/T/W
+    // del arranque de esa fila, en su ancla y sin paso en x.
+    bool pipeNextRow = false;
+    s32 nT[4] = {};
+    if(pipeTex1 && (leftMajor ? spanX1 - baseX : baseX - spanX0) >= 8) {
+      const int y2 = y + 1;
+      bool ok = false, allOver = true, allUnder = true;
+      for(int k = 0; k < 4; k++) {
+        const s32 ys = y2 * 4 + k;
+        const s32 eh = iXh + (ys - yhBase) * iDxh;
+        const s32 el = ys < iYm ? iXm + (ys - yhBase) * iDxm : iXl + (ys - iYm) * iDxl;
+        const s32 L = quant(leftMajor ? eh : el), R = quant(leftMajor ? el : eh);
+        if(!((L >> 1) > (R >> 1) || ys < subLo || ys >= subHi)) ok = true;
+        if(std::min(L, R) < scHi) allOver = false;
+        if(std::max(L, R) >= scLo) allUnder = false;
+      }
+      if(ok && !allOver && !allUnder) {
+        pipeNextRow = true;
+        const s32 dr = y2 - (iYh >> 2);
+        u32 xr = (u32)iXh + (u32)dr * ((u32)iDxh << 2);
+        if(doOffset) xr += 3u * (u32)iDxh;
+        const u32 xf = copyCy ? 0u : ((xr >> 7) & 0xff);
+        for(int c = 0; c < 4; c++) {
+          u32 diff = 0;
+          if(doOffset) {
+            const s32 deh = tDe[c] & ~0x1ff, dyh = tDy[c] & ~0x1ff;
+            diff = (u32)deh - (u32)(deh >> 2) - (u32)dyh + (u32)(dyh >> 2);
+          }
+          const u32 v = (u32)tC[c] + (u32)tDe[c] * (u32)dr;
+          nT[c] = (s32)(((v & ~0x1ffu) + diff - xf * (u32)((tDx[c] >> 8) & ~1)) & ~0x3ffu);
+        }
+      }
     }
     // Centroide: el HW evalua shade y z en la PRIMERA muestra cubierta en orden de
     // scanline (fila k, columna izquierda antes que derecha), con el desfase en cuartos
@@ -1456,6 +1497,17 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         }
         // 2-cycle: TEXEL1 es un segundo muestreo, de tile1, en el mismo S/T.
         u32 tex1 = usesTex1 ? sampleTex1(folds[tile1], su, tu, tex, usesLod ? folds[tile0] : texF) : tex;
+        if(pipeTex1 && !hdB.tex) {
+          s32 ns, nt;
+          if(pipeNextRow && x == (leftMajor ? spanX1 : spanX0)) {
+            ns = nT[0] >> 16; nt = nT[1] >> 16;
+            if(persp) perspDivide(ns, nt, nT[3] >> 16, ns, nt);
+          } else {
+            ns = stwAt(0, ldir * (u32)(tDx[0] & ~0x1f)); nt = stwAt(1, ldir * (u32)(tDx[1] & ~0x1f));
+            if(persp) perspDivide(ns, nt, stwAt(3, ldir * (u32)(tDx[3] & ~0x1f)), ns, nt);
+          }
+          tex1 = sampleTex1(texF, ns / 32.0, nt / 32.0, tex, texF);
+        }
         // Shade (if the triangle carries a shade block) feeds the combiner alongside
         // the texel — this is how MODULATE (texel*shade) textures get their lighting.
         u32 shd = gouraud ? shadeAt(dxI, xo, yo) : 0;

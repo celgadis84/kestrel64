@@ -46,6 +46,17 @@ failures are the 6 test-side ones above. They were at 209/217. What was missing:
 - **Scissor and rect edges.** The high scissor bound is exclusive in 1/2-cycle (`(x+3)>>2`)
   and `(x>>2)+1` in FILL/COPY. FILL/COPY rects have inclusive right/bottom edges.
 
+## Pipelined TEXEL1 in 1-cycle mode (2026-10-08)
+
+In 1-cycle mode the combiner's TEXEL1 is not a second sample: the hardware hands over the TEXEL0 of the
+*next* pixel along the span (parallel-rdp `combiner_uses_pipelined_texel1`, shading.h). On the last pixel
+of a span with lodlength >= 8 and a valid next line (some sub-scanline alive, not entirely outside the
+scissor), S/T/W come from the start of the next line instead. SoftRDP and GPU-RDP now do the same
+(`pipeTex1` in `drawTriangle`, flag `TF_PIPE1` in `tri.comp`).
+
+krom `RDPTex0And1`: 98.83 -> 99.42 on both backends, framebuffer identical to parallel-rdp (1792 -> 0
+differing pixels). RDP/ subset: 0 regressions on interp and gpurdp; SM64 md5 unchanged on both.
+
 ## FILL triangles cover the whole span (2026-10-08)
 
 `FillTriangle 16/32BPP`: 98.89 -> 98.94 on SoftRDP and GPU-RDP, framebuffer identical to

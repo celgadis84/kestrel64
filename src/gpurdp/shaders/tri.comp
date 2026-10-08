@@ -69,7 +69,7 @@ const int R_YL = 0, R_YM = 1, R_YH = 2, R_XL = 3, R_DXL = 4, R_XH = 5, R_DXH = 6
 const int F_LEFT = 1, F_DOOFF = 2, F_FILL = 4, F_SHADE = 8, F_ZACT = 16, F_ZSRC = 32, F_AA = 64,
           F_COMB = 128, F_NOBLEND = 256, F_TWO = 512, F_NOAAGLB = 1024, F_TEX = 2048,
           F_PERSP = 4096, F_LOD = 8192, F_TEX1 = 16384, F_FILT = 32768, F_ACMP = 65536,
-          F_RECT = 131072, F_FLIP = 262144, F_COPY = 524288;
+          F_RECT = 131072, F_FLIP = 262144, F_COPY = 524288, F_PIPE1 = 1048576;
 
 int base;
 uint cur;   // registro de la primitiva en curso
@@ -891,6 +891,51 @@ void pixel(int x, int y) {
     uint tex0 = sampleTex(int(tile0), ps, pt, false);
 #endif
     gTex1 = (fl & F_TEX1) == 0 ? tex0 : convOne() ? convTex1(int(tile0), tex0) : sampleTex(int(tile1), ps, pt, true);
+    if((fl & F_PIPE1) != 0) {
+      // TEXEL1 de 1 ciclo: TEXEL0 del pixel siguiente del recorrido; en el ultimo de un tramo
+      // largo con la fila siguiente valida, el del arranque de esa fila (SoftRdp drawTriangle).
+      int sx0 = mnL >> 3, sx1 = mxR >> 3, ns = 0, nt = 0;
+      bool nextRow = false;
+      if(x == (leftMajor ? sx1 : sx0) && (leftMajor ? sx1 - baseX : baseX - sx0) >= 8) {
+        int y2 = y + 1;
+        bool ok = false, allOver = true, allUnder = true;
+        for(int k = 0; k < 4; k++) {
+          int ys = y2 * 4 + k;
+          int eh = iXh + (ys - yhBase) * iDxh;
+          int el = ys < iYm ? iXm + (ys - yhBase) * iDxm : iXl + (ys - iYm) * iDxl;
+          int L = quant(leftMajor ? eh : el), Rr = quant(leftMajor ? el : eh);
+          if(!((L >> 1) > (Rr >> 1) || ys < subLo || ys >= subHi)) ok = true;
+          if(min(L, Rr) < scHi) allOver = false;
+          if(max(L, Rr) >= scLo) allUnder = false;
+        }
+        if(ok && !allOver && !allUnder) {
+          nextRow = true;
+          int dr = y2 - (R(R_YH) >> 2) * SC;
+          uint xr = uint(iXh) + uint(dr) * (uint(iDxh) << 2);
+          if(doOffset) xr += 3u * uint(iDxh);
+          uint xf = (xr >> 7) & 0xffu;
+          int nT[4];
+          for(int k = 0; k < 4; k++) {
+            int dde = D(R_TDE + k), ddy = D(R_TDY + k);
+            uint diff = 0u;
+            if(doOffset) { int deh = dde & ~0x1ff, dyh = ddy & ~0x1ff;
+                           diff = uint(deh) - uint(deh >> 2) - uint(dyh) + uint(dyh >> 2); }
+            uint v = uint(R(R_TC + k)) + uint(dde) * uint(dr);
+            nT[k] = int(((v & ~0x1ffu) + diff - xf * uint((tdx[k] >> 8) & ~1)) & ~0x3ffu);
+          }
+          ns = nT[0] >> 16; nt = nT[1] >> 16;
+          bool o3 = false;
+          if(persp) perspDivide(ns, nt, nT[3] >> 16, ns, nt, o3);
+        }
+      }
+      if(!nextRow) {
+        uint ldir = leftMajor ? 1u : ~0u;
+        ns = STW(0, ldir * uint(tdx[0] & ~0x1f)); nt = STW(1, ldir * uint(tdx[1] & ~0x1f));
+        bool o3 = false;
+        if(persp) perspDivide(ns, nt, STW(3, ldir * uint(tdx[3] & ~0x1f)), ns, nt, o3);
+      }
+      gTex1 = convOne() ? convTex1(int(tile0), tex0) : sampleTex(int(tile0), ns, nt, true);
+    }
     c = combProg ? combine(tex0, shd, comb) : tex0;
     pxShadeA = min(int(shd & 0xffu) + alphaDither(x, y), 0xff);
     if((fl & F_ACMP) != 0) {   // alphaRef >= umbral de blend_color
