@@ -157,7 +157,7 @@ N64NICCC/N64NICCC	98.60	98.60	13.64	SIZE 255x199 vs ref 320x240
 RCP/VI/CoverageTest/CoverageTest	91.76	93.45	29.69	SIZE 320x240 vs ref 320x237
 RCP/Version/RCPVersion	98.50	98.50	24.99	SIZE 320x240 vs ref 640x480
 RDP/16BPP/Line/FillLine/Cycle1FillLine320x240/Cycle1FillLine16BPP320X240	99.21	99.21	14.61	
-RDP/16BPP/Line/FillLine/FillLine320x240/FillLine16BPP320X240	99.26	99.26	14.42	
+RDP/16BPP/Line/FillLine/FillLine320x240/FillLine16BPP320X240	99.18	99.18	14.32	
 RDP/16BPP/Line/Plot/FillLine/PlotFillLine16BPP320X240	99.87	99.87	4.81	
 RDP/16BPP/Line/Rotate/FillLine/RotateFillLine16BPP320X240	0.00	99.41	17.57	
 RDP/16BPP/Rectangle/FillRectangle/Cycle1FillRectangle320x240/Cycle1FillRectangle16BPP320X240	98.65	98.65	24.18	
@@ -181,7 +181,7 @@ RDP/16BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA8B320x24
 RDP/16BPP/SetPrimColor/SetPrimColor16BPP	100.00	100.00	0.00	
 RDP/16BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle16BPP320X240	55.27	55.89	105.36	
 RDP/16BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle16BPP320X240	98.97	98.97	17.80	
-RDP/16BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle16BPP320X240	98.89	98.89	17.73	
+RDP/16BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle16BPP320X240	98.94	98.94	17.33	
 RDP/16BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle16BPP320X240	98.15	98.15	21.27	
 RDP/16BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle16BPP320X240	99.75	99.75	6.70	
 RDP/16BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle16BPP320X240	99.75	99.75	6.70	
@@ -204,7 +204,7 @@ RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTIA8B320x240/Cyc
 RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA4B320x240/Cycle1TextureTriangle16BPPTLUTRGBA4B320X240	89.73	95.23	28.30	
 RDP/16BPP/Triangle/TextureTriangle/TLUT/Cycle1TextureTriangleTLUTRGBA8B320x240/Cycle1TextureTriangle16BPPTLUTRGBA8B320X240	95.93	97.80	27.73	
 RDP/32BPP/Line/FillLine/Cycle1FillLine320x240/Cycle1FillLine32BPP320X240	99.21	99.21	15.10	
-RDP/32BPP/Line/FillLine/FillLine320x240/FillLine32BPP320X240	99.26	99.26	15.31	
+RDP/32BPP/Line/FillLine/FillLine320x240/FillLine32BPP320X240	99.18	99.18	15.47	
 RDP/32BPP/Line/Plot/FillLine/PlotFillLine32BPP320X240	99.87	99.87	5.31	
 RDP/32BPP/Line/Rotate/FillLine/RotateFillLine32BPP320X240	99.41	99.41	11.34	
 RDP/32BPP/Rectangle/FillRectangle/Cycle1FillRectangle320x240/Cycle1FillRectangle32BPP320X240	98.65	98.65	24.18	
@@ -225,7 +225,7 @@ RDP/32BPP/Rectangle/TextureRectangle/TLUT/Cycle1TextureRectangleTLUTRGBA8B320x24
 RDP/32BPP/SetPrimColor/SetPrimColor32BPP	1.20	100.00	13.68	
 RDP/32BPP/Triangle/Cube/FillTriangle320x240/CubeFillTriangle32BPP320X240	55.27	55.89	106.89	
 RDP/32BPP/Triangle/FillTriangle/Cycle1FillTriangle320x240/Cycle1FillTriangle32BPP320X240	98.97	98.97	18.33	
-RDP/32BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle32BPP320X240	98.89	98.89	18.78	
+RDP/32BPP/Triangle/FillTriangle/FillTriangle320x240/FillTriangle32BPP320X240	98.94	98.94	18.56	
 RDP/32BPP/Triangle/FillZBufferTriangle320x240/Cycle1FillZBufferTriangle32BPP320X240	98.15	98.15	21.62	
 RDP/32BPP/Triangle/Plot/FillTriangle/LeftMajorTriangle320x240/LeftMajorTriangle32BPP320X240	99.75	99.75	7.40	
 RDP/32BPP/Triangle/Plot/FillTriangle/RightMajorTriangle320x240/RightMajorTriangle32BPP320X240	99.75	99.75	7.40	

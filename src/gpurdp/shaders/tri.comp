@@ -744,6 +744,7 @@ void pixel(int x, int y) {
   int subLo = max(iYh, R(R_SY0) * 4 * SC), subHi = min(iYl, R(R_SY1) * 4 * SC);
   int scLo = R(R_SX0) * 8 * SC, scHi = R(R_SX1) * 8 * SC;
   uint cov = 0u;
+  int mnL = 0xffff, mxR = 0;
   for(int k = 0; k < 4; k++) {
     int ys = y * 4 + k;
     int eh = iXh + (ys - yhBase) * iDxh;
@@ -752,11 +753,14 @@ void pixel(int x, int y) {
     bool bad = (L >> 1) > (Rr >> 1) || ys < subLo || ys >= subHi;
     L = min(max(L, scLo), scHi); Rr = min(max(Rr, scLo), scHi);
     if(bad) { L = 0xffff; Rr = 0; }
+    mnL = min(mnL, L); mxR = max(mxR, Rr);
     int a = x * 8 + ((k & 1) != 0 ? 2 : 0), b = a + 4;
     if(a >= L && a < Rr) cov |= 1u << k;
     if(b >= L && b < Rr) cov |= 16u << k;
   }
-  if((fl & F_AA) != 0 ? cov == 0u : (cov & 1u) == 0u) return;
+  // FILL no mira la cobertura: el tramo entero, extremos inclusivos (SoftRdp / prdp fill_en)
+  if((fl & F_FILL) != 0) { if(x < (mnL >> 3) || x > (mxR >> 3)) return; }
+  else if((fl & F_AA) != 0 ? cov == 0u : (cov & 1u) == 0u) return;
   int hits = bitCount(cov);
   if((fl & F_FILL) != 0) {
     uint fc = U(R_FILL);

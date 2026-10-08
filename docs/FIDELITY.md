@@ -46,6 +46,18 @@ failures are the 6 test-side ones above. They were at 209/217. What was missing:
 - **Scissor and rect edges.** The high scissor bound is exclusive in 1/2-cycle (`(x+3)>>2`)
   and `(x>>2)+1` in FILL/COPY. FILL/COPY rects have inclusive right/bottom edges.
 
+## FILL triangles cover the whole span (2026-10-08)
+
+`FillTriangle 16/32BPP`: 98.89 -> 98.94 on SoftRDP and GPU-RDP, framebuffer identical to
+parallel-rdp pixel for pixel. `RDP/` subset 133: 0 regress over the gate threshold. SM64 md5
+unchanged. `FillLine 16/32BPP` goes 99.26 -> 99.18 against the krom PNG, but its framebuffer is now
+also identical to parallel-rdp (which scores 99.18): the extra edge pixels are what prdp draws.
+
+- In FILL cycle the RDP does not look at coverage: every pixel between the span's start and
+  end (`min(xleft) >> 3` .. `max(xright) >> 3`, both inclusive) is written, like COPY
+  (prdp `shading.h`, `fill_en`). We required sample 0 to be covered, so the right edge lost
+  one pixel per row on slanted edges.
+
 ## YUV textures (2026-10-08)
 
 `Cycle1TextureRectangle/Triangle 16/32BPP YUV16B`: 97.37/96.98/98.92/98.49 -> 99.74/99.74/99.73/99.73

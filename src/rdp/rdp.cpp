@@ -1042,7 +1042,7 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
         if(a >= qL[k] && a < qR[k]) c |= 1u << k;
         if(b >= qL[k] && b < qR[k]) c |= 16u << k;
       }
-      if(aaOn ? c == 0 : (c & 1) == 0) continue;
+      if(!fillMode && (aaOn ? c == 0 : (c & 1) == 0)) continue;
       rasterPx++;
       bx0 = std::min(bx0, x); bx1 = std::max(bx1, x);
       if(by0 < 0) by0 = y;
@@ -1313,7 +1313,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     // la cuenta es IDENTICA; se salta el trabajo por pixel (textura, combinador, mezcla).
     const u64 rowPx0 = rasterPx;
     if(costOnly) {
-      for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(copy16 || (aaOn ? c != 0 : (c & 1) != 0)) rasterPx++; }
+      for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(copy16 || fillMode || (aaOn ? c != 0 : (c & 1) != 0)) rasterPx++; }
       addSpan(xs, rasterPx - rowPx0);
       continue;
     }
@@ -1386,7 +1386,9 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     };
     for(int x = xs; x < xe; x++) {
       const u32 cov = coverage(x);
-      if(!copy16 && (aaOn ? cov == 0 : (cov & 1) == 0)) continue;
+      // FILL y COPY no miran la cobertura: el tramo entero [xs, xe) (parallel-rdp shading.h,
+      // `fill_en` -> x entre start_x y end_x, ambos inclusivos).
+      if(!copy16 && !fillMode && (aaOn ? cov == 0 : (cov & 1) == 0)) continue;
       rasterPx++;      // DPC counters: pixel entered the pipeline (may still be killed)
       const int hits = __builtin_popcount(cov);
       if(fillMode) {   // raw packed fill color straight to the color image (no AA)
