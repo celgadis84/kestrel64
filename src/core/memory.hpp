@@ -9,6 +9,7 @@
 
 #include "types.hpp"
 #include "gbcart.hpp"
+#include "sdcard.hpp"
 #include "../rdp/rdp.hpp"
 #include "../rsp/rsp.hpp"
 #include <vector>
@@ -1371,6 +1372,30 @@ public:
   auto isvWrite(u32 phys, u32 value, u32 nbytes) -> bool;
   auto isvRead(u32 phys, u32 nbytes, u32& out) -> bool;   // header/buffer readback
 
+  // SummerCart64: el flashcart que libcart reconoce por sus registros en 0x1FFF0000 tras la
+  // secuencia de llave. Solo lo necesario para la tarjeta SD: config get/set, operaciones SD,
+  // sector, lectura/escritura hacia el buffer 0x1FFE0000 o hacia la SDRAM del cartucho
+  // (0x10000000, la propia ROM). La tarjeta es la carpeta de la ROM salvo KESTREL_SD=<carpeta
+  // o .img>; KESTREL_SD=0 lo quita. Mientras el juego no abre la llave no hay nada distinto.
+  SdCard          sd;
+  std::string     sdPath;                // carpeta o imagen; se abre en el primer SD init
+  bool            sdTried = false;
+  bool            scOn = false;          // hay SummerCart64 en el bus
+  auto attachSdCard(const std::string& romPath) -> void;
+  u32             scKey = 0;             // fase de la secuencia de llave: 0, 1 (_UNL), 2 (abierto)
+  u32             scData0 = 0, scData1 = 0;
+  bool            scErr = false;
+  bool            scRomWrite = false;    // CFG_ROM_WRITE: la SDRAM acepta escrituras del PI
+  bool            scSwap = false;        // SD_BYTESWAP: lecturas SD->SDRAM con bytes cruzados
+  bool            scSdInit = false;
+  u32             scSector = 0;
+  std::vector<u8> scBuf;                 // buffer de datos de 8 KiB en 0x1FFE0000
+  auto scRead(u32 phys, u32& out) -> bool;
+  auto scWrite(u32 phys, u32 value) -> bool;
+  auto scCommand(u32 cmd) -> void;
+  auto scBufAt(u32 phys) -> u8*;          // byte del buffer o de la SDRAM, nullptr si no es nuestro
+  auto scDmaWrite(u32 cart, u8 b) -> bool; // RDRAM->cartucho sobre buffer/SDRAM
+
   // PI/cartridge write-latch. Writing to cart space does not reach ROM; it latches
   // the value onto the PI bus, and the very next cart read returns it before the
   // latch decays (~a couple hundred CPU instructions). Only the first write matters
@@ -1483,7 +1508,12 @@ public:
   // las 10 vueltas. System lo pasa a ops con el CPI vigente (cartLatchTtl).
   static constexpr u64 CART_LATCH_TTL_CYCLES = 330;
   u64 cartLatchTtl = 235;   // ops; lo fija System desde CART_LATCH_TTL_CYCLES y el CPI
-  auto isCart(u32 phys) const -> bool { return !rom.empty() && phys >= 0x1000'0000 && phys < 0x1fc0'0000; }
+  // 0x1FD00000+ es tambien bus del PI (dominio 1, direccion 3); solo se enruta ahi lo que
+  // atiende el SummerCart64 (su llave, y el resto con la llave abierta): sin el, como estaba.
+  auto isCart(u32 phys) const -> bool {
+    return !rom.empty() && phys >= 0x1000'0000 &&
+           (phys < 0x1fc0'0000 || (scOn && phys >= 0x1fd0'0000 && (scKey == 2 || (phys & ~3u) == 0x1fff'0010)));
+  }
   auto cartRom32(u32 phys) -> u32;               // aligned 32-bit ROM word (0 if past image)
   auto cartRead(u32 phys, u32 nbytes) -> u32;    // CPU read from cart space (latch + 16-bit mux)
   auto cartWrite(u32 phys, u64 value, u32 nbytes) -> void;  // CPU write to cart space (latch)

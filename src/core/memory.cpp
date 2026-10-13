@@ -835,6 +835,148 @@ auto Memory::isvRead(u32 phys, u32 nbytes, u32& out) -> bool {
   return true;
 }
 
+// --- SummerCart64 ------------------------------------------------------------
+// Protocolo segun el firmware de SummerCart64 v2 (registros SCR) y como lo usa libcart
+// (sc_init / sc_card_*): 0x1FFF0000 STATUS (lectura) / COMMAND (escritura), +4 DATA0,
+// +8 DATA1, +0xC IDENTIFIER = 'SCv2', +0x10 KEY. Los registros solo responden tras la
+// secuencia de llave 0 -> '_UNL' -> 'OCK_'; 0xFFFFFFFF los vuelve a cerrar. El buffer de
+// datos de 8 KiB vive en 0x1FFE0000 y la SDRAM del cartucho, que es donde esta la ROM, en
+// 0x10000000 (64 MiB). Los comandos acaban en el acto: STATUS nunca da CMD_BUSY, que es un
+// instante valido para el hardware (el juego sondea hasta que baja).
+static constexpr u32 kScReg = 0x1fff'0000, kScBuf = 0x1ffe'0000, kScBufSz = 0x2000;
+static constexpr u32 kScSdram = 64u << 20;
+
+auto Memory::attachSdCard(const std::string& romPath) -> void {
+  scOn = false; sdTried = false; scKey = 0; scSdInit = false; scRomWrite = false; scSwap = false;
+  sd.close();
+  const char* env = std::getenv("KESTREL_SD");
+  if(env && std::string(env) == "0") return;
+  if(env && *env) sdPath = env;
+  else {
+    const auto slash = romPath.find_last_of("/\\");
+    sdPath = slash == std::string::npos ? "." : romPath.substr(0, slash + 1);
+  }
+  scOn = true;
+  scBuf.assign(kScBufSz, 0);
+  // La SDRAM del flashcart es de 64 MiB y la ROM solo ocupa su principio; lo de despues se
+  // vuelve memoria escribible con CFG_ROM_WRITE. Se reserva ya para que crecer no mueva rom.
+  rom.reserve(kScSdram);
+}
+
+// La tarjeta se monta la primera vez que el juego la inicia: leer la carpeta cuesta, y un
+// juego que no la usa no debe pagarlo.
+static auto scMount(Memory& m) -> void {
+  if(m.sdTried) return;
+  m.sdTried = true;
+  if(m.sd.open(m.sdPath))
+    std::fprintf(stderr, "[sd] SummerCart64: tarjeta %s (%s, %llu sectores)\n", m.sdPath.c_str(),
+                 m.sd.isVirtual() ? "carpeta como FAT32" : "imagen", (unsigned long long)m.sd.sectors());
+  else
+    std::fprintf(stderr, "[sd] SummerCart64: '%s' no se pudo abrir, sin tarjeta\n", m.sdPath.c_str());
+}
+
+auto Memory::scBufAt(u32 phys) -> u8* {
+  if(phys >= kScBuf && phys < kScBuf + kScBufSz) return scBuf.data() + (phys - kScBuf);
+  if(phys >= BASE_CART && phys - BASE_CART < rom.size()) return rom.data() + (phys - BASE_CART);
+  return nullptr;
+}
+
+auto Memory::scDmaWrite(u32 cart, u8 b) -> bool {
+  if(cart >= kScBuf && cart < kScBuf + kScBufSz) { scBuf[cart - kScBuf] = b; return true; }
+  if(scRomWrite && cart >= BASE_CART && cart - BASE_CART < rom.size()) { rom[cart - BASE_CART] = b; return true; }
+  return false;
+}
+
+auto Memory::scRead(u32 phys, u32& out) -> bool {
+  if(scKey != 2) return false;
+  if(phys >= kScBuf && phys < kScBuf + kScBufSz) {
+    const u32 o = (phys - kScBuf) & ~3u;
+    out = (u32)scBuf[o] << 24 | (u32)scBuf[o + 1] << 16 | (u32)scBuf[o + 2] << 8 | scBuf[o + 3];
+    return true;
+  }
+  if(phys < kScReg || phys >= kScReg + 0x20) return false;
+  switch(phys & 0x1c) {
+    case 0x00: out = scErr ? 0x4000'0000u : 0; break;
+    case 0x04: out = scData0; break;
+    case 0x08: out = scData1; break;
+    case 0x0c: out = 0x5343'7632u; break;   // "SCv2"
+    default:   out = 0; break;
+  }
+  return true;
+}
+
+auto Memory::scWrite(u32 phys, u32 value) -> bool {
+  if((phys & ~3u) == kScReg + 0x10) {       // KEY: siempre escucha
+    if(value == 0xffff'ffffu) scKey = 0;
+    else if(value == 0) { if(scKey != 2) scKey = 0; }
+    else if(value == 0x5f55'4e4cu && scKey == 0) scKey = 1;   // "_UNL"
+    else if(value == 0x4f43'4b5fu && scKey == 1) scKey = 2;   // "OCK_"
+    else if(scKey != 2) scKey = 0;
+    return true;
+  }
+  if(scKey != 2) return false;
+  if(phys >= kScBuf && phys < kScBuf + kScBufSz) {
+    const u32 o = (phys - kScBuf) & ~3u;
+    for(u32 i = 0; i < 4; i++) scBuf[o + i] = (u8)(value >> (24 - 8 * i));
+    return true;
+  }
+  if(phys < kScReg || phys >= kScReg + 0x20) return false;
+  switch(phys & 0x1c) {
+    case 0x00: scCommand(value & 0xff); break;
+    case 0x04: scData0 = value; break;
+    case 0x08: scData1 = value; break;
+    default: break;
+  }
+  return true;
+}
+
+auto Memory::scCommand(u32 cmd) -> void {
+  scErr = false;
+  switch(cmd) {
+    case 'c': case 'C': {                   // CONFIG_GET / CONFIG_SET (SET devuelve el anterior)
+      u32 old = 0;
+      if(scData0 == 1) old = scRomWrite ? 1 : 0;   // CFG_ROM_WRITE; DD_MODE y SAVE_TYPE = 0
+      if(cmd == 'C' && scData0 == 1) {
+        scRomWrite = scData1 != 0;
+        if(scRomWrite && rom.size() < kScSdram) rom.resize(kScSdram, 0);   // dentro de lo reservado
+      }
+      scData1 = old;
+      break;
+    }
+    case 'i':                               // SD_OP
+      switch(scData1) {
+        case 0: scSdInit = false; break;
+        case 1: scMount(*this); if(sd.present()) scSdInit = true; else scErr = true; break;
+        case 2: scMount(*this); scData1 = (sd.present() ? 1u : 0u) | (scSdInit ? 2u : 0u); break;
+        case 3: if(u8* p = scBufAt(scData0)) std::memset(p, 0, 32); break;   // CSD+CID: sin datos
+        case 4: scSwap = true; break;
+        case 5: scSwap = false; break;
+        default: scErr = true; break;
+      }
+      break;
+    case 'I': scSector = scData0; break;    // SD_SECTOR_SET
+    case 's': case 'S': {                   // SD_READ / SD_WRITE: DATA0 = direccion, DATA1 = sectores
+      if(!scSdInit) { scErr = true; break; }
+      u8 tmp[512];
+      for(u32 k = 0; k < scData1; k++) {
+        const u32 a = scData0 + k * 512;
+        if(!scBufAt(a) || !scBufAt(a + 511)) { scErr = true; break; }
+        if(cmd == 's') {
+          if(!sd.read(scSector, tmp)) { scErr = true; break; }
+          const bool sw = scSwap && a < kScBuf;
+          for(u32 i = 0; i < 512; i++) *scBufAt(a + i) = tmp[sw ? i ^ 1 : i];
+        } else {
+          for(u32 i = 0; i < 512; i++) tmp[i] = *scBufAt(a + i);
+          if(!sd.write(scSector, tmp)) { scErr = true; break; }
+        }
+        scSector++;
+      }
+      break;
+    }
+    default: scErr = true; break;
+  }
+}
+
 // --- cartridge / PI bus ------------------------------------------------------
 // Aligned 32-bit big-endian ROM word; 0 past the loaded image.
 auto Memory::cartRom32(u32 phys) -> u32 {
@@ -883,6 +1025,12 @@ auto Memory::piIoDecay() -> void {
 auto Memory::cartRead(u32 phys, u32 nbytes) -> u32 {
   u32 isvVal = 0;
   if(isvRead(phys, nbytes, isvVal)) return isvVal;
+  if(scOn && scRead(phys, isvVal)) {
+    piIoDecay();
+    if(nbytes == 4) return isvVal;
+    const u16 hw = (u16)(isvVal >> ((phys & 2) ? 0 : 16));
+    return nbytes == 2 ? hw : (phys & 1) ? (hw & 0xff) : (hw >> 8);
+  }
   u64 now = cartNow();
   if(cartLatchValid && now < cartLatchExpiry) {
     u32 v = cartLatch;
@@ -907,7 +1055,6 @@ auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
   u64 now = cartNow();
   piIoDecay();
   if(rcp.pi_status & 0x2u) return;          // el PI ignora escrituras mientras esta ocupado
-  if(cartLatchValid) return;                // first-write-wins
   u32 v;
   switch(nbytes) {
     case 1:  v = ((u32)value & 0xff) << 24; break;
@@ -915,6 +1062,14 @@ auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
     case 8:  v = (u32)(value >> 32); break;
     default: v = (u32)value; break;
   }
+  // Un registro del flashcart recoge la escritura: el bus queda ocupado lo mismo, pero no
+  // hay valor flotando en las lineas que devolver en la siguiente lectura.
+  if(scOn && scWrite(phys, v)) {
+    cartIoBusyUntil = now + rcpCyclesToInsns(piXferCycles(phys, 4));
+    rcp.pi_status |= 0x2u;
+    return;
+  }
+  if(cartLatchValid) return;                // first-write-wins
   cartLatch = v;
   cartLatchValid = true;
   cartLatchExpiry = now + cartLatchTtl;
@@ -1739,6 +1894,18 @@ auto Memory::piDma(bool toCart) -> void {
       return;
     }
   }
+  if(toCart && scOn) {
+    // RDRAM -> SummerCart64: el buffer siempre, la SDRAM si CFG_ROM_WRITE esta puesto.
+    u32 len = ((rcp.pi_rd_len & 0x00ff'ffff) + 1 + 1) & ~1u;
+    ramBytesPi.fetch_add(len, std::memory_order_relaxed);
+    const u32 cartStart = rcp.pi_cart_addr & 0x1fff'fffe;
+    const u32 dram = rcp.pi_dram_addr & 0x00ff'fffe;
+    for(u32 i = 0; i < len; i++) scDmaWrite(cartStart + i, dram + i < rdram.size() ? rdram[dram + i] : 0);
+    rcp.pi_cart_addr = (rcp.pi_cart_addr + len) & 0xffff'fffe;
+    rcp.pi_dram_addr = (rcp.pi_dram_addr + len) & 0x00ff'fffe;
+    piArm(cartStart, len);
+    return;
+  }
   if(toCart) {
     // RDRAM -> ROM cart: ROM is read-only so nothing lands. The address registers still
     // advance by the (even-rounded) length, matching HW.
@@ -1778,7 +1945,9 @@ auto Memory::piDma(bool toCart) -> void {
     for(s32 i = 0; i < curLen; i += 2) {
       u32 romOff = (cart >= BASE_CART) ? cart - BASE_CART : 0xffff'ffffu;
       u16 data = 0;
-      if(romOff != 0xffff'ffffu) {
+      if(scOn && cart >= kScBuf && cart + 1 < kScBuf + kScBufSz) {
+        data = (u16)(scBuf[cart - kScBuf] << 8 | scBuf[cart - kScBuf + 1]);
+      } else if(romOff != 0xffff'ffffu) {
         u8 hi = (romOff     < rom.size()) ? rom[romOff]     : 0;
         u8 lo = (romOff + 1 < rom.size()) ? rom[romOff + 1] : 0;
         data = (u16)((hi << 8) | lo);

@@ -54,6 +54,7 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   if(!rom.loadFile(romPath, error)) return false;
   memory.loadRom(rom.data);  // exposes CART_ROM region for telemetry
   memory.attachSaveFile(romPath);  // load existing .eep/.sra/.fla, if any, next to the ROM
+  memory.attachSdCard(romPath);    // SummerCart64 con la carpeta de la ROM como tarjeta SD
   this->romPath = romPath;         // base de los nombres de ranura de estado (rom.stN)
   cheats.loadForRom(romPath);      // KESTREL_CHEATS, o el .cht que haya al lado de la ROM
   texpack::init(rom.header.name); // KESTREL_TEXDUMP / KESTREL_TEXPACK / KESTREL_TEXFX
