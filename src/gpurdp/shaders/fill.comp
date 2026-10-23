@@ -42,7 +42,50 @@ int inRect(uint off) {
 
 uint px16(uint x) { return (x & 1u) != 0u ? (p.color & 0xffffu) : (p.color >> 16); }
 
+// pass 2/3 = pass 0/1 por filas (solo 1x): despacho 2D, gid.y = fila y0 + gid.y, gid.x = palabra
+// dentro del tramo [x0, x1) de la fila (base/count = las de la fila y0). El anfitrion solo lo
+// usa si el paso de fila es multiplo de palabra (pass 2: width*bpp % 4, pass 3: width % 4), asi
+// que ninguna palabra mezcla dos filas y cada una la toca un solo hilo. Mismos bytes que pass
+// 0/1, sin divisiones. Se lee y solo se escribe si cambia: escribir la palabra entera sin leer
+// gano en SM64 pero perdio en DK64 (714 contra 560 ms de GPU): el espejo esta en memoria del
+// anfitrion y cada escritura cruza el PCIe; muchos rellenos de DK64 no cambian nada.
+void rows() {
+  uint gx = gl_GlobalInvocationID.x;
+  if(gx >= p.count) return;
+  uint y = p.y0 + gl_GlobalInvocationID.y;
+  uint sb = p.bpp == 4u ? 2u : p.bpp - 1u;   // log2(bpp)
+  if(p.pass == 2u) {
+    uint pitch = p.width << sb, rowB = p.addr + y * pitch;
+    uint w = p.base + gx + gl_GlobalInvocationID.y * (pitch >> 2);
+    uint lo = rowB + (p.x0 << sb), hi = rowB + (p.x1 << sb);
+    uint v = ram[w], o = v;
+    for(uint k = 0u; k < 4u; k++) {
+      uint b = w * 4u + k;
+      if(b < lo || b >= hi) continue;
+      uint off = b - rowB, x = off >> sb, sub = off & (p.bpp - 1u), byt;
+      if(p.bpp == 4u)      byt = (p.color >> (24u - sub * 8u)) & 0xffu;
+      else if(p.bpp == 1u) byt = (p.color >> (24u - (x & 3u) * 8u)) & 0xffu;
+      else                 byt = sub == 0u ? (px16(x) >> 8) : (px16(x) & 0xffu);
+      v = (v & ~(0xffu << (k * 8u))) | (byt << (k * 8u));
+    }
+    if(v != o) ram[w] = v;
+  } else {
+    uint rowE = (p.addr >> 1) + y * p.width;   // entrada = media palabra (solo 16 bpp)
+    uint w = p.base + gx + gl_GlobalInvocationID.y * (p.width >> 2);
+    uint lo = rowE + p.x0, hi = rowE + p.x1;
+    uint v = hid[w], o = v;
+    for(uint k = 0u; k < 4u; k++) {
+      uint e = w * 4u + k;
+      if(e < lo || e >= hi) continue;
+      uint byt = (px16(e - rowE) & 1u) != 0u ? 3u : 0u;
+      v = (v & ~(0xffu << (k * 8u))) | (byt << (k * 8u));
+    }
+    if(v != o) hid[w] = v;
+  }
+}
+
 void main() {
+  if(p.pass >= 2u) { rows(); return; }
   uint i = gl_GlobalInvocationID.x;
   if(i >= p.count) return;
   uint w = p.base + i;

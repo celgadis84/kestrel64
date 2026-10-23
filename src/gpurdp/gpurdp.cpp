@@ -850,13 +850,33 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
       const u32 lo = r.addr + (r.y0 * r.width + r.x0) * r.bpp;
       const u32 hi = r.addr + ((r.y1 - 1) * r.width + r.x1) * r.bpp - 1;
       Push p = {r.addr, r.width, r.bpp, r.x0, r.y0, r.x1, r.y1, r.color, lo >> 2, (hi >> 2) - (lo >> 2) + 1, 0};
-      vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-      vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
-      if(r.bpp == 2) {
-        // Bits ocultos: entrada e = media palabra 2e; cuatro entradas por palabra del buffer.
-        p.base = (lo >> 1) >> 2; p.count = ((hi >> 1) >> 2) - p.base + 1; p.pass = 1;
+      // Por filas (fill.comp pass 2/3) cuando el paso de fila es multiplo de palabra: hilos solo
+      // sobre el tramo [x0, x1) de cada fila y sin divisiones. Si no, un hilo por palabra del
+      // rango lineal entero (pass 0/1). KESTREL_GPURDP_FILLLIN=1 fuerza el lineal (A/B).
+      static const bool fillLin = [] { const char* e = std::getenv("KESTREL_GPURDP_FILLLIN"); return e && e[0] == '1'; }();
+      const u32 rowsN = r.y1 - r.y0;
+      const bool fillRows = !fillLin && rowsN > 0 && r.x1 > r.x0 && r.y1 > r.y0;
+      if(fillRows && (r.width * r.bpp) % 4 == 0) {
+        const u32 l0 = r.addr + (r.y0 * r.width + r.x0) * r.bpp, h0 = r.addr + (r.y0 * r.width + r.x1) * r.bpp - 1;
+        p.base = l0 >> 2; p.count = (h0 >> 2) - p.base + 1; p.pass = 2;
+        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+        vkCmdDispatch(c.cmd, (p.count + 63) / 64, rowsN, 1);
+      } else {
         vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
         vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+      }
+      if(r.bpp == 2) {
+        // Bits ocultos: entrada e = media palabra 2e; cuatro entradas por palabra del buffer.
+        if(fillRows && r.width % 4 == 0) {
+          const u32 e0 = (r.addr >> 1) + r.y0 * r.width + r.x0, e1 = (r.addr >> 1) + r.y0 * r.width + r.x1 - 1;
+          p.base = e0 >> 2; p.count = (e1 >> 2) - p.base + 1; p.pass = 3;
+          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(c.cmd, (p.count + 63) / 64, rowsN, 1);
+        } else {
+          p.base = (lo >> 1) >> 2; p.count = ((hi >> 1) >> 2) - p.base + 1; p.pass = 1;
+          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+        }
       }
       if(c.up) {
         // Lo mismo en la copia de alta: el rango [lo, hi] de 1x es [lo*S^2, (hi+1)*S^2) alli.

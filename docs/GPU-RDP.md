@@ -428,6 +428,49 @@ el anfitrion): SM64 200 intercambios GPU-RDP 4,19 s contra prdp 3,72 s; DK64 400
   (2) lotes en vuelo con fence asincrono (dos command buffers, registros/outs por lote y el espejo
   como dueno de las zonas pendientes) para solapar GPU y worker, que es lo que hace parallel-RDP.
 
+### A/B del shader 2026-10-24
+
+Medido como arriba, ms de despacho de GPU (`GPUTIME`, min de 4, intercalado contra el exe previo).
+Hashes identicos en todo (SM64 md5 `4aa1ead30413` / statehash `c06e76bf2ad9a90b`, DK64
+`40c90b2061c1` / `fcca404192c2d07c`). **DK64 686 -> 562 ms (-18 %)**, SM64 603 -> 606 (neutro;
+mediana 643 -> 622).
+
+- **Que se queda**:
+  - `tri.comp`, bucle por primitiva: `sHit[j]` es uniforme en el workgroup, asi que se salta lo
+    primero, y la prueba de caja/`inU` por hilo va dentro de un `if` sin `continue` divergente.
+    -9...11 % en DK64.
+  - `fill.comp` pass 2/3: rellenos por filas (despacho 2D, desplazamientos en vez de divisiones)
+    cuando el paso de fila es multiplo de palabra; si no, la ruta lineal pass 0/1
+    (`KESTREL_GPURDP_FILLLIN=1` la fuerza: mismos hashes). Lee la palabra y solo escribe si
+    cambia. Escribir entera sin leer: SM64 555 pero DK64 714, porque cada escritura cruza el PCIe.
+- **Perfil por cortes** (DK64, shader recortado, no bit a bit, base ~620 ms):
+
+  | corte | ms |
+  |---|---|
+  | `main` de tri vacio | 232 |
+  | tri y rellenos vacios | 15 |
+  | todo sin rellenos | 360 |
+  | sin pixel | 260 |
+  | solo criba | 310 |
+  | solo cobertura | 294 |
+  | sin textura | 570 |
+  | sin LOD | 552 |
+  | sin blender | 519 |
+
+  Los **rellenos** (1423 en 400 intercambios) se llevan ~220-260 ms, cerca del 40 % de la GPU.
+  Los triangulos, ~360 ms, la mayor parte en criba y cobertura, no en textura ni blender.
+- **Probado y descartado**:
+  - Reduccion por subgrupo de los atomicos de `outv`: neutra.
+  - `wr16`/`wr8`/`wrHid` con un `atomicXor` de la diferencia: neutro (566 contra 560).
+  - Gemelos DEVICE_LOCAL solo para registros, LUT y TMEM: 552 contra 566, ruido.
+  - `KESTREL_GPURDP_LOCAL=1` entero, re-medido: despachos 374 ms (contra 573 en el anfitrion),
+    pero la bajada cuesta 811 ms de GPU (una `VkBufferCopy` por fila de cada relleno y por zona) y
+    la pared sube de 3,82 a 4,59 s.
+- **Siguiente con recorrido**: el espejo vive en memoria del anfitrion (HOST_VISIBLE coherente),
+  asi que cada lectura y escritura del shader cruza el PCIe. Para ganar, que el espejo sea dueno
+  persistente en la GPU y solo baje lo realmente escrito, con huellas por bloque en vez de filas
+  enteras y copias fundidas. Otra opcion es hacer solo los rellenos en un espejo local.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego
