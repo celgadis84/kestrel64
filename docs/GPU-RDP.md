@@ -396,6 +396,38 @@ mismo md5 `b338947b` (37 k triangulos texturizados en la GPU, ningun vaciado por
   el: escalado x8 (GPU-RDP llega a x4) y su ventaja de ~10 % en SM64 (sin contabilidad por
   primitiva no espera a la GPU).
 
+### Revision de rendimiento contra parallel-RDP 2026-10-23 (sin cambio de codigo)
+
+Medido en `build-prdp` (RX 570, THREADS=1, JIT, min de 6, intercalado, con otra sesion cargando
+el anfitrion): SM64 200 intercambios GPU-RDP 4,19 s contra prdp 3,72 s; DK64 400 intercambios
+3,32 contra 2,68 s (mediana 3,6 contra 2,95). La brecha es real: +12 % SM64, +20 % DK64.
+
+- **La correccion del motivo de la Fase 5**: el reloj del invitado ya NO depende de la
+  contabilidad de la GPU. Desde el paseo de coste por adelantado (`dpScheduleSpan` ->
+  `rdpCostPass`, de fabrica), el tramo se pinta con `charge=false` y los `TriOut` solo alimentan
+  telemetria. Aplazar los vaciados ya no rompe el determinismo (comprobado: md5 de FBDUMP y
+  statehash identicos en SM64 y DK64).
+- Perfil por hilo (`KESTREL_HOSTPROF_WHO`): el hilo de CPU pasa el 38 % en `dpSpinUntil` con
+  GPU-RDP contra el 9 % con prdp; el RSP, el 58 % en `rspRdpHostDrain` contra el 34 %. El
+  worker de GPU-RDP pinta ~30 % de su tiempo por el CPU (tramos de menos de MINPX: drawTriangle,
+  blendPixel, sampleTexFold); el de prdp solo encola.
+- **Probado y descartado** (parche en el historial de la sesion, no commiteado):
+  - Barrera de CPU solo en SYNC_FULL tambien con GPU-RDP (`dpBarSyncOnly`): la espera se muda de
+    `dpSpinUntil` a `rcpRetire`, pared igual.
+  - Vaciado aplazado hasta SYNC_FULL o worker ocioso, con los tramos pequenos en la GPU mientras
+    haya cola pendiente: SM64 936 -> 225 vaciados, espera de fence 637 -> 449 ms, pero pared
+    -3 % (dentro del ruido) y DK64 igual. Ademas abre un hueco de coherencia (el bit2 de
+    `rcpPend` y `dpWrReset` darian la RDRAM por buena con pixeles aun en la GPU). No compensa.
+  - `KESTREL_GPURDP_MINPX` 1024 / 0: peor (0 sin aplazar = 25 s en SM64, el fence por tramo).
+- **Donde esta el coste de verdad** (`KESTREL_GPURDP_GPUTIME=1`): en DK64 hay pocos vaciados
+  (182 en 400 intercambios) pero 520-700 ms de despacho de GPU para 30 k triangulos con textura,
+  ~20 us de GPU por triangulo. Es el SHADER (`tri.comp`), no la sincronizacion. En SM64 la GPU
+  son ~250 ms y la espera de fence ~0,6 s.
+- Lo siguiente con recorrido, por orden: (1) perfilar `tri.comp` (RGP / marcas por tramo; mirar
+  la criba de 64 cajas por pasada con uniones de caja grandes y el muestreo de textura bit a bit),
+  (2) lotes en vuelo con fence asincrono (dos command buffers, registros/outs por lote y el espejo
+  como dueno de las zonas pendientes) para solapar GPU y worker, que es lo que hace parallel-RDP.
+
 ## Riesgos
 
 - **Rendimiento**: parallel-RDP lleva anos de ajuste. Meta realista: igualarlo en el juego
