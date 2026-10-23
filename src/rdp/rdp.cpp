@@ -2812,15 +2812,20 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
-// Copia hasta `n` bytes de RDRAM a TMEM parando donde paraba el bucle byte a byte: los
-// dos limites (0x1000 en TMEM, tamano de RDRAM) son monotonos y la copia va en orden
-// ascendente, asi que recortar la cuenta una vez copia EXACTAMENTE el mismo prefijo.
+// Copia `n` bytes de RDRAM a TMEM. La direccion de TMEM es de 12 bits y ENVUELVE (el contador
+// de la unidad de carga no se para en el final: parallel-rdp tmem_update enmascara igual), asi
+// que una carga que se pasa de 4 KiB sigue por el principio. El lado de RDRAM si recorta: lo
+// que cae fuera de la RAM instalada no existe.
 template<typename V>
 auto SoftRdp::copyRun(const V& m, u32 src, u32 dst, u32 n) -> void {
-  if(dst >= 0x1000 || src >= m.size()) return;
-  u32 lim = std::min(0x1000u - dst, (u32)(m.size() - src));
-  if(n > lim) n = lim;
-  if(n) std::memcpy(&tmem[dst], &m[src], n);
+  if(src >= m.size()) return;
+  n = std::min(n, (u32)(m.size() - src));
+  dst &= 0xfff;
+  while(n) {
+    const u32 c = std::min(n, 0x1000u - dst);
+    std::memcpy(&tmem[dst], &m[src], c);
+    dst = (dst + c) & 0xfff; src += c; n -= c;
+  }
 }
 
 auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
@@ -2874,7 +2879,7 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
       const u32 n = std::min(8u, nb - done);
       for(u32 b = 0; b < n; b++) {
         const u32 d = (w + b) ^ x, sa = src + done + b;
-        if(d < 0x1000 && sa < m.size()) tmem[d] = m[sa];
+        if(sa < m.size()) tmem[d & 0xfff] = m[sa];
       }
     }
   };
@@ -2895,7 +2900,8 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
         for(u32 tx = s0; tx <= s1; tx++) {         // nibble-granular copy
           u32 src = ti_addr + (ty * ti_width + tx) / 2;   // ti_width in texels
           u32 dstByte = (tl.tmem * 8 + (ty - t0) * rowBytes + (tx - s0) / 2) ^ (((ty - t0) & 1) ? 4u : 0u);
-          if(dstByte < 0x1000 && src < m.size()) {
+          dstByte &= 0xfff;
+          if(src < m.size()) {
             u8 nib = (tx & 1) ? (m[src] & 0xf) : (m[src] >> 4);
             if((tx - s0) & 1) tmem[dstByte] = (tmem[dstByte] & 0xf0) | nib;
             else              tmem[dstByte] = (tmem[dstByte] & 0x0f) | (nib << 4);
@@ -2950,7 +2956,7 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     if(!((ty - t0) & 1)) { copyRun(m, src, dst, rowRun); continue; }
     for(u32 b = 0; b < rowRun; b++) {                 // fila impar: mitades intercambiadas
       const u32 d = (dst + b) ^ 4u;
-      if(d < 0x1000 && src + b < m.size()) tmem[d] = m[src + b];
+      if(src + b < m.size()) tmem[d & 0xfff] = m[src + b];
     }
   }
 }

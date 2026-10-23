@@ -10348,3 +10348,11 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   se quedaba en el último tick (fin de búfer / campo / escritura). El crédito lleva resto exacto,
   así que trocearlo no mueve el fin de cada búfer. sm64 interp/threaded/threaded-jit ALL OK
   (md5 igual), systemtest interp ALL OK.
+
+### 2026-10-23 (7) — cargas de TMEM envuelven
+
+- LOAD_TILE/LOAD_BLOCK (SoftRDP, y por tanto GPU-RDP, que copia su TMEM): la dirección de TMEM
+  es de 12 bits y envuelve en vez de recortarse en 0x1000 (como el contador del HW y
+  parallel-rdp). Las mitades de 32 bpp ya envolvían (`& 0x7fe`). El muestreo fuera de rango
+  (`off >= 0x1000 -> 0`) sigue igual: va a la par con el shader del GPU-RDP, se toca junto.
+- krom `--filter Texture` regress=0, sm64 interp y gpurdp-jit ALL OK.
