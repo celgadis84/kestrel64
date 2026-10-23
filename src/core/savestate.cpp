@@ -104,8 +104,16 @@ struct StateIO {
   }
   auto vecBlob(std::vector<u8>& v) -> void {
     u64 sz = v.size(); pod(sz);
-    if(!writing) { if(sz > ((u64)1 << 30)) { bad = true; return; } v.resize((usize)sz); }
+    // Tope por lo que queda de fichero: un tamano corrupto no reserva gigas antes de fallar.
+    if(!writing) { if(bad || sz > ((u64)1 << 30) || pos + sz > len) { bad = true; return; } v.resize((usize)sz); }
     bytes(v.data(), (usize)sz);
+  }
+  // Memorias de tamano fijo del HW (DMEM, IMEM, PIF RAM, RDRAM oculta): el estado no puede
+  // cambiarles el tamano. El codigo las indexa con mascaras que dan por hecho ese tamano.
+  auto vecFixed(std::vector<u8>& v) -> void {
+    u64 sz = v.size(); pod(sz);
+    if(!writing && sz != v.size()) { bad = true; return; }
+    bytes(v.data(), v.size());
   }
 };
 
@@ -272,9 +280,9 @@ auto visitRam(StateIO& io, Memory& m) -> void {
   // Noveno bit de los chips RDRAM: ahi guarda el RDP los 2 bits bajos de la cobertura de
   // cada pixel y de ahi los lee el filtro de antialias del VI. Es estado de invitado como
   // la propia RDRAM; sin el, el frame siguiente a cargar un estado sale con los bordes mal.
-  io.vecBlob(m.rdramHidden);
-  io.vecBlob(m.dmem);
-  io.vecBlob(m.imem);
+  io.vecFixed(m.rdramHidden);
+  io.vecFixed(m.dmem);
+  io.vecFixed(m.imem);
   // Transaccion del SI en vuelo: es estado de invitado. Sin ella, un estado guardado justo
   // despues de que el juego arranque la lectura del mando se carga sin plazo armado, nadie
   // levanta MI_SI y el hilo que espera en la cola del SI no despierta nunca.
@@ -282,7 +290,7 @@ auto visitRam(StateIO& io, Memory& m) -> void {
   // Plazo del PI en vuelo (v13). Sin esto un estado guardado en mitad de una carga de
   // nivel revive con el motor ocupado para siempre o con la interrupcion perdida.
   io.pod(m.piBusy); io.pod(m.piDoneAt);
-  io.vecBlob(m.pifram);
+  io.vecFixed(m.pifram);
   // Modo de arranque del PIF (v18). Un estado anterior es de un juego que ya habia pasado el
   // arranque (nadie guarda en los primeros 5 s), asi que se carga en modo normal: si no, el
   // plazo de 0x08 ya vencido congelaria la consola nada mas cargar.

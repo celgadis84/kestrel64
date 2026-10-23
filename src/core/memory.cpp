@@ -1560,7 +1560,11 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
       // If both CLEAR_HALT (bit0) and SET_HALT (bit1) are written together the SET
       // wins: HALT stays set (already applied above) and the RSP does not launch.
       // A lone SET_HALT while the core is mid-task stops it (external halt).
-      if((v & (1 << 1)) && !(v & (1 << 0))) { rsp.running = false; rsp.brake = false; }
+      // Threaded: rsp.running es del worker; la CPU solo puede pedirle que pare (Rsp::extHalt).
+      if((v & (1 << 1)) && !(v & (1 << 0))) {
+        if(rcpMode == RcpMode::Threaded) { if(!(tlIsRspThread || lockRspExec || tlDpLogApply)) rsp.extHalt.store(true, std::memory_order_release); }
+        else { rsp.running = false; rsp.brake = false; }
+      }
       break;
     }
     case 0x1c: rcp.sp_semaphore.store(0, std::memory_order_release); break;   // escribir lo suelta

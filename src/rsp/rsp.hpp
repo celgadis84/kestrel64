@@ -136,6 +136,11 @@ struct Rsp {
   // Sin esto, stopRcpThreads() se queda en el join para siempre.
   std::atomic<bool> hostStop{false};
 
+  // SET_HALT de la CPU con la tarea en marcha (Threaded). El HW para el nucleo sin BREAK; el
+  // worker no mira sp_status en cada instruccion, asi que la CPU lo pide aqui y step() lo
+  // atiende en el borde de tanda. start() lo limpia: una peticion vieja no para la tarea nueva.
+  std::atomic<bool> extHalt{false};
+
   // Ventana viva de la tanda en curso de step(). `cyclesRun` se publica UNA vez por tanda
   // (8K instrucciones), y eso vale de sobra para telemetria y para el regulador -- pero no
   // vale cuando el que pregunta es el PROPIO RSP. Al escribir DPC_END, el microcodigo sella

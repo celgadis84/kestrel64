@@ -1472,7 +1472,11 @@ Cierre pendiente: que la eleccion diario/cita no mire nada en hora de anfitrion 
 paginas y que el consumidor del FIFO consulte el diario, que es lo que ya hace `dmaSettle` en
 el lado de la CPU. Mientras tanto las puertas siguen fijando `SPLEAD=0`, que es reproducible.
 
-Hueco secundario visto al leer, sin medir aun: `CPU::write8/16/32/64` (store **sin cache**) hace
+~~Hueco secundario~~: `CPU::write8/16/32/64` (store **sin cache**) hace
 `ramUncached(pe,sz)` + `mem->writeN(pe,x)` y **no llama a `dmaSettle`**, al contrario que
 `uncachedRead`, `dcFlush`/`dcFill`, `miRepeatStore` y los DMA de PI/SI. Un store sin cache sobre
 una pagina con un DMA del diario aun sin aplicar se lo puede comer la aplicacion posterior.
+**CERRADO 2026-10-23**: los stores sin cache (interprete `write8..64` y ayudantes del JIT)
+llaman `ramSettle` ANTES de escribir. No va dentro de `ramUncached` porque la lectura sin
+cache lo llama tras cobrar la parada: vaciar el diario ahi con el reloj ya avanzado multiplico
+x25 la pared de SM64 con GPU-RDP (barDP 87 %) -- medido y descartado.

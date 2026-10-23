@@ -10298,3 +10298,13 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Ventana del depurador Win32/D3D11/ImGui (`--debugger`, menú Depurar). Ver `docs/DEBUGGER.md`.
 - `System::CoreMutex` justo: las órdenes de telemetría ya no esperan segundos con la emulación libre.
 - Verificado: systemtest interp/jit PASS, `dbg_smoke` PASS, `debugger_smoke` PASS.
+
+### 2026-10-23 (2) — arreglos de la revisión de código
+
+- RSP Threaded: `SET_HALT` suelto de la CPU ya no se pierde (`Rsp::extHalt`, se atiende en el borde de tanda).
+- Store sin caché: `ramSettle` antes de escribir (GAPS, hueco del diario de DMA cerrado).
+- Savestate: tamaños de bloque validados (`vecFixed` para rdramHidden/dmem/imem/pifram, tope 1 GiB).
+- Telemetría: `mem.read coherent` bajo `CoreMutex`; `cpu.step` con tope 64 Mi (`capped`).
+- Presentador: recreación de swapchain destruye la vieja antes (sin NATIVE_WINDOW_IN_USE), `vkDeviceWaitIdle` bajo el candado de cola; GPU-RDP descarta el lote si el fence falla (dispositivo perdido).
+- Nuevo `scripts/swapchain_smoke.py` (redimensiona/minimiza la ventana por Win32): PASS en build/ y build-prdp/.
+- Verificado: systemtest interp/threaded-jit ALL OK; sm64 threaded-jit/interp/gpurdp-jit/prdp-jit/rewind-rtt ALL OK.

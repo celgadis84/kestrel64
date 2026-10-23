@@ -334,9 +334,14 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
       vkEndCommandBuffer(c.cmd);
       VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
       si.commandBufferCount = 1; si.pCommandBuffers = &c.cmd;
-      if(vkQueueSubmit(c.queue, 1, &si, c.fence) != VK_SUCCESS) return false;
-      vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
+      // Misma cola que el lote normal: mismo candado (puede ser la de parallel-rdp).
+      vrdp::queueLock();
+      const VkResult sr = vkQueueSubmit(c.queue, 1, &si, c.fence);
+      vrdp::queueUnlock();
+      if(sr != VK_SUCCESS) return false;
+      const VkResult wr = vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
       vkResetFences(c.dev, 1, &c.fence);
+      if(wr != VK_SUCCESS) return false;
     }
   }
 
@@ -971,9 +976,18 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   // KESTREL_GPURDP_SPIN=1: sondeo activo del fence en vez de dormir en el driver (A/B de la
   // latencia de despertar; el hilo que espera no tiene otra cosa que hacer).
   static const bool spin = [] { const char* e = std::getenv("KESTREL_GPURDP_SPIN"); return e && e[0] && e[0] != '0'; }();
-  if(spin) { while(vkGetFenceStatus(c.dev, c.fence) == VK_NOT_READY) {} }
-  else vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
+  VkResult wr;
+  if(spin) { while((wr = vkGetFenceStatus(c.dev, c.fence)) == VK_NOT_READY) {} }
+  else wr = vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
   vkResetFences(c.dev, 1, &c.fence);
+  // Dispositivo perdido (TDR del driver, GPU colgada): el espejo no tiene el trabajo hecho y
+  // volcarlo a RDRAM pisaria el framebuffer del invitado con basura. Se tira el lote.
+  if(wr != VK_SUCCESS) {
+    static bool said = false;
+    if(!said) { said = true; std::fprintf(stderr, "[gpurdp] espera del fence fallo (%d): lote descartado\n", (int)wr); }
+    if(outs) outs->assign(c.tris.size(), TriOut{});
+    c.q.clear(); c.tris.clear(); c.ops.clear(); c.tslots.clear(); return;
+  }
   const auto t3 = clk::now();
   if(c.qpool) {
     u64 ts[4] = {};

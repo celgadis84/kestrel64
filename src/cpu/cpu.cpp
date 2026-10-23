@@ -657,15 +657,15 @@ auto CPU::read8 (u64 v) -> u8  { u64 p=xlat(v,AccRead); if(memAbort||!mem) retur
 auto CPU::read16(u64 v) -> u16 { if(alignBad(v,2,AccRead)) return 0; u64 p=xlat(v,AccRead); if(memAbort||!mem) return 0; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccRead)) return 0; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()) return (u16)dcRead(pe,2); return uncachedRead(pe, 2, [&]{ return mem->read16(pe); }); }
 auto CPU::read32(u64 v) -> u32 { if(alignBad(v,4,AccRead)) return 0; u64 p=xlat(v,AccRead); if(memAbort||!mem) return 0; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccRead)) return 0; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) return (u32)dcRead(pe,4); return uncachedRead(pe, 4, [&]{ return mem->read32(pe); }); }
 auto CPU::read64(u64 v) -> u64 { if(alignBad(v,8,AccRead)) return 0; u64 p=xlat(v,AccRead); if(memAbort||!mem) return 0; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccRead)) return 0; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) return dcRead(pe,8); return uncachedRead(pe, 8, [&]{ return mem->read64(pe); }); }
-auto CPU::write8 (u64 v, u8  x) -> void { u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } ramUncached(pe,1); mem->write8 (pe, x); }
-auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } ramUncached(pe,2); mem->write16(pe, x); }
+auto CPU::write8 (u64 v, u8  x) -> void { u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)reXor(p,1); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,1); return; } ramSettle(pe,1); ramUncached(pe,1); mem->write8 (pe, x); }
+auto CPU::write16(u64 v, u16 x) -> void { if(alignBad(v,2,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)reXor(p,2); if(cacheable(v)&&pe<mem->rdram.size()){ dcWrite(pe,x,2); return; } ramSettle(pe,2); ramUncached(pe,2); mem->write16(pe, x); }
 auto CPU::seenWatch(u64 p, u32 size) -> void {
   if(!g_seenAddr || !mem || !(p <= g_seenAddr && p + size > g_seenAddr)) return;
   u32 cur = mem->read32(g_seenAddr);
   if(cur != g_seenPrev) { int i=g_seenIdx%kSeenRing; g_seenRet[i]=retired; g_seenOld[i]=g_seenPrev; g_seenNew[i]=cur; g_seenIdx++; g_seenPrev=cur; }
 }
-auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,4); else { ramUncached(pe,4); mem->write32(pe, x); } seenWatch(p&0x1fffffff,4); }
-auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else { ramUncached(pe,8); mem->write64(pe, x); } seenWatch(p&0x1fffffff,8); }
+auto CPU::write32(u64 v, u32 x) -> void { if(alignBad(v,4,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)reXor(p,4); if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,4); else { ramSettle(pe,4); ramUncached(pe,4); mem->write32(pe, x); } seenWatch(p&0x1fffffff,4); }
+auto CPU::write64(u64 v, u64 x) -> void { if(alignBad(v,8,AccWrite)) return; u64 p=xlat(v,AccWrite); if(memAbort||!mem) return; if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) return; u32 pe=(u32)p; if(cacheable(v)&&pe<mem->rdram.size()) dcWrite(pe,x,8); else { ramSettle(pe,8); ramUncached(pe,8); mem->write64(pe, x); } seenWatch(p&0x1fffffff,8); }
 
 auto CPU::connect(Memory* m) -> void {
   mem = m;
@@ -713,6 +713,9 @@ auto CPU::ramUncached(u32 pe, u32 size) -> void {
   if(g_wrBarrier && pe >= 0x0400'0000u && pe < 0x0404'0000u) mem->cpuRamWrBarrier(mem->cartNow());
 }
 
+// Antes de un acceso no cacheado (lectura o store): un DMA del diario sobre el tramo con instante
+// <= el nuestro cae ANTES. En un store, aplicado despues se comeria la escritura. Va antes de
+// cobrar la parada (ver uncachedRead), por eso no lo hace ramUncached.
 auto CPU::ramSettle(u32 pe, u32 size) -> void {
   if(mem && pe < (u32)mem->rdram.size()) mem->dmaSettle(pe, (u64)pe + size);
 }
@@ -2675,7 +2678,7 @@ auto CPU::jitMem(u32 op) -> u8 {
   if(sz == 1 || sz == 2) { if(storeCart(pm, rt, sz)) return 1; }
   if(sz != 4)            { if(mem->wordStoreQuirk(pm, rt, sz)) return 1; }
   if(inRdram) { dcWrite(pe, rt, sz); return 1; }
-  ramUncached(pe, sz);
+  ramSettle(pe, sz); ramUncached(pe, sz);
   switch(sz) {
     case 1: mem->write8 (pe, (u8) rt); break;
     case 2: mem->write16(pe, (u16)rt); break;
@@ -2753,7 +2756,7 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
     if constexpr(sz == 1 || sz == 2) { if(storeCart(pm, rtVal, sz)) return 1; }
     if constexpr(sz != 4)            { if(mem->wordStoreQuirk(pm, rtVal, sz)) return 1; }
     if(inRdram) { dcWrite(pe, rtVal, sz); return 1; }
-    ramUncached(pe, sz);
+    ramSettle(pe, sz); ramUncached(pe, sz);
     const u32 ep0 = mem->armEpoch;
     if      constexpr(sz == 1) mem->write8 (pe, (u8) rtVal);
     else if constexpr(sz == 2) mem->write16(pe, (u16)rtVal);

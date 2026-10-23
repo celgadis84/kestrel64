@@ -203,20 +203,6 @@ auto createSwapchain(Vk& v, bool quiet = false) -> bool {
 // estirando o recortando una imagen del tamano equivocado. Hay que rehacerla cuando el
 // tamano cambia y cuando el driver dice OUT_OF_DATE.
 //
-// vkDeviceWaitIdle primero: las imagenes viejas pueden seguir en vuelo en la cola.
-auto recreateSwapchain(Vk& v) -> bool {
-  vkDeviceWaitIdle(v.dev);
-  VkSwapchainKHR old = v.swap;
-  v.swap = VK_NULL_HANDLE;
-  v.swapImages.clear();
-  bool ok = createSwapchain(v, /*quiet=*/true);
-  if(old != VK_NULL_HANDLE) vkDestroySwapchainKHR(v.dev, old, nullptr);
-  // Una linea por recreacion, no por frame: solo ocurre al redimensionar o cuando el driver
-  // marca la cadena obsoleta, y es justo lo que hace falta ver si la ventana sale mal.
-  std::fprintf(stderr, "[video] swapchain recreado %ux%u ok=%d\n", v.extent.width, v.extent.height, (int)ok);
-  return ok;
-}
-
 // La cola grafica puede ser la de parallel-rdp (ver initVulkan). vkQueueSubmit y
 // vkQueuePresentKHR sobre una misma cola no son seguros entre hilos, y Granite submite desde
 // el hilo del RDP mientras esto corre en el de la ventana: sin el candado el driver pierde el
@@ -226,6 +212,30 @@ struct QueueGuard {
   explicit QueueGuard(bool shared) : on(shared) { if(on) vrdp::queueLock(); }
   ~QueueGuard() { if(on) vrdp::queueUnlock(); }
 };
+
+// vkDeviceWaitIdle primero: las imagenes viejas pueden seguir en vuelo en la cola. Pide
+// sincronizacion externa de TODAS las colas del dispositivo, asi que con el dispositivo de
+// parallel-rdp va bajo el mismo candado que sus envios.
+//
+// La cadena vieja se destruye ANTES de crear la nueva: se crea sin `oldSwapchain`, y una
+// superficie con otra cadena viva da VK_ERROR_NATIVE_WINDOW_IN_USE_KHR en muchos drivers. Si
+// la creacion falla `v.swap` queda nulo y presentFrame lo reintenta en vez de adquirir de el.
+auto recreateSwapchain(Vk& v) -> bool {
+  { QueueGuard qg(v.shared); vkDeviceWaitIdle(v.dev); }
+  if(v.swap != VK_NULL_HANDLE) vkDestroySwapchainKHR(v.dev, v.swap, nullptr);
+  v.swap = VK_NULL_HANDLE;
+  v.swapImages.clear();
+  bool ok = createSwapchain(v, /*quiet=*/true);
+  if(!ok) v.swap = VK_NULL_HANDLE;
+  // Una linea por recreacion, no por frame: solo ocurre al redimensionar o cuando el driver
+  // marca la cadena obsoleta, y es justo lo que hace falta ver si la ventana sale mal. Los
+  // reintentos fallidos seguidos no se repiten.
+  static bool lastOk = true;
+  if(ok || lastOk)
+    std::fprintf(stderr, "[video] swapchain recreado %ux%u ok=%d\n", v.extent.width, v.extent.height, (int)ok);
+  lastOk = ok;
+  return ok;
+}
 
 // La imagen fuente es del tamano EXACTO del cuadro del invitado, y se rehace cuando ese
 // tamano cambia. Antes era fija de 320x240 y el cuadro se recortaba contra ella: con el
@@ -505,7 +515,7 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
     int fbw = 0, fbh = 0;
     if(v.win) glfwGetFramebufferSize(v.win, &fbw, &fbh);
     if(fbw == 0 || fbh == 0) return;                       // minimizada: nada que presentar
-    if((u32)fbw != v.extent.width || (u32)fbh != v.extent.height)
+    if(v.swap == VK_NULL_HANDLE || (u32)fbw != v.extent.width || (u32)fbh != v.extent.height)
       if(!recreateSwapchain(v)) return;
   }
 
@@ -618,7 +628,7 @@ auto destroyVulkan(Vk& v) -> void {
     glfwTerminate();
     return;
   }
-  if(v.dev) vkDeviceWaitIdle(v.dev);
+  if(v.dev) { QueueGuard qg(v.shared); vkDeviceWaitIdle(v.dev); }
   if(v.fence) vkDestroyFence(v.dev, v.fence, nullptr);
   if(v.semRender) vkDestroySemaphore(v.dev, v.semRender, nullptr);
   if(v.semAcquire) vkDestroySemaphore(v.dev, v.semAcquire, nullptr);

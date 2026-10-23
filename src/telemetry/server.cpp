@@ -289,6 +289,8 @@ auto Server::cmdMemRead(const json::Value& args, json::Value& data, std::vector<
   // structs the CPU wrote but has not flushed are visible (dirty line shadows RAM).
   bool coherent = args.has("coherent") && args.get("coherent").asU32() != 0;
   if(coherent && r->name == "RDRAM") {
+    // La D-cache es del hilo de CPU: leerla mientras rellena/expulsa lineas da bytes mezclados.
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     blob.resize(len);
     for(u32 i = 0; i < len; i++) blob[i] = system.cpu.peekPhysCoherent(addr + i);
   } else {
@@ -433,6 +435,10 @@ auto Server::cmdCpuRegs(const json::Value&, json::Value& data) -> void {
 auto Server::cmdCpuStep(const json::Value& args, json::Value& data) -> void {
   u64 n = args.has("count") ? args.get("count").asU64() : 1;
   if(n == 0) n = 1;
+  // Con el candado puesto el emulador y el resto de clientes esperan: un count enorme por
+  // error congelaba todo minutos. Tope ~1 s de interprete; para mas, cpu.run_until.
+  constexpr u64 kMaxStep = 64ull << 20;
+  if(n > kMaxStep) { n = kMaxStep; data.set("capped", true); }
   std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   u64 taken = system.stepCpu(n);
   data.set("stepped", taken);

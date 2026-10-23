@@ -2160,6 +2160,7 @@ auto Rsp::start() -> void {
   // tienda de la CPU, escritura por MCP) sin poner un gancho en ningun camino caliente.
   jitSelectImage(imp);
   running = true; brake = true;
+  extHalt.store(false, std::memory_order_relaxed);
   r[0] = 0;
   pc = mem->rcp.sp_pc & 0xfff;
   halt = false; broke = false;
@@ -2376,6 +2377,8 @@ auto Rsp::step(u64 maxInsns) -> void {
     // El saldo llega a 0 exacto: chunk nunca supera budget. Re-armar (avisando) mantiene
     // viva la tarea; solo devuelve 0 si el usuario pidio un tope duro (KESTREL_RSPBUDGET).
     if(budget == 0 && !halt) budget = watchdog();
+    // SET_HALT externo (CPU): parar sin BREAK, igual que el SET_HALT del propio microcodigo.
+    if(!halt && extHalt.load(std::memory_order_acquire)) halt = true;
     if(pubMid) {
       // En Threaded esta llamada es la tarea ENTERA en el worker, y el regulador del hilo
       // CPU (Memory::rcpPace) necesita ver el avance mientras corre, no solo al final.
