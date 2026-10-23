@@ -2918,6 +2918,9 @@ auto SoftRdp::loadTile(Memory& mem, u32 t, bool block, u64 cmd) -> void {
     return;
   }
   u32 s0 = sl >> 2, t0 = tlo >> 2, s1 = sh >> 2, t1 = th >> 2;
+  // SH < SL (o TH < TL) viene de un comando malformado: (s1-s0+1) da la vuelta en u32 y
+  // los bucles de fila recorrian ~4G bytes colgando el hilo del RDP. No hay nada que cargar.
+  if(s1 < s0 || t1 < t0) return;
   u32 rowBytes = tl.line * 8;
   accountLoad(mem, t1 - t0 + 1, u64(s1 - s0 + 1) * bpt);
   // Los texeles de una fila son contiguos en el texture image (paso `bpt`) y tambien en

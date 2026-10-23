@@ -2050,20 +2050,20 @@ auto CPU::execute(u32 op) -> void {
     // Privileged: kernel mode always, else requires Status.CU0 (Coprocessor Unusable, CE=0).
     if(cpuMode() != 0 && !((u32)cop0[C0_Status] & 0x1000'0000u)) { takeException(11); break; }
     { u64 a=gpr[RS]+SIMM; translate(a,AccRead); if(memAbort) break; cacheOp((op >> 16) & 0x1f, a); } break;
-  case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
+  case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; if(alignBad(va,4,AccRead)) break; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
               if(__builtin_expect(watchArmed,0) && watchTrip(pa,AccRead)) break;
               u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : uncachedRead(pe, 4, [&]{ return mem->read32(pe); });
               set(RT, sext32(val)); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x31: /*LWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet32(RT, read32(gpr[RS]+SIMM)); break;
-  case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
+  case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; if(alignBad(va,8,AccRead)) break; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
               if(__builtin_expect(watchArmed,0) && watchTrip(pa,AccRead)) break;
               u32 pe=(u32)pa; u64 val = (cacheable(va)&&pe<mem->rdram.size()) ? dcRead(pe,8) : uncachedRead(pe, 8, [&]{ return mem->read64(pe); });
               set(RT, val); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x35: /*LDC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet64(RT, read64(gpr[RS]+SIMM)); break;
   case 0x37: /*LD*/  set(RT, read64(gpr[RS]+SIMM)); break;
-  case 0x38: /*SC*/  if(llbit) write32(gpr[RS]+SIMM, (u32)gpr[RT]); set(RT, llbit?1:0); break;
+  case 0x38: /*SC*/  if(alignBad(gpr[RS]+SIMM,4,AccWrite)) break; if(llbit) write32(gpr[RS]+SIMM, (u32)gpr[RT]); set(RT, llbit?1:0); break;
   case 0x39: /*SWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} write32(gpr[RS]+SIMM, fprGet32(RT)); break;
-  case 0x3c: /*SCD*/ if(llbit) write64(gpr[RS]+SIMM, gpr[RT]); set(RT, llbit?1:0); break;
+  case 0x3c: /*SCD*/ if(alignBad(gpr[RS]+SIMM,8,AccWrite)) break; if(llbit) write64(gpr[RS]+SIMM, gpr[RT]); set(RT, llbit?1:0); break;
   case 0x3d: /*SDC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} write64(gpr[RS]+SIMM, fprGet64(RT)); break;
   case 0x3f: /*SD*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,8,AccWrite)) break; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) break;
@@ -2920,6 +2920,10 @@ auto CPU::writeCop0(u32 reg, u64 v) -> void {
       if((ov & 0x2) && !(nv & 0x2)) exlClrRet = retired;
       cop0[reg] = sext32(nv); bumpXlat(); return; }  // bit19 not writable (modo/RE/bit64 cambian la traducción → invalida fetch fast-path)
     case C0_Compare: cop0[reg] = sext32((u32)v); timerIntr = false; return;  // writing acks timer
+    // Cause: por MTC0 solo se escriben IP1:0 (bits 9:8, interrupciones software). ExcCode,
+    // BD, CE e IP7:2 los pone el hardware; dejarlos escribibles clavaba IP3-6 para siempre
+    // (step() solo refresca IP2/IP7) y daba una tormenta de interrupciones fantasma.
+    case C0_Cause: cop0[reg] = sext32(((u32)cop0[reg] & ~0x300u) | ((u32)v & 0x300u)); return;
     case 7: case 21: case 22: case 23: case 24: case 25: case 31: return;    // no storage; latch only
     default: cop0[reg] = v; return;
   }

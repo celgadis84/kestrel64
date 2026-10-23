@@ -16,6 +16,7 @@
 #endif
 
 #include <cstdio>
+#include <cstring>
 
 namespace kestrel::net {
 
@@ -102,7 +103,7 @@ auto TcpConn::recvFrame(std::string& json, std::vector<u8>& blob) -> bool {
   std::vector<u8> payload(total);
   if(!recvAll(payload.data(), total)) return false;
   u32 jsonLen = rd32le(payload.data());
-  if(4u + jsonLen > total) return false;
+  if(jsonLen > total - 4) return false;   // total >= 4: sin desborde de u32 (4+0xFFFFFFFC == 0)
   json.assign((const char*)payload.data() + 4, jsonLen);
   blob.assign(payload.begin() + 4 + jsonLen, payload.end());
   return true;

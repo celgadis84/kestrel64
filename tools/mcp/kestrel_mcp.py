@@ -66,8 +66,12 @@ def _recv_exact(n: int) -> bytes:
     return bytes(buf)
 
 
-def query(cmd: str, blob: bytes = b"", **args):
-    """Send one request, return (data_dict, blob_bytes)."""
+def query(cmd: str, blob: bytes = b"", _wait_s: float = 30.0, **args):
+    """Send one request, return (data_dict, blob_bytes).
+
+    `_wait_s` = socket read timeout for this call. Blocking commands (run_until,
+    frame_advance, state.*) pass their own server-side timeout plus margin, so a
+    legitimately long wait is not torn down at a fixed 30 s."""
     global _id
     with _lock:
         _id += 1
@@ -79,6 +83,7 @@ def query(cmd: str, blob: bytes = b"", **args):
         frame = struct.pack("<I", len(payload)) + payload
         try:
             _connect()
+            _sock.settimeout(max(30.0, float(_wait_s)))
             _sock.sendall(frame)
             (total,) = struct.unpack("<I", _recv_exact(4))
             payload = _recv_exact(total)
@@ -198,7 +203,8 @@ def frame_advance(fields: int = 1, timeout_ms: int = 5000) -> dict:
     the game reads the controller, so one advance = one movie sample and a button press
     lands on the exact frame. Blocks until done. Returns
     {fields, timedOut, paused, halted, viFields, viFlips, pc}."""
-    data, _ = query("frame.advance", fields=int(fields), timeout_ms=int(timeout_ms))
+    data, _ = query("frame.advance", _wait_s=timeout_ms / 1000 + 10,
+                    fields=int(fields), timeout_ms=int(timeout_ms))
     return data
 
 
@@ -247,8 +253,10 @@ def rdp_stats(action: str = "read") -> dict:
     return data
 
 
-def controller_set(buttons="", stick_x: int = 0, stick_y: int = 0, polls: int = 6) -> dict:
-    """Press the player-1 controller from here, overriding the host keyboard/gamepad.
+def controller_set(buttons="", stick_x: int = 0, stick_y: int = 0, polls: int = 6,
+                   pad: int = 1) -> dict:
+    """Press controller `pad` (1-4, default player 1) from here, overriding the host
+    keyboard/gamepad.
 
     `buttons` is either a 16-bit word (A=0x8000 ... C-Right=0x0001, START=0x1000) or a
     name list: "start", "a,b", "z+cup". Names: a b z start dup ddown dleft dright l r
@@ -263,15 +271,16 @@ def controller_set(buttons="", stick_x: int = 0, stick_y: int = 0, polls: int = 
 
     Needed because the window loop republishes the pad every frame: writing the button
     word with write_memory is overwritten before the game ever polls it."""
-    data, _ = query("pad.set", buttons=buttons, stick_x=int(stick_x),
+    data, _ = query("pad.set", pad=int(pad), buttons=buttons, stick_x=int(stick_x),
                     stick_y=int(stick_y), polls=int(polls))
     return data
 
 
-def controller_state() -> dict:
-    """Effective player-1 pad state: whether the injected pad is driving it, how many
-    joybus polls it has left, and the button word / stick the game will read next."""
-    data, _ = query("pad.get")
+def controller_state(pad: int = 1) -> dict:
+    """Effective state of controller `pad` (1-4): whether the injected pad is driving
+    it, how many joybus polls it has left, and the button word / stick the game will
+    read next."""
+    data, _ = query("pad.get", pad=int(pad))
     return data
 
 
@@ -355,7 +364,8 @@ def run_until(addr, timeout_ms: int = 5000) -> dict:
     """Resume and block until PC reaches `addr` (or CPU halts / timeout). Uses a
     temporary breakpoint, leaves the core paused at the stop point. Returns
     {hit, timedOut, pc, halted, disasm}."""
-    data, _ = query("cpu.run_until", addr=_addr(addr), timeout_ms=int(timeout_ms))
+    data, _ = query("cpu.run_until", _wait_s=timeout_ms / 1000 + 10,
+                    addr=_addr(addr), timeout_ms=int(timeout_ms))
     return data
 
 
