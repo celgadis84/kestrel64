@@ -932,6 +932,19 @@ al RCP. Bloqueado por oraculo: hace falta una ROM de medida tipo Thar0 (PIPEBUSY
 alrededor de N triangulos de tamanos y modos distintos) corrida en consola real.
 Ver `docs/baselines/pd-opt.md`.
 
+- **Oraculo en camino (2026-10-24)**: la sesion SDK ha hecho la ROM de barrido
+  `k64sdk-compat/build-tritime/demos/45_tritiming/45_tritiming.z64`. Va solo CPU->RDP, sin RSP,
+  escribe por ISViewer `[45] cfg,size,N,clk,...` y tarda ~80 s. Los numeros de consola real
+  llegaran mas adelante. Lo que ya ensena en kestrel64 (prioridad baja hasta tener la consola):
+  1. No hay coste por primitiva ni por palabra de comando: un triangulo de altura cero sale
+     a 0,1 clk. Es este mismo hueco.
+  2. TEX+Z, 2C+Z y 32bpp+Z dan los mismos ciclos que 1C+Z: el modelo no distingue ciclo,
+     textura ni tamano de pixel cuando hay Z.
+  3. pipe% y buf% salen al ~99 % en todos los casos, asi que los contadores PIPEBUSY/BUFBUSY no
+     discriminan.
+  4. Un triangulo de una linea que empieza con ancho 0 no pinta nada. Sin verificar en consola;
+     puede ser correcto, segun como cuente el caminante de aristas la primera subscanline.
+
 ### Fidelidad de temporizacion — las DMA no cuestan tiempo (parcial: SI hecho 2026-09-08)
 
 **SI: HECHO.** `Memory::siDma()` ya no termina en la misma instruccion que la arranco. Ahora
