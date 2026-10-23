@@ -166,6 +166,9 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   `cycles/stalls/pairs` por ranura, `metric=cycles|stalls`, y `timing` en `rsp_registers`),
   cpu/rsp/rcp registers, disasm, breakpoints, `run_until`, simbolos del invitado (`--symbols
   <map GNU ld>` / `sym_load` / `sym_lookup`; `profile_cpu` y `cpu_disasm` dan `funcion+off`).
+- Depurador (2026-10-23): grabadora de cuadro RDP/RSP, timeline, TMEM, TLB, ev.log, mem.watch,
+  usb.log (SC64), code/rsp/rom.load en caliente, y ventana ImGui (`--debugger`, menu Depurar)
+  que habla con el mismo servidor. `docs/DEBUGGER.md`.
 - **When a capability is missing, ADD it** to the server — don't fall back to guessing.
 
 ### Ejecutar el emulador a mano (reglas de depuracion)

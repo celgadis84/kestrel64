@@ -448,6 +448,152 @@ def state_load(slot: int = 0) -> dict:
     return data
 
 
+# --- Capas del depurador (docs/DEBUGGER.md) ------------------------------------------
+# dbg_enable arranca la grabacion por cuadro (comandos RDP, tareas RSP, trabajos RDP);
+# frame=0 es el ultimo cuadro CERRADO (vuelta de VI_ORIGIN), frame=1 el que esta en curso.
+
+def dbg_enable(on: bool = True) -> dict:
+    """Turn the per-frame debug recorder on/off (RDP command list, RSP tasks, RDP jobs,
+    timeline). Costs a little per RDP command while on; zero when off. Data shows up from
+    the next closed frame (VI_ORIGIN change)."""
+    data, _ = query("dbg.enable", on=int(bool(on)))
+    return data
+
+
+def dbg_status() -> dict:
+    """Recorder state: on/freeze, frames closed, and counts of the last/current frame."""
+    data, _ = query("dbg.status")
+    return data
+
+
+def dbg_freeze(on: bool = True) -> dict:
+    """Freeze the last recorded frame (stop rotating) so it can be inspected while the
+    game keeps running."""
+    data, _ = query("dbg.freeze", on=int(bool(on)))
+    return data
+
+
+def dbg_rdp_frame(frame: int = 0, start: int = 0, count: int = 200, decode: bool = True,
+                  prims: bool = False) -> dict:
+    """RDP command list of a frame: per command index, RDRAM/DMEM address, opcode, name,
+    raw 64-bit words and decoded text (combiner, other modes, triangle edges, rects...).
+    prims=True keeps only primitives (triangles/rects) for step-by-primitive inspection.
+    Page with start/count."""
+    data, _ = query("dbg.rdp.frame", frame=int(frame), start=int(start), count=int(count),
+                    decode=int(bool(decode)), prims=int(bool(prims)))
+    return data
+
+
+def dbg_rsp_tasks(frame: int = 0) -> dict:
+    """RSP tasks (OSTask) started in a frame: type, flags, ucode/ucodeData/dataPtr, start
+    and end guest time, RSP cycles."""
+    data, _ = query("dbg.rsp.tasks", frame=int(frame))
+    return data
+
+
+def dbg_timeline(frame: int = 0) -> dict:
+    """CPU/RSP/RDP lanes of a frame in guest time relative to frame start: rsp=[t0,t1,type,
+    cycles], rdp=[t0,t1,commands,fifoBytes]. Gaps = that unit idle."""
+    data, _ = query("dbg.timeline", frame=int(frame))
+    return data
+
+
+def dbg_fb(path: str = "kestrel_dbg_fb.png", kind: str = "color", addr=None, width: int = 0,
+           height: int = 0, siz: int = 0) -> dict:
+    """Render any RDRAM image as PNG. kind=color|depth|coverage. Defaults = what the RDP has
+    set now (SET_COLOR_IMAGE / SET_Z_IMAGE, scissor height). Coverage = 3-bit per pixel
+    (16bpp: pixel bit0 + hidden RDRAM bits; 32bpp: alpha[7:5]). Depth = encoded 16-bit z."""
+    a = {"kind": kind}
+    if addr is not None: a["addr"] = _addr(addr)
+    if width: a["width"] = int(width)
+    if height: a["height"] = int(height)
+    if siz: a["siz"] = int(siz)
+    data, blob = query("dbg.fb", **a)
+    _write_png(path, data["width"], data["height"], blob)
+    data["path"] = path
+    return data
+
+
+def dbg_tmem(path: str = "") -> dict:
+    """SoftRDP TMEM (4 KiB) + the 8 tile descriptors. path!='' saves the raw 4 KiB. Under
+    parallel-RDP TMEM lives on the GPU and this copy can be stale."""
+    data, blob = query("dbg.tmem")
+    if path:
+        with open(path, "wb") as f:
+            f.write(blob)
+        data["path"] = path
+    else:
+        data["hexHead"] = blob[:64].hex()
+    return data
+
+
+def cpu_tlb() -> dict:
+    """The 32 VR4300 TLB entries decoded (vpn2, asid, page size, pfn/valid/dirty per half)."""
+    data, _ = query("cpu.tlb")
+    return data
+
+
+def event_log(n: int = 100, on=None) -> dict:
+    """Last n events of the RCP event ring [clock, tag, a, b] (DMA, interrupts, RSP/RDP
+    start/end...). on=True/False arms/disarms it."""
+    a = {"n": int(n)}
+    if on is not None: a["on"] = int(bool(on))
+    data, _ = query("ev.log", **a)
+    return data
+
+
+def mem_watch(addr=None, length: int = 4, read: bool = False, write: bool = True,
+              clear: bool = False) -> dict:
+    """Host watchpoint on PHYSICAL addresses [addr, addr+length): pauses the CPU right after
+    the load/store that touches it (independent of guest WatchLo). Returns hit pc/addr once
+    fired. Call with no addr for status; clear=True removes it."""
+    a = {}
+    if clear: a["clear"] = 1
+    elif addr is not None:
+        a.update(addr=_addr(addr), len=int(length), r=int(bool(read)), w=int(bool(write)))
+    data, _ = query("mem.watch", **a)
+    return data
+
+
+def code_load(path: str, addr=None, pc=None) -> dict:
+    """Hot-load code: an ELF32 BE (PT_LOAD segments to their KSEG0/KSEG1 addresses, .bss
+    zeroed) or a raw binary at `addr`. Written cache-coherent, dynarec flushed. pc=1 jumps
+    to the ELF entry (or addr for raw), pc=<address> jumps there; omit to keep running."""
+    with open(path, "rb") as f:
+        blob = f.read()
+    a = {}
+    if addr is not None: a["addr"] = _addr(addr)
+    if pc is not None: a["pc"] = _addr(pc)
+    data, _ = query("code.load", blob=blob, **a)
+    return data
+
+
+def rsp_load(path: str, mem: str = "imem", offset=0, pc=None, force: bool = False) -> dict:
+    """Load RSP microcode/data into IMEM or DMEM (RSP must be halted unless force=True).
+    IMEM writes invalidate the RSP JIT. pc sets the RSP PC."""
+    with open(path, "rb") as f:
+        blob = f.read()
+    a = {"mem": mem, "offset": _addr(offset), "force": int(bool(force))}
+    if pc is not None: a["pc"] = _addr(pc)
+    data, _ = query("rsp.load", blob=blob, **a)
+    return data
+
+
+def rom_load(path: str) -> dict:
+    """Switch ROM: the emulator relaunches itself with the same command line and the new
+    ROM (same telemetry port). The next call reconnects automatically after ~1-2 s."""
+    data, _ = query("rom.load", path=os.path.abspath(path))
+    _drop()
+    return data
+
+
+def usb_log(clear: bool = False) -> dict:
+    """SummerCart64 USB debug output (USB_WRITE text packets from the guest): text, packet
+    and byte counts. clear=True empties the text buffer after reading."""
+    data, _ = query("usb.log", clear=int(bool(clear)))
+    return data
+
+
 def _selftest():
     print("status     :", json.dumps(emu_status(), indent=2)[:600])
     regs = memory_regions()
@@ -512,6 +658,10 @@ def _serve_mcp():
     mcp.tool()(profile_rsp)
     mcp.tool()(state_save)
     mcp.tool()(state_load)
+    for fn in (dbg_enable, dbg_status, dbg_freeze, dbg_rdp_frame, dbg_rsp_tasks, dbg_timeline,
+               dbg_fb, dbg_tmem, cpu_tlb, event_log, mem_watch, code_load, rsp_load, rom_load,
+               usb_log):
+        mcp.tool()(fn)
     mcp.run()
 
 

@@ -863,6 +863,12 @@ private:
   // Solo se mira si el invitado la ha ARMADO (R o W a uno): `watchArmed` es falso siempre en
   // un juego normal, asi que el coste en el camino de datos es un booleano.
   inline auto watchTrip(u64 phys, Access acc) -> bool {
+    if(hostWatchAcc && (hostWatchAcc & (acc == AccWrite ? 1u : 2u)) && !hostWatchHit) {
+      const u32 p = (u32)phys & 0x1fff'ffffu;
+      if(p >= hostWatchLo && p < hostWatchHi) {
+        hostWatchHit = true; hostWatchHitW = acc == AccWrite; hostWatchHitPc = (u32)pc; hostWatchHitAddr = p;
+      }
+    }
     const u32 lo = (u32)cop0[18];
     if(!(lo & (acc == AccWrite ? 1u : 2u))) return false;
     if(((u32)cop0[19] & 0xFu) != 0) return false;             // PAddr1 != 0: imposible en N64
@@ -914,7 +920,22 @@ private:
 public:
   // WatchLo del invitado con R o W armado: el driver manda al interprete (ver watchTrip).
   bool watchArmed = false;
-  // --- dynarec (Etapa 2a) ----------------------------------------------------
+  // Punto de observacion del ANFITRION (depurador / orden mem.watch): rango fisico
+  // [hostWatchLo, hostWatchHi) y accesos (bit0 escritura, bit1 lectura). No es WatchLo: no
+  // lanza excepcion ni toca el estado del invitado; el acceso se completa y el bucle de
+  // System pausa al acabar la instruccion. Comparte `watchArmed` (manda el interprete).
+  u32 hostWatchLo = 0, hostWatchHi = 0; u8 hostWatchAcc = 0;
+  bool hostWatchHit = false; bool hostWatchHitW = false; u32 hostWatchHitPc = 0, hostWatchHitAddr = 0;
+  // Escritura del ANFITRION en RDRAM (mem.write / code.load): escribe la RDRAM y, si la
+  // linea esta residente en D$ o I$, tambien la linea, para que el invitado vea el dato
+  // nuevo aunque no vacie caches (equivale a que el juego hiciera writeback+invalidate).
+  // code=true ademas tira lo compilado por el dynarec. Llamar con coreMutex cogido.
+  auto hostPoke(u32 phys, const u8* src, u32 n, bool code) -> u32;
+  auto hostWatchSet(u32 lo, u32 hi, u8 acc) -> void {
+    hostWatchLo = lo; hostWatchHi = hi; hostWatchAcc = acc; hostWatchHit = false;
+    watchArmed = (((u32)cop0[18] & 3u) != 0) || hostWatchAcc != 0;
+  }
+  // --- dynarec (Etapa 2a)----------------------------------------------------
   // Cache de bloques compilados (x86-64) para runs secuenciales de ops ALU seguras.
   // Gated por KESTREL_JIT en stepCpu; el intérprete es el fallback para todo lo demás.
   jit::CodeCache* jitCache = nullptr;

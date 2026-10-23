@@ -3,6 +3,7 @@
 #include "profile.hpp"
 #include "library.hpp"
 #include "../core/runtime.hpp"
+#include "debugger.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -43,7 +44,7 @@ enum : UINT {
   kOpenRom = 0x8100, kOpenFile, kRelaunch, kQuit,
   kPause, kReset, kSaveState, kLoadState, kNextSlot,
   kFull, kHud,
-  kAudioOn, kPadCfg, kAllOpts, kAbout,
+  kAudioOn, kPadCfg, kAllOpts, kAbout, kDebugger,
   kScale1  = 0x8140,              // +0..+6 (escala 1x..7x)
   kThrHw = 0x8160, kThrAuto, kThrOn, kThrOff,
   kSlot0   = 0x8170,              // +0..+9
@@ -254,6 +255,10 @@ auto buildMenu() -> void {
   addItem(cfg, kPadCfg, "&Mando...");
   addItem(cfg, kAllOpts, "&Todas las opciones...\tF12");
   addSub(g_menu, cfg, "&Opciones");
+
+  HMENU dbg = CreatePopupMenu();
+  addItem(dbg, kDebugger, "&Depurador...");
+  addSub(g_menu, dbg, "&Depurar");
 
   HMENU help = CreatePopupMenu();
   addItem(help, kAbout, "&Acerca de");
@@ -1594,6 +1599,9 @@ auto onCommand(UINT id) -> void {
     case kAllOpts:
       if(g_optWin) { SetForegroundWindow(g_optWin); return; }
       std::thread(optionsDialogThread).detach();
+      return;
+    case kDebugger:
+      dbgwin::open();   // hilo y ventana propios; si ya esta abierta, la trae delante
       return;
     case kAbout:
       MessageBoxA(g_game,

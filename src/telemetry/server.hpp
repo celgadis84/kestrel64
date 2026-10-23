@@ -26,6 +26,11 @@ struct Server {
   auto serve(u16 port) -> void;
   auto stop() -> void;
 
+  // Despacho EN PROCESO: la ventana del depurador llama por aqui con las mismas ordenes que
+  // el MCP, bajo el mismo dispatchMx, asi que ve exactamente lo mismo que un cliente TCP.
+  auto call(const json::Value& req, const std::vector<u8>& reqBlob, json::Value& reply,
+            std::vector<u8>& blob) -> void;
+
 private:
   System& system;
   net::TcpServer tcp;
@@ -43,7 +48,17 @@ private:
   auto serveClient(std::shared_ptr<net::TcpConn> conn) -> void;
 
   // Dispatch one request; fills `reply` JSON and optional `blob`.
-  auto dispatch(const json::Value& req, json::Value& reply, std::vector<u8>& blob) -> void;
+  auto dispatch(const json::Value& req, const std::vector<u8>& reqBlob, json::Value& reply,
+                std::vector<u8>& blob) -> void;
+  // Ordenes del depurador y de carga en caliente (server_dbg.cpp). Devuelve false si `cmd`
+  // no es suya; si es suya, `err` vacio = exito.
+  auto dispatchDbg(const std::string& cmd, const json::Value& args, const std::vector<u8>& reqBlob,
+                   json::Value& data, std::vector<u8>& blob, std::string& err) -> bool;
+  auto dbgFb(const json::Value& args, json::Value& data, std::vector<u8>& blob, std::string& err) -> void;
+  auto dbgCodeLoad(const json::Value& args, const std::vector<u8>& reqBlob, json::Value& data, std::string& err) -> void;
+  auto dbgRspLoad(const json::Value& args, const std::vector<u8>& reqBlob, json::Value& data, std::string& err) -> void;
+  auto dbgRomLoad(const json::Value& args, json::Value& data, std::string& err) -> void;
+  auto dbgUsb(const std::string& cmd, const json::Value& args, const std::vector<u8>& reqBlob, json::Value& data, std::vector<u8>& blob, std::string& err) -> void;
 
   // Command handlers.
   auto cmdStatus(const json::Value& args, json::Value& data) -> void;

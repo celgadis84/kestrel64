@@ -59,6 +59,13 @@ que seas duenno.
    https://github.com/bloc97/Anime4K
    Licencia MIT (SPDX: MIT). Texto completo en la seccion A.
 
+8. Dear ImGui -- interfaz de la ventana del depurador (--debugger), sin modificar,
+   en third_party/imgui/ (nucleo + backends win32 y dx11).
+   Copyright (c) 2014-2025 Omar Cornut
+   https://github.com/ocornut/imgui
+   Licencia MIT (SPDX: MIT). Texto completo en la seccion A y en
+   third_party/imgui/LICENSE.txt.
+
 
 Nota sobre las FUENTES de documentacion. El emulador esta escrito contra la
 documentacion publica de hardware de n64brew, n64.dev, la wiki de libdragon y el

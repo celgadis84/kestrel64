@@ -44,7 +44,7 @@ auto Server::serveClient(std::shared_ptr<net::TcpConn> conn) -> void {
       // Una orden cada vez contra el estado vivo, igual que cuando solo se atendia a un
       // cliente: lo unico que pasa a ir en paralelo es esperar en la red.
       std::lock_guard<std::mutex> lk(dispatchMx);
-      dispatch(req, reply, blob);
+      dispatch(req, reqBlob, reply, blob);
     }
 
     if(!conn->sendFrame(json::dump(reply), blob.empty() ? nullptr : blob.data(), (u32)blob.size()))
@@ -80,7 +80,15 @@ auto Server::serve(u16 port) -> void {
   for(auto& t : workers) if(t.joinable()) t.join();
 }
 
-auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8>& blob) -> void {
+auto Server::call(const json::Value& req, const std::vector<u8>& reqBlob, json::Value& reply,
+                  std::vector<u8>& blob) -> void {
+  std::lock_guard<std::mutex> lk(dispatchMx);
+  reply.set("id", req.get("id"));
+  dispatch(req, reqBlob, reply, blob);
+}
+
+auto Server::dispatch(const json::Value& req, const std::vector<u8>& reqBlob, json::Value& reply,
+                      std::vector<u8>& blob) -> void {
   std::string cmd = req.get("cmd").asString();
   json::Value args = req.get("args");
   json::Value data = json::Value::object();
@@ -101,8 +109,8 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
     std::string err = cmdMemWrtag(args, data);
     if(err.empty()) done(); else fail("mem.wrtag: " + err);
   } else if(cmd == "mem.write") {
-    // request blob is not threaded here in M0; write uses args-encoded bytes instead.
-    if(cmdMemWrite(args, blob, data)) done(); else fail("mem.write: bad region or range");
+    // Bytes en el blob de la peticion (sin coste de hex) o, si no hay blob, en args.data.
+    if(cmdMemWrite(args, reqBlob, data)) done(); else fail("mem.write: bad region or range");
   } else if(cmd == "cpu.regs") {
     cmdCpuRegs(args, data); done();
   } else if(cmd == "cpu.step") {
@@ -148,7 +156,10 @@ auto Server::dispatch(const json::Value& req, json::Value& reply, std::vector<u8
   } else if(cmd == "state.save" || cmd == "state.load") {
     if(cmdState(cmd, args, data)) done(); else fail(data.get("msg").asString());
   } else {
-    fail("unknown command: " + cmd);
+    std::string err;
+    if(!dispatchDbg(cmd, args, reqBlob, data, blob, err)) fail("unknown command: " + cmd);
+    else if(err.empty()) done();
+    else fail(cmd + ": " + err);
   }
 }
 
@@ -335,28 +346,35 @@ auto Server::cmdMemWrtag(const json::Value& args, json::Value& data) -> std::str
   return "";
 }
 
-auto Server::cmdMemWrite(const json::Value& args, const std::vector<u8>&, json::Value& data) -> bool {
+auto Server::cmdMemWrite(const json::Value& args, const std::vector<u8>& reqBlob, json::Value& data) -> bool {
   Region* r = system.memory.findRegion(args.get("region").asString());
   if(!r || !r->data) return false;
   u32 addr = args.get("addr").asU32();
   if(addr >= r->size) return false;
-  // M0: bytes supplied as a JSON array under "data" (hex string or array).
+  // Bytes: el blob binario de la peticion si viene; si no, args.data (hex o array JSON).
+  std::vector<u8> bytesIn;
   json::Value bytes = args.get("data");
-  u32 written = 0;
-  if(bytes.type == json::Value::Type::Array && bytes.arr) {
-    for(auto& v : *bytes.arr) {
-      if(addr + written >= r->size) break;
-      r->data[addr + written] = (u8)v.asU32();
-      written++;
-    }
+  if(!reqBlob.empty()) {
+    bytesIn = reqBlob;
+  } else if(bytes.type == json::Value::Type::Array && bytes.arr) {
+    for(auto& v : *bytes.arr) bytesIn.push_back((u8)v.asU32());
   } else if(bytes.isString()) {
-    // hex string
     const std::string& h = bytes.str;
-    for(usize i = 0; i + 1 < h.size(); i += 2) {
-      if(addr + written >= r->size) break;
-      auto nib = [](char c) -> int { if(c>='0'&&c<='9')return c-'0'; if(c>='a'&&c<='f')return c-'a'+10; if(c>='A'&&c<='F')return c-'A'+10; return 0; };
-      r->data[addr + written] = (u8)(nib(h[i])<<4 | nib(h[i+1]));
-      written++;
+    auto nib = [](char c) -> int { if(c>='0'&&c<='9')return c-'0'; if(c>='a'&&c<='f')return c-'a'+10; if(c>='A'&&c<='F')return c-'A'+10; return 0; };
+    for(usize i = 0; i + 1 < h.size(); i += 2) bytesIn.push_back((u8)(nib(h[i])<<4 | nib(h[i+1])));
+  }
+  u32 written = (u32)std::min<usize>(bytesIn.size(), r->size - addr);
+  {
+    // Bajo coreMutex: la CPU no puede estar a mitad de instruccion mirando estos bytes.
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
+    if(r->data == system.memory.rdram.data()) {
+      // RDRAM por defecto coherente con las caches de la CPU (la linea residente tambien se
+      // actualiza); code=1 ademas tira lo compilado por el dynarec.
+      system.cpu.hostPoke(addr, bytesIn.data(), written, args.get("code").asU32() != 0);
+    } else {
+      std::memcpy(r->data + addr, bytesIn.data(), written);
+      if(r->data == system.memory.imem.data() && system.memory.rsp.jc)
+        system.memory.rsp.jitInvalidate(addr, written, system.memory.imem.data());
     }
   }
   data.set("region", r->name);
@@ -370,7 +388,7 @@ static const char* kGprName[32] = {
   "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
 
 auto Server::cmdCpuRegs(const json::Value&, json::Value& data) -> void {
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   CPU& c = system.cpu;
   data.set("pc", c.pc);
   data.set("nextPc", c.nextPc);
@@ -415,7 +433,7 @@ auto Server::cmdCpuRegs(const json::Value&, json::Value& data) -> void {
 auto Server::cmdCpuStep(const json::Value& args, json::Value& data) -> void {
   u64 n = args.has("count") ? args.get("count").asU64() : 1;
   if(n == 0) n = 1;
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   u64 taken = system.stepCpu(n);
   data.set("stepped", taken);
   data.set("pc", system.cpu.pc);
@@ -429,7 +447,7 @@ auto Server::cmdCpuDisasm(const json::Value& args, json::Value& data) -> bool {
   u32 addr = args.get("addr").asU32();
   u32 count = args.has("count") ? args.get("count").asU32() : 16;
   if(count == 0 || count > 4096) count = 16;
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   const Symbols& syms = globalSymbols();
   json::Value list = json::Value::array();
   for(u32 i = 0; i < count; i++) {
@@ -451,11 +469,11 @@ auto Server::cmdRunControl(const std::string& cmd, json::Value& data) -> void {
   if(cmd == "pause") {
     system.paused.store(true);
   } else if(cmd == "resume") {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     if(system.cpu.halted) { system.cpu.halted = false; system.cpu.haltReason.clear(); }
     system.paused.store(false);
   } else if(cmd == "reset") {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     system.paused.store(true);
     system.cpu.fastBoot(system.rom.header.entryPoint);
   }
@@ -475,7 +493,7 @@ auto Server::cmdFrameAdvance(const json::Value& args, json::Value& data) -> void
   if(n > 100000) n = 100000;
   u32 timeoutMs = args.has("timeout_ms") ? args.get("timeout_ms").asU32() : 5000;
   {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     if(system.cpu.halted) { system.cpu.halted = false; system.cpu.haltReason.clear(); }
     system.paused.store(true);                 // el avance manda por encima de la pausa
     system.stepFields.store(n, std::memory_order_relaxed);
@@ -490,7 +508,7 @@ auto Server::cmdFrameAdvance(const json::Value& args, json::Value& data) -> void
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     u32 left = system.stepFields.exchange(0, std::memory_order_relaxed);
     data.set("fields", (u64)(n - left));
     data.set("timedOut", timedOut);
@@ -519,7 +537,7 @@ auto Server::cmdRewind(const json::Value& args, json::Value& data) -> bool {
     if(system.stateSeq.load(std::memory_order_acquire) != seq0) {
       std::string msg;
       { std::lock_guard<std::mutex> ml(system.stateMsgMutex); msg = system.stateMsg; }
-      std::lock_guard<std::mutex> lk(system.coreMutex);
+      std::lock_guard<System::CoreMutex> lk(system.coreMutex);
       data.set("msg", msg);
       data.set("steps", (u64)system.rewinder.steps());
       data.set("bytes", (u64)system.rewinder.bytes());
@@ -690,7 +708,7 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
 }
 
 auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   Rcp& r = system.memory.rcp;
   json::Value mi = json::Value::object();
   mi.set("mode", (u64)r.mi_mode);
@@ -785,7 +803,7 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
       data.set("height", (u64)h);
       data.set("format", "rgba8888");
       data.set("source", "gpu");
-      std::lock_guard<std::mutex> lk(system.coreMutex);
+      std::lock_guard<System::CoreMutex> lk(system.coreMutex);
       data.set("origin", (u64)(system.memory.rcp.vi_origin & 0x00FFFFFF));
       return true;
     }
@@ -793,7 +811,7 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
   }
   u32 origin, width, ctrl;
   {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     Rcp& r = system.memory.rcp;
     // frame=1: en entrelazado, el cuadro de los dos campos (ver Rcp::viFrameOrigin).
     origin = args.has("frame") && args.get("frame").asU32() ? r.viFrameOrigin()
@@ -875,7 +893,7 @@ static auto rspTimingJson(const RspTiming& t) -> json::Value {
 }
 
 auto Server::cmdRspRegs(const json::Value& args, json::Value& data) -> void {
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   Rsp& s = system.memory.rsp;
   data.set("pc", (u64)s.pc);
   data.set("running", s.running);
@@ -899,7 +917,7 @@ auto Server::cmdRspRegs(const json::Value& args, json::Value& data) -> void {
 
 auto Server::cmdBpAdd(const json::Value& args, json::Value& data) -> void {
   u32 addr = args.get("addr").asU32();
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   auto& bps = system.breakpoints;
   if(std::find(bps.begin(), bps.end(), addr) == bps.end()) bps.push_back(addr);
   data.set("addr", (u64)addr);
@@ -907,7 +925,7 @@ auto Server::cmdBpAdd(const json::Value& args, json::Value& data) -> void {
 }
 
 auto Server::cmdBpDel(const json::Value& args, json::Value& data) -> void {
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   auto& bps = system.breakpoints;
   if(args.has("addr")) {
     u32 addr = args.get("addr").asU32();
@@ -919,7 +937,7 @@ auto Server::cmdBpDel(const json::Value& args, json::Value& data) -> void {
 }
 
 auto Server::cmdBpList(const json::Value&, json::Value& data) -> void {
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   json::Value list = json::Value::array();
   for(u32 b : system.breakpoints) list.push(json::Value((u64)b));
   data.set("breakpoints", list);
@@ -935,7 +953,7 @@ auto Server::cmdRunUntil(const json::Value& args, json::Value& data) -> void {
   u32 timeoutMs = args.has("timeout_ms") ? args.get("timeout_ms").asU32() : 5000;
   bool added = false;
   {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     auto& bps = system.breakpoints;
     if(std::find(bps.begin(), bps.end(), addr) == bps.end()) { bps.push_back(addr); added = true; }
     system.lastBpHit.store(0);
@@ -953,7 +971,7 @@ auto Server::cmdRunUntil(const json::Value& args, json::Value& data) -> void {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   {
-    std::lock_guard<std::mutex> lk(system.coreMutex);
+    std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     if(added) {
       auto& bps = system.breakpoints;
       bps.erase(std::remove(bps.begin(), bps.end(), addr), bps.end());
@@ -961,6 +979,13 @@ auto Server::cmdRunUntil(const json::Value& args, json::Value& data) -> void {
     system.paused.store(true);
     data.set("hit", hit);
     data.set("timedOut", timedOut);
+    // Si paro en OTRO punto de ruptura (o en un mem.watch), quien pregunta necesita saber cual.
+    data.set("lastBpHit", system.lastBpHit.load());
+    if(system.cpu.hostWatchHit) {
+      data.set("watchPc", system.cpu.hostWatchHitPc);
+      data.set("watchAddr", system.cpu.hostWatchHitAddr);
+      data.set("watchWrite", system.cpu.hostWatchHitW);
+    }
     data.set("pc", system.cpu.pc);
     data.set("halted", system.cpu.halted);
     if(system.cpu.halted) data.set("haltReason", system.cpu.haltReason);
@@ -975,7 +1000,7 @@ auto Server::cmdRunUntil(const json::Value& args, json::Value& data) -> void {
 // sampler buckets by physical address (16-byte resolution); the RSP sampler counts
 // per IMEM instruction. Turn on, run the workload, then query prof.cpu / prof.rsp.
 auto Server::cmdProfControl(const std::string& cmd, json::Value& data) -> void {
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   if(cmd == "prof.start") {
     system.cpu.profEnable(true);
     system.memory.rsp.profOn = true; system.memory.rsp.profClear();
@@ -998,7 +1023,7 @@ auto Server::cmdProfControl(const std::string& cmd, json::Value& data) -> void {
 auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   u32 topN = args.has("top") ? args.get("top").asU32() : 20;
   const std::string metric = args.has("metric") ? args.get("metric").asString() : "exec";
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   CPU& c = system.cpu;
   const std::vector<u32>* src = &c.profBuckets;
   u64 mtotal = c.profTotal;
@@ -1070,7 +1095,7 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
 auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
   u32 topN = args.has("top") ? args.get("top").asU32() : 20;
   const std::string metric = args.has("metric") ? args.get("metric").asString() : "count";
-  std::lock_guard<std::mutex> lk(system.coreMutex);
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   Rsp& s = system.memory.rsp;
   const RspTiming* t = s.tm;
   const u32* key = s.profPc;

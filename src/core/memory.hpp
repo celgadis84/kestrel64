@@ -1395,6 +1395,16 @@ public:
   auto scCommand(u32 cmd) -> void;
   auto scBufAt(u32 phys) -> u8*;          // byte del buffer o de la SDRAM, nullptr si no es nuestro
   auto scDmaWrite(u32 cart, u8 b) -> bool; // RDRAM->cartucho sobre buffer/SDRAM
+  // USB del SC64 (N64 -> anfitrion): USB_WRITE ('M') manda DATA1[23:0] bytes desde la
+  // direccion de cartucho DATA0 con tipo DATA1[31:24]. Aqui no hay cable: los paquetes se
+  // guardan para la orden usb.log y, con KESTREL_USB=1, los de texto (tipo 1) salen por
+  // stdout. USB_WRITE_STATUS / USB_READ_STATUS contestan siempre "libre / nada pendiente".
+  std::mutex      usbMx;
+  std::string     usbText;               // texto acumulado (tipo 1), tope kUsbKeep
+  u64             usbPackets = 0, usbBytes = 0;
+  u32             usbLastType = 0;
+  static constexpr usize kUsbKeep = 1u << 20;
+  int             usbEcho = -1;          // KESTREL_USB, leido la primera vez
 
   // PI/cartridge write-latch. Writing to cart space does not reach ROM; it latches
   // the value onto the PI bus, and the very next cart read returns it before the

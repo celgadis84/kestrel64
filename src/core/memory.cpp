@@ -9,6 +9,7 @@
 #include "../audio/audio.hpp"
 #include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
+#include "../debug/dbg.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -973,6 +974,37 @@ auto Memory::scCommand(u32 cmd) -> void {
       }
       break;
     }
+    case 'M': {                             // USB_WRITE: DATA0 = direccion, DATA1 = tipo<<24 | longitud
+      const u32 type = scData1 >> 24, len = scData1 & 0xff'ffffu;
+      std::string pkt;
+      pkt.reserve(len);
+      for(u32 i = 0; i < len; i++) {
+        const u8* p = scBufAt(scData0 + i);
+        if(!p) { scErr = true; break; }
+        pkt.push_back((char)*p);
+      }
+      if(scErr) break;
+      // Trama del SDK (k64/usb.h): 'K64' + tipo + longitud BE de 32 bits + datos. Si llega
+      // envuelta asi se desenvuelve; si no, el paquete es el dato tal cual.
+      u32 t = type;
+      std::string body = pkt;
+      if(pkt.size() >= 8 && pkt[0] == 'K' && pkt[1] == '6' && pkt[2] == '4') {
+        t = (u8)pkt[3];
+        const u32 n = (u32)(u8)pkt[4] << 24 | (u32)(u8)pkt[5] << 16 | (u32)(u8)pkt[6] << 8 | (u8)pkt[7];
+        body = pkt.substr(8, std::min<usize>(n, pkt.size() - 8));
+      }
+      if(usbEcho < 0) { const char* e = std::getenv("KESTREL_USB"); usbEcho = e && *e && *e != '0'; }
+      std::lock_guard<std::mutex> lk(usbMx);
+      usbPackets++; usbBytes += len; usbLastType = t;
+      if(t == 1) {
+        usbText += body;
+        if(usbText.size() > kUsbKeep) usbText.erase(0, usbText.size() - kUsbKeep);
+        if(usbEcho) { std::fwrite(body.data(), 1, body.size(), stdout); std::fflush(stdout); }
+      }
+      break;
+    }
+    case 'U': scData0 = 0; break;           // USB_WRITE_STATUS: bit31 = ocupado -> nunca
+    case 'u': scData0 = 0; scData1 = 0; break;   // USB_READ_STATUS: nada pendiente
     default: scErr = true; break;
   }
 }
@@ -1701,6 +1733,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     case 0x04: { u32 nv = v & 0xffffff;
                  if(rcp.vi_origin && nv != rcp.vi_origin) {
                    rcp.viFlips++;
+                   dbg::g.flip(rcp.viFlips, cartNow());   // depurador: cierra el cuadro
                    // KESTREL_FLIPLOG=1: cuantos campos de video ha costado cada cuadro. La media
                    // (campos por intercambio) esconde lo unico que importa en un juego que se
                    // autorregula: si la cadencia es estable (siempre 2) o resbala (2,3,2,4...).
@@ -2979,6 +3012,11 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
   }
   rdpHasResume = false;
   rdpLastEnd = end;
+  // Depurador (docs/DEBUGGER.md): graba los comandos del tramo, ya con la reanudacion
+  // aplicada, desde la MISMA fuente que va a leer el rasterizador. Vale para los tres backends.
+  struct DbgJobEnd { Memory* m; ~DbgJobEnd() { dbg::g.rdpJobEnd(m->cartNow()); } } dbgEnd{this};
+  dbg::g.rdpJob(cmdSrc ? cmdSrc : rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus,
+                cartNow());
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   wrtag::setWin(0, current & 0x00ff'ffffu, end & 0x00ff'ffffu);
   if(vrdp::active()) {

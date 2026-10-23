@@ -130,6 +130,11 @@ struct SoftRdp {
   auto wrAdd(u32 a, u32 b) -> void;
   auto wrClear() -> void { for(u32 i = 0; i < kWrSlots; i++) { wrLo[i] = ~0u; wrHi[i] = 0; } }
   auto colorImageSize() const -> u32 { return ci_size; }
+  // Para el depurador (dbg.fb): ancho del color image, z image y caja del scissor vigentes.
+  auto colorImageWidth() const -> u32 { return ci_width; }
+  auto zImage() const -> u32 { return zi_addr; }
+  auto scissorBox(int& x0, int& y0, int& x1, int& y1) const -> void { x0 = sx0; y0 = sy0; x1 = sx1; y1 = sy1; }
+  auto textureImage(u32& addr, u32& width, u32& size, u32& fmt) const -> void { addr = ti_addr; width = ti_width; size = ti_size; fmt = ti_fmt; }
 
   // --- DPC performance counters (accounting only, never gates execution) -------
   // The RDP owns four 24-bit counters the CPU reads at DPC_CLOCK/BUFBUSY/PIPEBUSY/
@@ -220,6 +225,7 @@ private:
   // DPC counters: a pixel killed by alpha or depth compare performs its reads but
   // neither write, and that difference is worth ~1 cycle/pixel on hardware.
   u64 pxWrites = 0, pxZWrites = 0;
+public:   // el depurador (dbg.tmem) lee tiles y TMEM
 
   // --- tiles / TMEM -----------------------------------------------------------
   struct Tile {
@@ -228,6 +234,7 @@ private:
     u32 sl = 0, tl = 0, sh = 0, th = 0;   // SET_TILE_SIZE (10.2 fixed)
   } tiles[8];
   u8  tmem[0x1000] = {};   // 4 KB texture memory
+private:
   auto statsCmd(Memory& mem, u32 op, u64 cmd) -> void;     // rdp.stats: antes de ejecutar
   u32 tlutMode() const { return (other_hi >> 14) & 3; }  // TEXTLUT: 0 none,2 RGBA16,3 IA16
 

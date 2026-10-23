@@ -10290,3 +10290,11 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   RDPTex0And1 98,83 -> 99,42, HelloWorldRDP16BPP 99,06 -> 100. RSPXBUSRDP ya = prdp.
 - Lo que queda por debajo de prdp en krom-prdp.tsv no es rasterizador: FastZigZag (carrera
   CPU/RSP contra DPC_CURRENT, los dos lejos del PNG) y SNES PPU (programas con animacion).
+
+## 2026-10-23 — depurador (MCP + ventana), USB SC64, carga en caliente
+
+- Capas de depuración estilo ares reimplementadas: `dbg.*`, `cpu.tlb`, `ev.log`, `mem.watch`, `usb.log`.
+- Carga en caliente: `code.load`, `rsp.load`, `rom.load` (relanza el sistema en el mismo proceso).
+- Ventana del depurador Win32/D3D11/ImGui (`--debugger`, menú Depurar). Ver `docs/DEBUGGER.md`.
+- `System::CoreMutex` justo: las órdenes de telemetría ya no esperan segundos con la emulación libre.
+- Verificado: systemtest interp/jit PASS, `dbg_smoke` PASS, `debugger_smoke` PASS.

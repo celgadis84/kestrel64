@@ -45,6 +45,7 @@ add_executable(kestrel64
   src/cpu/jit.cpp
   src/net/tcp.cpp
   src/telemetry/server.cpp
+  src/telemetry/server_dbg.cpp
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/video/present.cpp
@@ -59,6 +60,7 @@ add_executable(kestrel64
   src/ui/profile.cpp
   src/ui/menu_win32.cpp
   src/ui/library_win32.cpp
+  src/debug/dbg.cpp
 )
 
 target_include_directories(kestrel64 PRIVATE src)
@@ -91,6 +93,7 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(rsp_test PRIVATE src)
 if(WIN32)
@@ -112,6 +115,7 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(save_test PRIVATE src)
 if(WIN32)
@@ -133,6 +137,7 @@ add_executable(tpak_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(tpak_test PRIVATE src)
 if(WIN32)
@@ -156,6 +161,7 @@ add_executable(wildmem_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(wildmem_test PRIVATE src)
 if(WIN32)
@@ -179,6 +185,7 @@ add_executable(watch_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(watch_test PRIVATE src)
 if(WIN32)
@@ -201,6 +208,7 @@ add_executable(pif_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(pif_test PRIVATE src)
 if(WIN32)
@@ -223,6 +231,7 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/debug/dbg.cpp
 )
 target_include_directories(cheat_test PRIVATE src)
 if(WIN32)
@@ -312,6 +321,18 @@ if(WIN32)
   # comdlg32: el dialogo de "elige una ROM" cuando se abre el .exe desde el Explorador.
   # comctl32: las barras deslizantes de los numericos acotados del dialogo de opciones.
   target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32 comctl32 shell32 ole32)
+  # Ventana del depurador (docs/DEBUGGER.md): Dear ImGui (MIT, third_party/imgui) sobre D3D11,
+  # en su propio hilo. d3dcompiler compila en tiempo de ejecucion los dos shaders del backend.
+  target_sources(kestrel64 PRIVATE
+    src/ui/debugger_win32.cpp
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp
+    third_party/imgui/backends/imgui_impl_win32.cpp
+    third_party/imgui/backends/imgui_impl_dx11.cpp)
+  target_include_directories(kestrel64 PRIVATE third_party/imgui)
+  target_link_libraries(kestrel64 PRIVATE d3d11 d3dcompiler dxgi dwmapi)
   if(NOT KESTREL_DYNAMIC AND NOT MSVC)
     # Un unico .exe sin DLL propias. Por defecto, libc++ y GLFW quedan como DLL y viven en
     # C:/msys64/clang64/bin: dentro de la shell de MSYS2 el PATH las encuentra, pero el

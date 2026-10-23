@@ -782,6 +782,31 @@ auto CPU::dcMiss(u32 idx, u32 base) -> void {
 // (dcRead/dcWrite viven ahora en linea en cpu.hpp.) Cola de depuracion del store: punto de
 // vigilancia (KESTREL_WATCHP) y write-through de diagnostico (KESTREL_DCWT). Fuera de linea
 // porque solo corre con una de las dos armadas.
+auto CPU::hostPoke(u32 phys, const u8* src, u32 n, bool code) -> u32 {
+  if(!mem) return 0;
+  const u32 sz = (u32)mem->rdram.size();
+  phys &= 0x1fff'ffffu;
+  if(phys >= sz) return 0;
+  if(n > sz - phys) n = sz - phys;
+  std::memcpy(mem->rdram.data() + phys, src, n);
+  for(u32 a = phys; a < phys + n; ) {
+    // D$: linea de 16 B, tag fisico; I$: linea de 32 B. Se copian los bytes del tramo que
+    // caigan en la linea residente; una linea que no esta no hace falta tocarla.
+    DCacheLine& d = dcache[(a >> 4) & 0x1ff];
+    if(d.tagv == ((a & ~0xfu) | 1u)) d.data[a & 0xf] = mem->rdram[a];
+    ICacheLine& ic = icache[(a >> 5) & 0x1ff];
+    if(ic.valid && ic.ptag == (a & ~0x1fu)) ic.data[a & 0x1f] = mem->rdram[a];
+    a++;
+  }
+  if(code) {
+    if(jitCache) jitCache->clear();
+    jitTlbValid = false;
+    fetchLineVBase = 1;
+    bumpXlat();
+  }
+  return n;
+}
+
 auto CPU::dcWriteDbg(u32 phys, u64 val, u32 size) -> void {
   u32 idx = (phys >> 4) & 0x1ff, off = phys & 0xf;
   DCacheLine& l = dcache[idx];
@@ -2911,7 +2936,7 @@ auto CPU::writeCop0(u32 reg, u64 v) -> void {
     // cualquiera de las dos condiciones saca al dynarec: la excepcion Watch es precisa y el
     // codigo emitido no la mira, asi que mientras este armada manda el interprete.
     case 18:/*WatchLo*/ cop0[reg] = sext32((u32)v & 0xFFFF'FFFBu);
-                        watchArmed = ((u32)v & 3u) != 0; ++tlbGen; jitTlbValid = false; return;
+                        watchArmed = ((u32)v & 3u) != 0 || hostWatchAcc != 0; ++tlbGen; jitTlbValid = false; return;
     case 19:/*WatchHi*/ cop0[reg] = sext32((u32)v & 0xFu); return;
     case C0_Config:  cop0[reg] = sext32(((u32)v & 0x0F00'800Fu) | 0x7006'6460u); return;  // writable: 0-3,15,24-27; rest fixed
     case C0_Status: {

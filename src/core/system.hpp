@@ -33,10 +33,28 @@ struct System {
   // The CPU runs on the run() thread; telemetry handlers touch CPU/memory from
   // the telemetry thread. coreMutex serializes the two. Lock it for any access
   // that reads or mutates emulation state across the thread boundary.
-  std::mutex coreMutex;
+  // std::mutex no es justo (en Windows es un SRWLock): el hilo de la CPU suelta el candado
+  // entre subtramos y lo vuelve a coger antes de que despierte quien espera, asi que una
+  // orden de telemetria podia esperar segundos con la emulacion libre. Quien no lo consigue
+  // a la primera se apunta en `waiting`, y el bucle de ejecucion cede mientras haya alguien.
+  struct CoreMutex {
+    std::mutex m;
+    std::atomic<int> waiting{0};
+    auto lock() -> void {
+      if(m.try_lock()) return;
+      waiting.fetch_add(1, std::memory_order_relaxed);
+      m.lock();
+      waiting.fetch_sub(1, std::memory_order_relaxed);
+    }
+    auto try_lock() -> bool { return m.try_lock(); }
+    auto unlock() -> void { m.unlock(); }
+  };
+  CoreMutex coreMutex;
 
   std::atomic<bool> paused{true};    // start paused so single-stepping is deterministic
   std::atomic<bool> shutdown{false};
+  // rom.load (MCP): ROM con la que relanzar el proceso al salir del bucle (main.cpp).
+  std::string romSwapPath;
   // Avance por fotogramas (TAS). Campos de video que el bucle debe correr AUNQUE este en
   // pausa; al cerrar cada campo se descuenta uno y al llegar a cero la pausa vuelve a
   // mandar. El cuanto es el CAMPO de video, no la instruccion ni el volteo de buffer: es
@@ -135,6 +153,8 @@ struct System {
 
   // Start the telemetry server on its own thread (non-blocking).
   auto startTelemetry(u16 port) -> bool;
+  // El servidor en marcha (o nulo): la ventana del depurador despacha por el mismo camino.
+  auto telemetryServer() -> telemetry::Server* { return tele.get(); }
   // Cierra el servidor y LIBERA EL PUERTO antes de que se destruya el System. Hace falta
   // para relanzarse desde el menu: el proceso nuevo se levanta mientras este sigue vivo, y
   // se encontraria el 9128 ocupado. Idempotente.

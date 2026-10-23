@@ -2,6 +2,7 @@
 #include "rsp.hpp"
 #include "../core/memory.hpp"
 #include "rspjit.hpp"
+#include "../debug/dbg.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2165,6 +2166,7 @@ auto Rsp::start() -> void {
   inDelay = false; pendingTarget = 0;
   budget = kWatchdogQuantum;
   if(tm) tm->taskBegin();
+  dbg::g.rspStart(mem->dmem.data(), pc, mem->cartNow());   // depurador: tarea lanzada
   hangTicks = 0;
 }
 
@@ -2401,6 +2403,7 @@ auto Rsp::step(u64 maxInsns) -> void {
       { u32 a = 0xfc0; u32 ty = ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3];
         u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += ran;
         if(tm) tm->taskEnd(ty); }
+      dbg::g.rspEnd(cyclesRun.load(std::memory_order_relaxed) - mem->spKickCycles, mem->cartNow());
       static const bool tr = std::getenv("KESTREL_RSPTRACE") != nullptr;
       if(tr) { static unsigned n = 0; n++;
         auto dm = [&](u32 a){ a &= 0xffc;

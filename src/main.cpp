@@ -8,11 +8,13 @@
 #include "core/runtime.hpp"
 #include "ui/menu.hpp"
 #include "ui/library.hpp"
+#include "ui/debugger.hpp"
 #include "telemetry/symbols.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 #include <csignal>
 #include <filesystem>
 
@@ -140,6 +142,7 @@ int main(int argc, char** argv) {
   bool freeRun = false;
   bool play = false;   // modo usuario final: corriendo Y con ventana
   [[maybe_unused]] bool useLibrary = false;  // abrir la biblioteca aunque haya consola (--library)
+  bool debugger = kestrel::envFlag("KESTREL_DEBUGGER", false);   // --debugger: ventana del depurador
   bool pgoCapture = false;                  // --pgo-capture: escribir el perfil de PGO al salir
   std::string pgoName;                      // nombre que lo etiqueta (por defecto, el de la ROM)
 
@@ -164,6 +167,7 @@ int main(int argc, char** argv) {
     // ROM, y tragarsela dejaba al emulador sin nada que cargar. El .profraw se nombra con la
     // ROM; para etiquetar una captura concreta esta KESTREL_PGO_NAME.
     else if(a == "--pgo-capture") { pgoCapture = true; }
+    else if(a == "--debugger") { debugger = true; }
 #ifdef _WIN32
     // Abre la BIBLIOTECA (el carrusel de caratulas) aunque haya consola. Es el modo de
     // uso normal cuando se lanza a mano, y la unica forma de probar el lanzador desde una
@@ -307,6 +311,8 @@ int main(int argc, char** argv) {
   const bool batch = freeRun && !play;   // lote = corre sin ventana; jugar = corre CON ventana
   system.exitOnHalt = batch;      // lote headless: halt = fin de sesión, no punto de inspección
   system.startTelemetry(port);
+  kestrel::dbgwin::init(system);
+  if(debugger) kestrel::dbgwin::open();
   system.startVideo(batch);     // --run = lote: sin ventana salvo KESTREL_VIDEO
   // El cartel decia siempre "CPU interpreter", que dejo de ser verdad cuando el dynarec
   // paso a ir puesto por defecto: quien mirase la consola creia estar midiendo el
@@ -317,6 +323,7 @@ int main(int argc, char** argv) {
   std::fflush(stdout);
 
   system.runLoop();
+  kestrel::dbgwin::close();   // antes de cerrar la telemetria: la ventana la usa
   kestrel::audio::shutdown();
   std::printf("[system] shutdown.\n");
   std::fflush(stdout);
@@ -328,5 +335,34 @@ int main(int argc, char** argv) {
     system.stopTelemetry();
     kestrel::ui::doRelaunch();
   }
+#ifdef _WIN32
+  // rom.load (MCP): relanzar con la MISMA linea de ordenes y la ROM nueva en lugar de la
+  // vieja (o anadida si vino del selector). El puerto de telemetria es el mismo, asi que el
+  // puente MCP reconecta en su siguiente llamada.
+  if(!system.romSwapPath.empty()) {
+    system.stopTelemetry();
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string cmd = std::string("\"") + exe + "\"";
+    bool replaced = false;
+    for(int i = 1; i < argc; i++) {
+      std::string a = argv[i];
+      if(!replaced && a == romPath) { a = system.romSwapPath; replaced = true; }
+      cmd += " \"" + a + "\"";
+    }
+    if(!replaced) cmd += " \"" + system.romSwapPath + "\"";
+    STARTUPINFOA si = {};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi = {};
+    std::vector<char> line(cmd.begin(), cmd.end());
+    line.push_back(0);
+    if(CreateProcessA(nullptr, line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    } else {
+      std::fprintf(stderr, "[rom.load] CreateProcess fallo (%lu)\n", (unsigned long)GetLastError());
+    }
+  }
+#endif
   return 0;
 }

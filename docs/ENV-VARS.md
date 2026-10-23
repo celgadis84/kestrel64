@@ -179,3 +179,6 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 - `KESTREL_CACHECOST=1` — cobra fallos de I$/D$ (60 ciclos, como HW). Default 0 = fallos gratis. Obligatorio para medir el port PSX.
 - `KESTREL_RSP_TIMING=1` — modelo de ciclos del pipeline RSP; `profile_rsp metric=cycles|stalls` y `rsp_registers().timing` por MCP.
 - `KESTREL_TELEMETRY_PORT` — puerto que usa el puente `tools/mcp/kestrel_mcp.py` (default 9128).
+- `KESTREL_USB=1` — USB del SummerCart64 (registros USB_*, salida de depuracion del homebrew); se lee por MCP `usb.log` y en el panel USB del depurador. Ver `docs/DEBUGGER.md`.
+- `KESTREL_DEBUGGER=1` (o `--debugger`) — abre la ventana del depurador al arrancar. Menu Depurar > Depurador... la abre en marcha.
+- `KESTREL_DEBUGGER_SHOT=<ruta.bmp>` — la ventana del depurador vuelca su backbuffer a los 180 cuadros (pruebas sin pantalla, `scripts/debugger_smoke.py`).

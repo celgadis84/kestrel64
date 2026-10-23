@@ -311,7 +311,9 @@ auto System::stepCpu(u64 n) -> u64 {
     // Con la excepcion Watch armada manda el interprete: es precisa (se toma ANTES de
     // completar el acceso) y el codigo emitido no compara cada direccion contra WatchLo.
     // Un juego normal no la arma nunca, asi que esto es un booleano por bloque.
-    if(jitOn && !cpu.watchArmed) {
+    // Con puntos de ruptura puestos tambien manda el interprete: el bloque compilado no mira
+    // el PC de cada instruccion y se saltaba la parada (cpu.bp.add / run_until con JIT).
+    if(jitOn && !cpu.watchArmed && breakpoints.empty()) {
       // Ventana que le queda a esta llamada: una cadena de bloques enlazados no puede
       // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
       cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
@@ -411,6 +413,13 @@ auto System::stepCpu(u64 n) -> u64 {
       for(u32 b : breakpoints) {
         if(b == pcv) { lastBpHit.store(pcv); paused.store(true); return i; }
       }
+    }
+    // Punto de observacion del anfitrion (mem.watch): el acceso ya se completo; se para
+    // aqui, al final de la instruccion que lo hizo. El hit queda en cpu.hostWatchHit* para
+    // quien pregunte; se rearma con la siguiente mem.watch.
+    if(__builtin_expect(cpu.hostWatchHit, 0) && cpu.hostWatchAcc) {
+      cpu.hostWatchAcc = 0; cpu.watchArmed = ((u32)cpu.cop0[18] & 3u) != 0;
+      paused.store(true); return i;
     }
     rspInterleave();
   }
@@ -588,7 +597,7 @@ auto System::serviceStateReq() -> void {
   u32 rew  = rewindReq.exchange(0, std::memory_order_acq_rel);
   if(save < 0 && load < 0 && !rew) return;
 
-  std::lock_guard<std::mutex> lk(coreMutex);
+  std::lock_guard<CoreMutex> lk(coreMutex);
   quiesceRcp();
 
   std::string err, msg;
@@ -960,7 +969,7 @@ auto System::run() -> void {
     u64 did;
     bool fieldClosed = false;
     {
-      std::lock_guard<std::mutex> lk(coreMutex);
+      std::lock_guard<CoreMutex> lk(coreMutex);
       // Un subtramo de campo de trabajo de CPU por vuelta, y despues el VI. La duracion
       // sale del modelo de reloj (clocks.tickInsns() = campo / viTicksPerField), no de una
       // constante suelta: el mismo campo lo usa la lectura de VI_V_CURRENT en Memory, para
@@ -1038,6 +1047,10 @@ auto System::run() -> void {
         std::fflush(stderr);
       }
     }
+    // Alguien (telemetria, depurador) espera el nucleo: dejarle pasar antes del
+    // siguiente subtramo. Sin esto el candado volvia siempre a este hilo.
+    while(coreMutex.waiting.load(std::memory_order_relaxed) > 0) std::this_thread::yield();
+
     // Foto de rebobinado. Va FUERA del subtramo de arriba y con el RCP parado a proposito:
     // una foto con el RDP a medias de una lista no se puede volver a meter en la maquina.
     // Apagado, esto es una comparacion contra cero.
@@ -1047,7 +1060,7 @@ auto System::run() -> void {
       if(rewindWaitSlices >= kRestWaitMax)
         std::fprintf(stderr, "[rewind] sin reposo del RCP en %u subtramos: parada forzada\n", rewindWaitSlices);
       rewindDue = false; rewindWaitSlices = 0;
-      std::lock_guard<std::mutex> lk(coreMutex);
+      std::lock_guard<CoreMutex> lk(coreMutex);
       quiesceRcp();
       rewinder.onField(*this);
     }
@@ -1343,7 +1356,7 @@ auto System::run() -> void {
                        (unsigned long long)cpu.fpuStall,
                        cpu.retired ? (double)cpu.fpuStall / (double)cpu.retired : 0.0);
       }
-      std::lock_guard<std::mutex> lk(coreMutex);
+      std::lock_guard<CoreMutex> lk(coreMutex);
       cpu.maxInsn = cpu.retired + 1;
       // El tope de instrucciones se comprueba en la guarda de depuracion del interprete, y
       // esa guarda se calcula UNA vez al parsear el entorno. Ponerlo aqui sin re-armarla
@@ -1365,7 +1378,7 @@ auto System::run() -> void {
                      " retirado %llu instrucciones en ese hueco: cuelgue.\n",
                      hangSecs, (unsigned long long)hangFlips,
                      (unsigned long long)(cpu.retired - hangInsn));
-        std::lock_guard<std::mutex> lk(coreMutex);
+        std::lock_guard<CoreMutex> lk(coreMutex);
         cpu.maxInsn = cpu.retired + 1;   // reutiliza el volcado del tope de instrucciones
         cpu.refreshDebugArmed();
         hangSecs = 0.0;                  // un solo aviso
@@ -1375,14 +1388,14 @@ auto System::run() -> void {
     if(stableEvery && cpu.retired >= stableNext) {
       stableNext = cpu.retired + stableEvery;
       u64 h;
-      { std::lock_guard<std::mutex> lk(coreMutex); h = framebufferHash(memory); }
+      { std::lock_guard<CoreMutex> lk(coreMutex); h = framebufferHash(memory); }
       if(h != stableHash) { stableHash = h; stableRun = 0; stableSawChange = true; }
       else if(stableSawChange && ++stableRun >= stableNeed) {
         std::fprintf(stderr, "[stable] framebuffer unchanged for %llu insns after %lluM, stopping\n",
                      (unsigned long long)(stableEvery * stableNeed),
                      (unsigned long long)(cpu.retired / 1'000'000));
         // Reuse the cap path so the dump/report side stays in exactly one place.
-        std::lock_guard<std::mutex> lk(coreMutex);
+        std::lock_guard<CoreMutex> lk(coreMutex);
         cpu.maxInsn = cpu.retired + 1;
         cpu.refreshDebugArmed();   // idem: sin re-armar la guarda el tope no lo mira nadie
         stableEvery = 0;
