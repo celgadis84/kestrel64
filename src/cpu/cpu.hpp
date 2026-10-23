@@ -180,7 +180,10 @@ struct CPU {
   u32  fetchLineEpoch = ~0u;    // valor de xlatEpoch con el que se llenó
   bool fetchLineCache = false;  // ¿la línea va por I-cache (true) o bus directo (false)?
   u32  xlatEpoch      = 0;      // generación de traducción; ++ invalida el fetch fast-path
-  auto bumpXlat() -> void { ++xlatEpoch; }   // llamar en todo cambio de mapeo/modo
+  // Llamar en todo cambio de mapeo/modo. Tambien tira la softTLB de PC del dynarec: su etiqueta
+  // es (vpn, ASID) y no ve KSU/EXL/ERL/KX, asi que un veredicto cacheado en kernel valia en
+  // usuario (se saltaba el AdEL de ksseg/kseg3) y uno de kuseg mapeado valia con ERL=1.
+  auto bumpXlat() -> void { ++xlatEpoch; jitTlbValid = false; }
 
   // --- exception / interrupt state -------------------------------------------
   bool inDelay = false;      // the instruction at pc sits in a branch delay slot
@@ -755,6 +758,10 @@ private:
   // uncached XKPHYS windows bypass; KSEG0 and cached-mapped regions go through the
   // primary cache. Only accesses that also land in RDRAM are actually cached here.
   inline auto cacheable(u64 vaddr) -> bool {
+    // Solo una direccion de compatibilidad (bits 63:32 = signo del 31) es kseg0/kseg1 o
+    // ckseg0/ckseg1. Una de xkphys/xkseg con los 32 bits bajos en 0x8.../0xA... la decide la
+    // traduccion (atributo de cache de xkphys, campo C de la TLB), no el segmento de 32 bits.
+    if((s64)vaddr != (s32)(u32)vaddr) return xlatCacheable;
     u32 seg = (u32)vaddr & 0xE000'0000u;
     if(seg == 0x8000'0000u) return true;    // KSEG0 / ckseg0 (cached)
     if(seg == 0xA000'0000u) return false;   // KSEG1 / ckseg1 (uncached)

@@ -10316,3 +10316,19 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   pausada; `resume` lo suelta y ejecuta ese PC una vez. Detalle en `docs/DEBUGGER.md`.
 - Verificado: `rspbp_smoke` PASS (Threaded y Lockstep), systemtest interp/threaded-jit ALL OK,
   sm64 threaded-jit/interp/prdp-jit ALL OK.
+
+### 2026-10-23 (4) — más arreglos de la revisión (CPU)
+
+- `cacheable()`: una dirección de 64 bits no extendida en signo (xkphys/xkseg) ya no se toma
+  por kseg0/kseg1 por sus 32 bits bajos; decide el atributo de la traducción (xkphys sin caché
+  con bits bajos 0x8... salía cacheada).
+- `translate()`: Status.ERL=1 deja kuseg (y xkuseg < 2 GiB) directo y sin caché, virtual = física.
+- `bumpXlat()` tira también la softTLB de PC del dynarec (no veía KSU/EXL/ERL: veredicto de
+  kernel reutilizado en usuario se saltaba el AdEL de ksseg/kseg3).
+- SB/SH/SW del intérprete, camino no cacheado: `ramSettle` + `ramUncached` como write8/16/32 y
+  el JIT (faltaba asentar el diario de DMA y la barrera de escritura a RDRAM/DMEM en Threaded).
+- LL aplica `reXor` como SC (con RE=1 en usuario leía la otra palabra).
+- No cambiado a propósito: escribir Count no resetea `countFrac` (el divisor de PClock del HW
+  sigue libre; resetearlo sería inventar).
+- Verificado: systemtest interp/threaded/threaded-jit/phys-threaded ALL OK, sm64
+  interp/threaded/threaded-jit/phys ALL OK, `rspbp_smoke` PASS.

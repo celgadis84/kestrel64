@@ -1813,6 +1813,9 @@ auto CPU::translate(u64 vaddr, Access acc) -> u64 {
     u32 seg = va >> 29;   // top 3 bits pick the segment
     bool mapped, direct = false;
     // seg: 0-3 = useg(kuseg), 4 = kseg0, 5 = kseg1, 6 = ksseg, 7 = kseg3.
+    // Status.ERL=1 (kernel, tras un Reset/NMI/error de cache): kuseg deja de pasar por la TLB
+    // y queda como 2 GiB directos y sin cache, virtual = fisica (VR4300 UM 5.2.4).
+    if(seg <= 3 && (status & 0x4)) { xlatCacheable = false; return va; }
     if(seg <= 3)      { mapped = true;  }                         // useg: all modes
     else if(seg == 6) { mapped = true;  if(mode == 2) goto ade; } // ksseg: kernel+super
     else if(seg == 7) { mapped = true;  if(mode != 0) goto ade; } // kseg3: kernel only
@@ -1835,6 +1838,7 @@ auto CPU::translate(u64 vaddr, Access acc) -> u64 {
       goto ade;
     }
     // kernel (mode 0)
+    if((status & 0x4) && vaddr < 0x8000'0000ull) { xlatCacheable = false; return vaddr; } // ERL: xkuseg bajo directo
     if(lo40) return tlbLookup(vaddr, acc, true);                         // xkuseg
     if(vaddr >= 0x4000'0000'0000'0000ull && vaddr <= 0x4000'00FF'FFFF'FFFFull)
       return tlbLookup(vaddr, acc, true);                                // xksseg
@@ -2055,19 +2059,19 @@ auto CPU::execute(u32 op) -> void {
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 1)) break;
       if(storeCart((u32)p&0x1fff'ffff, gpr[RT], 1)) break;
       if(mem->wordStoreQuirk((u32)p&0x1fff'ffff, gpr[RT], 1)) break;
-      { u32 pe=(u32)reXor(p,1); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],1); break; } mem->write8(pe,(u8)gpr[RT]); } } break;
+      { u32 pe=(u32)reXor(p,1); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],1); break; } ramSettle(pe,1); ramUncached(pe,1); mem->write8(pe,(u8)gpr[RT]); } } break;
   case 0x29: /*SH*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,2,AccWrite)) break; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) break;
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 2)) break;
       if(storeCart((u32)p&0x1fff'ffff, gpr[RT], 2)) break;
       if(mem->wordStoreQuirk((u32)p&0x1fff'ffff, gpr[RT], 2)) break;
-      { u32 pe=(u32)reXor(p,2); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],2); break; } mem->write16(pe,(u16)gpr[RT]); } } break;
+      { u32 pe=(u32)reXor(p,2); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],2); break; } ramSettle(pe,2); ramUncached(pe,2); mem->write16(pe,(u16)gpr[RT]); } } break;
   case 0x2a: /*SWL*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;   // store: a TLB/addr fault here is TLBS/AdES, not the load flavor
       u32 s=(u32)(reOn()?(3-(a&3)):(a&3))*8; u32 d=readNoWatch32(a&~3ull); u32 m = s? (~0u>>s):~0u; write32(a&~3ull, (d & ~(m>>0)) | ((u32)gpr[RT]>>s)); break; }
   case 0x2b: /*SW*/ { u64 a=gpr[RS]+SIMM; if(alignBad(a,4,AccWrite)) break; u64 p=xlat(a,AccWrite); if(memAbort||!mem) break;
       if(__builtin_expect(watchArmed,0) && watchTrip(p,AccWrite)) break;
       if(storeRepeat((u32)p&0x1fff'ffff, gpr[RT], 4)) break;
-      { u32 pe=(u32)reXor(p,4); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],4); break; } mem->write32(pe, (u32)gpr[RT]); } } break;
+      { u32 pe=(u32)reXor(p,4); if(cacheable(a)&&pe<mem->rdram.size()){ dcWrite(pe,gpr[RT],4); break; } ramSettle(pe,4); ramUncached(pe,4); mem->write32(pe, (u32)gpr[RT]); } } break;
   case 0x2c: /*SDL*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;
       u32 s=(u32)(reOn()?(7-(a&7)):(a&7))*8; u64 d=readNoWatch64(a&~7ull); u64 m = s? (~0ull>>s):~0ull; write64(a&~7ull, (d & ~(m>>0)) | (gpr[RT]>>s)); break; }
   case 0x2d: /*SDR*/ { u64 a=gpr[RS]+SIMM; xlat(a,AccWrite); if(memAbort) break;
@@ -2080,7 +2084,7 @@ auto CPU::execute(u32 op) -> void {
     { u64 a=gpr[RS]+SIMM; translate(a,AccRead); if(memAbort) break; cacheOp((op >> 16) & 0x1f, a); } break;
   case 0x30: { /*LL*/  u64 va=gpr[RS]+SIMM; if(alignBad(va,4,AccRead)) break; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
               if(__builtin_expect(watchArmed,0) && watchTrip(pa,AccRead)) break;
-              u32 pe=(u32)pa; u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : uncachedRead(pe, 4, [&]{ return mem->read32(pe); });
+              u32 pe=(u32)reXor(pa,4); u32 val = (cacheable(va)&&pe<mem->rdram.size()) ? (u32)dcRead(pe,4) : uncachedRead(pe, 4, [&]{ return mem->read32(pe); });
               set(RT, sext32(val)); cop0[17]=(u32)(pa>>4); llbit=true; } break;  // LLAddr = phys>>4
   case 0x31: /*LWC1*/ if(!((u32)cop0[C0_Status]&0x2000'0000u)){copUnusable(1);break;} fprSet32(RT, read32(gpr[RS]+SIMM)); break;
   case 0x34: { /*LLD*/ u64 va=gpr[RS]+SIMM; if(alignBad(va,8,AccRead)) break; u64 pa=xlat(va,AccRead); if(memAbort||!mem) break;
