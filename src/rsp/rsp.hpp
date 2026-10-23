@@ -141,6 +141,18 @@ struct Rsp {
   // atiende en el borde de tanda. start() lo limpia: una peticion vieja no para la tarea nueva.
   std::atomic<bool> extHalt{false};
 
+  // Puntos de ruptura de DEPURACION (MCP rsp.bp.*), por ranura de IMEM. No es estado del
+  // invitado: el nucleo se congela ANTES de ejecutar la instruccion, sin tocar sp_status.
+  // En Threaded el worker espera en sitio hasta que `resume` limpia bpHit; en Lockstep step()
+  // vuelve sin ejecutar y System para la CPU. Al seguir se salta una vez ese PC (bpSkip).
+  // Con alguno armado manda el interprete del RSP (el codigo emitido no mira cada PC).
+  std::atomic<u8>   bpMap[1024]{};
+  std::atomic<u32>  bpCount{0};
+  std::atomic<bool> bpHit{false};
+  std::atomic<u32>  bpSeq{0};      // sube en cada acierto; System lo usa para parar una vez
+  std::atomic<u32>  bpHitPc{0};
+  u32 bpSkip = ~0u;
+
   // Ventana viva de la tanda en curso de step(). `cyclesRun` se publica UNA vez por tanda
   // (8K instrucciones), y eso vale de sobra para telemetria y para el regulador -- pero no
   // vale cuando el que pregunta es el PROPIO RSP. Al escribir DPC_END, el microcodigo sella

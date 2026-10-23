@@ -10308,3 +10308,11 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Presentador: recreación de swapchain destruye la vieja antes (sin NATIVE_WINDOW_IN_USE), `vkDeviceWaitIdle` bajo el candado de cola; GPU-RDP descarta el lote si el fence falla (dispositivo perdido).
 - Nuevo `scripts/swapchain_smoke.py` (redimensiona/minimiza la ventana por Win32): PASS en build/ y build-prdp/.
 - Verificado: systemtest interp/threaded-jit ALL OK; sm64 threaded-jit/interp/gpurdp-jit/prdp-jit/rewind-rtt ALL OK.
+
+### 2026-10-23 (3) — puntos de ruptura del RSP
+
+- MCP `rsp.bp.add/del/list` (+ `rsp_breakpoint_*` en el puente). Mapa de 1024 ranuras de IMEM;
+  con puntos puestos RSP y CPU van por intérprete. Acierto = RSP quieto antes del PC y CPU
+  pausada; `resume` lo suelta y ejecuta ese PC una vez. Detalle en `docs/DEBUGGER.md`.
+- Verificado: `rspbp_smoke` PASS (Threaded y Lockstep), systemtest interp/threaded-jit ALL OK,
+  sm64 threaded-jit/interp/prdp-jit ALL OK.

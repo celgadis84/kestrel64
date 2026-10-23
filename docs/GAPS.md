@@ -1044,7 +1044,7 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
 ### Interfaz / herramientas
 
 - Modelo de mando 3D (el analógico como plano de mando, no como par de ejes).
-- Huecos del lanzador: puntos de ruptura del RSP. (Puntos de observación: **CERRADO 2026-10-23**, MCP `mem.watch` + panel Memoria del depurador.)
+- Huecos del lanzador: puntos de ruptura del RSP: **CERRADO 2026-10-23**, MCP `rsp.bp.add/del/list` (ver `docs/DEBUGGER.md`; prueba `scripts/rspbp_smoke.py`). (Puntos de observación: **CERRADO 2026-10-23**, MCP `mem.watch` + panel Memoria del depurador.)
 - **Depurador (2026-10-23)**: capas estilo ares reimplementadas (grabadora RDP/RSP, línea de tiempo, TMEM, TLB, eventos RCP, USB SC64) por MCP y ventana ImGui; ver `docs/DEBUGGER.md`.
 - Recarga en caliente fase 2: `code.load`/`rsp.load`/`rom.load` hechos; falta parchear funciones sin reiniciar (protocolo deployer SC64 por USB + invalidación del JIT por rango, `jitInvalidate`).
 

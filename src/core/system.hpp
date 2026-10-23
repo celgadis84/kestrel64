@@ -193,6 +193,11 @@ struct System {
   // like the rest of the core state; run_until pushes/pops a temporary entry.
   std::vector<u32> breakpoints;
   std::atomic<u32> lastBpHit{0};   // PC of the breakpoint that last fired (0 = none)
+  // Puntos de ruptura del RSP (rsp.bp.*, mapa en Rsp::bpMap). Con alguno armado stepCpu va
+  // por el interprete y mira Rsp::bpSeq por instruccion: la CPU para en la misma instruccion
+  // en la que el RSP se congela, sin adelantarse. Lo escribe el servidor bajo coreMutex.
+  bool rspBpArmed = false;
+  u32  rspBpSeen  = 0;
 
   // Ruta de la ROM cargada. La necesita el nombre de las ranuras de estado (rom.stN).
   std::string romPath;

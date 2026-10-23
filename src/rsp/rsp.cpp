@@ -8,6 +8,7 @@
 #include <cstring>
 #include <immintrin.h>   // SSE2..SSE4.2 (Nehalem host: -march=native)
 #include <chrono>
+#include <thread>
 #include <vector>
 #include <array>
 #include <utility>
@@ -2266,6 +2267,8 @@ static const u64 kRspTanda = [] {
 __attribute__((flatten))
 auto Rsp::step(u64 maxInsns) -> void {
   if(!running) return;
+  if(bpHit.load(std::memory_order_acquire)) return;   // congelado por un punto de ruptura
+  bool bpStop = false;
   bindMem();
   rspThread = std::this_thread::get_id();
   u64 ran = 0;
@@ -2302,12 +2305,13 @@ auto Rsp::step(u64 maxInsns) -> void {
   // compran otro 1-3 % en SM64/PD/DK64 pero se lo cobran a junkrunner, asi que no se cogen.
   // KESTREL_RSPTANDA.
   // Solo cambia el grano de publicacion y de sondeo de hostStop: el reloj de invitado es el mismo.
-  while(!halt && maxInsns && budget && !hostStop.load(std::memory_order_relaxed)) {
+  while(!halt && !bpStop && maxInsns && budget && !hostStop.load(std::memory_order_relaxed)) {
     u64 chunk = maxInsns < budget ? maxInsns : budget;
     if(chunk > kRspTanda) chunk = kRspTanda;
     const bool prof = profOn;
     RspTiming* const tim = tm;
-    const bool useJit = jitOn && jc && !prof && !tim;
+    const bool bpOn = bpCount.load(std::memory_order_relaxed) != 0;
+    const bool useJit = jitOn && jc && !prof && !tim && !bpOn;
     const bool jitStats = statsOn;
     const u8* const limp = imp;
     u64 c = chunk;
@@ -2349,6 +2353,19 @@ auto Rsp::step(u64 maxInsns) -> void {
           continue;
         }
       }
+      if(bpOn && pc != bpSkip && bpMap[(pc >> 2) & 1023].load(std::memory_order_relaxed)) {
+        bpSkip = pc;
+        bpHitPc.store(pc, std::memory_order_relaxed);
+        bpHit.store(true, std::memory_order_release);
+        bpSeq.fetch_add(1, std::memory_order_release);
+        if(!pubMid) { bpStop = true; break; }   // Lockstep: vuelve sin ejecutar
+        // Threaded: el worker se aparca aqui con todo su estado quieto (rsp.regs lo lee sin
+        // candado mientras bpHit siga puesto) hasta que `resume` lo limpie.
+        while(bpHit.load(std::memory_order_acquire) && !hostStop.load(std::memory_order_relaxed))
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if(hostStop.load(std::memory_order_relaxed)) { bpStop = true; break; }
+      }
+      if(bpOn) bpSkip = ~0u;   // pasado (o saltado una vez): el siguiente acierto vuelve a parar
       c--;
       if(jitStats && jc) jc->interpOps++;
       // Fetch: dentro del bucle el PC SIEMPRE esta alineado a palabra (avanza de 4 en 4 y

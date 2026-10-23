@@ -141,6 +141,8 @@ auto Server::dispatch(const json::Value& req, const std::vector<u8>& reqBlob, js
     cmdBpDel(args, data); done();
   } else if(cmd == "cpu.bp.list") {
     cmdBpList(args, data); done();
+  } else if(cmd == "rsp.bp.add" || cmd == "rsp.bp.del" || cmd == "rsp.bp.list") {
+    cmdRspBp(cmd, args, data); done();
   } else if(cmd == "cpu.run_until") {
     cmdRunUntil(args, data); done();
   } else if(cmd == "prof.start" || cmd == "prof.stop" || cmd == "prof.reset") {
@@ -475,6 +477,9 @@ auto Server::cmdRunControl(const std::string& cmd, json::Value& data) -> void {
   if(cmd == "pause") {
     system.paused.store(true);
   } else if(cmd == "resume") {
+    // Primero soltar un RSP congelado en un punto de ruptura, SIN candado: en Threaded la CPU
+    // puede estar en su barrera esperando al RSP con coreMutex tomado.
+    system.memory.rsp.bpHit.store(false, std::memory_order_release);
     std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     if(system.cpu.halted) { system.cpu.halted = false; system.cpu.haltReason.clear(); }
     system.paused.store(false);
@@ -899,7 +904,10 @@ static auto rspTimingJson(const RspTiming& t) -> json::Value {
 }
 
 auto Server::cmdRspRegs(const json::Value& args, json::Value& data) -> void {
-  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
+  // Con el RSP aparcado en un punto de ruptura su estado esta quieto y se lee sin candado (en
+  // Threaded la CPU puede estar esperandolo en su barrera con coreMutex tomado).
+  std::unique_lock<System::CoreMutex> lk(system.coreMutex, std::defer_lock);
+  if(!system.memory.rsp.bpHit.load(std::memory_order_acquire)) lk.lock();
   Rsp& s = system.memory.rsp;
   data.set("pc", (u64)s.pc);
   data.set("running", s.running);
@@ -948,6 +956,37 @@ auto Server::cmdBpList(const json::Value&, json::Value& data) -> void {
   for(u32 b : system.breakpoints) list.push(json::Value((u64)b));
   data.set("breakpoints", list);
   data.set("lastHit", (u64)system.lastBpHit.load());
+}
+
+// Puntos de ruptura del RSP: addr = direccion de IMEM (0x000..0xFFC; se acepta 0x04001xxx).
+// rsp.bp.del sin addr los quita todos. rsp.bp.list da la lista y, si el RSP esta congelado en
+// uno, hit/hitPc; se sigue con `resume`.
+auto Server::cmdRspBp(const std::string& cmd, const json::Value& args, json::Value& data) -> void {
+  // rsp.bp.list va sin candado: con el RSP congelado en Threaded la CPU puede tener coreMutex
+  // tomado en su barrera. Solo lee atomicos.
+  std::unique_lock<System::CoreMutex> lk(system.coreMutex, std::defer_lock);
+  if(cmd != "rsp.bp.list") lk.lock();
+  Rsp& r = system.memory.rsp;
+  if(cmd == "rsp.bp.add" || (cmd == "rsp.bp.del" && args.has("addr"))) {
+    const u32 slot = (args.get("addr").asU32() >> 2) & 1023;
+    const bool add = cmd == "rsp.bp.add";
+    const u8 was = r.bpMap[slot].exchange(add ? 1 : 0, std::memory_order_relaxed);
+    if(add && !was) r.bpCount.fetch_add(1, std::memory_order_relaxed);
+    if(!add && was) r.bpCount.fetch_sub(1, std::memory_order_relaxed);
+  } else if(cmd == "rsp.bp.del") {
+    for(auto& b : r.bpMap) b.store(0, std::memory_order_relaxed);
+    r.bpCount.store(0, std::memory_order_relaxed);
+  }
+  const u32 n = r.bpCount.load(std::memory_order_relaxed);
+  if(lk.owns_lock()) system.rspBpArmed = n != 0;
+  json::Value list = json::Value::array();
+  for(u32 i = 0; i < 1024; i++)
+    if(r.bpMap[i].load(std::memory_order_relaxed)) list.push(json::Value((u64)(i << 2)));
+  data.set("breakpoints", list);
+  data.set("count", (u64)n);
+  const bool hit = r.bpHit.load(std::memory_order_acquire);
+  data.set("hit", hit);
+  if(hit) data.set("hitPc", (u64)r.bpHitPc.load(std::memory_order_relaxed));
 }
 
 // Resume and block until PC reaches `addr` (or halt / timeout). Uses a temporary

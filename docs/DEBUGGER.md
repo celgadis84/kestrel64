@@ -21,6 +21,21 @@ ventana es un cliente más del mismo servidor, en el mismo proceso.
 | `code.load` / `rsp.load` | carga en caliente de un binario en RDRAM / IMEM-DMEM |
 | `rom.load` | cambia la ROM y relanza el sistema sin salir del proceso |
 | `usb.log` | salida del USB SC64 (`osSyncPrintf`/debug USB del homebrew), ver `KESTREL_USB` |
+| `rsp.bp.add/del/list` | puntos de ruptura del RSP sobre PC de IMEM (`del` sin `addr` borra todos) |
+
+### Puntos de ruptura del RSP
+
+- Mapa de 1024 ranuras (una por palabra de IMEM). Con alguno puesto, el RSP va por el
+  intérprete (el JIT se apaga mientras haya puntos) y la CPU también, para pararse en la
+  instrucción exacta en que se ve el acierto (`rspBpArmed`).
+- Acierto: el RSP se queda ANTES de ejecutar ese PC, `bpHit`/`hitPc` se publican y la CPU se
+  pausa (`status.paused`). Threaded: el hilo del RSP espera dentro de `step()`; Lockstep: sale
+  del tramo y no vuelve a entrar hasta `resume`.
+- `run_control resume` suelta el acierto y ese mismo PC se ejecuta una vez sin volver a parar
+  (`bpSkip`); la siguiente pasada vuelve a parar.
+- Con el RSP parado en un punto, `rsp.regs` y `rsp.bp.list` responden sin candado. `add`/`del`
+  toman el CoreMutex: si la CPU está en una barrera esperando al RSP, hacer `resume` antes.
+- Prueba: `scripts/rspbp_smoke.py --threads 1|0 --port 9172` (SM64, punto en 0x000).
 
 Wrappers en `tools/mcp/kestrel_mcp.py`. Prueba de humo: `scripts/dbg_smoke.py --port 9171+`,
 `scripts/romswap_smoke.py`.

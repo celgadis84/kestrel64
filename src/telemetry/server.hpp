@@ -84,6 +84,7 @@ private:
   auto cmdBpAdd(const json::Value& args, json::Value& data) -> void;
   auto cmdBpDel(const json::Value& args, json::Value& data) -> void;
   auto cmdBpList(const json::Value& args, json::Value& data) -> void;
+  auto cmdRspBp(const std::string& cmd, const json::Value& args, json::Value& data) -> void;
   auto cmdRunUntil(const json::Value& args, json::Value& data) -> void;
   auto cmdProfControl(const std::string& cmd, json::Value& data) -> void;
   auto cmdProfCpu(const json::Value& args, json::Value& data) -> void;

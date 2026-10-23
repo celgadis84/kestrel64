@@ -360,6 +360,30 @@ def breakpoint_list() -> dict:
     return data
 
 
+def rsp_breakpoint_add(addr) -> dict:
+    """Set an RSP breakpoint at an IMEM address (0x000..0xFFC, 0x04001xxx accepted). The RSP
+    freezes BEFORE executing it (guest state untouched) and the CPU pauses with it; inspect
+    with rsp_registers, continue with run_control('resume'). While any is armed the RSP and
+    CPU run on their interpreters. Add/del while the RSP is frozen may block: resume first."""
+    data, _ = query("rsp.bp.add", addr=_addr(addr))
+    return data
+
+
+def rsp_breakpoint_del(addr=None) -> dict:
+    """Remove an RSP breakpoint. Omit addr to clear all of them."""
+    if addr is None:
+        data, _ = query("rsp.bp.del")
+    else:
+        data, _ = query("rsp.bp.del", addr=_addr(addr))
+    return data
+
+
+def rsp_breakpoint_list() -> dict:
+    """List RSP breakpoints; hit/hitPc say whether the RSP is frozen on one right now."""
+    data, _ = query("rsp.bp.list")
+    return data
+
+
 def run_until(addr, timeout_ms: int = 5000) -> dict:
     """Resume and block until PC reaches `addr` (or CPU halts / timeout). Uses a
     temporary breakpoint, leaves the core paused at the stop point. Returns
@@ -660,7 +684,7 @@ def _serve_mcp():
     mcp.tool()(state_load)
     for fn in (dbg_enable, dbg_status, dbg_freeze, dbg_rdp_frame, dbg_rsp_tasks, dbg_timeline,
                dbg_fb, dbg_tmem, cpu_tlb, event_log, mem_watch, code_load, rsp_load, rom_load,
-               usb_log):
+               usb_log, rsp_breakpoint_add, rsp_breakpoint_del, rsp_breakpoint_list):
         mcp.tool()(fn)
     mcp.run()
 

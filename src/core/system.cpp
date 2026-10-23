@@ -313,7 +313,7 @@ auto System::stepCpu(u64 n) -> u64 {
     // Un juego normal no la arma nunca, asi que esto es un booleano por bloque.
     // Con puntos de ruptura puestos tambien manda el interprete: el bloque compilado no mira
     // el PC de cada instruccion y se saltaba la parada (cpu.bp.add / run_until con JIT).
-    if(jitOn && !cpu.watchArmed && breakpoints.empty()) {
+    if(jitOn && !cpu.watchArmed && breakpoints.empty() && !rspBpArmed) {
       // Ventana que le queda a esta llamada: una cadena de bloques enlazados no puede
       // pasarse de aquí, o el bucle de arriba tickearía el VI tarde (campo estirado).
       cpu.jitOpsBudget = (u32)((n - i) > 0xFFFF'FFFFull ? 0xFFFF'FFFFull : (n - i));
@@ -412,6 +412,13 @@ auto System::stepCpu(u64 n) -> u64 {
       u32 pcv = (u32)cpu.pc;
       for(u32 b : breakpoints) {
         if(b == pcv) { lastBpHit.store(pcv); paused.store(true); return i; }
+      }
+    }
+    if(__builtin_expect(rspBpArmed, 0)) {
+      const u32 s = memory.rsp.bpSeq.load(std::memory_order_acquire);
+      if(s != rspBpSeen) {
+        rspBpSeen = s;
+        if(memory.rsp.bpHit.load(std::memory_order_acquire)) { paused.store(true); return i; }
       }
     }
     // Punto de observacion del anfitrion (mem.watch): el acceso ya se completo; se para
