@@ -170,12 +170,13 @@ threaded) necesitan ROMs, y aqui no se distribuye ninguna.
 | `kestrel64-{ver}-setup.exe` | Instalador. Lo normal. |
 | `kestrel64-{ver}-win64.zip` | Portable: descomprimir y listo. |
 
-Dentro van los dos rasterizadores: `kestrel64.exe` (Parallel-RDP, por GPU, el
-recomendado) y `kestrel64-soft.exe` (por CPU, para una maquina sin Vulkan), mas el
-lanzador `kestrel64-gui.exe`.
+Dentro van un solo emulador, `kestrel64.exe`, y el lanzador `kestrel64-gui.exe`. El
+emulador trae tres rasterizadores, a elegir en Video > Rasterizador: GPU-RDP (propio,
+por GPU con Vulkan, el de fabrica), Parallel-RDP y SoftRDP (por CPU). Sin Vulkan cae
+solo a SoftRDP.
 
-**Requisitos:** Windows de 64 bits y una GPU con Vulkan. `vulkan-1.dll` la instala el
-driver de la grafica; no se distribuye aqui.
+**Requisitos:** Windows de 64 bits; para los rasterizadores por GPU, una grafica con
+Vulkan. `vulkan-1.dll` la instala el driver de la grafica; no se distribuye aqui.
 
 ### Procedencia
 
