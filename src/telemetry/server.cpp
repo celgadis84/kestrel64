@@ -16,6 +16,15 @@
 
 namespace kestrel::telemetry {
 
+// Ordenes que esperan al nucleo (hasta timeout_ms o varios segundos) sin coger nada del
+// servidor: solo atomicos, stateMsgMutex y coreMutex en tramos cortos. Van FUERA de
+// dispatchMx para que la espera no congele a los demas clientes (ventana del depurador,
+// pad.py) durante segundos.
+static auto waitsOnCore(const std::string& cmd) -> bool {
+  return cmd == "frame.advance" || cmd == "cpu.run_until" || cmd == "rewind.step" ||
+         cmd == "state.save" || cmd == "state.load";
+}
+
 auto Server::stop() -> void {
   stopping.store(true);
   tcp.close();
@@ -43,8 +52,8 @@ auto Server::serveClient(std::shared_ptr<net::TcpConn> conn) -> void {
       reply.set("id", req.get("id"));
       // Una orden cada vez contra el estado vivo, igual que cuando solo se atendia a un
       // cliente: lo unico que pasa a ir en paralelo es esperar en la red.
-      std::lock_guard<std::mutex> lk(dispatchMx);
-      dispatch(req, reqBlob, reply, blob);
+      if(waitsOnCore(req.get("cmd").asString())) dispatch(req, reqBlob, reply, blob);
+      else { std::lock_guard<std::mutex> lk(dispatchMx); dispatch(req, reqBlob, reply, blob); }
     }
 
     if(!conn->sendFrame(json::dump(reply), blob.empty() ? nullptr : blob.data(), (u32)blob.size()))
@@ -82,8 +91,9 @@ auto Server::serve(u16 port) -> void {
 
 auto Server::call(const json::Value& req, const std::vector<u8>& reqBlob, json::Value& reply,
                   std::vector<u8>& blob) -> void {
-  std::lock_guard<std::mutex> lk(dispatchMx);
   reply.set("id", req.get("id"));
+  if(waitsOnCore(req.get("cmd").asString())) { dispatch(req, reqBlob, reply, blob); return; }
+  std::lock_guard<std::mutex> lk(dispatchMx);
   dispatch(req, reqBlob, reply, blob);
 }
 

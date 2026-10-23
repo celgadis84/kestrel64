@@ -10366,3 +10366,17 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - No cambiado: JAL/JALR/BxxAL y EPC enlazan `sext32` del PC. Correcto en direccionamiento de 32
   bits; con PC fuera de compatibilidad (código en xkphys/xkseg) haría falta el VA de 64 bits
   también en el JIT, que liga con VA de 32. Anotado en GAPS.
+
+### 2026-10-23 (9) — carreras del JIT del RSP y del MCP
+
+- `Rsp::jitInvalidate` desde OTRO hilo (telemetria `mem.write`/`rsp.load` a IMEM, DMA de la CPU
+  con el RSP en marcha en Threaded) llamaba a `jc->syncImem` mientras el hilo del RSP leia la
+  tabla de bloques: carrera. Ahora deja `jitImemSyncReq` y el propio hilo del RSP sincroniza al
+  empezar la siguiente tanda (una carga atomica por tanda de 1024). `jitImemGen` (no atomico)
+  solo lo toca el hilo propio.
+- `dispatchMx` se sostenia durante las ordenes que esperan al nucleo (`frame.advance`,
+  `cpu.run_until`, `state.*`, `rewind.step`: hasta `timeout_ms`), congelando a los demas
+  clientes (ventana del depurador, pad.py). Esas ordenes solo usan atomicos y coreMutex en
+  tramos cortos: van fuera del mutex. `scripts/mcpwait_smoke.py`: PASS (ping 0 ms durante un
+  run_until de 3 s; 40 reescrituras de IMEM con el RSP vivo). sm64 interp/threaded-jit y
+  systemtest threaded-jit ALL OK; rspbp_smoke y mcpfix_smoke PASS.

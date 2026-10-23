@@ -333,6 +333,9 @@ struct Rsp {
   // instrucciones interpretadas) o de fuera: en el primer caso se puede cambiar de imagen sin
   // riesgo, en el segundo hay que limitarse a invalidar la tabla viva.
   std::thread::id rspThread{};
+  // IMEM cambio desde fuera del hilo del RSP con el nucleo corriendo: step() sincroniza la
+  // tabla del JIT (syncImem) al empezar la siguiente tanda, desde su propio hilo.
+  std::atomic<bool> jitImemSyncReq{false};
   // Tira la tabla de bloques. La llama el motor de DMA del SP cuando escribe en IMEM: es
   // la unica via por la que el microcodigo puede cambiar bajo un bloque ya compilado
   // mientras la tarea corre (carga de overlay). Al arrancar cada tarea se comprueba ademas

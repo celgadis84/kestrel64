@@ -332,15 +332,20 @@ auto Rsp::jitInvalidate(u32 off, u32 bytes, const u8* imem) -> void {
   if(!running) return;
   // Un bloque que este corriendo el MTC0 que lanzo este DMA lo ve al volver (Rsp::jitCop0)
   // y corta detras de esa instruccion, sin tocar nada mas del bloque ni de su tabla.
-  jitImemGen++;
+  const bool own = std::this_thread::get_id() == rspThread;
+  if(own) jitImemGen++;   // solo el propio hilo: jitImemGen no es atomico
   // Corriendo y desde el hilo del nucleo: es el propio microcodigo cargandose (el stub de
   // arranque DMAea el ucode de la tarea) o un overlay. El DMA sale de un MTC0; si ese MTC0
   // iba dentro de un bloque, el bloque corta al volver (ver arriba) y el codigo emitido no
   // se libera -- solo se marca muerto en la tabla --, asi que cambiar de imagen aqui es tan
   // seguro como en start(), y es DONDE de verdad pasa el cambio de tarea: si se invalida a
   // ciegas se tira la tabla de la tarea anterior cada vez.
-  if(std::this_thread::get_id() == rspThread) { jitSelectImage(imem); return; }
-  jc->syncImem(imem);
+  if(own) { jitSelectImage(imem); return; }
+  // Desde OTRO hilo (telemetria, DMA lanzado por la CPU con el RSP en marcha en Threaded) la
+  // tabla no se toca: el hilo del RSP la esta leyendo. Se le deja el aviso y la sincroniza el
+  // mismo al empezar la siguiente tanda (step()). En Lockstep ese hilo es este mismo y el
+  // aviso se cobra en la siguiente llamada a step().
+  jitImemSyncReq.store(true, std::memory_order_release);
   // El codigo emitido de los bloques muertos se queda en el buffer hasta el siguiente
   // reciclado: es un asignador de tope, no hay nada que liberar pieza a pieza.
 }
@@ -2311,6 +2316,10 @@ auto Rsp::step(u64 maxInsns) -> void {
     const bool prof = profOn;
     RspTiming* const tim = tm;
     const bool bpOn = bpCount.load(std::memory_order_relaxed) != 0;
+    if(jitImemSyncReq.load(std::memory_order_acquire) && jc) {
+      jitImemSyncReq.store(false, std::memory_order_relaxed);
+      jc->syncImem(imp);
+    }
     const bool useJit = jitOn && jc && !prof && !tim && !bpOn;
     const bool jitStats = statsOn;
     const u8* const limp = imp;
