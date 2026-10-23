@@ -10341,3 +10341,10 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - `vi.capture` sin `height`: alto de lo que barre el VI (240/288 por Y_SCALE), no 240 fijo.
 - `state.save/load` exige `slot` (sin él pisaba la ranura 0 del jugador).
 - Prueba: `scripts/mcpfix_smoke.py --port 9174` PASS; `dbg_smoke` PASS.
+
+### 2026-10-23 (6) — AI_LEN/AI_STATUS al día
+
+- Leer AI_LEN o AI_STATUS hace `aiTick(cartNow())` antes: el DAC drena por muestras y el valor
+  se quedaba en el último tick (fin de búfer / campo / escritura). El crédito lleva resto exacto,
+  así que trocearlo no mueve el fin de cada búfer. sm64 interp/threaded/threaded-jit ALL OK
+  (md5 igual), systemtest interp ALL OK.

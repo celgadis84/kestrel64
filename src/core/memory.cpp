@@ -1358,8 +1358,13 @@ auto Memory::mmioRead32(u32 a) -> u32 {
     return 0;
   case BASE_AI & 0x1ff0'0000:
     switch(off & 0xff) {
-    case 0x04: return rcp.ai_play_remaining;   // bytes left in the playing buffer (drains)
+    // El DAC drena por muestras, no por eventos: sin ponerlo al dia, AI_LEN devolvia lo que
+    // quedaba en el ultimo tick (fin de bufer, campo o escritura) y osAiGetLength veia el
+    // bufer parado. aiTick reparte el credito con resto exacto, asi que trocearlo aqui no
+    // cambia cuando acaba cada bufer.
+    case 0x04: aiTick(cartNow()); return rcp.ai_play_remaining;   // bytes left in the playing buffer
     case 0x0c:                                 // AI_STATUS: FIFO_FULL(bit31) | DMA_BUSY(bit30)
+      aiTick(cartNow());
       return (rcp.ai_fifo_count >= 2 ? 0x8000'0001u : 0u)
            | (rcp.ai_fifo_count >= 1 ? 0x4000'0000u : 0u);
     }
