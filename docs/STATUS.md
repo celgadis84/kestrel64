@@ -10332,3 +10332,12 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   sigue libre; resetearlo sería inventar).
 - Verificado: systemtest interp/threaded/threaded-jit/phys-threaded ALL OK, sm64
   interp/threaded/threaded-jit/phys ALL OK, `rspbp_smoke` PASS.
+
+### 2026-10-23 (5) — arreglos MCP
+
+- `cpu.regs`/`cpu.step`/`cpu.disasm`/`run_until`: el op se lee por la dirección VIRTUAL
+  (traducción en sondeo, sin excepción); antes `Memory::read32` enmascaraba 29 bits y un PC en
+  kuseg/TLB mostraba otra página. No mapeada -> 0.
+- `vi.capture` sin `height`: alto de lo que barre el VI (240/288 por Y_SCALE), no 240 fijo.
+- `state.save/load` exige `slot` (sin él pisaba la ranura 0 del jugador).
+- Prueba: `scripts/mcpfix_smoke.py --port 9174` PASS; `dbg_smoke` PASS.

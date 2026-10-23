@@ -391,6 +391,17 @@ static const char* kGprName[32] = {
   "zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",
   "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
 
+// Palabra de instruccion en una direccion VIRTUAL del invitado. Memory::read32 toma fisica (solo
+// enmascara 29 bits), asi que un PC en kuseg/TLB leia otra pagina. Traduccion en modo sondeo:
+// sin excepcion, sin tocar BadVAddr ni el atributo de cache. No mapeada -> 0.
+static auto guestOp(System& s, u64 va) -> u32 {
+  CPU& c = s.cpu;
+  const bool sc = c.xlatCacheable;
+  const u64 p = c.tlbProbePhys(va);
+  c.xlatCacheable = sc;
+  return p == ~0ull ? 0u : s.memory.read32((u32)p);
+}
+
 auto Server::cmdCpuRegs(const json::Value&, json::Value& data) -> void {
   std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   CPU& c = system.cpu;
@@ -416,7 +427,7 @@ auto Server::cmdCpuRegs(const json::Value&, json::Value& data) -> void {
   for(int i = 0; i < 32; i++) { char nm[8]; std::snprintf(nm,sizeof nm,"f%d",i); f.set(nm, c.fpr[i]); }
   data.set("fpr", f);
   // disasm of the instruction at pc
-  u32 op = system.memory.read32((u32)c.pc);
+  u32 op = guestOp(system, c.pc);
   data.set("op", (u64)op);
   data.set("disasm", CPU::disasm(op, c.pc));
   // control-transfer ring buffer, oldest → newest
@@ -447,7 +458,7 @@ auto Server::cmdCpuStep(const json::Value& args, json::Value& data) -> void {
   data.set("pc", system.cpu.pc);
   data.set("halted", system.cpu.halted);
   if(system.cpu.halted) data.set("haltReason", system.cpu.haltReason);
-  u32 op = system.memory.read32((u32)system.cpu.pc);
+  u32 op = guestOp(system, system.cpu.pc);
   data.set("disasm", CPU::disasm(op, system.cpu.pc));
 }
 
@@ -460,7 +471,7 @@ auto Server::cmdCpuDisasm(const json::Value& args, json::Value& data) -> bool {
   json::Value list = json::Value::array();
   for(u32 i = 0; i < count; i++) {
     u32 a = addr + i * 4;
-    u32 op = system.memory.read32(a);
+    u32 op = guestOp(system, (u64)(s64)(s32)a);
     json::Value e = json::Value::object();
     e.set("addr", (u64)a);
     e.set("op", (u64)op);
@@ -572,6 +583,9 @@ auto Server::cmdRewind(const json::Value& args, json::Value& data) -> bool {
 // va a usar el lanzador. Si nadie contesta en 5 s es que no hay bucle corriendo, y eso se
 // dice en vez de colgar al cliente.
 auto Server::cmdState(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
+  // Ranura obligatoria: sin ella valia 0, que es la ranura rapida del jugador, y un cliente
+  // que olvidaba el argumento le pisaba (o le cargaba) la partida.
+  if(!args.has("slot")) { data.set("msg", "falta slot (0..9)"); return false; }
   int slot = (int)args.get("slot").asInt();
   if(slot < 0 || slot > 9) { data.set("msg", "slot fuera de rango (0..9)"); return false; }
   auto& box = (cmd == "state.save") ? system.stateSaveReq : system.stateLoadReq;
@@ -798,7 +812,7 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
 // from the RCP register file (the exact buffer the console would be scanning out),
 // then expands the pixels the same way the DAC does: 5/5/5/1 for 16bpp, direct
 // 8/8/8/8 for 32bpp. Height is not a hardware register — it falls out of the active
-// scan window, so we accept an optional `height` arg and default to 240 (NTSC).
+// scan window, so we accept an optional `height` arg and default to what the VI scans.
 auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool {
   // Con el backend de GPU vivo, la imagen BUENA no esta en la RDRAM: parallel-rdp rasteriza
   // y escanea por su cuenta, y lo que se ve en la ventana sale de vrdp::scanout() ya con el
@@ -820,7 +834,7 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
     }
     vrdp::scanoutDone();   // simetrico: scanout() deja el cerrojo cogido aunque no haya foto
   }
-  u32 origin, width, ctrl;
+  u32 origin, width, ctrl, autoH;
   {
     std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     Rcp& r = system.memory.rcp;
@@ -829,11 +843,18 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
                                                              : r.vi_origin & 0x00FFFFFF;
     width  = r.vi_width & 0xFFF;
     ctrl   = r.vi_ctrl;
+    // Alto sin argumento: lo que el VI barre, como framebufferHash -- 240/288 lineas segun
+    // NTSC/PAL (VI_V_SYNC) por Y_SCALE (2.10). Fijo a 240 cortaba PAL y 480i y leia de mas
+    // con Y_SCALE < 1.
+    const u32 ysc = r.vi_yscale & 0xfff;
+    const u32 baseH = (r.viHalflines() >= 550) ? 288 : 240;
+    autoH = ysc ? ((baseH * ysc) >> 10) : baseH;
+    if(autoH == 0 || autoH > 576) autoH = baseH;
   }
   u32 type = ctrl & 0x3;                  // 0/1 blank, 2 = 16bpp 5551, 3 = 32bpp 8888
   if(width == 0 || (type != 2 && type != 3)) return false;
-  u32 height = args.has("height") ? args.get("height").asU32() : 240;
-  if(height == 0 || height > 480) height = 240;
+  u32 height = args.has("height") ? args.get("height").asU32() : autoH;
+  if(height == 0 || height > 576) height = autoH;
   u32 bpp = (type == 3) ? 4 : 2;
   auto& ram = system.memory.rdram;
   u64 need = (u64)origin + (u64)width * height * bpp;
@@ -1034,7 +1055,7 @@ auto Server::cmdRunUntil(const json::Value& args, json::Value& data) -> void {
     data.set("pc", system.cpu.pc);
     data.set("halted", system.cpu.halted);
     if(system.cpu.halted) data.set("haltReason", system.cpu.haltReason);
-    u32 op = system.memory.read32((u32)system.cpu.pc);
+    u32 op = guestOp(system, system.cpu.pc);
     data.set("op", (u64)op);
     data.set("disasm", CPU::disasm(op, system.cpu.pc));
   }
