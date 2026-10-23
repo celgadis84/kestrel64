@@ -10356,3 +10356,13 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   parallel-rdp). Las mitades de 32 bpp ya envolvían (`& 0x7fe`). El muestreo fuera de rango
   (`off >= 0x1000 -> 0`) sigue igual: va a la par con el shader del GPU-RDP, se toca junto.
 - krom `--filter Texture` regress=0, sm64 interp y gpurdp-jit ALL OK.
+
+### 2026-10-23 (8) — SB/SH/SD a registros del RCP
+
+- `wordStoreQuirk` cubre también el espacio MMIO (`isMmio`): el RCP ignora byte-enables y un
+  SB/SH/SD le llega como palabra con el dato desplazado (SD: los 32 bits altos), igual que DMEM.
+  Antes `write8/16` hacían leer-modificar-escribir del registro. systemtest interp/threaded-jit
+  y sm64 interp/threaded-jit ALL OK.
+- No cambiado: JAL/JALR/BxxAL y EPC enlazan `sext32` del PC. Correcto en direccionamiento de 32
+  bits; con PC fuera de compatibilidad (código en xkphys/xkseg) haría falta el VA de 64 bits
+  también en el JIT, que liga con VA de 32. Anotado en GAPS.

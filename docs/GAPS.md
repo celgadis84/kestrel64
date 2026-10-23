@@ -84,6 +84,11 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 ### Fidelidad
 
+- **Enlace y EPC con VA de 64 bits** (abierto, 2026-10-23, prioridad baja). JAL/JALR/BxxAL y
+  la EPC de las excepciones guardan `sext32(pc+8)`: correcto en modo 32 bits (todo juego y
+  homebrew conocido). Con KX/SX/UX=1 y codigo fuera del rango sext32 el VR4300 guarda los 64
+  bits; arreglarlo pide tocar interprete **y** JIT (el PC del JIT es 32 bits). Sin caso real.
+
 - ~~**Con parallel-RDP el RDP no le cuesta NADA al invitado**~~ **CERRADO 2026-09-09.**
   El reloj de coste del RDP (`rcp.rdpGclk`, el que frena a la CPU en `Memory::rdpPace`) y
   `DPC_CLOCK` solo los alimentaba `SoftRdp::accountPixels`. Con la GPU activa, `rdpRunJob`

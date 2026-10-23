@@ -1112,7 +1112,12 @@ auto Memory::cartWrite(u32 phys, u64 value, u32 nbytes) -> void {
 auto Memory::wordStoreQuirk(u32 phys, u64 reg, u32 width) -> bool {
   bool sp  = phys >= BASE_DMEM   && phys < BASE_SP;
   bool pif = phys >= BASE_PIFRAM && phys < BASE_PIFRAM + PIFRAM_SIZE;
-  if(!sp && !pif) return false;
+  // Registros del RCP: tampoco miran los byte-enables. Un SB/SH/SD les llega como escritura de
+  // palabra con el dato desplazado, igual que a DMEM. Antes write8/16 hacian leer-modificar-
+  // escribir: la lectura podia tener efectos (o devolver otra cosa que lo escrito) y el byte
+  // vecino conservaba el valor viejo en vez de recibir el del registro de la CPU.
+  bool mmio = !sp && isMmio(phys);
+  if(!sp && !pif && !mmio) return false;
   if(width == 4) return false;                 // SW behaves normally on these devices
   // SB/SH/SD a DMEM/IMEM: esta rareza NO pasa por CPU::ramUncached, asi que sin esto se cuela
   // una escritura de la CPU en la memoria que el RSP lee ahora mismo, y en Threaded con
