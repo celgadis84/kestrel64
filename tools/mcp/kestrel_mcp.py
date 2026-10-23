@@ -384,6 +384,14 @@ def rsp_breakpoint_list() -> dict:
     return data
 
 
+def rsp_disasm(addr=0, count: int = 64) -> dict:
+    """Disassemble RSP IMEM (addr 0x000..0xFFC, count <= 1024) with RSP mnemonics (VU ops,
+    LWC2/SWC2 vector loads/stores, COP0 SP_*/DPC_* names). Rows carry bp=True where an RSP
+    breakpoint is set; pc = current RSP PC."""
+    data, _ = query("rsp.disasm", addr=_addr(addr), count=count)
+    return data
+
+
 def run_until(addr, timeout_ms: int = 5000) -> dict:
     """Resume and block until PC reaches `addr` (or CPU halts / timeout). Uses a
     temporary breakpoint, leaves the core paused at the stop point. Returns
@@ -684,7 +692,8 @@ def _serve_mcp():
     mcp.tool()(state_load)
     for fn in (dbg_enable, dbg_status, dbg_freeze, dbg_rdp_frame, dbg_rsp_tasks, dbg_timeline,
                dbg_fb, dbg_tmem, cpu_tlb, event_log, mem_watch, code_load, rsp_load, rom_load,
-               usb_log, rsp_breakpoint_add, rsp_breakpoint_del, rsp_breakpoint_list):
+               usb_log, rsp_breakpoint_add, rsp_breakpoint_del, rsp_breakpoint_list,
+               rsp_disasm):
         mcp.tool()(fn)
     mcp.run()
 

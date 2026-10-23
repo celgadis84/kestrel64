@@ -194,7 +194,7 @@ auto pixelImage(Tex& t, float zoom, int& hx, int& hy) -> void {
 
 bool showControl = true, showCpu = true, showDisasm = true, showMem = true, showRdp = true,
      showRsp = true, showTimeline = true, showFb = true, showTmem = false, showTlb = false,
-     showProf = false, showEv = false, showUsb = false, showRcp = false;
+     showProf = false, showEv = false, showUsb = false, showRcp = false, showRspCode = true;
 
 auto panelControl() -> void {
   static Reply st, dst;
@@ -341,6 +341,73 @@ auto panelDisasm() -> void {
       if(ImGui::Selectable(t, sel == a, ImGuiSelectableFlags_SpanAllColumns)) sel = a;
       ImGui::TableNextColumn();
       ImGui::TextUnformatted(e.get("sym").asString().c_str());
+      ImGui::TableNextColumn();
+      ImGui::TextUnformatted(e.get("text").asString().c_str());
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
+  }
+  ImGui::End();
+}
+
+// IMEM desensamblada con puntos de ruptura del RSP (rsp.disasm + rsp.bp.*). Con el RSP
+// congelado en uno se resalta la fila y "Continuar" lo suelta (resume).
+auto panelRspCode() -> void {
+  static Reply r, bps;
+  static Ticker tk;
+  static bool follow = true;
+  static char addrBuf[8] = "000";
+  if(!ImGui::Begin("RSP: codigo", &showRspCode)) { ImGui::End(); return; }
+  ImGui::Checkbox("Seguir PC", &follow);
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(80);
+  bool go = ImGui::InputText("IMEM", addrBuf, sizeof addrBuf, ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_EnterReturnsTrue);
+  if(go) follow = false;
+  if(g_dirty || go || tk.due(0.5)) {
+    bps = Q("rsp.bp.list");
+    const u64 pc = num(r.data.get("pc"));
+    u64 base = follow ? (pc >= 64 ? pc - 64 : 0) : (hexParse(addrBuf) & 0xffc);
+    if(base > 0x1000 - 64 * 4) base = 0x1000 - 64 * 4;
+    Value a = A(); a.set("addr", base); a.set("count", 64);
+    r = Q("rsp.disasm", a);
+  }
+  const bool hit = bps.data.get("hit").b;
+  const u64 hitPc = num(bps.data.get("hitPc"));
+  ImGui::SameLine();
+  if(ImGui::Button("Quitar todos")) { Q("rsp.bp.del"); g_dirty = true; }
+  if(hit) {
+    ImGui::SameLine();
+    if(ImGui::Button("Continuar")) { Q("resume"); g_dirty = true; }
+    ImGui::TextColored(ImVec4(1, .8f, .3f, 1), "RSP parado en punto de ruptura: %03llx", (unsigned long long)hitPc);
+  } else {
+    ImGui::TextDisabled("Clic en la primera columna = punto de ruptura (%llu puestos)",
+                        (unsigned long long)num(bps.data.get("count")));
+  }
+  if(!r.ok) { ImGui::TextColored(ImVec4(1, .4f, .4f, 1), "%s", r.err.c_str()); ImGui::End(); return; }
+  const u64 pc = num(r.data.get("pc"));
+  if(ImGui::BeginTable("rspdis", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable)) {
+    ImGui::TableSetupScrollFreeze(0, 1);
+    ImGui::TableSetupColumn("BP");
+    ImGui::TableSetupColumn("IMEM");
+    ImGui::TableSetupColumn("Op");
+    ImGui::TableSetupColumn("Instruccion", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableHeadersRow();
+    int i = 0;
+    for(const auto& e : arr(r.data.get("insns"))) {
+      const u64 a = num(e.get("addr"));
+      ImGui::TableNextRow();
+      if(a == pc) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, hit ? IM_COL32(110, 60, 20, 255) : IM_COL32(60, 90, 30, 255));
+      ImGui::TableNextColumn();
+      ImGui::PushID(i++);
+      const bool b = e.get("bp").b;
+      if(ImGui::SmallButton(b ? "X" : " ")) {
+        Value q = A(); q.set("addr", a);
+        Q(b ? "rsp.bp.del" : "rsp.bp.add", q); g_dirty = true;
+      }
+      ImGui::TableNextColumn();
+      ImGui::Text("%03llx", (unsigned long long)a);
+      ImGui::TableNextColumn();
+      ImGui::TextDisabled("%08llx", (unsigned long long)num(e.get("op")));
       ImGui::TableNextColumn();
       ImGui::TextUnformatted(e.get("text").asString().c_str());
       ImGui::PopID();
@@ -931,6 +998,7 @@ auto defaultLayout(ImGuiID dock) -> void {
   ImGui::DockBuilderDockWindow("Registros RCP / RSP", leftBot);
   ImGui::DockBuilderDockWindow("Desensamblado", cTop);
   ImGui::DockBuilderDockWindow("Perfilador", cTop);
+  ImGui::DockBuilderDockWindow("RSP: codigo", cTop);
   ImGui::DockBuilderDockWindow("Memoria", cBot);
   ImGui::DockBuilderDockWindow("TLB", cBot);
   ImGui::DockBuilderDockWindow("Eventos RCP", cBot);
@@ -953,6 +1021,7 @@ auto drawAll() -> void {
       ImGui::Separator();
       ImGui::MenuItem("RDP: comandos", nullptr, &showRdp);
       ImGui::MenuItem("RSP: tareas", nullptr, &showRsp);
+      ImGui::MenuItem("RSP: codigo / puntos de ruptura", nullptr, &showRspCode);
       ImGui::MenuItem("Linea de tiempo", nullptr, &showTimeline);
       ImGui::MenuItem("Framebuffer", nullptr, &showFb);
       ImGui::MenuItem("TMEM", nullptr, &showTmem);
@@ -973,6 +1042,7 @@ auto drawAll() -> void {
   if(showMem) panelMem();
   if(showRdp) panelRdp();
   if(showRsp) panelRsp();
+  if(showRspCode) panelRspCode();
   if(showTimeline) panelTimeline();
   if(showFb) panelFb();
   if(showTmem) panelTmem();

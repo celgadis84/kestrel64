@@ -10380,3 +10380,17 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   tramos cortos: van fuera del mutex. `scripts/mcpwait_smoke.py`: PASS (ping 0 ms durante un
   run_until de 3 s; 40 reescrituras de IMEM con el RSP vivo). sm64 interp/threaded-jit y
   systemtest threaded-jit ALL OK; rspbp_smoke y mcpfix_smoke PASS.
+
+### 2026-10-23 (10) — desensamblado del RSP y panel de puntos de ruptura; lianas de DK64
+
+- `rsp.disasm` (server_dbg.cpp, wrapper `rsp_disasm`): IMEM desensamblada con mnemonicos del
+  RSP (operaciones de la VU con elemento, LWC2/SWC2 con offset escalado por tamano, mfc2/cfc2/
+  mtc2/ctc2, COP0 con nombres SP_*/DPC_*); lo escalar va por `CPU::disasm`. Marca `bp` en las
+  filas con punto de ruptura. Sin candado con el RSP aparcado en un punto (como `rsp.regs`).
+- Ventana del depurador: panel "RSP: codigo" (seguir PC, clic = punto de ruptura, fila naranja
+  = RSP parado ahi, Continuar, Quitar todos). `scripts/rspdis_smoke.py` y debugger_smoke PASS.
+- Lianas de DK64 (demo de atraccion): con todo lo de hoy (AI_LEN/AI_STATUS incluido) DK sigue
+  cayendo al agua. `scripts/dk_vine_check.py` (capturas cada N s tras un START). No se pierden
+  cuadros; sigue siendo divergencia de logica (algo que el juego lee vale distinto), ver la
+  seccion "Estado de la prueba de la liana de DK64" mas arriba. Ninguna correccion de hoy la
+  toca.

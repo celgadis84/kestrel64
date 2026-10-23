@@ -22,6 +22,7 @@ ventana es un cliente más del mismo servidor, en el mismo proceso.
 | `rom.load` | cambia la ROM y relanza el sistema sin salir del proceso |
 | `usb.log` | salida del USB SC64 (`osSyncPrintf`/debug USB del homebrew), ver `KESTREL_USB` |
 | `rsp.bp.add/del/list` | puntos de ruptura del RSP sobre PC de IMEM (`del` sin `addr` borra todos) |
+| `rsp.disasm` | IMEM desensamblada con mnemónicos del RSP (VU, LWC2/SWC2, COP0 SP_*/DPC_*), marca `bp` |
 
 ### Puntos de ruptura del RSP
 
@@ -35,7 +36,8 @@ ventana es un cliente más del mismo servidor, en el mismo proceso.
   (`bpSkip`); la siguiente pasada vuelve a parar.
 - Con el RSP parado en un punto, `rsp.regs` y `rsp.bp.list` responden sin candado. `add`/`del`
   toman el CoreMutex: si la CPU está en una barrera esperando al RSP, hacer `resume` antes.
-- Prueba: `scripts/rspbp_smoke.py --threads 1|0 --port 9172` (SM64, punto en 0x000).
+- Prueba: `scripts/rspbp_smoke.py --threads 1|0 --port 9172` (SM64, punto en 0x000);
+  `scripts/rspdis_smoke.py --port 9178` (rsp.disasm + marca de bp).
 
 Wrappers en `tools/mcp/kestrel_mcp.py`. Prueba de humo: `scripts/dbg_smoke.py --port 9171+`,
 `scripts/romswap_smoke.py`.
@@ -52,7 +54,8 @@ Wrappers en `tools/mcp/kestrel_mcp.py`. Prueba de humo: `scripts/dbg_smoke.py --
   la selección), Memoria (hex editable, mem.watch), RDP: comandos del cuadro, RSP: tareas,
   Línea de tiempo, Framebuffer (zoom, píxel bajo el ratón), TMEM (decodificada con el
   intercambio de palabras de filas impares, RGBA32 partido, TLUT en 0x800), TLB, Perfilador,
-  Eventos RCP, USB (SC64), Registros RCP / RSP.
+  Eventos RCP, USB (SC64), Registros RCP / RSP, RSP: código (IMEM desensamblada, clic en la
+  primera columna = punto de ruptura, fila naranja = RSP parado ahí, botón Continuar).
 - Disposición inicial con DockBuilder; la que deje el usuario se guarda en
   `kestrel64_debugger.ini` junto al exe.
 - Sin GPU cae a WARP.

@@ -21,6 +21,69 @@ namespace {
 
 auto hex64(u64 v) -> std::string { char b[24]; std::snprintf(b, sizeof b, "%016llx", (unsigned long long)v); return b; }
 
+// Desensamblado del RSP: lo escalar es MIPS R4000 (se delega en CPU::disasm); aqui solo lo
+// propio: COP0 con nombres SP_*/DPC_*, mfc2/cfc2/mtc2/ctc2, operaciones de la VU y las
+// cargas/almacenes vectoriales LWC2/SWC2 (offset de 7 bits con signo escalado por tamano).
+auto rspDisasm(u32 op, u32 pc) -> std::string {
+  static const char* gpr[32] = {
+    "zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",
+    "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
+  static const char* c0[16] = {
+    "SP_MEM_ADDR","SP_DRAM_ADDR","SP_RD_LEN","SP_WR_LEN","SP_STATUS","SP_DMA_FULL",
+    "SP_DMA_BUSY","SP_SEMAPHORE","DPC_START","DPC_END","DPC_CURRENT","DPC_STATUS",
+    "DPC_CLOCK","DPC_BUFBUSY","DPC_PIPEBUSY","DPC_TMEM"};
+  static const char* vu[64] = {
+    "vmulf","vmulu","vrndp","vmulq","vmudl","vmudm","vmudn","vmudh",
+    "vmacf","vmacu","vrndn","vmacq","vmadl","vmadm","vmadn","vmadh",
+    "vadd","vsub",nullptr,"vabs","vaddc","vsubc",nullptr,nullptr,
+    nullptr,nullptr,nullptr,nullptr,nullptr,"vsar",nullptr,nullptr,
+    "vlt","veq","vne","vge","vcl","vch","vcr","vmrg",
+    "vand","vnand","vor","vnor","vxor","vnxor",nullptr,nullptr,
+    "vrcp","vrcpl","vrcph","vmov","vrsq","vrsql","vrsqh","vnop",
+    nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr,nullptr};
+  static const char* ls = "bsldqrpuhfwt";
+  static const u8 lsShift[12] = {0,1,2,3,4,4,3,3,4,4,4,4};
+  char b[96];
+  const u32 opc = op >> 26, rs = (op >> 21) & 31, rt = (op >> 16) & 31, rd = (op >> 11) & 31;
+  auto el = [](u32 e) -> std::string {
+    static const char* n[16] = {"","","[0q]","[1q]","[0h]","[1h]","[2h]","[3h]",
+                                "[0]","[1]","[2]","[3]","[4]","[5]","[6]","[7]"};
+    return n[e & 15];
+  };
+  if(opc == 0x10 && (rs == 0 || rs == 4)) {
+    std::snprintf(b, sizeof b, "%s %s,%s", rs ? "mtc0" : "mfc0", gpr[rt], c0[rd & 15]);
+    return b;
+  }
+  if(opc == 0x12) {
+    if(op & (1u << 25)) {
+      const char* m = vu[op & 63];
+      if(!m) { std::snprintf(b, sizeof b, "cop2 0x%07x", op & 0x1ffffff); return b; }
+      const u32 vd = (op >> 6) & 31, vs = rd, e = (op >> 21) & 15;
+      const u32 f = op & 63;
+      if(f == 55) return "vnop";
+      if(f >= 48)   // una sola lane: vd[de], vt[e]
+        std::snprintf(b, sizeof b, "%s v%u[%u],v%u[%u]", m, vd, vs & 7, rt, e & 7);
+      else
+        std::snprintf(b, sizeof b, "%s v%u,v%u,v%u%s", m, vd, vs, rt, el(e).c_str());
+      return b;
+    }
+    static const char* mv[8] = {"mfc2",nullptr,"cfc2",nullptr,"mtc2",nullptr,"ctc2",nullptr};
+    if(rs < 8 && mv[rs]) {
+      if(rs == 2 || rs == 6) std::snprintf(b, sizeof b, "%s %s,vc%u", mv[rs], gpr[rt], rd & 3);
+      else std::snprintf(b, sizeof b, "%s %s,v%u[%u]", mv[rs], gpr[rt], rd, (op >> 7) & 15);
+      return b;
+    }
+  }
+  if((opc == 0x32 || opc == 0x3a) && rd < 12) {
+    s32 off = (s32)(op << 25) >> 25;
+    off *= 1 << lsShift[rd];
+    std::snprintf(b, sizeof b, "%c%cv v%u[%u],%s0x%x(%s)", opc == 0x32 ? 'l' : 's', ls[rd], rt,
+                  (op >> 7) & 15, off < 0 ? "-" : "", (u32)(off < 0 ? -off : off), gpr[rs]);
+    return b;
+  }
+  return CPU::disasm(op, pc);
+}
+
 auto readFile(const std::string& path, std::vector<u8>& out) -> bool {
   std::ifstream f(path, std::ios::binary);
   if(!f) return false;
@@ -222,6 +285,30 @@ auto Server::dispatchDbg(const std::string& cmd, const json::Value& args, const 
     dbgCodeLoad(args, reqBlob, data, err);
   } else if(cmd == "rsp.load") {
     dbgRspLoad(args, reqBlob, data, err);
+  } else if(cmd == "rsp.disasm") {
+    // IMEM desensamblada: addr (0x000..0xFFC) + count (defecto 64, tope 1024). Marca los
+    // puntos de ruptura del RSP; pc = PC actual del RSP.
+    const u32 a0 = args.get("addr").asU32() & 0xffc;
+    u32 count = args.has("count") ? args.get("count").asU32() : 64;
+    if(count == 0 || count > 1024) count = 64;
+    Memory& m = system.memory;
+    // Con el RSP aparcado en un punto de ruptura se lee sin candado (como rsp.regs): en
+    // Threaded la CPU puede esperarlo en su barrera con coreMutex tomado.
+    std::unique_lock<System::CoreMutex> lk(system.coreMutex, std::defer_lock);
+    if(!m.rsp.bpHit.load(std::memory_order_acquire)) lk.lock();
+    json::Value list = json::Value::array();
+    for(u32 i = 0; i < count; i++) {
+      const u32 a = (a0 + i * 4) & 0xffc;
+      const u32 op = ((u32)m.imem[a] << 24) | ((u32)m.imem[a + 1] << 16) | ((u32)m.imem[a + 2] << 8) | m.imem[a + 3];
+      json::Value e = json::Value::object();
+      e.set("addr", (u64)a);
+      e.set("op", (u64)op);
+      e.set("text", rspDisasm(op, a));
+      if(m.rsp.bpMap[a >> 2].load(std::memory_order_relaxed)) e.set("bp", true);
+      list.push(std::move(e));
+    }
+    data.set("pc", (u64)(m.rsp.pc & 0xffc));
+    data.set("insns", list);
   } else if(cmd == "rom.load") {
     dbgRomLoad(args, data, err);
   } else if(cmd == "usb.log") {
