@@ -1098,6 +1098,10 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
 - Huecos del lanzador: puntos de ruptura del RSP: **CERRADO 2026-10-23**, MCP `rsp.bp.add/del/list` (ver `docs/DEBUGGER.md`; prueba `scripts/rspbp_smoke.py`). (Puntos de observación: **CERRADO 2026-10-23**, MCP `mem.watch` + panel Memoria del depurador.)
 - **Depurador (2026-10-23)**: capas estilo ares reimplementadas (grabadora RDP/RSP, línea de tiempo, TMEM, TLB, eventos RCP, USB SC64) por MCP y ventana ImGui; ver `docs/DEBUGGER.md`.
 - Recarga en caliente fase 2: `code.load`/`rsp.load`/`rom.load` hechos; falta parchear funciones sin reiniciar (protocolo deployer SC64 por USB + invalidación del JIT por rango, `jitInvalidate`).
+- **Retirar el lanzador (`kestrel64-gui.exe`): llevar al exe lo que solo tiene él** (anotado 2026-10-24). Objetivo: el paquete con un solo programa, sin Python congelado. Inventario por grep de `src/ui/` (a confirmar al empezar):
+  - YA en el exe: barra de menú con el MISMO catálogo de opciones (`options.py` -> `optdefs.cpp`, mismo `profile.json`), biblioteca con carátulas y carrusel 3D (`library_win32.cpp`), editor del mapa de mando (diálogo de captura de teclas), depurador ImGui (cubre las pestañas CPU/RCP/RSP/perfilador de la ventana de telemetría).
+  - FALTA en el exe: la **ficha de juego** (`gamecard.py` + `web/card.js`: información, manual PDF, editor de trucos `.cht` -- el exe solo acepta el fichero --, gestión de partidas `.eep/.sra/.fla/.mpk` y estados), la pestaña **Estado** de telemetría (velocidad por dominio, ocupación de hilos, cabecera del cartucho), la opción "elegir = ficha o jugar" (`select_action`) y los **temas**.
+  - Pendientes heredados de `docs/LAUNCHER.md` "Qué falta": mandos 2-4 y cambiar opciones en caliente sin reiniciar.
 
 ---
 
