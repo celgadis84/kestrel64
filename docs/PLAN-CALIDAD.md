@@ -64,14 +64,19 @@ Reglas para todo el plan:
 - El README actualiza la cifra de ares con la comparativa del martes 2026-10-27 (ver GAPS)
   y enlaza a la arquitectura.
 
-## Fase 3 — Verificación reproducible sin ROMs comerciales (1–2 días)
+## Fase 3 — Verificación reproducible sin ROMs comerciales (horas)
 
-- `ctest` registra los 10 tests unitarios. CI los ejecuta en cada push.
-- `scripts/fetch_test_roms.py` descarga ROMs de prueba homebrew **solo si su licencia
-  permite redistribuir o descargar en CI**. Lo primero es comprobar la licencia de cada una
-  (n64-systemtest, suites krom); la que tenga duda se salta. Se fijan por hash.
-- CI: systemtest en `interp` y `jit`, y un subconjunto de krom contra baseline.
-- `CONTRIBUTING.md`: cómo validar un cambio sin ROMs privadas y qué puertas son locales.
+Decisión del usuario (2026-10-24): **sin CI de pruebas ni descarga automática**. Los repos de
+pruebas son públicos y no publican releases; basta con documentar y enlazar.
+
+- `CONTRIBUTING.md` y `docs/TESTING.md` (en español y en inglés). Para cada suite:
+  - el enlace a su repositorio público (n64-systemtest, las pruebas de PeterLemon/krom,
+    libdragon);
+  - cómo compilarla u obtenerla;
+  - dónde ponerla (`scripts/local.env`);
+  - qué script la lanza y qué baseline compara.
+- Separar qué se puede validar sin ROMs (tests unitarios) de qué necesita las suites
+  externas. Las ROMs comerciales quedan como puertas locales, nunca obligatorias.
 
 ## Fase 4 — Reestructuración de ficheros grandes (varios días, con riesgo)
 
@@ -127,9 +132,10 @@ Dos frentes medidos por separado.
 |---|---|---|
 | 1 Limpieza | horas | pendiente |
 | 2 Arquitectura en dos idiomas | ~1,5 días | pendiente |
-| 3 Verificación reproducible | 1–2 días | pendiente (licencias primero) |
+| 3 Verificación reproducible | horas | pendiente (solo documentar y enlazar) |
 | 4 Reestructuración | varios días | pendiente |
 | 5 Optimización | ~1 semana | pendiente |
 | 6 Interfaces en inglés | 1–2 días | pendiente |
 
+**Arranque: martes 2026-10-27**, junto con la comparativa de velocidad con ares (GAPS).
 Las fases 1–3 son las que más cambian la percepción externa y no tocan código del emulador.
