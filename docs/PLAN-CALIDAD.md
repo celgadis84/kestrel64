@@ -1,0 +1,135 @@
+# Plan de calidad de código y documentación (abierto 2026-10-24)
+
+Motivo: queja externa de "poca cantidad y calidad de código/documentación" en el repo
+público. El diagnóstico del 2026-10-24 apunta a que el problema no es la cantidad: el
+código y la documentación son **inaccesibles para quien llega de fuera y lee inglés**.
+
+| Aspecto | Dato 2026-10-24 | Problema |
+|---|---|---|
+| Código propio | ~45.700 líneas C++ en `src/` | — |
+| Comentarios | 22 % de las líneas | En español sin tildes y en estilo telegráfico |
+| Ficheros gigantes | `core/memory.cpp` 5.600, `cpu/jit.cpp` 4.000, `cpu/cpu.cpp` 3.600, `rdp/rdp.cpp` 3.400 | Difíciles de revisar |
+| `docs/` | 35 documentos, casi todos en español | Ilegibles para el público objetivo |
+| `docs/STATUS.md` | 10.400 líneas | Es un diario, no una referencia |
+| `docs/GAPS.md` | Líneas de hasta 2.000 caracteres | Ilegible en el visor de GitHub |
+| `docs/wip/` | Copias de `.cpp`/`.hpp` (~3.700 líneas) | Basura versionada |
+| Tests | 10 tests unitarios | Las puertas de verdad necesitan ROMs que no están en el repo |
+
+Reglas para todo el plan:
+- Ningún cambio de código altera el comportamiento del invitado. Cada commit de las fases
+  4 y 5 se valida con statehash, el md5 de SM64 y systemtest en el modo afectado.
+- Codificación y finales de línea de cada fichero se mantienen. Los ficheros nuevos van en
+  UTF-8 con LF.
+- Nada de rutas personales ni de nombres de ROM comerciales en ficheros versionados.
+
+## Fase 1 — Limpieza (unas horas)
+
+1. Quitar `docs/wip/`. Si algo de ahí sigue vivo, se pasa a una rama.
+2. Partir `STATUS.md`:
+   - `STATUS.md` corto (≤300 líneas) con el estado actual por subsistema.
+   - El diario se mueve a `docs/history/STATUS-2026.md` sin cambios.
+3. `GAPS.md`: recortar las líneas a ≤100 columnas, sin cambiar el contenido. Se hace con un
+   script (`scripts/rewrap_md.py`) que no toque bloques de código ni tablas.
+4. `docs/README.md` como índice bilingüe: una línea en español y otra en inglés por documento,
+   agrupados por tema (arquitectura, CPU, RSP, RDP, vídeo/audio, herramientas, histórico).
+
+## Fase 2 — Arquitectura en dos idiomas (~1,5 días)
+
+- `docs/ARCHITECTURE.md` (en inglés) y `docs/ARQUITECTURA.md` (en español), **misma
+  estructura sección a sección**.
+- Regla de sincronía:
+  - Cabecera común `Synced with: <commit>`.
+  - Tocar uno obliga a tocar el otro en el mismo commit.
+  - Un script, `scripts/check_docs_sync.py`, compara los títulos de sección y la cabecera
+    y falla en CI si se desalinean.
+- Contenido, un nivel por encima de los documentos `ARCH-*` existentes, a los que enlaza
+  como lectura a fondo:
+  1. Visión general: objetivo, apuesta multihilo, determinismo, diagrama de hilos (mermaid,
+     que GitHub dibuja).
+  2. Modelo de tiempo: Lockstep frente a Threaded, citas datadas en tiempo de invitado,
+     statehash como invariante.
+  3. Memoria y bus: RDRAM, MMIO, DMA, cachés, TLB.
+  4. CPU: intérprete, JIT (bloques, enlazado, L2), PGO.
+  5. RSP: LLE, JIT del RSP, modelo de ciclos.
+  6. RDP: SoftRDP (oráculo), GPU-RDP (de fábrica), parallel-rdp (alternativa); espejo y
+     coherencia.
+  7. VI, presentación, audio.
+  8. Estado: savestates, rebobinado, TAS.
+  9. Telemetría/MCP y depurador.
+  10. Build, empaquetado y verificación (puertas, oráculos y qué cubre cada uno).
+  11. Mapa de `src/`: directorio → responsabilidad → fichero de entrada.
+- Además, los documentos de diseño más consultados reciben un **resumen en inglés de 10–20
+  líneas** al principio: `ARCH-THREADING`, `JIT-PLAN`, `RSP-JIT`, `GPU-RDP`, `MCP-GUIA`,
+  `DEBUGGER` y `ENV-VARS`. No se traducen enteros.
+- El README actualiza la cifra de ares con la comparativa del martes 2026-10-27 (ver GAPS)
+  y enlaza a la arquitectura.
+
+## Fase 3 — Verificación reproducible sin ROMs comerciales (1–2 días)
+
+- `ctest` registra los 10 tests unitarios. CI los ejecuta en cada push.
+- `scripts/fetch_test_roms.py` descarga ROMs de prueba homebrew **solo si su licencia
+  permite redistribuir o descargar en CI**. Lo primero es comprobar la licencia de cada una
+  (n64-systemtest, suites krom); la que tenga duda se salta. Se fijan por hash.
+- CI: systemtest en `interp` y `jit`, y un subconjunto de krom contra baseline.
+- `CONTRIBUTING.md`: cómo validar un cambio sin ROMs privadas y qué puertas son locales.
+
+## Fase 4 — Reestructuración de ficheros grandes (varios días, con riesgo)
+
+Mismo comportamiento y otra organización. Un fichero por commit, validado.
+
+- `core/memory.cpp` → bus/MMIO, DMA, RDRAM y cachés, TLB, según las responsabilidades
+  reales que salgan al leerlo.
+- `cpu/jit.cpp` → front-end (decodificación de bloques), emisión, enlazado y caché de
+  bloques.
+- `cpu/cpu.cpp` y `rdp/rdp.cpp`: igual, solo si el corte sale natural.
+- Riesgo de rendimiento al partir unidades de compilación (inlining): se mide con `bench`
+  y se rehace el perfil PGO al acabar la fase.
+
+## Fase 5 — Optimización del código (nueva, ~1 semana)
+
+Dos frentes medidos por separado.
+
+**a) Higiene (anti-slop).**
+- Código muerto: rutas experimentales abandonadas y variables `KESTREL_*` sin uso. Se
+  inventarían contra `docs/ENV-VARS.md` y se retiran las muertas.
+- Duplicados: ayudantes repetidos entre CPU/JIT/RSP y entre SoftRDP/GPU-RDP.
+- Comprobaciones defensivas en rutas de confianza.
+- Comentarios que narran el *qué* en vez del *porqué*.
+- Funciones de cientos de líneas.
+- Retirada de parallel-rdp si GPU-RDP ya lo cubre: decisión aparte, con medida.
+
+**b) Rendimiento, guiado por perfil.**
+- Perfil de PD, SM64 y DK64 en juego. Optimizar solo lo que salga caliente.
+- Validación de cada cambio:
+  - `bench` (mínimo de 4, intercalado);
+  - statehash idéntico;
+  - perfil PGO rehecho al final.
+- Sin metas inventadas: cada cambio se queda solo si gana más que el ruido medido.
+
+**Herramienta anti-slop.** No hay una skill "antislop" canónica; hay varias de terceros
+("deslop", "anti-slop") con calidad desigual. Decisión:
+- Las reglas van **en el repo**, en una sección "AI-assisted code" de `CONTRIBUTING.md`:
+  patrones prohibidos con un ejemplo de antes/después tomado de este código.
+- Se aplican las skills integradas `/simplify` y `/code-review` sobre el diff de cada commit
+  de las fases 4 y 5.
+- Una skill de terceros solo se instala tras leer su contenido entero.
+
+## Fase 6 — Comentarios en inglés en las interfaces (~1–2 días)
+
+- Las cabeceras públicas de cada subsistema (`*.hpp` que usan otros directorios) reciben
+  un comentario de cabecera en inglés: responsabilidad, invariantes e hilos que la tocan.
+- Los comentarios internos en español se quedan: reescribirlos no aporta y arriesga diffs
+  enormes. El código nuevo comenta en inglés.
+
+## Orden y estado
+
+| Fase | Coste | Estado |
+|---|---|---|
+| 1 Limpieza | horas | pendiente |
+| 2 Arquitectura en dos idiomas | ~1,5 días | pendiente |
+| 3 Verificación reproducible | 1–2 días | pendiente (licencias primero) |
+| 4 Reestructuración | varios días | pendiente |
+| 5 Optimización | ~1 semana | pendiente |
+| 6 Interfaces en inglés | 1–2 días | pendiente |
+
+Las fases 1–3 son las que más cambian la percepción externa y no tocan código del emulador.
