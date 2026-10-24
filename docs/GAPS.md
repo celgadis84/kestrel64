@@ -950,6 +950,9 @@ Ver `docs/baselines/pd-opt.md`.
     clk_per_line). Al lado, kestrel64 del mismo dia: `45_tritiming_emu_2026-10-24.csv`
     (columnas x10).
   - En consola, pipe% y buf% tambien salen al 99 % en todo, asi que el punto 3 no es un fallo.
+  - **La fila FILL solo vale como COSTE**: la 45 dibuja en un buffer fuera de pantalla, sus
+    pixeles nunca se han visto en consola. No es prueba de que los triangulos FILL rasterizan
+    bien (ver "Triangulos en ciclo FILL": en consola llegan a colgar el RDP).
   - **Setup por triangulo** (area cero; emu 0,1): FILL 23,2 · 1C 33,1 · 1C+Z 40,8 · 2C+Z 40,7 ·
     TEX+Z 76,7. Depende del modo, y la textura suma ~+36.
   - **Coste fijo por linea** (spans de 4-16 px): FILL 18-19 (emu 3,1) · 1C sin Z 22-27 (emu 7) ·
@@ -1027,6 +1030,15 @@ Lo que queda, por tamano:
   bits**, no en pixeles: el RDP rellena el ancho completo de la palabra y los extremos quedan a
   medias. Ni nuestro SoftRDP ni parallel-RDP lo hacen. Es la pieza mas gorda y la unica con
   evidencia numerica ya recogida.
+  **Consola real CUELGA el RDP con triangulos FILL (n64-b1, demo 42 del SDK, 2026-10-24)**: foto
+  de crash con el DPC parado a mitad del buffer en una ristra de triangulos FILL 0x08 diminutos
+  (~3 lineas, x~37 y~100), uno con el primer tramo invertido (XM a la izquierda de XH);
+  DPC_STATUS 0x760 (cmd/pipe busy, start_gclk=0), clk 0xfa1637. Sin modos FILL no cuelga; al
+  volver a FILL cuelga otra vez. kestrel64 y parallel-RDP NO lo reproducen. El SDK ya no emite
+  triangulos FILL (k64sdk-compat f452c72: modo plano = 1-cycle + PRIM). Modelar el cuelgue no
+  hace falta (indefinido, y ningun juego lo usa); pendiente barato: aviso de depuracion (ev.log)
+  cuando llegue un triangulo con cycle type FILL o COPY, para que el homebrew lo vea antes de
+  probar en consola.
 - **`Undefined Shade 1C`** (64). Comportamiento del combinador cuando el sombreado no esta
   definido; hay que averiguar que valor deja el aparato en ese camino.
 - **Noveno bit oculto de la RDRAM, RDP->CPU** (32). Necesita los bits de `MI_MODE` 9/10 (EBUS)
