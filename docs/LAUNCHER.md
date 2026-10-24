@@ -674,8 +674,39 @@ cabecera N64 legible), de modo que `rom=C:\Windows\win.ini` da 404. Los manuales
 **solo por indice** dentro de la lista que la ficha descubrio, nunca por ruta que mande el
 cliente.
 
+## Ficha de juego en el exe (sin lanzador)
+
+Desde 2026-10-24 `kestrel64.exe` tiene su propia ficha, para poder retirar el lanzador. Misma
+logica que `gamecard.py`, en C++: `src/ui/gamecard.{hpp,cpp}` (disco: nombres, partidas,
+manuales, `.cht`, `games/<CRC>.json`) y `src/ui/gamecard_win32.cpp` (ventana Win32 con las
+cuatro pestanas Info / Manual / Trucos / Partidas, botones Jugar y Cerrar). Lee y escribe los
+MISMOS ficheros que el lanzador, asi que las dos caras ven la misma ficha. Prueba:
+`cmake --build build --target gamecard_test && build/gamecard_test.exe` (mismo recorrido que
+`gamecard_test.py`, mas el JSON y el indice de manuales).
+
+- **Biblioteca del exe**: Intro / clic sobre el elegido / boton A (1) del mando del PC abren la
+  ficha; TAB / boton X (3) juega directo; Start juega siempre. Con
+  `select_action: "play"` se invierte (Intro juega, TAB abre la ficha). Doble clic juega.
+- **Menu del juego**: Archivo > "Ficha del juego..." (sin boton Jugar: ya se esta jugando) y
+  "Biblioteca: jugar sin pasar por la ficha" (alterna `select_action`).
+- **Partidas jugadas**: al salir de una sesion `--play`, `main.cpp` suma `plays`/`seconds`/`last`
+  (menos de 3 s no cuenta). Si el exe lo lanzo el lanzador (`KESTREL_LAUNCHER=1`, lo pone
+  `kestrel_launcher.py`), no apunta: ya lo hace el lanzador y contaria doble.
+- **Fuente de manuales** (solo en el exe): en la pestana Manual el usuario escribe la URL (o
+  ruta) de un indice CSV con el formato `external_files.csv` de las bases del Downloader de
+  MiSTer (`Path,URL,tamano,md5,...`). "Buscar y descargar" baja el indice, elige las entradas
+  cuyo titulo sin etiquetas `(...)`/`[...]` coincide con el nombre del fichero de la ROM (o
+  su nombre interno), comprueba el tamano y las guarda en `manuals/`. La fuente se recuerda en
+  `<estado>/manuals_source.txt`. **El emulador no trae ninguna fuente de fabrica**: la herramienta
+  es neutra y el contenido lo elige el usuario.
+- **Estado** de telemetria: panel Control del depurador (`--debugger` / menu Depurar), tabla
+  con lo mismo que la pestana Estado del lanzador (campos/s, % de N64 real por dominio,
+  ocupacion de hilos, overclock, cartucho) y el JSON completo plegado debajo.
+- **Temas**: solo del lanzador web (tokens CSS). El exe usa el aspecto del sistema; no se
+  porta. Tampoco el mando/caja/cartucho 3D en WebGL (`scene3d.js`): el exe dibuja el mando
+  en 2D (GDI) en el dialogo de mando y el carrusel es de caratulas planas.
+
 ## Que falta
 
-- Vigilar escrituras (`KESTREL_WATCHP`) desde el depurador, y puntos de ruptura sobre el RSP.
 - Segundo, tercer y cuarto mando (hoy solo `KESTREL_PAD1`).
 - Cambiar opciones en caliente sin reiniciar el emulador.

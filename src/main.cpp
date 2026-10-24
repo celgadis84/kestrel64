@@ -8,6 +8,7 @@
 #include "core/runtime.hpp"
 #include "ui/menu.hpp"
 #include "ui/library.hpp"
+#include "ui/gamecard.hpp"
 #include "ui/debugger.hpp"
 #include "telemetry/symbols.hpp"
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <string>
 #include <vector>
 #include <csignal>
+#include <ctime>
 #include <filesystem>
 
 #ifdef _WIN32
@@ -322,9 +324,17 @@ int main(int argc, char** argv) {
               !freeRun ? "paused â step over MCP" : (play ? "free-run + video" : "free-run"));
   std::fflush(stdout);
 
+  const std::time_t playT0 = std::time(nullptr);
   system.runLoop();
   kestrel::dbgwin::close();   // antes de cerrar la telemetria: la ventana la usa
   kestrel::audio::shutdown();
+  // Partida jugada para la ficha del juego (<estado>/games/<CRC>.json, la misma del
+  // lanzador). Si nos lanzo el lanzador la apunta el al volver: aqui contaria doble.
+  if(play && !std::getenv("KESTREL_LAUNCHER")) {
+    namespace card = kestrel::ui::card;
+    card::metaPlayed(card::metaKey(romPath, card::readHeader(romPath)),
+                     (long long)(std::time(nullptr) - playT0));
+  }
   std::printf("[system] shutdown.\n");
   std::fflush(stdout);
   // El relanzado va AQUI, con el audio ya cerrado: el proceso nuevo abre waveOut nada

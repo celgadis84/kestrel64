@@ -1,5 +1,6 @@
 #include "library.hpp"
 #include "profile.hpp"
+#include "gamecard.hpp"
 #include "../core/archive.hpp"
 
 #ifdef _WIN32
@@ -661,6 +662,7 @@ struct Lib {
   float pos = 0.0f;
   bool dirty = true;
   bool sound = true;
+  bool playFirst = false;     // select_action == "play": Enter juega y Tab abre la ficha
   int offX = 0, offY = 0, pw = 0, ph = 0;   // lienzo de pixeles: origen y tamano en la ventana
   int loaded = 0;             // caratulas con textura viva (para poder soltar las lejanas)
   int padDir = 0;             // direccion mantenida en el mando
@@ -863,7 +865,8 @@ auto render(Canvas& cv) -> void {
   }
 
   tcenter(cv, g.fSmall, 0, kCanW, kHelpY + 2, 12, kColDim,
-          "<- -> MOVER   ENTER JUGAR   F2 CARPETA   F5 RELEER   ESC SALIR");
+          g.playFirst ? "<- ->  ENTER JUGAR  TAB FICHA  F2 CARPETA  F5 RELEER  ESC SALIR"
+                      : "<- ->  ENTER FICHA  TAB JUGAR  F2 CARPETA  F5 RELEER  ESC SALIR");
 }
 
 // ============================================================ acciones
@@ -889,6 +892,21 @@ auto chooseSel() -> void {
   beep(1400, 40);
   PostMessageA(g.win, WM_CLOSE, 0, 0);
 }
+
+// Ficha del juego seleccionado. Bloquea este hilo (el de la biblioteca) con su propio bucle,
+// y la biblioteca queda deshabilitada mientras tanto. "Jugar" en la ficha = elegirlo.
+auto openCard() -> void {
+  if(g.roms.empty()) return;
+  beep(1100, 25);
+  const bool play = card::showCard(g.roms[g.sel].path, g.win, true);
+  g.padBtns = ~0u;   // lo que estuviera pulsado al cerrar no cuenta como flanco nuevo
+  if(play) chooseSel();
+  else g.dirty = true;
+}
+
+// La accion principal (Enter, clic, A del mando) y la secundaria (Tab) segun select_action.
+auto activateSel() -> void { g.playFirst ? chooseSel() : openCard(); }
+auto secondarySel() -> void { g.playFirst ? openCard() : chooseSel(); }
 
 auto rescan() -> void {
   g.roms.clear();
@@ -980,8 +998,9 @@ auto pollPad() -> void {
   const u32 b = (u32)ji.dwButtons;
   const u32 edge = b & ~g.padBtns;
   g.padBtns = b;
-  if(edge & (1u << 0)) chooseSel();                                // A / boton 1: jugar
-  else if(edge & (1u << 7)) chooseSel();                           // Start en casi todos
+  if(edge & (1u << 0)) activateSel();                              // A / boton 1
+  else if(edge & (1u << 7)) chooseSel();                           // Start: jugar siempre
+  else if(edge & (1u << 2)) secondarySel();                        // X / boton 3
   else if(edge & (1u << 1)) PostMessageA(g.win, WM_CLOSE, 0, 0);   // B: salir
 }
 
@@ -1050,7 +1069,7 @@ LRESULT CALLBACK libProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       const float d = (float)g.sel - g.pos;
       if(std::fabs(d) > 0.002f) { g.pos += d * 0.28f; g.dirty = true; }
       else if(g.pos != (float)g.sel) { g.pos = (float)g.sel; g.dirty = true; }
-      pollPad();
+      if(!card::cardOpen()) pollPad();   // con la ficha delante el mando no mueve la biblioteca
       if(g.dirty) { g.dirty = false; InvalidateRect(h, nullptr, FALSE); }
       return 0;
     }
@@ -1082,13 +1101,15 @@ LRESULT CALLBACK libProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN: {
       const int i = hitTest(GET_X_LPARAM(l), GET_Y_LPARAM(l));
       if(i < 0) return 0;
-      if(i == g.sel) chooseSel();
+      if(i == g.sel) activateSel();
       else moveSel(i - g.sel);
       return 0;
     }
     case WM_LBUTTONDBLCLK: {
+      // Con la ficha como accion principal el primer clic ya la abrio y la biblioteca esta
+      // deshabilitada: este mensaje solo llega en modo "jugar directo".
       const int i = hitTest(GET_X_LPARAM(l), GET_Y_LPARAM(l));
-      if(i == g.sel) chooseSel();
+      if(i == g.sel && !card::cardOpen()) activateSel();
       return 0;
     }
     case WM_KEYDOWN:
@@ -1099,7 +1120,8 @@ LRESULT CALLBACK libProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case VK_NEXT: moveSel(10); return 0;
         case VK_HOME: moveSel(-(int)g.roms.size()); return 0;
         case VK_END: moveSel((int)g.roms.size()); return 0;
-        case VK_RETURN: case VK_SPACE: chooseSel(); return 0;
+        case VK_RETURN: case VK_SPACE: activateSel(); return 0;
+        case VK_TAB: secondarySel(); return 0;
         case VK_ESCAPE: PostMessageA(h, WM_CLOSE, 0, 0); return 0;
         case VK_F2: pickFolder(); return 0;
         case VK_F3: pickFile(); return 0;
@@ -1165,6 +1187,8 @@ auto pickRomLibrary(void* ownerHwnd) -> std::string {
   Profile prof = loadProfile();
   g.dir = startDir(prof);
   g.sound = prof.getBool("audio");
+  // Misma clave que el lanzador ("card" de fabrica): elegir un juego abre su ficha.
+  g.playFirst = prof.get("select_action") == "play";
   // Las de la portada sin caratula van a la escala de la TEXTURA, no a la de la ventana.
   g.fTex = makeFont(12 * kTexK, FW_BOLD);
   g.fTexBig = makeFont(16 * kTexK, FW_BOLD);

@@ -2,6 +2,7 @@
 #include "optdefs.hpp"
 #include "profile.hpp"
 #include "library.hpp"
+#include "gamecard.hpp"
 #include "../core/runtime.hpp"
 #include "debugger.hpp"
 
@@ -44,7 +45,7 @@ enum : UINT {
   kOpenRom = 0x8100, kOpenFile, kRelaunch, kQuit,
   kPause, kReset, kSaveState, kLoadState, kNextSlot,
   kFull, kHud,
-  kAudioOn, kPadCfg, kAllOpts, kAbout, kDebugger,
+  kAudioOn, kPadCfg, kAllOpts, kAbout, kDebugger, kGameCard, kCardDirect,
   kScale1  = 0x8140,              // +0..+6 (escala 1x..7x)
   kThrHw = 0x8160, kThrAuto, kThrOn, kThrOff,
   kSlot0   = 0x8170,              // +0..+9
@@ -183,6 +184,9 @@ auto buildMenu() -> void {
   HMENU file = CreatePopupMenu();
   addItem(file, kOpenRom, "&Biblioteca de ROMs...\tCtrl+O");
   addItem(file, kOpenFile, "Abrir un &fichero...");
+  addItem(file, kGameCard, "&Ficha del juego...");
+  addItem(file, kCardDirect, "Biblioteca: &jugar sin pasar por la ficha");
+  addSep(file);
   addItem(file, kRelaunch, "&Reiniciar emulador");
   addSep(file);
   addItem(file, kQuit, "&Salir");
@@ -293,6 +297,8 @@ auto syncMenu() -> void {
                 MF_BYCOMMAND | (g_prof.getBool("fullscreen") ? MF_CHECKED : MF_UNCHECKED));
   CheckMenuItem(g_menu, kPause,
                 MF_BYCOMMAND | ((g_h.paused && g_h.paused->load()) ? MF_CHECKED : MF_UNCHECKED));
+  CheckMenuItem(g_menu, kCardDirect,
+                MF_BYCOMMAND | (g_prof.get("select_action") == "play" ? MF_CHECKED : MF_UNCHECKED));
   int n = std::atoi(g_prof.get("winscale").c_str());
   if(n < 1 || n > 7) n = 2;
   CheckMenuRadioItem(g_menu, kScale1, kScale1 + 6, kScale1 + (UINT)(n - 1), MF_BYCOMMAND);
@@ -1603,6 +1609,22 @@ auto onCommand(UINT id) -> void {
     case kDebugger:
       dbgwin::open();   // hilo y ventana propios; si ya esta abierta, la trae delante
       return;
+    case kGameCard: {
+      // Ficha de la ROM en marcha, en su hilo como los demas dialogos. Sin dueno: deshabilitar
+      // la ventana del juego desde otro hilo la dejaria sin teclado aunque el juego siga.
+      if(g_h.rom.empty()) return;
+      if(card::cardOpen()) { card::showCard(g_h.rom, nullptr, false); return; }   // la trae delante
+      std::string rom = g_h.rom;
+      std::thread([rom] { card::showCard(rom, nullptr, false); }).detach();
+      return;
+    }
+    case kCardDirect: {
+      const bool direct = g_prof.get("select_action") != "play";
+      g_prof.set("select_action", direct ? "play" : "card");
+      saveProfile(g_prof);
+      syncMenu();
+      return;
+    }
     case kAbout:
       MessageBoxA(g_game,
                   "kestrel64 - emulador de Nintendo 64 escrito desde cero.\n\n"

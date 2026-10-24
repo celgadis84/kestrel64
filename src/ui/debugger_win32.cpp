@@ -196,6 +196,53 @@ bool showControl = true, showCpu = true, showDisasm = true, showMem = true, show
      showRsp = true, showTimeline = true, showFb = true, showTmem = false, showTlb = false,
      showProf = false, showEv = false, showUsb = false, showRcp = false, showRspCode = true;
 
+auto dbl(const Value& v) -> double {
+  if(v.type != Value::Type::Number) return 0;
+  if(!v.isInt) return v.num;
+  return v.sign ? (double)(s64)v.u : (double)v.u;
+}
+
+// Lo mismo que la pestana "Estado" del lanzador: velocidad frente a una N64 real, ocupacion
+// de los hilos (en multihilo el % de CPU sube cuando la CPU gira esperando al RCP; cpuWait
+// alto = el palo largo es un worker), overclock y cartucho.
+auto statusSummary(const Value& d) -> void {
+  const Value sp = d.get("speed"), oc = sp.get("overclock"), oq = sp.get("occupancy"), g = d.get("game");
+  auto row = [](const char* k, const char* fmt, auto... a) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn(); ImGui::TextDisabled("%s", k);
+    ImGui::TableNextColumn(); ImGui::Text(fmt, a...);
+  };
+  auto ocx = [&](const char* k) { const double x = dbl(oc.get(k)); return x > 0 ? x : 1.0; };
+  const ImGuiTableFlags fl = ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg;
+  if(ImGui::BeginTable("velocidad", 2, fl)) {
+    row("campos/s", "%.1f", dbl(oq.get("fps")));
+    row("CPU % de N64 real", "%.1f", dbl(sp.get("cpuPct")));
+    row("RSP % de N64 real", "%.1f", dbl(sp.get("rspPct")));
+    row("RDRAM % de N64 real", "%.1f", dbl(sp.get("rdramPct")));
+    row("instrucciones", "%llu", (unsigned long long)num(sp.get("insns")));
+    row("RDP ocupado", "%.1f %%", dbl(oq.get("rdpBusyPct")));
+    row("RSP ocupado", "%.1f %%", dbl(oq.get("rspBusyPct")));
+    row("CPU esperando", "%.1f %%", dbl(oq.get("cpuWaitPct")));
+    row("overclock CPU", "%.2fx (%.2f MHz)", ocx("cpu"), 93.75 * ocx("cpu"));
+    row("overclock RSP", "%.2fx (%.2f MHz)", ocx("rsp"), 62.5 * ocx("rsp"));
+    row("overclock RDRAM", "%.2fx", ocx("rdram"));
+    ImGui::EndTable();
+  }
+  if(g.type == Value::Type::Object && !g.get("name").asString().empty() && ImGui::TreeNode("Cartucho")) {
+    if(ImGui::BeginTable("cartucho", 2, fl)) {
+      row("nombre", "%s", g.get("name").asString().c_str());
+      row("ID", "%s", g.get("cartId").asString().c_str());
+      row("orden", "%s", g.get("romOrder").asString().c_str());
+      row("entrada", "%08llx", (unsigned long long)num(g.get("entryPoint")));
+      row("CRC1", "%08llx", (unsigned long long)num(g.get("crc1")));
+      row("CRC2", "%08llx", (unsigned long long)num(g.get("crc2")));
+      row("guardado", "%s", g.get("saveType").asString().c_str());
+      ImGui::EndTable();
+    }
+    ImGui::TreePop();
+  }
+}
+
 auto panelControl() -> void {
   static Reply st, dst;
   static Ticker tk;
@@ -235,7 +282,8 @@ auto panelControl() -> void {
   }
   ImGui::Separator();
   if(!st.ok) ImGui::TextColored(ImVec4(1, .4f, .4f, 1), "%s", st.err.c_str());
-  if(ImGui::CollapsingHeader("Estado")) jsonBody(st.data);
+  else statusSummary(st.data);
+  if(ImGui::CollapsingHeader("Estado (JSON completo)")) jsonBody(st.data);
   ImGui::End();
 }
 

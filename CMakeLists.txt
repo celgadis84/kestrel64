@@ -60,6 +60,8 @@ add_executable(kestrel64
   src/ui/profile.cpp
   src/ui/menu_win32.cpp
   src/ui/library_win32.cpp
+  src/ui/gamecard.cpp
+  src/ui/gamecard_win32.cpp
   src/debug/dbg.cpp
 )
 
@@ -245,6 +247,17 @@ add_executable(archive_test EXCLUDE_FROM_ALL
 )
 target_include_directories(archive_test PRIVATE src)
 
+# Ficha de juego del exe (trucos, manuales, partidas, metadatos). Mismo recorrido que
+# tools/launcher/gamecard_test.py: las dos caras escriben los mismos ficheros.
+add_executable(gamecard_test EXCLUDE_FROM_ALL
+  test/gamecard_test.cpp
+  src/ui/gamecard.cpp
+  src/ui/profile.cpp
+  src/ui/optdefs.cpp
+  src/core/archive.cpp
+)
+target_include_directories(gamecard_test PRIVATE src)
+
 # Codec de diferencias del rebobinado. Header-only a proposito: se prueba sin arrastrar el
 # resto del emulador.
 add_executable(rewind_test EXCLUDE_FROM_ALL
@@ -254,7 +267,7 @@ target_include_directories(rewind_test PRIVATE src)
 
 # Los tests compilan rsp.cpp, que usa SSSE3 en el difusor de banda: sin el mismo juego de
 # instrucciones que el binario principal no enlaza.
-foreach(t rsp_test save_test cheat_test archive_test wildmem_test rewind_test watch_test pif_test tpak_test)
+foreach(t rsp_test save_test cheat_test archive_test gamecard_test wildmem_test rewind_test watch_test pif_test tpak_test)
   if(NOT MSVC)
     if(KESTREL_BUILD_LOCAL)
       target_compile_options(${t} PRIVATE -march=native)
@@ -320,7 +333,7 @@ target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw3)
 if(WIN32)
   # comdlg32: el dialogo de "elige una ROM" cuando se abre el .exe desde el Explorador.
   # comctl32: las barras deslizantes de los numericos acotados del dialogo de opciones.
-  target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32 comctl32 shell32 ole32)
+  target_link_libraries(kestrel64 PRIVATE ws2_32 gdi32 user32 winmm comdlg32 comctl32 shell32 ole32 urlmon)
   # Ventana del depurador (docs/DEBUGGER.md): Dear ImGui (MIT, third_party/imgui) sobre D3D11,
   # en su propio hilo. d3dcompiler compila en tiempo de ejecucion los dos shaders del backend.
   target_sources(kestrel64 PRIVATE

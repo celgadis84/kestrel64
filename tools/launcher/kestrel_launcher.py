@@ -840,6 +840,7 @@ class H(BaseHTTPRequestHandler):
         # El emulador lleva el mismo catalogo de opciones dentro de su ventana y escribe en
         # ESTE perfil, no en otro: en arbol de desarrollo STATE no es %LOCALAPPDATA%.
         env["KESTREL_PROFILE"] = PROFILE
+        env["KESTREL_LAUNCHER"] = "1"   # la partida la apunta el lanzador (meta_played)
         bl = pick_exe(prof.get("plugin", "auto"))
         if not bl:
             return dict(ok=False, error="no hay ningun kestrel64.exe compilado")
