@@ -470,6 +470,32 @@ mediana 643 -> 622).
   asi que cada lectura y escritura del shader cruza el PCIe. Para ganar, que el espejo sea dueno
   persistente en la GPU y solo baje lo realmente escrito, con huellas por bloque en vez de filas
   enteras y copias fundidas. Otra opcion es hacer solo los rellenos en un espejo local.
+- **Decision 2026-10-24 (usuario)**: **RECOMENDADO** = espejo en la GPU, empezando por los
+  rellenos (~40 % de la GPU en DK64) y bajando por rectangulo/rangos fundidos, no por fila (lo
+  que hundio `LOCAL=1`). **DESCARTADO** = lotes en vuelo con fence asincrono (opcion (2) de
+  arriba): la espera de fence ya es pequena (SM64 ~0,6 s, DK64 182 vaciados en 400
+  intercambios; el "~12 s de ida y vuelta" era de antes de los tramos) y es un rediseno con el
+  mismo riesgo de coherencia que tumbo el vaciado aplazado.
+- **Paso 1 medido 2026-10-24: copias fundidas en `LOCAL=1`** (`mergeCopies`: ordena y funde
+  rangos contiguos/solapados; un relleno de ancho completo = una copia, y de paso no quedan
+  regiones solapadas en un mismo `vkCmdCopyBuffer`). DK64 400 intercambios, ms de GPU:
+
+  | | subir | despachos | bajar | total | pared |
+  |---|---|---|---|---|---|
+  | anfitrion (defecto) | 0,4 | 570 | 0,3 | 571 | 3,48-3,53 s |
+  | `LOCAL=1` antes | 65 | 381 | 814 | 1260 | 3,99 s |
+  | `LOCAL=1` fundido | 66 | 389 | 211 | 666 | 3,65 s |
+
+  Hashes identicos (DK64 `40c90b2061c1`/`fcca404192c2d07c`, SM64 `4aa1ead30413`/
+  `c06e76bf2ad9a90b`). La bajada cae 4x pero `LOCAL=1` sigue por detras del anfitrion.
+- **Techo del espejo local** (por que no compensa seguir con rellenos/triangulos locales): la
+  RDRAM del CPU tiene que acabar con cada byte escrito, asi que esos bytes cruzan el PCIe igual
+  (escritura directa del shader o copia despues); local solo ahorra las LECTURAS del shader.
+  Ademas la GPU entera son ~0,57 s de 3,5 s de pared en DK64 y solo la espera de fence esta en
+  el camino critico: techo teorico ~15 %, los rellenos ~5-7 %, menos el coste de copias y de
+  la coherencia relleno-local / triangulo-anfitrion dentro del lote. Ganar de verdad pide que
+  el espejo sea dueno persistente en la GPU y baje solo cuando el CPU lee (marcar paginas), que
+  es el rediseno grande con riesgo de coherencia. Queda `mergeCopies` (inocuo, solo `LOCAL=1`).
 
 ## Riesgos
 

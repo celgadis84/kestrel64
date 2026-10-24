@@ -445,6 +445,23 @@ auto barrier(VkCommandBuffer cmd, VkAccessFlags dstAcc, VkPipelineStageFlags dst
   vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
+// Copias del espejo (mismo desplazamiento en origen y destino): ordena y funde los rangos que se
+// tocan o se solapan. Un relleno de ancho completo pasa de una copia por fila a una sola, y
+// vkCmdCopyBuffer no admite regiones solapadas en la misma orden.
+auto mergeCopies(std::vector<VkBufferCopy>& v) -> void {
+  if(v.size() < 2) return;
+  std::sort(v.begin(), v.end(), [](const VkBufferCopy& a, const VkBufferCopy& b) { return a.srcOffset < b.srcOffset; });
+  size_t o = 0;
+  for(size_t i = 1; i < v.size(); i++) {
+    VkBufferCopy& l = v[o];
+    if(v[i].srcOffset <= l.srcOffset + l.size) {
+      const VkDeviceSize e = std::max(l.srcOffset + l.size, v[i].srcOffset + v[i].size);
+      l.size = e - l.srcOffset;
+    } else v[++o] = v[i];
+  }
+  v.resize(o + 1);
+}
+
 // Huella de RDRAM de una primitiva: caja de pixeles sobre una imagen. Las columnas se ensanchan
 // a grupos de 8 bytes alineados: una palabra del espejo (4 bytes) y una de bits ocultos (4
 // medias palabras = 8 bytes de RDRAM) nunca quedan partidas entre dos huellas disjuntas, asi
@@ -785,6 +802,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
     }
     down.insert(down.end(), up.begin(), up.end());
     downHid.insert(downHid.end(), upHid.begin(), upHid.end());
+    mergeCopies(up); mergeCopies(upHid); mergeCopies(down); mergeCopies(downHid);
     if(!up.empty()) vkCmdCopyBuffer(c.cmd, c.ram.buf, c.ram.dbuf, (u32)up.size(), up.data());
     if(!upHid.empty()) vkCmdCopyBuffer(c.cmd, c.hid.buf, c.hid.dbuf, (u32)upHid.size(), upHid.data());
     if(!c.tris.empty()) {
