@@ -918,6 +918,59 @@ Por ahi va el orden nuevo:
   RDRAM -- CPU cacheada y sin cachear, DMA de RSP/PI/SI y el propio RDP -- y una sola que
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.
 
+### GPU-RDP: espejo dueno en la GPU (BOCETO de plan, abierto 2026-10-24, para mas adelante)
+
+**Por que.** Fase 5 del GPU-RDP llego a su techo con el espejo en memoria del anfitrion
+(HOST_VISIBLE): el shader lee y escribe color y z a traves del PCIe. Medido en DK64 (400
+intercambios, `docs/GPU-RDP.md` "A/B del shader" y "Decision 2026-10-24"): de ~570 ms de GPU,
+rellenos ~220, triangulos ~340, y de estos solo ~90 son criba+cobertura; el resto es trafico de
+color/z. Descartado por medida: lotes en vuelo con fence asincrono, `LOCAL=1` con copias
+fundidas (bajada 814 -> 211 ms, sigue por detras), rellenos solos en local, descarte de tesela
+y bordes por fila. Lo que queda es que la GPU sea DUENA de las imagenes y la RDRAM del CPU se
+ponga al dia solo cuando alguien la lee. Ganancia esperada: despachos ~570 -> ~380 ms (medido
+con todo local) y sin bajada de z ni de color que nadie lea; techo de pared ~10-15 % en DK64,
+mas con escalado x2/x4 (la copia de alta ya vive solo en la GPU).
+
+**Idea.** Tabla de propiedad por pagina de RDRAM (4 KB; o bloque de 256 B si hace falta):
+`HOST` (manda la RDRAM), `GPU` (manda el gemelo DEVICE_LOCAL, la RDRAM esta vieja), `IGUAL`.
+El RDP escribe -> la pagina pasa a `GPU` sin bajar nada. Cualquier LECTOR de RDRAM que toque una
+pagina `GPU` la baja antes (vaciado + copia de esa pagina) y la deja `IGUAL`. Cualquier
+ESCRITOR fuera del RDP la pasa a `HOST` (la siguiente lectura del RDP la sube, como hoy las
+zonas). El valor que ve el invitado es el mismo; solo cambia CUANDO se copia, asi que no hay
+semantica nueva que validar, solo completitud de los ganchos.
+
+**Lectores/escritores que hay que enganchar** (el riesgo esta aqui: uno olvidado = dato viejo):
+- CPU: `dcFill`/`uncachedRead`/stores sin cache ya pasan por `dmaSettle`/`ramSettle` (el diario
+  del DMA del SP usa el mismo patron de "pagina con algo pendiente"): extender ese chequeo.
+  Ojo con los caminos rapidos del JIT que leen la RDRAM por puntero sin pasar por ahi cuando el
+  modelo de cache esta apagado -- ver si hace falta proteccion de pagina (VirtualProtect +
+  manejador de excepcion, estilo fastmem) o un bit en la comprobacion que ya hace el JIT.
+- DMA: SP (RSP lee texturas/listas que el RDP pinto), PI, SI, AI.
+- El propio SoftRDP: cargas de TMEM (LOAD_TILE/BLOCK/TLUT leen RDRAM: render a textura) y las
+  primitivas que se quedan en CPU. Mejor: que las cargas lean del gemelo en la GPU.
+- VI/presentador: escanear directamente del gemelo (de paso, cero copias para pantalla).
+- Fuera del invitado: savestate, rebobinado, statehash, `read_memory` del MCP, FBDUMP, captura
+  de framebuffer, depurador -> bajada completa antes.
+- Hilos: el RDP corre en su hilo y la CPU en el suyo; transiciones de estado atomicas y la
+  bajada bajo el candado de la cola Vulkan (el mismo de `vrdp::queueLock`).
+
+**Fases** (cada una con A/B y hashes identicos; `gate_gpurdp` al cerrar, si el usuario lo pide):
+0. **Medir antes de construir** (go/no-go): telemetria que cuente, por cuadro, que paginas
+   escritas por el RDP se leen despues (CPU / DMA SP / cargas TMEM / VI) y cuantos bytes se
+   bajan hoy que nadie lee. Si casi todo se relee, el plan no compensa y se cierra aqui.
+1. Tabla de propiedad + ganchos en todos los lectores, pero bajando TODO al final del lote como
+   hoy (nada cambia). Modo de comprobacion `KESTREL_GPURDP_OWNCHECK=1`: en cada lectura
+   enganchada, comparar RDRAM contra el gemelo; cualquier diferencia en pagina `IGUAL`/`HOST`
+   = gancho que falta. Pasar krom + SM64 + DK64 + PD con el modo puesto.
+2. Bajada perezosa solo para la **z image** (casi nunca la lee el CPU; es la mitad del trafico
+   de triangulos con z). Riesgo minimo, primera ganancia medible.
+3. Color image perezosa + VI desde el gemelo.
+4. Huellas de escritura por bloque (bitmap que escribe el shader) para bajar solo lo pintado.
+5. De fabrica tras puertas completas; `KESTREL_GPURDP_OWN=0` como salida.
+
+**Coste estimado**: fase 0 = horas; 1 = 1-2 dias (lo largo es encontrar todos los lectores);
+2-4 = 1-2 dias; total ~1 semana con validacion. Detalle tecnico y medidas en `docs/GPU-RDP.md`.
+
 ### Coste del RDP: sin setup por primitiva ni por span (2026-09-30, sin oraculo)
 
 El modelo de coste del RDP (`SoftRdp::accountPixels` y compania, `docs/RDP-TIMING.md`) cobra
