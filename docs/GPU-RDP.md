@@ -458,7 +458,15 @@ mediana 643 -> 622).
   | sin blender | 519 |
 
   Los **rellenos** (1423 en 400 intercambios) se llevan ~220-260 ms, cerca del 40 % de la GPU.
-  Los triangulos, ~360 ms, la mayor parte en criba y cobertura, no en textura ni blender.
+  Los triangulos, ~340 ms. **Lectura corregida 2026-10-24**: las filas con rellenos encendidos
+  parten de 232 (tri vacio = rellenos + despacho), asi que la criba y el bucle cuestan ~28 ms
+  (260), entrar en `pixel` ~50 (310, el corte suma un atomico por pixel de la caja) y la
+  cobertura entera queda en ~62 (294). Los otros ~280 ms son la parte posterior a la cobertura
+  (shade, z, textura, combinador, blender y sobre todo lecturas/escrituras de color y z en el
+  espejo del ANFITRION, a traves del PCIe); quitar una etapa sola apenas se nota (sin textura
+  570, sin LOD 552, sin blender 519) porque el cuello es memoria. Descartados por eso, sin
+  hacer: descarte de tesela con bordes exactos y bordes por fila en memoria compartida (techo
+  ~30-60 ms de GPU, <2 % de pared).
 - **Probado y descartado**:
   - Reduccion por subgrupo de los atomicos de `outv`: neutra.
   - `wr16`/`wr8`/`wrHid` con un `atomicXor` de la diferencia: neutro (566 contra 560).
