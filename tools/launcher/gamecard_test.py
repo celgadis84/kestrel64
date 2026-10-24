@@ -20,21 +20,21 @@ def main():
 
 def run(d):
     # Nombres = los del emulador: sin contenedor y sin extension
-    rom = os.path.join(d, "Super Mario 64 (USA).z64.zip")
+    rom = os.path.join(d, "Space Demo 64 (USA).z64.zip")
     open(rom, "wb").write(b"x")
-    assert G.rom_base(rom) == os.path.join(d, "Super Mario 64 (USA)")
+    assert G.rom_base(rom) == os.path.join(d, "Space Demo 64 (USA)")
     assert G.rom_base(os.path.join(d, "Game.zip")) == os.path.join(d, "Game")
     assert G.rom_base(os.path.join(d, "a.b", "Game")) == os.path.join(d, "a.b", "Game")
 
     # Partidas y estados
-    open(os.path.join(d, "Super Mario 64 (USA).eep"), "wb").write(b"\0" * 512)
-    open(os.path.join(d, "Super Mario 64 (USA).st1"), "wb").write(b"\0" * 9)
+    open(os.path.join(d, "Space Demo 64 (USA).eep"), "wb").write(b"\0" * 512)
+    open(os.path.join(d, "Space Demo 64 (USA).st1"), "wb").write(b"\0" * 9)
     s = G.saves(rom)
     assert [x["kind"] for x in s] == ["eep", "st1"], s
 
     # Trucos: mismo lector que src/core/cheats.cpp, y reescritura que respeta el fichero
-    cht = os.path.join(d, "Super Mario 64 (USA).cht")
-    open(cht, "wb").write(b"# SM64\r\n8033B21D 0064\r\n[Vidas infinitas] ; nota\r\n"
+    cht = os.path.join(d, "Space Demo 64 (USA).cht")
+    open(cht, "wb").write(b"# demo\r\n8033B21D 0064\r\n[Vidas infinitas] ; nota\r\n"
                           b"8033B21D 0064\r\n\r\n# otro\r\n[-Monedas]\r\n8033B21A:0063\r\nzz\r\n")
     c = G.cheats(rom)["list"]
     assert [x["name"] for x in c] == ["sin nombre", "Vidas infinitas", "Monedas"], c
@@ -64,16 +64,16 @@ def run(d):
 
     # Manuales: por nombre de fichero o nombre interno, carpeta de la ROM o manuals/
     os.makedirs(os.path.join(d, "manuals"))
-    open(os.path.join(d, "manuals", "Super Mario 64 (USA) - manual.pdf"), "wb").write(b"%PDF")
-    open(os.path.join(d, "SUPERMARIO64.txt"), "wb").write(b"hi")
-    open(os.path.join(d, "Zelda.pdf"), "wb").write(b"%PDF")
-    open(os.path.join(d, "Super Mario 64 (USA).exe"), "wb").write(b"MZ")
-    m = G.manual_list(rom, {"name": "SUPER MARIO 64"})
-    assert [x["file"] for x in m] == ["SUPERMARIO64.txt", "Super Mario 64 (USA) - manual.pdf"], m
+    open(os.path.join(d, "manuals", "Space Demo 64 (USA) - manual.pdf"), "wb").write(b"%PDF")
+    open(os.path.join(d, "SPACEDEMO64.txt"), "wb").write(b"hi")
+    open(os.path.join(d, "Other.pdf"), "wb").write(b"%PDF")
+    open(os.path.join(d, "Space Demo 64 (USA).exe"), "wb").write(b"MZ")
+    m = G.manual_list(rom, {"name": "SPACE DEMO 64"})
+    assert [x["file"] for x in m] == ["SPACEDEMO64.txt", "Space Demo 64 (USA) - manual.pdf"], m
     p = G.manual_store(rom, "x.pdf", b"%PDF2")
-    assert p.endswith(os.path.join("manuals", "Super Mario 64 (USA).pdf"))
+    assert p.endswith(os.path.join("manuals", "Space Demo 64 (USA).pdf"))
     p = G.manual_store(rom, "y.PDF", b"%PDF3")
-    assert p.endswith("Super Mario 64 (USA) (2).pdf"), p
+    assert p.endswith("Space Demo 64 (USA) (2).pdf"), p
     for name, data in (("x.exe", b"MZ"), ("x.pdf", b"")):
         try:
             G.manual_store(rom, name, data)

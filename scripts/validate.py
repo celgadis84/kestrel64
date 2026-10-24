@@ -29,6 +29,7 @@ previous run it changes the boot path and therefore the md5, with no emulator
 change involved. Every SM64 run deletes the save first.
 """
 
+import romcfg  # configuracion local: scripts/local.env
 import argparse
 import concurrent.futures as futures
 import hashlib
@@ -41,7 +42,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ROMS = Path(os.environ.get("KESTREL_TESTROMS", r"E:\Claude\N64\test_roms"))
+ROMS = romcfg.testroms()
 KROM = ROMS / "PeterLemon-N64"
 EXE = Path(os.environ.get("KESTREL_EXE", ROOT / "build" / "kestrel64.exe"))
 BASELINES = ROOT / "docs" / "baselines"
@@ -458,8 +459,8 @@ def gate_krom(mode, args):
 # --------------------------------------------------------------------- gate: sm64
 
 def gate_sm64(mode, args):
-    rom = ROMS / "Super Mario 64 (USA).z64"
-    if not rom.exists():
+    rom = romcfg.rom("ROM_SM64")
+    if not rom or not rom.exists():
         print(f"sm64: SKIP (missing {rom})")
         return True
     save = rom.with_suffix(".eep")
@@ -509,8 +510,8 @@ def gate_pd(mode, args):
     partidas guardadas: una partida vieja cambia el arranque y el md5. Referencia por
     backend como sm64 (pd.txt = SoftRDP, que el GPU-RDP tiene que dar bit a bit).
     """
-    src = ROMS / "Perfect Dark (Europe) (En,Fr,De,Es,It).n64"
-    if not src.exists():
+    src = romcfg.rom("ROM_PD")
+    if not src or not src.exists():
         print(f"pd: SKIP (missing {src})")
         return True
     work = OUT / "pd"
@@ -543,7 +544,7 @@ def gate_pd(mode, args):
 def _bench_once(mode, args, flips):
     """Una medida: N campos VI, se repite --bench-runs veces y se queda el MINIMO
     (la muestra menos contaminada por el resto del sistema). Devuelve (mejor, hb)."""
-    rom = Path(args.bench_rom) if args.bench_rom else ROMS / "Super Mario 64 (USA).z64"
+    rom = Path(args.bench_rom) if args.bench_rom else romcfg.need(romcfg.rom("ROM_SM64"), "ROM_SM64")
     save = rom.with_suffix(".eep")
     dump = OUT / f"bench-{mode}.bmp"
     times, lines, fields = [], [], []
@@ -591,8 +592,8 @@ def gate_bench(mode, args):
     pendiente es la velocidad EN REGIMEN y la ordenada el coste de arranque. Un
     numero de "% tiempo real" sacado de una sola medida corta mezcla las dos cosas.
     """
-    rom = Path(args.bench_rom) if args.bench_rom else ROMS / "Super Mario 64 (USA).z64"
-    if not rom.exists():
+    rom = Path(args.bench_rom) if args.bench_rom else romcfg.rom("ROM_SM64")
+    if not rom or not rom.exists():
         print(f"bench: SKIP (missing {rom})")
         return True
     n1 = args.bench_flips

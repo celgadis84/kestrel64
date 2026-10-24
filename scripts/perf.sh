@@ -4,7 +4,9 @@
 # cambia el camino de arranque y con el la carga de trabajo.
 set -u
 export PATH=/c/msys64/clang64/bin:$PATH
-ROM=${KROM:-"/e/Claude/N64/test_roms/Super Mario 64 (USA).z64"}
+. "$(dirname "$0")/localenv.sh"
+ROM=${KROM:-$(romcfg "${ROM_SM64:-}")}
+[ -n "$ROM" ] || { echo "perf.sh: falta KROM o ROM_SM64 en scripts/local.env" >&2; exit 1; }
 SAVE="${ROM%.*}.eep"
 FLIPS=${KFLIPS:-500}
 EXE=${KEXE:-./build/kestrel64.exe}

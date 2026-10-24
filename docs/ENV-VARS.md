@@ -122,8 +122,8 @@ es el valor que descarrilaba Perfect Dark 1 de cada 8 arranques) · `KESTREL_PAC
 
 **Python**: `scripts/validate.py` pide numpy y el python de MSYS (`/c/msys64/clang64/bin/python`,
 el primero del PATH cuando se exporta clang64) NO lo tiene. Usar siempre el de Windows,
-`/c/Users/celga/AppData/Local/Programs/Python/Python311/python`, que es el que ya fijan
-`scripts/gate_all.sh` y `gate_prdp.sh` en su variable `PY`.
+`PY` de `scripts/local.env` (plantilla `scripts/local.env.example`), que cargan
+`scripts/gate_all.sh`, `gate_prdp.sh` y demas via `scripts/localenv.sh`.
 
 **RCP enhebrado, semantica y biseccion**: el consumidor del FIFO del RDP NO lee los
 comandos de la RDRAM viva sino de una **instantanea** que el productor copia al encolar el

@@ -120,7 +120,7 @@ older "build/link derisked" notes follow it.
   compiled and no flags change; systemtest interp **0/3721·0/2·0/6**, JIT **0/3721·0/2·0/6**.
   Lockstep==threaded md5 unaffected (no core source touched).
 - Source lives in the ares checkout for now: `PRDP_DIR` defaults to
-  `E:/Claude/N64/ares-64/ares/n64/vulkan/parallel-rdp`. Vendor into kestrel/third_party later.
+  `<workspace>/ares-64/ares/n64/vulkan/parallel-rdp`. Vendor into kestrel/third_party later.
 - **Wiring: NOT yet done** (the remaining work — see Next steps). At runtime KESTREL_PRDP=1
   currently does nothing because `vrdp::init` is called nowhere yet.
 

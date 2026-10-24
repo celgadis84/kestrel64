@@ -3,7 +3,7 @@
 # Uso: sh scripts/pdbench.sh [--mode lockstep|threaded] [--stage villa] rom[=map] ...
 #   rom=map  map explicito (p.ej. v2-00-base.z64 comparte map con v2-01)
 #   sin map  pdbench.py busca pd.map junto a la ROM, luego <rom sin .z64>.map
-PY=/c/Users/celga/AppData/Local/Programs/Python/Python311/python
+. "$(dirname "$0")/localenv.sh"
 HERE=$(cd "$(dirname "$0")" && pwd)
 ARGS=""
 while [ $# -gt 0 ]; do

@@ -10,7 +10,7 @@ El emulador tiene que estar EN MARCHA (`--play` o `--run`). El mando 1 se conduc
 fuera con `scripts/pad.py`, que habla con el servidor de telemetria del propio emulador:
 
 ```sh
-PY=/c/Users/celga/AppData/Local/Programs/Python/Python311/python
+. scripts/localenv.sh                     # PY de scripts/local.env
 $PY scripts/pad.py --status                  # fps y ocupacion ahora mismo
 $PY scripts/pad.py --shot /tmp/pd.png        # ver donde esta
 $PY scripts/pad.py start:8 wait:120 a:6 wait:60 shot:/tmp/pd.png

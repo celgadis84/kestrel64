@@ -31,7 +31,8 @@
 set -e
 cd "$(dirname "$0")/.."
 export PATH=/c/msys64/clang64/bin:$PATH
-ROMS=${ROMS:-/e/Claude/N64/test_roms}
+. scripts/localenv.sh
+ROMS=${ROMS:-$KESTREL_TESTROMS}
 OUT=pgo/kestrel.profdata
 if [ -n "$PGO_COMMERCIAL" ] || [ "$1" = "--capture" ]; then
   OUT=pgo/local/kestrel-commercial.profdata; mkdir -p pgo/local
@@ -70,16 +71,19 @@ esac
 build_gen
 rm -rf pgo/raw; mkdir -p pgo/raw
 run() { # run <nombre> <rom> <VAR=tope>   tope: KESTREL_MAXFLIPS o KESTREL_MAXINSN
+  [ -n "$2" ] || { echo "-- $1: SKIP (sin ROM en scripts/local.env)"; return 0; }
   echo "-- $1"
+  case $2 in /*|[A-Za-z]:*) r=$2 ;; *) r="$ROMS/$2" ;; esac
   env LLVM_PROFILE_FILE="$PWD/pgo/raw/$1-%p.profraw" KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 \
-      "$3" timeout 600 ./build-pgogen/kestrel64.exe --run "$ROMS/$2" 2>&1 \
+      "$3" timeout 600 ./build-pgogen/kestrel64.exe --run "$r" 2>&1 \
     | tr -d '\0' | grep -oE "\[statehash\] [0-9a-f]+" || true
 }
 if [ -n "$PGO_COMMERCIAL" ]; then
   # Juegos comerciales (solo para comparar; el perfil que se commitea sale del lote libre).
-  run PD   "Perfect Dark (Europe) (En,Fr,De,Es,It).n64" KESTREL_MAXFLIPS=1793
-  run SM64 "Super Mario 64 (USA).z64"                   KESTREL_MAXFLIPS=400
-  run DK64 "Donkey Kong 64 (USA).n64"                   KESTREL_MAXFLIPS=400
+  # ROMs de scripts/local.env (ROM_PD, ROM_SM64, ROM_DK64).
+  run PD   "${ROM_PD:-}"   KESTREL_MAXFLIPS=1793
+  run SM64 "${ROM_SM64:-}" KESTREL_MAXFLIPS=400
+  run DK64 "${ROM_DK64:-}" KESTREL_MAXFLIPS=400
 else
   # Lote LIBRE (homebrew y pruebas con licencia abierta): lo que se entrena y se distribuye.
   # junkrunner64 = juego 3D libdragon (CPU+RSP+RDP+audio), snapper64 = superficies RDP,

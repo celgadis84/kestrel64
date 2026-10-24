@@ -5,7 +5,7 @@
 # y krom con la referencia de interp. Necesita GPU con Vulkan.
 # pd: intro de Perfect Dark PAL contra pd.txt (SoftRDP).
 # Uso: sh scripts/gate_gpurdp.sh   (~7,5 min; release.sh --quick antes)
-PY=/c/Users/celga/AppData/Local/Programs/Python/Python311/python
+. "$(dirname "$0")/localenv.sh"
 cd "$(dirname "$0")/.."
 KESTREL_EXE="$(pwd)/build-prdp-static/kestrel64.exe"; export KESTREL_EXE
 [ -f "$KESTREL_EXE" ] || { echo "gate_gpurdp: falta $KESTREL_EXE (sh scripts/release.sh --quick)"; exit 1; }

@@ -1,13 +1,13 @@
 # Guia MCP de kestrel64 (para otra sesion que depura/optimiza un juego)
 
 Pensada para una sesion de Claude que trabaja en OTRO proyecto (p. ej. optimizar la decomp
-de Perfect Dark en `E:\Claude\N64\perfect_dark`) y usa kestrel64 como banco de pruebas:
+de Perfect Dark en `<workspace>\perfect_dark`) y usa kestrel64 como banco de pruebas:
 arrancar la ROM que acaba de compilar, llevarla a un punto concreto, mirar memoria/CPU/RCP
 y perfilar. Todo por el servidor de telemetria del propio emulador.
 
 **Reglas para esa sesion**
 - **Solo se USA kestrel64, no se edita.** Si falta una capacidad, anotarla y pedirla; el
-  arbol `E:\Claude\N64\kestrel64` es de otra sesion.
+  arbol `<workspace>\kestrel64` es de otra sesion.
 - **El MCP de ares esta MUERTO** (`mcp__ares64__*`, fork congelado). Usar solo
   `mcp__kestrel64__*`.
 - Respetar las reglas del proyecto del juego (en PD: `perfect_dark/docs/perf/`).
@@ -16,9 +16,9 @@ y perfilar. Todo por el servidor de telemetria del propio emulador.
 
 | exe | para que |
 |---|---|
-| `E:\Claude\N64\kestrel64\build-prdp-static\kestrel64.exe` | **el normal**: RDP por GPU (parallel-rdp), JIT de CPU y de RSP, hilos |
-| `E:\Claude\N64\kestrel64\build-static\kestrel64.exe` | igual con SoftRDP (rasterizador de referencia por software, sin Vulkan) |
-| `E:\Claude\N64\kestrel64\dist\kestrel64.exe` | la copia del paquete publicado (= build-prdp-static) |
+| `build-prdp-static\kestrel64.exe` | **el normal**: RDP por GPU (parallel-rdp), JIT de CPU y de RSP, hilos |
+| `build-static\kestrel64.exe` | igual con SoftRDP (rasterizador de referencia por software, sin Vulkan) |
+| `dist\kestrel64.exe` | la copia del paquete publicado (= build-prdp-static) |
 
 No compilar kestrel64 desde la otra sesion: `sh scripts/release.sh` es de su dueno.
 
@@ -27,7 +27,7 @@ No compilar kestrel64 desde la otra sesion: `sh scripts/release.sh` es de su due
 El servidor de telemetria arranca SIEMPRE, en el puerto 9128 (`--port N` para cambiarlo).
 
 ```sh
-EXE=/e/Claude/N64/kestrel64/build-prdp-static/kestrel64.exe
+EXE=<workspace>/kestrel64/build-prdp-static/kestrel64.exe
 "$EXE" "<rom>"            # PAUSADO con ventana: espera run_control('resume'). Ventana negra = normal.
 "$EXE" "<rom>" --play     # corriendo y con ventana (lo normal para mirar)
 "$EXE" "<rom>" --run      # corriendo SIN ventana (lotes, medidas)
@@ -46,18 +46,18 @@ de lanzar otro.
 
 ## 3. Conectar el MCP
 
-Ya esta registrado en `E:\Claude\N64\.mcp.json`:
+Ya esta registrado en `<workspace>\.mcp.json`:
 
 ```json
 { "mcpServers": { "kestrel64": {
     "command": "python",
-    "args": ["E:/Claude/N64/kestrel64/tools/mcp/kestrel_mcp.py"],
+    "args": ["<workspace>/kestrel64/tools/mcp/kestrel_mcp.py"],
     "env": { "KESTREL_TELEMETRY_HOST": "127.0.0.1", "KESTREL_TELEMETRY_PORT": "9128" } } } }
 ```
 
 Una sesion abierta en otra carpeta (p. ej. `perfect_dark/`) necesita ese mismo bloque en su
 `.mcp.json`. El puente necesita el paquete `mcp` de Python. Prueba sin MCP, con el emulador
-vivo: `python E:/Claude/N64/kestrel64/tools/mcp/kestrel_mcp.py --selftest`.
+vivo: `python <workspace>/kestrel64/tools/mcp/kestrel_mcp.py --selftest`.
 
 El puente reconecta solo. Si el emulador se reinicia, la siguiente llamada vuelve a
 conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
@@ -116,9 +116,9 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   milisegundos: son los mismos fotogramas de juego a cualquier velocidad, y al acabarse el
   juego ve la suelta.
 - `controller_state`: lo que el juego leera en el proximo sondeo.
-- Alternativa por linea de ordenes: `python E:/Claude/N64/kestrel64/scripts/pad.py
+- Alternativa por linea de ordenes: `python scripts/pad.py
   start:8 wait:120 a:6 shot:/tmp/x.png` (usar el python de Windows,
-  `/c/Users/celga/AppData/Local/Programs/Python/Python311/python`).
+  `PY` de `scripts/local.env`).
 
 **Imagen**
 - `capture_framebuffer(path)`: PNG de lo que esta mostrando el VI, mas un histograma de
@@ -155,11 +155,11 @@ Se ponen ANTES de lanzar el exe:
 - `KESTREL_RDRAM=4`: consola sin Expansion Pak (de fabrica 8 MB).
 - `KESTREL_SAVETYPE=...`: forzar el tipo de guardado si la ROM modificada cambio de ID.
 
-Lista completa: `E:\Claude\N64\kestrel64\CLAUDE.md`, seccion "Env-var toggles".
+Lista completa: `CLAUDE.md`, seccion "Env-var toggles".
 
 ## 6. Perfect Dark en concreto
 
-`E:\Claude\N64\kestrel64\docs\PD-GAMEPLAY.md` tiene los dos caminos para llegar a jugar un
+`docs/PD-GAMEPLAY.md` tiene los dos caminos para llegar a jugar un
 nivel sin tocar el menu a mano:
 1. Navegar el menu con el mando inyectado (`controller_set` o `scripts/pad.py`).
 2. Escribir el nivel en RAM: `g_MissionConfig`, y despues `g_MainChangeToStageNum`. Las

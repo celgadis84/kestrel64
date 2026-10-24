@@ -7,8 +7,10 @@
 import hashlib, os, subprocess, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "mcp"))
 import kestrel_mcp as k
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+import romcfg  # configuracion local: scripts/local.env
 
-ROM  = sys.argv[1] if len(sys.argv) > 1 else r"E:\Claude\N64\test_roms\Super Mario 64 (USA).z64"
+ROM  = sys.argv[1] if len(sys.argv) > 1 else str(romcfg.need(romcfg.rom("ROM_SM64"), "ROM_SM64"))
 EXE  = os.path.join(os.path.dirname(__file__), "..", "build", "kestrel64.exe")
 SLOT = 9
 if not os.path.exists(ROM):

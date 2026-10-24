@@ -5,6 +5,7 @@ restaura). Veredicto: el proceso sigue vivo, hay lineas "[video] swapchain recre
 y ninguna ok=0 tras la ultima restauracion.
 Uso: python scripts/swapchain_smoke.py [--exe build-prdp/kestrel64.exe] [--port 9173]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, ctypes, os, subprocess, sys, time
 from ctypes import wintypes
 from pathlib import Path
@@ -12,10 +13,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ap = argparse.ArgumentParser()
 ap.add_argument("--exe", default=str(ROOT / "build-prdp" / "kestrel64.exe"))
-ap.add_argument("--rom", default=str(ROOT.parent / "test_roms" / "Super Mario 64 (USA).z64"))
+ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
 ap.add_argument("--port", type=int, default=9173)
 ap.add_argument("--log", default="swapchain_smoke.log")
 args = ap.parse_args()
+args.rom = str(romcfg.need(args.rom, "ROM_SM64"))
 
 u32 = ctypes.windll.user32
 env = dict(os.environ, KESTREL_AUDIO="0", KESTREL_MAXINSN="4000000000")

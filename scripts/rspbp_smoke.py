@@ -6,6 +6,7 @@ con resume, exige un SEGUNDO acierto (el salto de una vez funciona y el siguient
 parar), quita todo y comprueba que el juego avanza. Una linea por paso y veredicto final.
 Uso: python scripts/rspbp_smoke.py [--threads 0|1] [--port 9172]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, os, subprocess, sys, time
 from pathlib import Path
 
@@ -15,9 +16,10 @@ sys.path.insert(0, str(ROOT / "tools" / "mcp"))
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=9172)
 ap.add_argument("--threads", default="1", help="KESTREL_THREADS: 1 = Threaded, 0 = Lockstep")
-ap.add_argument("--rom", default=str(ROOT.parent / "test_roms" / "Super Mario 64 (USA).z64"))
+ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
 ap.add_argument("--exe", default=str(ROOT / "build" / "kestrel64.exe"))
 args = ap.parse_args()
+args.rom = str(romcfg.need(args.rom, "ROM_SM64"))
 
 import kestrel_mcp as k  # noqa: E402
 k.PORT = args.port

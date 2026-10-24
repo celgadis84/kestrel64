@@ -17,6 +17,7 @@ las instrucciones paradas es un cuelgue de otra clase. Distinguirlos es el objet
 
   python scripts/dk_demo_hunt.py --runs 6 --minutes 5
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +25,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "tools", "mcp"))
 import kestrel_mcp as k  # noqa: E402
 
-ROM = r"E:\Claude\N64\test_roms\Donkey Kong 64 (USA).n64"
+ROM = str(romcfg.need(romcfg.rom("ROM_DK64"), "ROM_DK64"))
 
 
 def snap(png):

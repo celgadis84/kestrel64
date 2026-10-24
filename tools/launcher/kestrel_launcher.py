@@ -319,7 +319,7 @@ def art_key(fname, header):
 def art_norm(t):
     """Normaliza un titulo para casarlo: fuera los grupos entre parentesis o corchetes (que
     en No-Intro son region, idiomas y revision), fuera todo lo que no sea alfanumerico, y a
-    minusculas. "Super Mario 64 (USA)" y "SUPER MARIO 64" acaban iguales."""
+    minusculas. "Space Demo 64 (USA)" y "SPACE DEMO 64" acaban iguales."""
     t = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", t)
     t = t.replace("&", " and ")
     return re.sub(r"[^a-z0-9]", "", t.lower())

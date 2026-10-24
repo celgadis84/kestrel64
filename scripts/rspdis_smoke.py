@@ -2,15 +2,17 @@
 (VU, LWC2/SWC2, COP0 SP_*/DPC_*) y marca los puntos de ruptura puestos con rsp.bp.add.
 Uso: python scripts/rspdis_smoke.py [--port 9178]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, json, os, socket, struct, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=9178)
-ap.add_argument("--rom", default=str(ROOT.parent / "test_roms" / "Super Mario 64 (USA).z64"))
+ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
 ap.add_argument("--exe", default=str(ROOT / "build" / "kestrel64.exe"))
 args = ap.parse_args()
+args.rom = str(romcfg.need(args.rom, "ROM_SM64"))
 
 
 class Cli:

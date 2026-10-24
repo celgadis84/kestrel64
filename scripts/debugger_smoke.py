@@ -6,6 +6,7 @@ backbuffer (a los 180 cuadros de interfaz). Veredicto: la ventana existe, el pro
 vivo y la foto tiene contenido (no es un color plano). La foto queda en --out (BMP).
 Uso: python scripts/debugger_smoke.py [--port 9143] [--out captura.bmp]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, ctypes, os, subprocess, sys, time
 from pathlib import Path
 
@@ -13,11 +14,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "mcp"))
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=9143)
-ap.add_argument("--rom", default=str(ROOT.parent / "test_roms" / "Super Mario 64 (USA).z64"))
+ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
 ap.add_argument("--exe", default=str(ROOT / "build" / "kestrel64.exe"))
 ap.add_argument("--out", default="debugger_smoke.bmp")
 ap.add_argument("--wait", type=float, default=15.0)
 args = ap.parse_args()
+args.rom = str(romcfg.need(args.rom, "ROM_SM64"))
 os.environ["KESTREL_TELEMETRY_PORT"] = str(args.port)
 import kestrel_mcp as k  # noqa: E402
 k.PORT = args.port

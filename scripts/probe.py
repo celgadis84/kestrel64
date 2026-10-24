@@ -9,6 +9,7 @@ completely different hue = texture decode).
 
 usage: python scripts/probe.py <substring of ROM path> [--insn N]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse
 import collections
 import os
@@ -19,7 +20,7 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent
 EXE = ROOT / "build" / "kestrel64.exe"
-KROM = pathlib.Path("E:/Claude/N64/test_roms/PeterLemon-N64")
+KROM = romcfg.testroms() / "PeterLemon-N64"
 OUT = ROOT / "out"
 
 

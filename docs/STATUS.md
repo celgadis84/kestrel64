@@ -336,7 +336,7 @@ all four "RDP STATUS: Run from DMEM (xbus)" / "Flags during a run" tests.
 ### 2026-08-08 — validación cruzada con krom (PeterLemon/N64)
 
 Segundo oráculo HW además de n64-systemtest: las test-ROMs de PeterLemon/N64 (en
-`E:\Claude\N64\N64\`) renderizan tablas PASS/FAIL a framebuffer y traen PNG de
+`<workspace>\N64\`) renderizan tablas PASS/FAIL a framebuffer y traen PNG de
 referencia (salida de consola real). Volcado headless vía `KESTREL_MAXINSN` +
 `KESTREL_FBDUMP=<archivo.bmp>` (path relativo — MSYS mangle paths con `:`; convertir
 BMP→PNG con `py`, no la python de clang64 que no trae PIL). Resultados:
@@ -1281,7 +1281,7 @@ INVARIANTES: systemtest 0/3721·0/2·0/6 · lockstep==threaded 027e7280 · 47-su
 (static n=43 96.47→96.56, +0.09, leve subida). Genuino HW, cero regresión.
 
 LECCIÓN (regla usuario): en punto de duda → FUENTE (angrylion/MiSTer/parallel-rdp local en
-ares-64/thirdparty) ANTES que ensayo-error. angrylion checkout: /e/Claude/N64/ares-64/thirdparty/angrylion-rdp-plus/src
+ares-64/thirdparty) ANTES que ensayo-error. angrylion checkout: <workspace>/ares-64/thirdparty/angrylion-rdp-plus/src
 
 ## 2026-08-11 (sexies) — CombinerOverflow: DIAGNÓSTICO FIRME (fuente angrylion, no VI-filter)
 
@@ -8498,7 +8498,7 @@ no partida. El usuario grabo una partida de verdad en la **ranura 0** (la vieja 
 **Banco de partida (el que manda a partir de ahora)**:
 
 ```sh
-B="/e/Claude/N64/test_roms/Perfect Dark (Europe) (En,Fr,De,Es,It).n64"
+. scripts/localenv.sh; B=$(romcfg "$ROM_PD")
 KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 KESTREL_MAXFLIPS=1793 ./build-prdp-static/kestrel64.exe "$B" --run
 ```
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Puerta completa: systemtest + sm64 en los seis modos, luego krom. Un solo log.
 export PATH=/c/msys64/clang64/bin:$PATH
-PY=/c/Users/celga/AppData/Local/Programs/Python/Python311/python
+. "$(dirname "$0")/localenv.sh"
 cd "$(dirname "$0")/.."
 cmake --build build -j 8 >/dev/null || { echo "gate_all: build no compila"; exit 1; }
 

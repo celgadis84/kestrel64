@@ -10,7 +10,9 @@
 set -u
 export PATH=/c/msys64/clang64/bin:$PATH
 
-ROM=${KROM:-"/e/Claude/N64/test_roms/Super Mario 64 (USA).z64"}
+. "$(dirname "$0")/localenv.sh"
+ROM=${KROM:-$(romcfg "${ROM_SM64:-}")}
+[ -n "$ROM" ] || { echo "bench.sh: falta KROM o ROM_SM64 en scripts/local.env" >&2; exit 1; }
 SAVE="${ROM%.*}.eep"
 OUT=${KOUT:-/tmp/kbench}
 INSN=${KINSN:-300000000}

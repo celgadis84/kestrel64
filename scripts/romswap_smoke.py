@@ -3,6 +3,7 @@ por MCP y comprueba que el proceso relanzado responde con la ROM nueva. Los dos 
 llevan KESTREL_MAXINSN bajo, asi que mueren solos (el relanzado no es hijo nuestro).
 Uso: python scripts/romswap_smoke.py [--port 9142]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, os, subprocess, sys, time
 from pathlib import Path
 
@@ -16,8 +17,8 @@ os.environ["KESTREL_TELEMETRY_PORT"] = str(args.port)
 import kestrel_mcp as k  # noqa: E402
 k.PORT = args.port
 
-roms = ROOT.parent / "test_roms"
-a, b = roms / "Super Mario 64 (USA).z64", roms / "n64-systemtest.z64"
+roms = romcfg.testroms()
+a, b = romcfg.need(romcfg.rom("ROM_SM64"), "ROM_SM64"), roms / "n64-systemtest.z64"
 env = dict(os.environ, KESTREL_AUDIO="0", KESTREL_MAXINSN="400000000")
 p = subprocess.Popen([args.exe, str(a), "--run", "--port", str(args.port)], env=env,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

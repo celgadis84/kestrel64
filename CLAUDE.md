@@ -8,7 +8,11 @@ emulators (ares, cen64) hit an architectural ceiling.
 Live status: `docs/STATUS.md`. Backlog de huecos y pendientes: `docs/GAPS.md` (lo que
 falta frente a ares/PJ64/mupen + pendientes propios, ordenado; se actualiza al cerrar
 cada punto). Peticiones de la optimizacion de Perfect Dark al emulador:
-`PD64_pending.md` (P1..P8, tachar al cerrar). Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
+`PD64_pending.md` (P1..P8, tachar al cerrar; **local, en .gitignore**: el repo es PUBLICO).
+Configuracion de la maquina (python, carpeta y nombres de ROMs de prueba, ares): `scripts/local.env`
+(ignorado; plantilla `scripts/local.env.example`), que leen `scripts/localenv.sh` y
+`scripts/romcfg.py`. **Nunca** rutas personales ni nombres de ROM comerciales en ficheros
+versionados. Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
 `docs/TEXTURE-FORMATS.md`, `docs/parallel-rdp-integration.md`, `docs/VI-CLOCK.md`,
 `docs/RSP-JIT.md`, `docs/ROMS-COMPRIMIDAS.md`.
 
@@ -30,7 +34,7 @@ Toolchain = clang at `/c/msys64/clang64/bin` (MSYS2 CLANG64). Static-linked exe.
 
 ```bash
 export PATH=/c/msys64/clang64/bin:$PATH
-cd /e/Claude/N64/kestrel64
+cd <workspace>/kestrel64
 sh scripts/release.sh          # <-- ESTE. Regenera los CUATRO arboles + lanzador + paquete.
 ```
 
@@ -240,7 +244,7 @@ systemtest 100%, SM64/PD/DK64 jugables, lockstep==threaded. Saves completos, PIF
 block-linking, RSP JIT, savestates/rewind. RDP: GPU-RDP propio (Vulkan compute) de fabrica,
 SoftRDP y GPU-RDP a la par de parallel-rdp en la suite krom RDP/ (2026-10-08). Ultimo: SummerCart64
 + SD (carpeta de ROMs como FAT32 virtual, 6f76432). Peticiones de otros proyectos: `PD64_pending.md`
-(PD) y mensajes de las sesiones SDK/PSX. Huecos conocidos: `docs/GAPS.md`.
+(PD, local) y mensajes de las sesiones SDK/PSX. Huecos conocidos: `docs/GAPS.md`.
 
 Prioridad (usuario): breadth funcional antes que accuracy subpixel de color; ampliar segun
 lo pidan el SDK, el port PSX y PD.

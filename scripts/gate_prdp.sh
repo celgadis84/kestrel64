@@ -7,7 +7,7 @@
 # sm64 tiene su propio md5 por modo: parallel-rdp no es pixel-identico a SoftRDP
 # y no tiene por que serlo; lo que se exige es que no cambie entre corridas.
 export PATH=/c/msys64/clang64/bin:$PATH
-PY=/c/Users/celga/AppData/Local/Programs/Python/Python311/python
+. "$(dirname "$0")/localenv.sh"
 cd "$(dirname "$0")/.."
 KESTREL_EXE="$(pwd)/build-prdp/kestrel64.exe"; export KESTREL_EXE
 [ -f "$KESTREL_EXE" ] || { echo "gate_prdp: falta $KESTREL_EXE (cmake -B build-prdp -DKESTREL_PRDP=ON)"; exit 1; }

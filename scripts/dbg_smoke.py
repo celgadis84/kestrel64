@@ -4,6 +4,7 @@ Lanza SM64 sin ventana en un puerto propio, activa la grabadora, espera unos cua
 pasa por cada orden nueva imprimiendo una linea de veredicto por orden. Sale con 0 si
 todas responden bien. Uso: python scripts/dbg_smoke.py [--port 9141] [--rom ruta]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, os, subprocess, sys, time, tempfile
 from pathlib import Path
 
@@ -12,10 +13,11 @@ sys.path.insert(0, str(ROOT / "tools" / "mcp"))
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--port", type=int, default=9141)
-ap.add_argument("--rom", default=str(ROOT.parent / "test_roms" / "Super Mario 64 (USA).z64"))
+ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
 ap.add_argument("--exe", default=str(ROOT / "build" / "kestrel64.exe"))
 ap.add_argument("--romswap", default="", help="ROM para probar rom.load (opcional)")
 args = ap.parse_args()
+args.rom = str(romcfg.need(args.rom, "ROM_SM64"))
 
 os.environ["KESTREL_TELEMETRY_PORT"] = str(args.port)
 import kestrel_mcp as k  # noqa: E402

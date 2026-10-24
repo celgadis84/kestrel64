@@ -34,6 +34,7 @@ usage:
                                [--filter SUBSTR] [--report out/fidelity.md]
 """
 
+import romcfg  # configuracion local: scripts/local.env
 import argparse
 import json
 import os
@@ -46,12 +47,12 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ROMS = Path(os.environ.get("KESTREL_TESTROMS", r"E:\Claude\N64\test_roms"))
+ROMS = romcfg.testroms()
 KESTREL = Path(os.environ.get("KESTREL_EXE", ROOT / "build-prdp-static" / "kestrel64.exe"))
 FAITHFUL = {"KESTREL_SPLEAD": "0", "KESTREL_SPSIGQ": "0", "KESTREL_DPLOGLEAD": "0"}
 # RDP backend, fixed explicitly: the shipped exe starts on GPU-RDP, which is not complete yet.
 RDP_ENV = {"prdp": {"KESTREL_PRDP": "1"}, "gpu": {"KESTREL_GPURDP": "1"}, "soft": {"KESTREL_PRDP": "0"}}
-ARES = Path(os.environ.get("ARES_EXE", r"E:\Claude\N64\ares-64\build_win\desktop-ui\rundir\ares.exe"))
+ARES = Path(romcfg.get("ARES_EXE", "ares.exe"))
 OUT = ROOT / "out" / "fidelity"
 KPORT = 9133
 KPORTS = (9141, 9142, 9143, 9144)   # krom en paralelo

@@ -6,6 +6,7 @@ Puerto propio (defecto 9176). Ver docs/STATUS.md "Estado de la prueba de la lian
 
   python scripts/dk_vine_check.py --exe build/kestrel64.exe --out <dir> [--threads 1]
 """
+import romcfg  # configuracion local: scripts/local.env
 import argparse, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -15,7 +16,7 @@ import kestrel_mcp as k  # noqa: E402
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--exe", default=os.path.join(ROOT, "build", "kestrel64.exe"))
-ap.add_argument("--rom", default=r"E:\Claude\N64\test_roms\Donkey Kong 64 (USA).n64")
+ap.add_argument("--rom", default=romcfg.rom("ROM_DK64"))
 ap.add_argument("--port", type=int, default=9176)
 ap.add_argument("--out", required=True)
 ap.add_argument("--intro", type=float, default=10.0)
@@ -24,6 +25,7 @@ ap.add_argument("--period", type=float, default=3.0)
 ap.add_argument("--threads", default="1")
 ap.add_argument("--tag", default="v")
 args = ap.parse_args()
+args.rom = str(romcfg.need(args.rom, "ROM_DK64"))
 os.makedirs(args.out, exist_ok=True)
 k.PORT = args.port
 

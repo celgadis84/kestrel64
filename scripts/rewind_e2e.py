@@ -16,6 +16,7 @@
 #   python scripts/rewind_e2e.py [--exe build-prdp-static/kestrel64.exe] [--rom ...]
 #                                [--a 200] [--b 40] [--port 9131] [--env K=V ...]
 
+import romcfg  # configuracion local: scripts/local.env
 import argparse
 import hashlib
 import os
@@ -33,13 +34,14 @@ sys.path.insert(0, str(ROOT / "tools" / "mcp"))
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--exe", default=str(ROOT / "build-prdp-static" / "kestrel64.exe"))
-    ap.add_argument("--rom", default=str(ROOT.parent / "test_roms" / "Super Mario 64 (USA).z64"))
+    ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
     ap.add_argument("--a", type=int, default=200)
     ap.add_argument("--b", type=int, default=40)
     ap.add_argument("--fields", type=int, default=2, help="KESTREL_REWIND_FIELDS")
     ap.add_argument("--port", type=int, default=9131)
     ap.add_argument("--env", action="append", default=[])
     a = ap.parse_args()
+    a.rom = str(romcfg.need(a.rom, "ROM_SM64"))
     a.exe = str(Path(a.exe).resolve())
     if a.b % a.fields:
         print("--b tiene que ser multiplo de --fields"); return 2

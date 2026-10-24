@@ -15,7 +15,7 @@ The ROM is built from a local checkout at `../rdp-timing-tests` (libdragon):
 
 ```bash
 # libdragon host tools, once:  make tools-install   (N64_INST=/root/n64tool)
-cd /e/Claude/N64/rdp-timing-tests
+cd <workspace>/rdp-timing-tests
 PATH=/root/n64tool/bin:$PATH make EXTRA_CFLAGS=-DTOTAL_RUNS=8
 ```
 

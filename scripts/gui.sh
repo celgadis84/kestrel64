@@ -14,7 +14,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-PY=${PY:-/c/Users/celga/AppData/Local/Programs/Python/Python311/python}
+. scripts/localenv.sh
 [ -x "$PY" ] || PY=python
 OUT="${1:-dist}"
 WORK=build-gui

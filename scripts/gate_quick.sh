@@ -13,7 +13,7 @@
 #   phys  -> systemtest + sm64 en modo phys
 #   thar0 -> tiempos RDP contra HW (Thar0, ~2 min): rmse tiene que quedar en 0.1332
 # Uso: sh scripts/gate_quick.sh [krom] [lock] [phys] [thar0]
-PY=/c/Users/celga/AppData/Local/Programs/Python/Python311/python
+. "$(dirname "$0")/localenv.sh"
 cd "$(dirname "$0")/.."
 SOFT="$(pwd)/build-static/kestrel64.exe"
 PRDP="$(pwd)/build-prdp-static/kestrel64.exe"

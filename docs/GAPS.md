@@ -944,6 +944,27 @@ Ver `docs/baselines/pd-opt.md`.
      discriminan.
   4. Un triangulo de una linea que empieza con ancho 0 no pinta nada. Sin verificar en consola;
      puede ser correcto, segun como cuente el caminante de aristas la primera subscanline.
+- **Oraculo de consola real YA DISPONIBLE (2026-10-24, EverDrive64 v1, cifras transcritas de
+  fotos del HUD)**:
+  - Datos: `k64sdk-compat/docs/hw/45_tritiming_hw_2026-10-24.csv` (cfg,size,N,clk_per_tri,
+    clk_per_line). Al lado, kestrel64 del mismo dia: `45_tritiming_emu_2026-10-24.csv`
+    (columnas x10).
+  - En consola, pipe% y buf% tambien salen al 99 % en todo, asi que el punto 3 no es un fallo.
+  - **Setup por triangulo** (area cero; emu 0,1): FILL 23,2 · 1C 33,1 · 1C+Z 40,8 · 2C+Z 40,7 ·
+    TEX+Z 76,7. Depende del modo, y la textura suma ~+36.
+  - **Coste fijo por linea** (spans de 4-16 px): FILL 18-19 (emu 3,1) · 1C sin Z 22-27 (emu 7) ·
+    1C+Z 66-70 (emu 25).
+  - **Spans largos** (64 px): 1C+Z 130-137 (emu 115,6, ~+15 %) · FILL 30-32 (emu 11) · 1C 43-47
+    (emu 41-42).
+  - **Una sola linea** (64x1): FILL 61,6 (emu ~11) · 1C+Z 240,5 (emu ~116).
+  - 2C+Z se comporta como 1C+Z en todos los tamanos, y TEX+Z tambien salvo en el setup. 32 bpp
+    1C+Z: 64x64 da 177,7 clk/linea (contra 130 a 16 bpp), y 64x1 da 335,9. Con AA (IM_RD), 1C+Z
+    64x64 da 169,6 contra 130.
+  - Conclusion: en triangulos pequenos el emulador va de 2,5x a 6x mas rapido que la consola,
+    porque le falta el setup por primitiva segun el modo y el coste fijo por linea. Con spans
+    largos va bien.
+  - Siguiente: calibrar setup y coste por linea contra el CSV, y despues pedir a la sesion SDK
+    que repita las ROMs 45 y 42.
 
 ### Fidelidad de temporizacion — las DMA no cuestan tiempo (parcial: SI hecho 2026-09-08)
 

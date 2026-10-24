@@ -57,3 +57,9 @@ SHA256SUMS.txt
 pgo/raw/
 pgo/local/
 *.profraw
+
+# Peticiones de la sesion de Perfect Dark al emulador: notas locales de trabajo, no van al repo.
+PD64_pending.md
+
+# Configuracion local de la maquina (rutas de ROMs de prueba, python): ver scripts/local.env.example.
+scripts/local.env
