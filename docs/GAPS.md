@@ -966,8 +966,14 @@ Ver `docs/baselines/pd-opt.md`.
   - Conclusion: en triangulos pequenos el emulador va de 2,5x a 6x mas rapido que la consola,
     porque le falta el setup por primitiva segun el modo y el coste fijo por linea. Con spans
     largos va bien.
-  - Siguiente: calibrar setup y coste por linea contra el CSV, y despues pedir a la sesion SDK
-    que repita las ROMs 45 y 42.
+  - **NO calibrar todavia con este CSV** (usuario, 2026-10-24: no se fia de que este bien
+    medido). Hay incoherencias a la vista: FILL 64x1 cuesta 61,6 por linea y FILL 64x64, 30-32;
+    con AA sale mas BARATO (169,6) que sin AA (130 a 16 bpp no es comparable, pero el orden
+    choca). Pedida a la sesion SDK una medida mejor: varios N por configuracion (pendiente de la
+    recta = coste por triangulo, ordenada = coste fijo), barridos separados de alto (coste por
+    linea) y de ancho (coste por pixel), SYNC_FULL antes y despues de cada lote, varias
+    repeticiones con dispersion, DPC_STATUS de cada lote, y la imagen en pantalla para ver que
+    se dibuja lo que se mide. Calibrar solo con esos datos.
 
 ### Fidelidad de temporizacion — las DMA no cuestan tiempo (parcial: SI hecho 2026-09-08)
 
