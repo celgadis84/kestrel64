@@ -917,6 +917,18 @@ Por ahi va el orden nuevo:
   miraria lo que cambio. No es corto: hay que cazar TODAS las vias de escritura a la
   RDRAM -- CPU cacheada y sin cachear, DMA de RSP/PI/SI y el propio RDP -- y una sola que
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.
+- **Comparativa de velocidad kestrel64 contra ares, rehecha** (abierto 2026-10-24,
+  **agendado martes 2026-10-27**). La unica medida de los dos lado a lado es de 2026-08-20
+  (`STATUS.md`, "Velocidad honesta": threaded-jit 37,5 % de tiempo real con SoftRDP frente a
+  ares 50-65 %). Desde entonces solo se ha medido kestrel (PD 1,12x en juego 2026-09-24, PGO
+  -7..-8,6 %, JIT L2, GPU-RDP de fabrica); la fidelidad si esta comparada (2026-10-07,
+  `docs/baselines/timings.md`). Metodo: mismo anfitrion (i7-870 + RX570), mismas tres ROMs
+  (SM64, DK64, PD en juego), **mismo trabajo de invitado** (N campos VI desde el mismo punto,
+  no segundos de pared ni Mips), ares sin tope de velocidad y sin sincronia de audio/video,
+  kestrel con el exe del paquete (`build-prdp-static`, GPU-RDP) y tambien SoftRDP para que la
+  comparacion de CPU no dependa de la GPU, min de 4 corridas intercaladas. ares se ejecuta
+  tal cual (fork congelado, no se toca). Salida: tabla en `docs/baselines/timings.md` y
+  frase actualizada en `README.md` ("Why another emulator" cita cifras de ares de agosto).
 
 ### GPU-RDP: espejo dueno en la GPU (BOCETO de plan, abierto 2026-10-24, para mas adelante)
 
