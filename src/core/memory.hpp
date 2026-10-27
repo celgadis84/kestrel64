@@ -874,6 +874,17 @@ struct Memory {
   std::atomic<bool> dpLogFlush{false};   // System::quiesceRcp: aplicar el diario sin esperar
   u32 dpJobAddr[kDpRingN]{};       // DPC_CURRENT al abrir
   u32 dpJobEndAddr[kDpRingN]{};    // DPC_CURRENT al cerrar
+  // CMD_BUSY tras cerrar el trabajo (HW, verificado en consola): lo baja el fin de un SYNC_FULL
+  // y lo vuelve a subir cualquier comando posterior, y se queda puesto con el RDP parado hasta
+  // el siguiente SYNC_FULL (STATUS 0x0C0 en reposo). dpJobSync = el tramo acaba en SYNC_FULL.
+  bool dpJobBusyAfter[kDpRingN]{};
+  bool dpJobSync[kDpRingN]{};
+  std::atomic<bool> dpBusyAfterLast{false};   // el del ultimo tramo fechado (modelo sin horario)
+  // Riesgo de HW: escribir DPC_START/END con un SYNC_FULL en curso cuelga el RDP real. Se avisa
+  // una vez; KESTREL_RDP_STRICT=1 ademas congela el RDP como la consola (ver dpcHazardCheck).
+  bool dpHazardWarned = false;
+  std::atomic<bool> rdpHwHung{false};
+  auto dpcHazardCheck(u32 reg, u32 v) -> bool;
   // Instante de invitado en que ARRANCA un trabajo lanzado en `ops`. El motor es UNO: un
   // buffer encolado detras de otro no puede empezar antes de que el anterior drene, asi que
   // el arranque es el maximo entre su propio lanzamiento y el cierre del anterior. Sin este
@@ -1609,6 +1620,7 @@ public:
 
   // --- interrupt aggregation (MI) --------------------------------------------
   auto raiseIntr(u32 bit) -> void {
+    if(bit == MI_DP && rdpHwHung.load(std::memory_order_relaxed)) return;   // KESTREL_RDP_STRICT
     // KESTREL_IRQTRACE=<n>: las n primeras subidas de CADA interrupcion, con el INSTANTE de
     // invitado en que caen. Es la sonda con la que se comprueba que un plazo es exacto: dos
     // corridas con ajustes distintos de anfitrion (KESTREL_VITICKS) tienen que dar la MISMA

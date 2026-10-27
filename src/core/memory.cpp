@@ -1586,6 +1586,8 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     // Vistas del RSP aun sin aplicar (ver dpLogDueAt): antes de que esta escritura pise cpuDpcView.
     if(!tlIsRspThread && !tlDpLogApply && (rcpPend.load(std::memory_order_relaxed) & 16u))
       dpLogApply(cartNow());
+    // START/END con un SYNC_FULL en curso: riesgo de cuelgue del HW (aviso; STRICT = colgar).
+    if(((off & 0xff) == 0x00 || (off & 0xff) == 0x04) && dpcHazardCheck(off & 0xff, v)) return;
     static const bool dpwr = std::getenv("KESTREL_DPSYNCLOG") != nullptr;
     if(dpwr) std::fprintf(stderr, "[dpwr] reg=%02x v=%08x st=%08x start=%06x cur=%06x end=%06x sub=%06x\n",
                           off & 0xff, v, rcp.dpc_status.load(), rcp.dpc_start, rcp.dpc_current.load(), rcp.dpc_end, rcp.dpc_submitted);
@@ -4065,6 +4067,8 @@ auto Memory::dpScheduleReload(u32 addr) -> void {
   dpJobEndAddr[seq & kDpRingM] = addr;
   dpJobStartG[seq & kDpRingM]  = t;
   dpJobEndG[seq & kDpRingM]    = t;
+  dpJobBusyAfter[seq & kDpRingM] = dpBusyAfterLast.load(std::memory_order_relaxed);   // vacio: hereda
+  dpJobSync[seq & kDpRingM]    = false;
   dpJobKickG[seq & kDpRingM]   = kg;
   dpSchedEnd.store(t, std::memory_order_release);
   dpSubSeq.store(seq + 1, std::memory_order_release);
@@ -4108,6 +4112,15 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpJobEndAddr[seq & kDpRingM] = end;
   dpJobStartG[seq & kDpRingM]  = t0;
   dpJobEndG[seq & kDpRingM]    = t1;
+  {
+    // CMD_BUSY tras el tramo (ver dpJobBusyAfter). Sin pase de coste no se sabe como acaba:
+    // se da por cerrado con SYNC_FULL, igual que dpLastSpanSync, o sea el modelo de antes.
+    const u8 tail = !costed ? (current != end ? 1 : 0) : softCost.cmdTail;
+    const bool after = tail == 0 ? dpBusyAfterLast.load(std::memory_order_relaxed) : tail == 2;
+    dpJobBusyAfter[seq & kDpRingM] = after;
+    dpJobSync[seq & kDpRingM]      = costed && tail == 1;
+    dpBusyAfterLast.store(after, std::memory_order_relaxed);
+  }
   // Desde que instante lo ve un lector. El RSP sella con el instante de SU ciclo, y eso ya es
   // lo que ve la CPU en su siguiente instruccion. La CPU sella con cartNow(), que son las ops
   // retiradas ANTES de la que escribe DPC_END: la escritura queda al final de esa instruccion,
@@ -4516,6 +4529,8 @@ auto Memory::rcpSchedReset() -> void {
   std::lock_guard<std::mutex> lk(rdpMx);
   dpSchedEnd.store(0, std::memory_order_relaxed);
   dpSyncEnds.clear();
+  dpBusyAfterLast.store(false, std::memory_order_relaxed);
+  rdpHwHung.store(false, std::memory_order_relaxed);
   dpSyncBarAt.store(~0ull, std::memory_order_relaxed);
   dpSubSeq.store(0, std::memory_order_relaxed);
   dpcEpoch.fetch_add(1, std::memory_order_release);
@@ -4931,9 +4946,13 @@ auto Memory::dpcStatusFor(u64 now, u32 who) -> u32 {
   bumpOwned(dpcRdSt[who]);
   if(now > dpMaxQuery.load(std::memory_order_relaxed))
     dpMaxQuery.store(now, std::memory_order_relaxed);
+  // KESTREL_RDP_STRICT=1 tras el riesgo de dpcHazardCheck: el RDP real queda colgado con
+  // START_VALID|END_VALID|DMA_BUSY|CMD_BUSY y sin CBUF_READY (0x740, medido en consola).
+  if(rdpHwHung.load(std::memory_order_relaxed)) return (st & 0x7u) | 0x740u;
   if(!dpGuestOn()) {
     u32 pend = dpPending.load(std::memory_order_acquire);
     if(pend)      st |= 0x100u | 0x40u;
+    else if(dpBusyAfterLast.load(std::memory_order_relaxed)) st |= 0x40u;
     if(pend >= 2) st |= 0x200u;
     return st;
   }
@@ -4942,11 +4961,51 @@ auto Memory::dpcStatusFor(u64 now, u32 who) -> u32 {
   u64 out = vis > c ? vis - c : 0;   // trabajos vivos para ESTE reloj
   if(out >= 1) { st |= 0x100u | 0x40u;   // DMA_BUSY | CMD_BUSY
     bumpOwned(dpcRdBusy[who]); }
+  // RDP parado: CMD_BUSY sigue puesto si hubo comandos tras el ultimo SYNC_FULL (HW: 0x0C0).
+  else if(c > 0 && dpJobBusyAfter[(c - 1) & kDpRingM]) st |= 0x40u;
   // END_VALID: ya hay un buffer esperando ademas del que el motor esta leyendo, o sea que el
   // par START/END esta lleno y no cabe otro.
   if(out >= 2) { st |= 0x200u;
     bumpOwned(dpcRdEndV[who]); }
   return st;
+}
+
+// Riesgo de HW verificado en consola: escribir DPC_START o DPC_END mientras el RDP ejecuta un
+// SYNC_FULL lo cuelga (CURRENT clavado a mitad de comando, DPC_STATUS 0x740, sin MI_DP). El
+// modelo no separa el SYNC_FULL del resto del tramo, asi que la ventana es el tramo EN CURSO
+// (arrancado y sin cerrar en el instante de invitado de la escritura) que acaba en SYNC_FULL.
+// Por defecto solo avisa, una vez por corrida. KESTREL_RDP_STRICT=1 congela el RDP como la
+// consola: START/END ignorados, STATUS fijo en 0x740 y MI_DP no vuelve a subir.
+// Devuelve true si la escritura NO debe aplicarse (RDP colgado).
+auto Memory::dpcHazardCheck(u32 reg, u32 v) -> bool {
+  if(rdpHwHung.load(std::memory_order_relaxed)) return true;
+  if(!dpGuestOn()) return false;
+  const u64 now = lockRspExec ? rspGuestNowAt(rsp.exactCycles())
+                : tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow();
+  const u64 sub = dpSubSeq.load(std::memory_order_acquire);
+  bool hit = false; u64 j = 0;
+  for(u64 k = sub; k > 0 && sub - k < 8; --k) {     // el motor es uno: a lo sumo un tramo en curso
+    const u64 i = (k - 1) & kDpRingM;
+    if(dpJobEndG[i] <= now) break;                   // este y los anteriores ya cerraron
+    if(dpJobStartG[i] <= now) { hit = dpJobSync[i]; j = i; break; }
+  }
+  if(!hit) return false;
+  static const bool strict = [] { const char* e = std::getenv("KESTREL_RDP_STRICT"); return e && *e && *e != '0'; }();
+  if(!dpHazardWarned) {
+    dpHazardWarned = true;
+    const bool fromRsp = tlIsRspThread || tlDpLogApply || lockRspExec;
+    std::fprintf(stderr, "[rdp] HW hazard: DPC_%s written while SYNC_FULL in progress (hangs real HW): "
+                 "v=%06x by %s pc=%08llx span=%06x..%06x at=%llu end=%llu%s\n",
+                 reg == 0 ? "START" : "END", v & 0xffffffu, fromRsp ? "RSP" : "CPU",
+                 fromRsp ? (unsigned long long)(tlDpLogApply ? 0 : rsp.pc)
+                         : (unsigned long long)storePc,
+                 dpJobAddr[j], dpJobEndAddr[j], (unsigned long long)now,
+                 (unsigned long long)dpJobEndG[j], strict ? " -- RDP congelado (KESTREL_RDP_STRICT)" : "");
+    std::fflush(stderr);
+  }
+  if(!strict) return false;
+  rdpHwHung.store(true, std::memory_order_relaxed);
+  return true;
 }
 
 // Esperar a que el RDP alcance el instante de invitado del lector. Lo usa el hilo del RSP

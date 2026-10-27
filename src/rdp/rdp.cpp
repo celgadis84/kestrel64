@@ -3105,6 +3105,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   int guard = 0;
   bool split = false;                 // ultimo comando del span partido: no se ejecuta
   sawSyncFull = false;
+  cmdTail = 0;
   stopAt = cur;
   static bool lowCi = false; static u64 lowMark = 0;
   static const bool citrace = std::getenv("KESTREL_CITRACE") != nullptr;
@@ -3117,6 +3118,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     if(wrtag::tag) wrtag::moveWinLo(0, cur);
     u64 cmd = fetch(cur);
     u32 op = (cmd >> 56) & 0x3f;
+    cmdTail = op == 0x29 ? 1 : 2;
     if(gpuQueued && !gpuNoFlush(op, cycleType())) {
       // Cargas de TMEM/TLUT: solo leen RDRAM. Si lo que leen no lo va a escribir nada de la
       // cola, no hace falta bajarla. Cota por arriba de lo que leen (4 B por texel, 8 de
@@ -3135,6 +3137,14 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     // KESTREL_RDPMODES: cada valor DISTINTO de los comandos de estado (modos, combinador, imagenes,
     // tile, scissor, colores) una sola vez, para comparar dos programas que deberian pintar igual.
     static const bool modesLog = std::getenv("KESTREL_RDPMODES") != nullptr;
+    // KESTREL_RDPTRACE=<n>: los n primeros comandos con su direccion, para casar el stream con
+    // un volcado de la consola (pantalla de panico) y ver que hubo antes del punto de cuelgue.
+    static const long traceMax = std::getenv("KESTREL_RDPTRACE") ? std::atol(std::getenv("KESTREL_RDPTRACE")) : 0;
+    static long traceN = 0;
+    if(traceMax && !costOnly && traceN < traceMax) {
+      traceN++;
+      std::fprintf(stderr, "[rdptrace] %06x %02x %016llx\n", cur, op, (unsigned long long)cmd);
+    }
     if(modesLog && op >= 0x2d && op != 0x31 && op != 0x33 && op != 0x34 && op != 0x30 && op != 0x36) {
       static std::set<u64> seen;
       if(seen.size() < 400 && seen.insert(cmd).second)
