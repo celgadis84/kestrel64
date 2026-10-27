@@ -363,6 +363,13 @@ auto CPU::mulDivFromEnv() -> u8 {
 }
 
 auto CPU::reset() -> void {
+  if(wrtag::tag) {
+    static CPU* self; self = this;
+    wrtag::dirtyProbe = [](uint32_t phys) -> bool {
+      const DCacheLine& l = self->dcache[(phys >> 4) & 0x1ff];
+      return l.tagv == ((phys & ~0xfu) | 1u) && l.dirty;
+    };
+  }
   for(auto& r : gpr) r = 0;
   hi = lo = 0;
   for(auto& c : cop0) c = 0;
@@ -743,7 +750,8 @@ auto CPU::dcFlush(u32 idx) -> void {
   mem->dmaSettle(tag, (u64)tag + 16);
   // El volcado de una linea sucia es la unica forma en que un store CACHEADO de la CPU
   // llega a RDRAM, asi que sin esto KESTREL_WATCH no ve el 99% de lo que escribe el juego.
-  wrtag::mark(tag, wrtag::kDcache, (u32)pc);
+  wrtag::mark(tag, wrtag::kDcache, (u32)pc, false);
+  if(tag + 16 <= mem->rdram.size()) wrtag::fifoCheckLine(tag, &mem->rdram[tag], l.data, wrtag::kDcache, (u32)pc);
   if(mem->watchAddr) mem->watchHit(tag, 16, 0, false);
   if(tag + 16 <= mem->rdram.size()) std::memcpy(&mem->rdram[tag], l.data, 16);
   else for(u32 i = 0; i < 16; i++) if(tag + i < mem->rdram.size()) mem->rdram[tag + i] = l.data[i];
@@ -772,7 +780,8 @@ auto CPU::dcMiss(u32 idx, u32 base) -> void {
     ramCpuBytes += 16;               // ... mas el volcado de la vieja
     u32 tag = l.ptag();
     mem->dmaSettle(tag, (u64)tag + 16);
-    wrtag::mark(tag, wrtag::kDcache, (u32)pc);
+    wrtag::mark(tag, wrtag::kDcache, (u32)pc, false);
+    if(tag + 16 <= sz) wrtag::fifoCheckLine(tag, ram + tag, l.data, wrtag::kDcache, (u32)pc);
     if(mem->watchAddr) mem->watchHit(tag, 16, 0, false);
     if(tag + 16 <= sz) std::memcpy(ram + tag, l.data, 16);
     else for(u32 i = 0; i < 16; i++) if(tag + i < sz) ram[tag + i] = l.data[i];

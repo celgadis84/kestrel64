@@ -12,6 +12,7 @@
 #include "../../third_party/parallel-rdp/parallel-rdp/luts.hpp"
 #endif
 #include <cstdio>
+#include <set>
 
 namespace kestrel {
 
@@ -3131,6 +3132,14 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     }
     const bool st = charge && mem.rdpStats.on.load(std::memory_order_relaxed);
     if(st) statsCmd(mem, op, cmd);
+    // KESTREL_RDPMODES: cada valor DISTINTO de los comandos de estado (modos, combinador, imagenes,
+    // tile, scissor, colores) una sola vez, para comparar dos programas que deberian pintar igual.
+    static const bool modesLog = std::getenv("KESTREL_RDPMODES") != nullptr;
+    if(modesLog && op >= 0x2d && op != 0x31 && op != 0x33 && op != 0x34 && op != 0x30 && op != 0x36) {
+      static std::set<u64> seen;
+      if(seen.size() < 400 && seen.insert(cmd).second)
+        std::fprintf(stderr, "[mode] %02x %016llx\n", op, (unsigned long long)cmd);
+    }
     if(ops) {
       hist[op]++;
       // alert on the first time we ever see a color-image set or a triangle
@@ -3138,6 +3147,48 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       if(op == 0x3f && !sawCimg) { sawCimg = true; std::fprintf(stderr, "[rdp!] first SET_COLOR_IMAGE %016llx\n",(unsigned long long)cmd); std::fflush(stderr); }
       if(op >= 0x08 && op <= 0x0f && !sawTri) { sawTri = true; std::fprintf(stderr, "[rdp!] first TRIANGLE op=%02x\n", op); std::fflush(stderr); }
       if(op == 0x36 && !sawFill) { sawFill = true; std::fprintf(stderr, "[rdp!] first FILL_RECT %016llx\n",(unsigned long long)cmd); std::fflush(stderr); }
+    }
+
+    // KESTREL_RDPVALID: reglas que el emulador perdona y la consola no (cuelgue del RDP o
+    // imagen rota). Imprime los 40 primeros avisos con la direccion del comando.
+    static const bool valid = std::getenv("KESTREL_RDPVALID") != nullptr;
+    if(valid && !costOnly) {
+      static u32 nwarn = 0;
+      static bool drawPipe = false, drawLoad = false, drawTile = false;
+      const bool draw = (op >= 0x08 && op <= 0x0f) || op == 0x24 || op == 0x25 || op == 0x36;
+      const u32 cyc = cycleType();
+      static u32 histA[24], histOp[24], histN = 0;
+      static const u32 dumpAt = (u32)std::atoi(std::getenv("KESTREL_RDPVALID"));
+      auto warn = [&](const char* what) {
+        if(nwarn + 1 == dumpAt)
+          for(u32 i = 0; i < 24; i++) {
+            const u32 k = (histN + i) % 24;
+            std::fprintf(stderr, "[rdpvalid]   prev %06x op %02x\n", histA[k], histOp[k]);
+          }
+        if(nwarn++ < 40) std::fprintf(stderr, "[rdpvalid] %06x op %02x %016llx cyc %u: %s\n", cur, op,
+                                      (unsigned long long)cmd, cyc, what);
+      };
+      if(op >= 0x01 && op <= 0x07) warn("invalid opcode");
+      if(op >= 0x10 && op <= 0x23) warn("invalid opcode");
+      if(op >= 0x08 && op <= 0x0f && cyc >= 2) warn("triangle in COPY/FILL mode (hang)");
+      if((op == 0x24 || op == 0x25) && cyc == 3) warn("texture rect in FILL mode (hang)");
+      if((op == 0x24 || op == 0x25) && cyc == 2 && tiles[(cmd >> 24) & 7].size == 3) warn("COPY mode with 32-bit tile");
+      if((op == 0x30 || op == 0x33 || op == 0x34) && ti_size == 0) warn("LOAD from a 4bpp texture image (hang)");
+      if(op == 0x33 && ((cmd >> 12) & 0xfff) + 1 > 2048) warn("LOAD_BLOCK over 2048 texels");
+      if(op == 0x30 && tiles[(cmd >> 24) & 7].tmem < 256) warn("LOAD_TLUT into low TMEM");
+      if((op == 0x30 || op == 0x33 || op == 0x34) && drawLoad) warn("LOAD after draw without SYNC_LOAD");
+      if((op == 0x35 || op == 0x32) && drawTile) warn("SET_TILE(_SIZE) after draw without SYNC_TILE");
+      if((op == 0x2f || op == 0x3c || op == 0x3f || op == 0x3e || op == 0x2d) && drawPipe) warn("mode/image change after draw without SYNC_PIPE");
+      static u32 nextA = 0, njump = 0;
+      if(cur != nextA && njump++ < 60)
+        std::fprintf(stderr, "[rdpvalid] jump %06x -> %06x (span %06x..%06x)\n", nextA, cur, start & 0xffffffu, end);
+      nextA = cur + (op >= 0x08 && op <= 0x0f ? (4 + ((op & 4) ? 8 : 0) + ((op & 2) ? 8 : 0) + ((op & 1) ? 2 : 0)) * 8
+                                             : op == 0x24 || op == 0x25 ? 16 : 8);
+      histA[histN % 24] = cur; histOp[histN % 24] = op; histN++;
+      if(draw) drawPipe = drawLoad = drawTile = true;
+      if(op == 0x27 || op == 0x29) drawPipe = false;
+      if(op == 0x26 || op == 0x29) drawLoad = false;
+      if(op == 0x28 || op == 0x29) drawTile = false;
     }
 
     // triangles have a variable length; everything else is one 64-bit word.

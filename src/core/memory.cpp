@@ -3018,6 +3018,16 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
   // trozo pendiente pertenece a un FIFO que ya no existe y se descarta, como en HW.
   const u32 rawCur = current;
   if(rdpHasResume && rawCur == rdpLastEnd) current = rdpResume;
+  // Comando cortado entre dos buffers DPC: aqui se descarta, pero el RDP real se queda
+  // colgado a media instruccion esperando el resto (cmd_busy + dma_busy para siempre).
+  static const bool splitLog = std::getenv("KESTREL_SPLITLOG") != nullptr;
+  if(splitLog && rdpHasResume) std::fprintf(stderr, "[split] %06x..%06x -> %06x\n", rdpResume, rdpLastEnd, rawCur);
+  if(rdpHasResume && rawCur != rdpLastEnd) {
+    static int nsplit = 0;
+    if(nsplit++ < 20)
+      std::fprintf(stderr, "[rdp!] comando partido entre buffers DPC: %06x..%06x sin terminar, START nuevo %06x"
+                           " (en HW cuelga el RDP)\n", rdpResume, rdpLastEnd, rawCur);
+  }
   u32 costCur = rawCur;
   if(!preCosted) {
     if(rdpCostHasResume && rawCur == rdpCostLastEnd) costCur = rdpCostResume;

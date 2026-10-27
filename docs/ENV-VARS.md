@@ -146,7 +146,16 @@ workers en su hilo y el otro sincrono, para bisecar de quien es una corrupcion �
 **Quien escribio esto** (caros, solo para depurar): `KESTREL_WRTAG=1` mantiene un tag de
 ultimo escritor por bloque de 16 B de RDRAM (CPU-uncached / D-cache / SP-DMA / PI-DMA /
 SI-DMA / RDP) con el PC del guest (SP-DMA: `0x04001000|pc` del RSP), lo imprime en el volcado de fallo, se consulta en vivo por MCP (`mem.wrtag` / `mem_wrtag(addr, length, group='' | 'who' | 'pc')`; agrupado barre 8 MiB en unos cientos de tramos; el RDP solo se marca con SoftRDP, `KESTREL_PRDP=0`), y chiva (`[fifo!]`)
-cualquier escritura dentro del FIFO del RDP aun sin consumir · `KESTREL_RDPGUARD=<lo>:<hi>`
+cualquier escritura dentro del FIFO del RDP aun sin consumir (el volcado de una linea de D$ solo
+cuenta si CAMBIA bytes dentro de la ventana), y `[dirty!]` cuando un DMA del SP escribe RDRAM
+bajo una linea que la D$ de la CPU tiene sucia (fallo de coherencia independiente del ritmo del
+RDP) · `KESTREL_RDPVALID=<n>` valida el stream RDP contra los cuelgues/corrupciones conocidos del
+HW (triangulo en COPY/FILL, LOAD de 4bpp, falta de SYNC_*...), vuelca los 24 comandos previos al
+aviso n y los saltos del puntero de lectura · `KESTREL_RDPMODES=1` imprime una vez cada valor
+distinto de los comandos de estado (modos, combinador, imagenes, tile, colores): diff entre dos
+programas que deberian pintar igual · `[rdp!]` (siempre) avisa de un comando cortado entre dos
+buffers DPC, que en HW cuelga el RDP; `KESTREL_SPLITLOG=1` lista ademas los cortes dentro del
+mismo buffer · `KESTREL_RDPGUARD=<lo>:<hi>`
 chiva cualquier escritura del RDP a RDRAM en ese rango fisico · `KESTREL_CIFLOOR=<phys>`
 baja el suelo por debajo del cual un SET_COLOR_IMAGE se considera basura (por defecto los
 vectores de excepcion).
