@@ -238,7 +238,36 @@ auto push(const s16* frames, u32 nframes) -> void {
 #endif
 }
 
+// KESTREL_WAVDUMP=<ruta>: copia en un WAV (s16 estéreo, la tasa del primer buffer) todo lo que
+// el AI emite, también con KESTREL_AUDIO=0. La cabecera se reescribe en cada buffer, así el
+// fichero vale aunque el proceso muera por timeout.
+static auto wavDump(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate) -> void {
+  static const char* path = std::getenv("KESTREL_WAVDUMP");
+  static FILE* f = path ? std::fopen(path, "wb") : nullptr;
+  static u32 bytes = 0;
+  if(!f || addr >= size) return;
+  if(len > size - addr) len = size - addr;
+  len &= ~3u;
+  auto le32 = [](u8* p, u32 v) { p[0] = (u8)v; p[1] = (u8)(v >> 8); p[2] = (u8)(v >> 16); p[3] = (u8)(v >> 24); };
+  if(bytes == 0) {
+    u8 h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
+                0,0,0,0,0,0,0,0,4,0,16,0,'d','a','t','a',0,0,0,0};
+    le32(h + 24, sampleRate); le32(h + 28, sampleRate * 4);
+    std::fwrite(h, 1, 44, f);
+  }
+  std::vector<u8> tmp(len);
+  for(u32 i = 0; i < len; i += 2) { tmp[i] = base[addr + i + 1]; tmp[i + 1] = base[addr + i]; }   // BE -> LE
+  std::fwrite(tmp.data(), 1, len, f);
+  bytes += len;
+  u8 w[4];
+  std::fseek(f, 4, SEEK_SET); le32(w, 36 + bytes); std::fwrite(w, 1, 4, f);
+  std::fseek(f, 40, SEEK_SET); le32(w, bytes); std::fwrite(w, 1, 4, f);
+  std::fseek(f, 0, SEEK_END);
+  std::fflush(f);
+}
+
 auto pushRdram(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate) -> void {
+  wavDump(base, size, addr, len, sampleRate);
 #ifdef _WIN32
   if(g.disabled) return;
   init(sampleRate);

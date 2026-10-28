@@ -44,7 +44,7 @@ bits; con los valores de cabecera de un cartucho normal salen 5,375 MB/s -- y le
 `MI_PI` al vencer. `loadRom` programa ademas `PI_BSD_DOM1_*` desde los bytes 0x01..0x03 de
 la cabecera, que es lo que hace el IPL2 y aqui no hacia nadie por ser HLE el arranque; ver
 `docs/STATUS.md`) ·
-`KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` ·
+`KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` · `KESTREL_WAVDUMP=path` (WAV s16 estéreo de todo lo que emite el AI, también con `KESTREL_AUDIO=0`; cabecera reescrita en cada buffer, vale tras un timeout) ·
 `KESTREL_CPUIDLE=0` (apaga el cobro en bloque del hilo ocioso del invitado -- `beq $0,$0,-1`
 con NOP en la ranura de retardo; el salto usa el MISMO permiso que una cadena enlazada del JIT,
 asi que no cambia cuando se mira cada evento. -14 % de pared en SM64 threaded-jit; se niega con
