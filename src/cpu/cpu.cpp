@@ -74,6 +74,49 @@ static int g_seenIdx = 0;
 // Headless framebuffer dump (debug): reads the current VI framebuffer straight
 // out of RDRAM and writes a 24-bit BMP. Independent of the Vulkan presenter so a
 // batch/headless run can be eyeballed. Honors 16bpp (RGBA5551) and 32bpp.
+static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void;
+
+// KESTREL_FBSEQ=patron (printf, %u = numero de campo, p.ej. dir/f%06u.bmp): el framebuffer de
+// cada campo cerrado, en tiempo de INVITADO, para montar video fotograma a fotograma; casa
+// muestra a muestra con KESTREL_WAVDUMP (el presentador va al ritmo del anfitrion y no sirve).
+// KESTREL_FBSEQ_EVERY=N vuelca uno de cada N campos (2 = 30 fps); KESTREL_FBSEQ_FROM=campo
+// salta el arranque. KESTREL_FBSEQ_GUEST=1: en vez de por campo, los cuadros que pide el
+// invitado escribiendo N en 0x13FF001C (N copias del cuadro en pantalla, volcadas al cierre del
+// campo siguiente): un port que va mas lento que la consola emulada marca a SU ritmo y el video
+// sale a tiempo de la maquina emulada (el port PSX con PSX_CAPTURE).
+auto fbSeqField(Memory* mem, u32 field) -> void {
+  static const char* pat = std::getenv("KESTREL_FBSEQ");
+  if(!pat) return;
+  static const bool guest = [] { const char* e = std::getenv("KESTREL_FBSEQ_GUEST"); return e && e[0] == '1'; }();
+  if(guest) {
+    static u32 n = 0;
+    if(!mem->fbSeqReq) return;
+    mem->rdpDrain();
+    char path[1024];
+    std::snprintf(path, sizeof path, pat, n);
+    dumpFramebufferBmp(mem, path);
+    for(u32 k = 1; k < mem->fbSeqReq; k++) {         // copias del mismo cuadro
+      char p2[1024];
+      std::snprintf(p2, sizeof p2, pat, n + k);
+      if(FILE* a = std::fopen(path, "rb")) {
+        if(FILE* b = std::fopen(p2, "wb")) { char buf[65536]; usize r;
+          while((r = std::fread(buf, 1, sizeof buf, a)) > 0) std::fwrite(buf, 1, r, b); std::fclose(b); }
+        std::fclose(a);
+      }
+    }
+    n += mem->fbSeqReq;
+    mem->fbSeqReq = 0;
+    return;
+  }
+  static const u32 every = [] { const char* e = std::getenv("KESTREL_FBSEQ_EVERY"); u32 n = e ? (u32)std::strtoul(e, nullptr, 0) : 1; return n ? n : 1u; }();
+  static const u32 from = [] { const char* e = std::getenv("KESTREL_FBSEQ_FROM"); return e ? (u32)std::strtoul(e, nullptr, 0) : 0u; }();
+  if(field < from || (field - from) % every) return;
+  char path[1024];
+  std::snprintf(path, sizeof path, pat, (field - from) / every);
+  mem->rdpDrain();
+  dumpFramebufferBmp(mem, path);
+}
+
 static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
   if(!mem) return;
   // KESTREL_FBFRAME=1: en entrelazado (SERRATE), el cuadro entero de los dos campos en vez

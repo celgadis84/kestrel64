@@ -1379,6 +1379,7 @@ public:
   // physical 0x13FF0000. Chars are staged at 0x13FF0020; a length write to
   // 0x13FF0014 flushes them to stdout. Returns true if the address was handled.
   std::vector<u8> isv;                  // staging buffer (lazily sized on first use)
+  u32 fbSeqReq = 0;                     // KESTREL_FBSEQ_GUEST: frames the guest asked for (0x13FF001C)
   u8  isvHdr[0x20] = {};                // the window's header registers (magic, pointers)
   auto isvWrite(u32 phys, u32 value, u32 nbytes) -> bool;
   auto isvRead(u32 phys, u32 nbytes, u32& out) -> bool;   // header/buffer readback

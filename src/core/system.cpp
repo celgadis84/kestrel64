@@ -17,6 +17,7 @@
 #include <cstdlib>
 
 namespace kestrel {
+auto fbSeqField(Memory* mem, u32 field) -> void;   // cpu.cpp, KESTREL_FBSEQ
 
 System::System() = default;
 
@@ -989,6 +990,7 @@ auto System::run() -> void {
       // cruce; aqui solo se recoge. La llamada de arriba se queda porque es la que mueve
       // VI_V_CURRENT y drena el AI en cada subtramo aunque no haya cruzado nada.
       if(viFieldPend) { fieldClosed = true; viFieldPend = false; }
+      if(fieldClosed) fbSeqField(&memory, memory.rcp.viFields);   // KESTREL_FBSEQ (cpu.cpp)
       // El PIF paro la CPU (NMI sostenida): la consola se queda congelada hasta apagarla.
       if(memory.pifFrozen && !cpu.halted) cpu.halted = true;
       resetButton();

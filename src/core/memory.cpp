@@ -804,6 +804,7 @@ auto Memory::isvWrite(u32 phys, u32 value, u32 nbytes) -> bool {
       isv[off + i] = (u8)(value >> (8 * (nbytes - 1 - i)));
     return true;
   }
+  if(phys == 0x13ff'001c) { fbSeqReq += value; return true; }   // captura marcada por el invitado (fbSeqField)
   // Header registers below the buffer. The real IS-Viewer is a devkit cartridge with
   // RAM in this window, and probes rely on that: libdragon's isviewer_init() writes a
   // magic word to 0x13FF0000 and reads it back to decide the device is present. Backing

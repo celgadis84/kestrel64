@@ -244,10 +244,12 @@ auto push(const s16* frames, u32 nframes) -> void {
 static auto wavDump(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate) -> void {
   static const char* path = std::getenv("KESTREL_WAVDUMP");
   static FILE* f = path ? std::fopen(path, "wb") : nullptr;
-  static u32 bytes = 0;
+  static u32 bytes = 0, rate0 = 0;
+  static double phase = 0;
   if(!f || addr >= size) return;
   if(len > size - addr) len = size - addr;
   len &= ~3u;
+  if(bytes == 0) rate0 = sampleRate;
   auto le32 = [](u8* p, u32 v) { p[0] = (u8)v; p[1] = (u8)(v >> 8); p[2] = (u8)(v >> 16); p[3] = (u8)(v >> 24); };
   if(bytes == 0) {
     u8 h[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0,
@@ -257,6 +259,21 @@ static auto wavDump(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate)
   }
   std::vector<u8> tmp(len);
   for(u32 i = 0; i < len; i += 2) { tmp[i] = base[addr + i + 1]; tmp[i + 1] = base[addr + i]; }   // BE -> LE
+  // Otra tasa que la del fichero (un video con su propio audio): remuestreo lineal a la primera.
+  if(rate0 && (sampleRate * 100 < rate0 * 99 || sampleRate * 100 > rate0 * 101)) {
+    const s16* in = (const s16*)tmp.data();
+    u32 nin = len / 4;
+    std::vector<s16> out;
+    double step = (double)sampleRate / rate0;
+    for(; phase < nin; phase += step) {
+      u32 i = (u32)phase; double fr = phase - i;
+      u32 j = i + 1 < nin ? i + 1 : i;
+      for(int c = 0; c < 2; c++) out.push_back((s16)(in[2 * i + c] * (1 - fr) + in[2 * j + c] * fr));
+    }
+    phase -= nin;
+    tmp.assign((const u8*)out.data(), (const u8*)(out.data() + out.size()));
+    len = (u32)tmp.size();
+  }
   std::fwrite(tmp.data(), 1, len, f);
   bytes += len;
   u8 w[4];
