@@ -393,6 +393,12 @@ Se cachean en `tools/launcher/cache/boxart/`. Una caratula encontrada por indice
 tambien bajo la clave que pidio el cliente, para que el refresco siguiente acierte en cache. Un
 fallo se marca con un fichero vacio para no volver a salir a la red en cada refresco.
 
+**La descarga es opcional y viene APAGADA (2026-10-30).** Interruptor "Caratulas en linea" en
+la barra de la biblioteca (clave de perfil `boxart_online`, defecto `false`). Apagado, el
+servidor solo sirve lo que ya este en la cache: no pide el indice ni marca fallos, asi que al
+encenderlo se busca todo lo que falte. Ni el repo ni el paquete llevan una sola caratula: solo
+la URL; lo bajado queda en la maquina del usuario (la cache esta en `.gitignore`).
+
 ## La biblioteca en 3D del lanzador web
 
 Las caratulas no son imagenes en perspectiva: son **cajas de carton con volumen**
@@ -698,7 +704,26 @@ MISMOS ficheros que el lanzador, asi que las dos caras ven la misma ficha. Prueb
   cuyo titulo sin etiquetas `(...)`/`[...]` coincide con el nombre del fichero de la ROM (o
   su nombre interno), comprueba el tamano y las guarda en `manuals/`. La fuente se recuerda en
   `<estado>/manuals_source.txt`. **El emulador no trae ninguna fuente de fabrica**: la herramienta
-  es neutra y el contenido lo elige el usuario.
+  es neutra y el contenido lo elige el usuario (los manuales son escaneos con derechos).
+  "Descargar todos" (2026-10-30) baja TODO el indice a la biblioteca global `<estado>/manuals/`
+  (pide confirmacion con numero y tamano; lo que ya esta se salta); `manuals()` la recorre
+  tambien, casando por titulo limpio, asi que "Juego (Europe).pdf" vale para "Juego (USA).z64".
+- **Biblioteca de trucos** (2026-10-30, solo en el exe): como las caratulas. Fuente de fabrica
+  la carpeta N64 de libretro-database (`cht/Nintendo - Nintendo 64`, CC BY-SA 4.0, .cht de
+  RetroArch), cambiable por otra URL de GitHub (`github.com/.../tree/...` o
+  `raw.githubusercontent.com/...`) o una carpeta local. **La fuente se ve pero la descarga viene
+  apagada**: casilla "Bajar de" en la pestana Trucos (`<estado>/cheats_source.txt`: linea 1 la
+  fuente, "" = la de fabrica; linea 2 `on`). Sin marcarla no sale nada a la red.
+  - "Bajar este juego" / "Bajar todos" (4 hilos, progreso en la ficha). El indice es UNA
+    peticion al API de arboles de GitHub, cacheada 7 dias en `<estado>/cheats/index.txt` (sin
+    cuenta, 60 peticiones por hora). Casa el nombre como las caratulas (`cheatNameMatch`).
+  - Lo bajado se convierte al formato del emulador (`chtFromRetroArch`: codigos con `+`
+    partidos, 12 hex -> 8+4, un truco con algun codigo ilegible fuera entero) y se guarda con
+    TODO apagado (`[-nombre]`) en `<estado>/cheats/`. Nada cambia un juego por si solo.
+  - La ficha ensena el de la biblioteca si la ROM no tiene `<base>.cht` propio; encender,
+    anadir o borrar un truco lo copia antes a `<base>.cht` (`ownCht`), que siempre manda. El
+    nucleo (`Cheats::reload`) no cambia: carga `<base>.cht` como siempre.
+  - Nada se redistribuye: el exe solo lleva la URL y lo bajado queda en la maquina del usuario.
 - **Estado** de telemetria: panel Control del depurador (`--debugger` / menu Depurar), tabla
   con lo mismo que la pestana Estado del lanzador (campos/s, % de N64 real por dominio,
   ocupacion de hilos, overclock, cartucho) y el JSON completo plegado debajo.

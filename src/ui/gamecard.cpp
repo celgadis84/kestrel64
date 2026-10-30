@@ -290,6 +290,10 @@ auto jsonUnstr(const std::string& raw) -> std::string {
   return o;
 }
 
+// Definidas mas abajo, con el resto de la normalizacion de nombres.
+auto titleKey(const std::string& name) -> std::string;
+auto stemKey(const std::string& stem) -> std::string;
+
 }  // namespace
 
 // ================================================================ nombres y cabecera
@@ -413,6 +417,25 @@ auto manuals(const std::string& path, const std::string& internalName) -> std::v
       }
     }
   }
+  // Biblioteca global (<estado>/manuals/): ahi los nombres son los de la fuente, con su region
+  // y sus etiquetas, asi que se casa por titulo limpio ("Juego (Europe).pdf" vale para
+  // "Juego (USA).z64"); con prefijo para "Juego - Manual.pdf".
+  const std::string db = manualDbDir();
+  if(statOf(db).dir) {
+    const std::string tstem = stemKey(baseName(romBase(path)));
+    for(const std::string& f : listFiles(db)) {
+      if(!manualExtOk(f)) continue;
+      const std::string k = titleKey(f);
+      const bool hit = (tstem.size() >= 6 && k.rfind(tstem, 0) == 0) || (!tstem.empty() && k == tstem) ||
+                       (iname.size() >= 4 && k == iname);
+      // La carpeta del perfil puede ser la de las ROMs: no listar dos veces el mismo fichero.
+      const std::string key = lower(join(db, f));
+      if(hit && std::find(seen.begin(), seen.end(), key) == seen.end()) {
+        seen.push_back(key);
+        found.push_back(join(db, f));
+      }
+    }
+  }
   return found;
 }
 
@@ -473,6 +496,17 @@ auto titleKey(const std::string& name) -> std::string {
   return norm(o);
 }
 
+// Lo mismo para un nombre que ya viene SIN extension (la base de una ROM): "Dr. Mario 64 (USA)"
+// no tiene extension ". Mario 64 (USA)". Y '&' cuenta como "and", como en No-Intro.
+auto stemKey(const std::string& stem) -> std::string {
+  std::string s;
+  for(char c : stem) {
+    if(c == '&') s += " and ";
+    else s.push_back(c);
+  }
+  return titleKey(s + ".x");
+}
+
 }  // namespace
 
 auto manualIndexParse(const std::string& csv) -> std::vector<ManualEntry> {
@@ -501,7 +535,7 @@ auto manualIndexParse(const std::string& csv) -> std::vector<ManualEntry> {
 
 auto manualIndexMatch(const std::vector<ManualEntry>& idx, const std::string& path,
                       const std::string& internalName) -> std::vector<ManualEntry> {
-  const std::string stem = titleKey(baseName(romBase(path)));
+  const std::string stem = stemKey(baseName(romBase(path)));
   const std::string iname = norm(internalName);
   std::vector<std::pair<int, ManualEntry>> hits;
   for(const ManualEntry& m : idx) {
@@ -530,6 +564,17 @@ auto manualSource() -> std::string {
 
 auto setManualSource(const std::string& url) -> bool {
   return writeAtomic(join(stateDir(), "manuals_source.txt"), trim(url) + "\n");
+}
+
+auto manualDbDir() -> std::string { return join(stateDir(), "manuals"); }
+
+auto dbFileName(const std::string& name) -> std::string {
+  std::string o;
+  for(char c : baseName(name)) {
+    if((unsigned char)c < 32 || (unsigned char)c >= 127 || std::strchr("\\/:*?\"<>|", c)) o.push_back('_');
+    else o.push_back(c);
+  }
+  return o;
 }
 
 // ================================================================ trucos
@@ -575,11 +620,30 @@ auto parseCht(const std::vector<std::string>& lines) -> std::vector<Cheat> {
 auto cheats(const std::string& path) -> std::vector<Cheat> {
   std::vector<std::string> lines;
   std::string nl;
-  if(!readLines(chtPath(path), lines, nl)) return {};
+  const std::string f = cheatFile(path);
+  if(f.empty() || !readLines(f, lines, nl)) return {};
   return parseCht(lines);
 }
 
+namespace {
+// Antes de tocar los trucos de una ROM sin .cht propio: copiar el de la biblioteca, que es lo
+// que la ficha estaba ensenando (los indices de truco siguen valiendo).
+auto ownCht(const std::string& path, std::string& err) -> bool {
+  const std::string mine = chtPath(path);
+  if(statOf(mine).file) return true;
+  const std::string db = cheatDbFile(path);
+  if(db.empty()) return true;
+  std::string data;
+  if(!readAll(db, data) || !writeAtomic(mine, data)) {
+    err = "no se pudo copiar " + baseName(db) + " a " + baseName(mine);
+    return false;
+  }
+  return true;
+}
+}  // namespace
+
 auto setCheat(const std::string& path, int id, bool on, std::string& err) -> bool {
+  if(!ownCht(path, err)) return false;
   const std::string f = chtPath(path);
   std::vector<std::string> lines;
   std::string nl;
@@ -632,6 +696,7 @@ auto addCheat(const std::string& path, const std::string& name0, const std::stri
   if(!take(cur)) return false;
   if(good.empty()) { err = "el truco no tiene codigos"; return false; }
 
+  if(!ownCht(path, err)) return false;
   const std::string f = chtPath(path);
   std::vector<std::string> lines;
   std::string nl;
@@ -650,6 +715,7 @@ auto addCheat(const std::string& path, const std::string& name0, const std::stri
 }
 
 auto delCheat(const std::string& path, int id, std::string& err) -> bool {
+  if(!ownCht(path, err)) return false;
   const std::string f = chtPath(path);
   std::vector<std::string> lines;
   std::string nl;
@@ -663,6 +729,333 @@ auto delCheat(const std::string& path, int id, std::string& err) -> bool {
   lines.erase(lines.begin() + a, lines.begin() + b);
   if(!writeLines(f, lines, nl)) { err = "no se puede escribir " + f; return false; }
   return true;
+}
+
+// ================================================================ biblioteca de trucos
+
+const char* const kCheatSourceDefault =
+    "https://github.com/libretro/libretro-database/tree/master/cht/Nintendo - Nintendo 64";
+
+namespace {
+// cheats_source.txt: linea 1 = fuente ("" = la de fabrica), linea 2 = "on" si el usuario
+// encendio la descarga. Sin fichero: fuente de fabrica y descarga apagada.
+void cheatSourceRead(std::string& src, bool& on) {
+  std::string s;
+  readAll(join(stateDir(), "cheats_source.txt"), s);
+  const size_t nl = s.find('\n');
+  src = trim(s.substr(0, nl));
+  on = nl != std::string::npos && trim(s.substr(nl + 1)) == "on";
+}
+}  // namespace
+
+auto cheatSource() -> std::string {
+  std::string s;
+  bool on = false;
+  cheatSourceRead(s, on);
+  return s.empty() ? std::string(kCheatSourceDefault) : s;
+}
+
+auto cheatSourceOn() -> bool {
+  std::string s;
+  bool on = false;
+  cheatSourceRead(s, on);
+  return on;
+}
+
+auto setCheatSource(const std::string& src, bool on) -> bool {
+  const std::string s = trim(src) == kCheatSourceDefault ? std::string() : trim(src);
+  return writeAtomic(join(stateDir(), "cheats_source.txt"), s + "\n" + (on ? "on\n" : ""));
+}
+
+auto cheatDbDir() -> std::string { return join(stateDir(), "cheats"); }
+
+namespace {
+
+auto urlDecode(const std::string& s) -> std::string {
+  std::string o;
+  for(usize i = 0; i < s.size(); i++) {
+    if(s[i] == '%' && i + 2 < s.size() && std::isxdigit((unsigned char)s[i + 1]) &&
+       std::isxdigit((unsigned char)s[i + 2])) {
+      o.push_back((char)std::strtoul(s.substr(i + 1, 2).c_str(), nullptr, 16));
+      i += 2;
+    } else {
+      o.push_back(s[i]);
+    }
+  }
+  return o;
+}
+
+auto split(const std::string& s, char sep) -> std::vector<std::string> {
+  std::vector<std::string> out;
+  std::string cur;
+  for(char c : s) {
+    if(c == sep) { if(!cur.empty()) out.push_back(cur); cur.clear(); }
+    else cur.push_back(c);
+  }
+  if(!cur.empty()) out.push_back(cur);
+  return out;
+}
+
+}  // namespace
+
+auto urlEncodePath(const std::string& s) -> std::string {
+  std::string o;
+  for(char c : s) {
+    const unsigned char u = (unsigned char)c;
+    if(std::isalnum(u) && u < 128) o.push_back(c);
+    else if(std::strchr("-._~/", c) && c) o.push_back(c);
+    else {
+      char b[4];
+      std::snprintf(b, sizeof b, "%%%02X", u);
+      o += b;
+    }
+  }
+  return o;
+}
+
+auto cheatSrcResolve(const std::string& src0) -> CheatSrc {
+  CheatSrc r;
+  const std::string src = trim(src0);
+  if(src.empty()) return r;
+  const usize sch = src.find("://");
+  if(sch == std::string::npos) {
+    r.local = true;
+    r.base = src;
+    if(r.base.back() != '/' && r.base.back() != '\\') r.base.push_back('/');
+    r.ok = statOf(src).dir;
+    return r;
+  }
+  std::string rest = src.substr(sch + 3);
+  const usize q = rest.find_first_of("?#");
+  if(q != std::string::npos) rest.resize(q);
+  std::vector<std::string> p = split(urlDecode(rest), '/');
+  std::string owner, repo, branch, dir;
+  usize from = 0;
+  if(p.size() >= 4 && lower(p[0]) == "raw.githubusercontent.com") {
+    owner = p[1], repo = p[2], branch = p[3], from = 4;
+  } else if(p.size() >= 5 && (lower(p[0]) == "github.com" || lower(p[0]) == "www.github.com") &&
+            p[3] == "tree") {
+    owner = p[1], repo = p[2], branch = p[4], from = 5;
+  } else {
+    return r;
+  }
+  for(usize i = from; i < p.size(); i++) dir += (dir.empty() ? "" : "/") + p[i];
+  const std::string encDir = urlEncodePath(dir);
+  r.base = "https://raw.githubusercontent.com/" + owner + "/" + repo + "/" + urlEncodePath(branch) +
+           "/" + encDir + (encDir.empty() ? "" : "/");
+  r.index = "https://api.github.com/repos/" + owner + "/" + repo + "/git/trees/" +
+            urlEncodePath(branch) + (dir.empty() ? "" : ":" + encDir);
+  r.ok = true;
+  return r;
+}
+
+auto cheatTreeParse(const std::string& js) -> std::vector<std::string> {
+  std::vector<std::string> out;
+  usize p = 0;
+  while((p = js.find("\"path\"", p)) != std::string::npos) {
+    p += 6;
+    usize c = js.find_first_not_of(" \t\r\n", p);
+    if(c == std::string::npos || js[c] != ':') continue;
+    usize a = js.find_first_not_of(" \t\r\n", c + 1);
+    if(a == std::string::npos || js[a] != '"') continue;
+    usize b = a + 1;
+    while(b < js.size() && js[b] != '"') b += js[b] == '\\' ? 2 : 1;
+    if(b >= js.size()) break;
+    const std::string name = jsonUnstr(js.substr(a, b - a + 1));
+    p = b + 1;
+    if(name.find('/') == std::string::npos && lower(extOf(name)) == ".cht") out.push_back(name);
+  }
+  return out;
+}
+
+auto cheatNameMatch(const std::vector<std::string>& names, const std::string& path,
+                    const std::string& internalName, char region) -> std::string {
+  if(names.empty()) return {};
+  std::vector<std::pair<std::string, std::string>> keyed;   // titulo limpio -> nombre
+  keyed.reserve(names.size());
+  for(const std::string& n : names) keyed.push_back({stemKey(n.substr(0, n.size() - extOf(n).size())), n});
+  static const struct { char r; const char* tag; } kTags[] = {
+      {'E', "USA"}, {'J', "Japan"}, {'P', "Europe"}, {'D', "Germany"}, {'F', "France"},
+      {'I', "Italy"}, {'S', "Spain"}, {'U', "Australia"}, {'X', "Europe"}, {'Y', "Europe"}};
+  std::string tag;
+  for(const auto& t : kTags)
+    if(t.r == region) tag = t.tag;
+  auto pick = [&](const std::vector<std::string>& cand) -> std::string {
+    for(const std::string& want : {tag, std::string("USA")}) {
+      if(want.empty()) continue;
+      std::string best;
+      for(const std::string& c : cand)
+        if(c.find("(" + want) != std::string::npos && (best.empty() || c.size() < best.size())) best = c;
+      if(!best.empty()) return best;
+    }
+    std::string best;
+    for(const std::string& c : cand)
+      if(best.empty() || c.size() < best.size()) best = c;
+    return best;
+  };
+  auto with = [&](const std::string& k) {
+    std::vector<std::string> c;
+    for(const auto& e : keyed)
+      if(e.first == k) c.push_back(e.second);
+    return c;
+  };
+  const std::string keys[2] = {stemKey(baseName(romBase(path))), norm(internalName)};
+  for(const std::string& k : keys) {
+    if(k.empty()) continue;
+    std::vector<std::string> c = with(k);
+    if(!c.empty()) return pick(c);
+  }
+  // Prefijo inequivoco: el nombre interno viene recortado ("GOLDENEYE" por "GoldenEye 007") y
+  // el del fichero a veces trae cola ("mario_kart_64_rom").
+  for(const std::string& k : keys) {
+    if(k.size() < 6) continue;
+    for(int dir = 0; dir < 2; dir++) {
+      std::vector<std::string> titles;
+      for(const auto& e : keyed) {
+        const bool m = dir == 0 ? e.first.rfind(k, 0) == 0
+                                : (e.first.size() >= 6 && k.rfind(e.first, 0) == 0);
+        if(m && std::find(titles.begin(), titles.end(), e.first) == titles.end()) titles.push_back(e.first);
+      }
+      if(titles.size() == 1) return pick(with(titles[0]));
+    }
+  }
+  return {};
+}
+
+namespace {
+// Valor de "clave = valor" de RetroArch: comillas opcionales, con \" y \\ dentro.
+auto raValue(const std::string& v0) -> std::string {
+  const std::string v = trim(v0);
+  if(v.size() < 2 || v[0] != '"') return v;
+  std::string o;
+  for(usize i = 1; i < v.size(); i++) {
+    if(v[i] == '\\' && i + 1 < v.size()) { o.push_back(v[++i]); continue; }
+    if(v[i] == '"') break;
+    o.push_back(v[i]);
+  }
+  return o;
+}
+}  // namespace
+
+auto chtFromRetroArch(const std::string& text, const std::string& origin) -> std::string {
+  struct Ra { std::string desc, code; };
+  std::vector<std::pair<int, Ra>> ra;
+  auto slot = [&](int i) -> Ra& {
+    for(auto& e : ra)
+      if(e.first == i) return e.second;
+    ra.push_back({i, Ra{}});
+    return ra.back().second;
+  };
+  std::vector<std::string> lines;
+  usize p = 0;
+  while(p <= text.size()) {
+    usize e = text.find('\n', p);
+    if(e == std::string::npos) e = text.size();
+    lines.push_back(text.substr(p, e - p));
+    p = e + 1;
+  }
+  for(const std::string& ln : lines) {
+    const usize eq = ln.find('=');
+    if(eq == std::string::npos) continue;
+    const std::string k = lower(trim(ln.substr(0, eq)));
+    if(k.rfind("cheat", 0) != 0) continue;
+    usize us = k.find('_');
+    if(us == std::string::npos || us == 5) continue;
+    const std::string num = k.substr(5, us - 5), field = k.substr(us + 1);
+    if(num.find_first_not_of("0123456789") != std::string::npos) continue;
+    const int i = std::atoi(num.c_str());
+    if(field == "desc") slot(i).desc = raValue(ln.substr(eq + 1));
+    else if(field == "code") slot(i).code = raValue(ln.substr(eq + 1));
+  }
+  std::string out = "# " + origin + "\n# Todo apagado: se enciende desde la ficha del juego.\n";
+  int n = 0;
+  if(ra.empty()) {
+    // No es de RetroArch: quiza ya es del emulador (una coleccion propia). Se copia apagado.
+    std::vector<std::string> tmp;
+    for(std::string ln : lines) {
+      if(!ln.empty() && ln.back() == '\r') ln.pop_back();
+      tmp.push_back(ln);
+    }
+    for(const Cheat& c : parseCht(tmp)) {
+      if(c.codes.empty() || c.bad) continue;
+      out += "\n[-" + c.name + "]\n";
+      for(const std::string& cd : c.codes) out += cd + "\n";
+      n++;
+    }
+    return n ? out : std::string();
+  }
+  std::sort(ra.begin(), ra.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+  for(const auto& e : ra) {
+    std::vector<std::string> good;
+    bool bad = false;
+    for(std::string piece : split(e.second.code, '+')) {
+      piece = trim(piece);
+      if(piece.empty()) continue;
+      // "8033B21E0008" sin separador: 8 + 4 cifras.
+      if(piece.size() == 12 && isHex(piece.substr(0, 8)) && isHex(piece.substr(8)))
+        piece = piece.substr(0, 8) + " " + piece.substr(8);
+      std::string cd;
+      if(!code(piece, cd)) { bad = true; break; }
+      good.push_back(cd);
+    }
+    if(bad || good.empty()) continue;
+    std::string name;
+    for(char c : e.second.desc)
+      if(!std::strchr("[]\r\n#;", c)) name.push_back(c);
+    name = trim(name);
+    while(!name.empty() && name[0] == '-') name = trim(name.substr(1));
+    if(name.empty()) name = "truco " + std::to_string(e.first);
+    out += "\n[-" + name + "]\n";
+    for(const std::string& cd : good) out += cd + "\n";
+    n++;
+  }
+  return n ? out : std::string();
+}
+
+auto cheatIndexCached(const std::string& src, std::vector<std::string>& names) -> bool {
+  const std::string f = join(cheatDbDir(), "index.txt");
+  const Stat st = statOf(f);
+  if(!st.file || std::time(nullptr) - st.mtime > 7 * 86400) return false;
+  std::vector<std::string> lines;
+  std::string nl;
+  if(!readLines(f, lines, nl) || lines.empty() || lines[0] != "# " + trim(src)) return false;
+  names.assign(lines.begin() + 1, lines.end());
+  while(!names.empty() && names.back().empty()) names.pop_back();
+  return !names.empty();
+}
+
+auto cheatIndexStore(const std::string& src, const std::vector<std::string>& names) -> void {
+  std::string s = "# " + trim(src) + "\n";
+  for(const std::string& n : names) s += n + "\n";
+  writeAtomic(join(cheatDbDir(), "index.txt"), s);
+}
+
+auto cheatDbStore(const std::string& dir, const std::string& name, const std::string& raw,
+                  std::string& err) -> bool {
+  const std::string conv = chtFromRetroArch(raw, "de " + name + " (fuente de trucos de la ficha)");
+  if(conv.empty()) { err = name + ": sin trucos legibles"; return false; }
+  if(!writeAtomic(join(dir, dbFileName(name)), conv)) { err = "no se pudo escribir en " + dir; return false; }
+  return true;
+}
+
+auto cheatDbFile(const std::string& path) -> std::string {
+  const std::string dir = cheatDbDir();
+  if(!statOf(dir).dir) return {};
+  std::vector<std::string> names;
+  for(const std::string& f : listFiles(dir))
+    if(lower(extOf(f)) == ".cht") names.push_back(f);
+  if(names.empty()) return {};
+  // La cabecera de la ROM (desenvuelta si viene en zip) se lee una vez por ROM, no por clic.
+  static std::string lastPath;
+  static Header lastHdr;
+  if(lastPath != path) { lastHdr = readHeader(path); lastPath = path; }
+  const std::string m = cheatNameMatch(names, path, lastHdr.name, lastHdr.region);
+  return m.empty() ? std::string() : join(dir, m);
+}
+
+auto cheatFile(const std::string& path) -> std::string {
+  const std::string mine = chtPath(path);
+  return statOf(mine).file ? mine : cheatDbFile(path);
 }
 
 // ================================================================ metadatos

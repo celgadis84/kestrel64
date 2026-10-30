@@ -167,6 +167,48 @@ static void run(const fs::path& d) {
   check(r.str("year") == "1996" && r.flag("favorite") && r.num("plays") == 1, "meta partidas");
   check(r.num("seconds") == 100 && r.num("bogus") == 3, "meta segundos y clave ajena");
   check(fs::exists(d / "games" / "ABC.json"), "meta en <estado>/games");
+
+  // Biblioteca de trucos: fuente opcional y apagada de fabrica
+  check(!cheatSourceOn() && cheatSource() == kCheatSourceDefault, "fuente de fabrica, apagada");
+  check(setCheatSource(kCheatSourceDefault, true) && cheatSourceOn() &&
+            cheatSource() == kCheatSourceDefault, "fuente encendida");
+  check(setCheatSource("https://github.com/o/r/tree/main/x y", false) && !cheatSourceOn() &&
+            cheatSource() == "https://github.com/o/r/tree/main/x y", "fuente propia apagada");
+  CheatSrc cs = cheatSrcResolve("https://github.com/o/r/tree/main/a b");
+  check(cs.ok && !cs.local && cs.base == "https://raw.githubusercontent.com/o/r/main/a%20b/",
+        "resolver tree");
+  check(cs.index.find("api.github.com/repos/o/r/git/trees/") != std::string::npos, "resolver indice");
+  check(cheatSrcResolve(ds).ok && cheatSrcResolve(ds).local, "resolver carpeta local");
+  check(!cheatSrcResolve("ftp://x").ok, "resolver rechaza");
+  auto tn = cheatTreeParse(R"({"tree":[{"path":"Rocket Demo (USA).cht","type":"blob"},)"
+                           R"({"path":"Rocket Demo (Japan).cht","type":"blob"},)"
+                           R"({"path":"Rocket Demo 2 (USA).cht","type":"blob"},)"
+                           R"({"path":"readme.md","type":"blob"}],"truncated":false})");
+  check(tn.size() == 3, "arbol: solo .cht");
+  const std::string romL = (d / "Rocket Demo (Europe).z64").string();
+  check(cheatNameMatch(tn, romL, "", 'J') == "Rocket Demo (Japan).cht", "casar: region");
+  check(cheatNameMatch(tn, romL, "", 'P') == "Rocket Demo (USA).cht", "casar: USA de reserva");
+  check(cheatNameMatch(tn, (d / "Nada.z64").string(), "", 'E').empty(), "casar: nada");
+  const std::string ra = "cheats = 3\n\ncheat0_desc = \"Vidas\"\ncheat0_code = \"8033B21D 0064+8033B21E 0001\"\n"
+                         "cheat0_enable = true\ncheat1_desc = \"Roto\"\ncheat1_code = \"ZZZ\"\n"
+                         "cheat2_desc = \"Largo\"\ncheat2_code = \"80001234FFFF\"\n";
+  const std::string conv = chtFromRetroArch(ra, "prueba");
+  check(conv.find("[-Vidas]") != std::string::npos && conv.find("8033B21E 0001") != std::string::npos,
+        "retroarch: apagado y '+' partido");
+  check(conv.find("Roto") == std::string::npos, "retroarch: descarta truco roto");
+  check(conv.find("80001234 FFFF") != std::string::npos, "retroarch: 12 hex -> 8+4");
+  check(chtFromRetroArch("nada", "x").empty(), "retroarch: vacio");
+  // Copia al tocar: la ROM sin .cht propio ve la biblioteca; encender la copia a <base>.cht
+  put(romL, "x");
+  check(cheatDbStore(cheatDbDir(), "Rocket Demo (USA).cht", ra, err), "guardar en biblioteca");
+  check(cheatFile(romL) == cheatDbFile(romL) && !cheatDbFile(romL).empty(), "ficha ve la biblioteca");
+  auto c2 = cheats(romL);
+  check(c2.size() == 2 && ons(c2) == "00", "biblioteca toda apagada");
+  check(setCheat(romL, 0, true, err) && fs::exists(chtPath(romL)), "encender copia a <base>.cht");
+  check(ons(cheats(romL)) == "10" && cheatFile(romL) == chtPath(romL),
+        "propio manda");
+  check(get(cheatDbDir() + "/Rocket Demo (USA).cht").find("[-Vidas]") != std::string::npos,
+        "biblioteca intacta");
   (void)ds;
 }
 

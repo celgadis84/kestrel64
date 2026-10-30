@@ -67,6 +67,11 @@ auto manualIndexMatch(const std::vector<ManualEntry>& idx, const std::string& pa
                       const std::string& internalName) -> std::vector<ManualEntry>;
 auto manualSource() -> std::string;
 auto setManualSource(const std::string& url) -> bool;
+// Biblioteca global de manuales, <estado>/manuals/: "Descargar todos" baja ahi el indice entero
+// de la fuente y manuals() mira tambien ahi (casado por titulo, sin etiquetas "(...)").
+auto manualDbDir() -> std::string;
+// Nombre de fichero seguro para la biblioteca: sin carpeta, ASCII y sin \/:*?"<>|.
+auto dbFileName(const std::string& name) -> std::string;
 
 // ---------------------------------------------------------------- trucos
 // Mismo lector que Cheats::loadFile: comentario con # o ;, cabecera [nombre] con '-' delante
@@ -89,6 +94,52 @@ auto setCheat(const std::string& path, int id, bool on, std::string& err) -> boo
 auto addCheat(const std::string& path, const std::string& name, const std::string& codes, bool on,
               std::string& err) -> bool;
 auto delCheat(const std::string& path, int id, std::string& err) -> bool;
+
+// ---------------------------------------------------------------- biblioteca de trucos
+// Como las caratulas del lanzador: una coleccion nombrada a lo No-Intro que se baja a la maquina
+// del usuario (el exe no redistribuye nada). De fabrica, la carpeta N64 de libretro-database
+// (CC BY-SA 4.0, .cht de RetroArch); el usuario puede poner otra URL de GitHub o una carpeta
+// local (la de trucos de RetroArch, por ejemplo). Se guarda en <estado>/cheats_source.txt.
+// La descarga es OPCIONAL y viene apagada: la fuente se ensena, pero nada sale a la red (ni se
+// copia de la carpeta) hasta que el usuario marca la casilla.
+//
+// Lo bajado va a <estado>/cheats/ ya en el formato del emulador y con TODO apagado, asi que no
+// cambia ningun juego por si solo. La ficha lo ensena cuando la ROM no tiene <base>.cht propio,
+// y al encender, anadir o borrar un truco se copia a <base>.cht: el propio siempre manda.
+extern const char* const kCheatSourceDefault;
+auto cheatSource() -> std::string;                      // la del usuario o la de fabrica
+auto cheatSourceOn() -> bool;                           // descarga encendida (defecto: no)
+auto setCheatSource(const std::string& src, bool on) -> bool;  // src "" = la de fabrica
+auto cheatDbDir() -> std::string;
+// Donde estan los ficheros de una fuente. URL: raw.githubusercontent.com/<o>/<r>/<rama>/<ruta>
+// o github.com/<o>/<r>/tree/<rama>/<ruta>; `base` + nombre codificado = el fichero, `index` =
+// API de arboles de GitHub (una sola peticion lista la carpeta). Carpeta local: local=true.
+struct CheatSrc {
+  std::string base, index;
+  bool local = false, ok = false;
+};
+auto cheatSrcResolve(const std::string& src) -> CheatSrc;
+auto urlEncodePath(const std::string& s) -> std::string;
+// Nombres de fichero .cht (con extension) de una respuesta del API de arboles.
+auto cheatTreeParse(const std::string& json) -> std::vector<std::string>;
+// El nombre de la coleccion que es esta ROM, o "": titulo exacto sin etiquetas, y si no prefijo
+// en los dos sentidos SOLO si es inequivoco ("Mario Party" no elige entre 1 y 2). Con varias
+// entradas gana la region del cartucho, luego USA, luego la mas corta (la version base).
+auto cheatNameMatch(const std::vector<std::string>& names, const std::string& path,
+                    const std::string& internalName, char region) -> std::string;
+// .cht de RetroArch (cheatN_desc / cheatN_code con '+' / cheatN_enable) o .cht del emulador ->
+// formato del emulador, todo apagado, con `origin` de comentario. "" si no sale ningun truco.
+// Un truco con algun codigo ilegible se descarta entero: aplicarlo a medias es peor.
+auto chtFromRetroArch(const std::string& text, const std::string& origin) -> std::string;
+// Indice de la fuente cacheado en <estado>/cheats/index.txt (7 dias; el API de GitHub sin
+// cuenta admite 60 peticiones por hora).
+auto cheatIndexCached(const std::string& src, std::vector<std::string>& names) -> bool;
+auto cheatIndexStore(const std::string& src, const std::vector<std::string>& names) -> void;
+// Convierte y guarda en `dir` un fichero bajado de la fuente.
+auto cheatDbStore(const std::string& dir, const std::string& name, const std::string& raw,
+                  std::string& err) -> bool;
+auto cheatDbFile(const std::string& path) -> std::string;   // el de la biblioteca, o ""
+auto cheatFile(const std::string& path) -> std::string;     // el propio si existe, si no ese
 
 // ---------------------------------------------------------------- metadatos
 // Objeto JSON plano. Se guardan los valores en crudo (texto JSON) para que las claves que no

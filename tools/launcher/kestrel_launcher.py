@@ -396,13 +396,17 @@ def art_match(keys, region=""):
     return None
 
 
-def art_fetch(keys, region=""):
+def art_fetch(keys, region="", online=False):
     os.makedirs(ART, exist_ok=True)
     for k in keys:
         safe = re.sub(r'[\\/:*?"<>|]', "_", k)
         local = os.path.join(ART, safe + ".png")
         if os.path.isfile(local):
             return local if os.path.getsize(local) > 0 else None
+    # Descarga opcional y apagada de fabrica (perfil "boxart_online"): sin ella solo vale
+    # lo que ya este en cache, ni indice ni marca de "no encontrado".
+    if not online:
+        return None
     # No esta en cache: intentar red una sola vez por clave. Sin red, se marca con un
     # fichero vacio para no volver a intentarlo en cada refresco de la lista.
     m = art_match(keys, region)
@@ -724,7 +728,8 @@ class H(BaseHTTPRequestHandler):
         name = q.get("name", [""])[0]
         if not key:
             return self._send(404, b"no", "text/plain")
-        f = art_fetch([k for k in (key, name) if k], q.get("region", [""])[0])
+        f = art_fetch([k for k in (key, name) if k], q.get("region", [""])[0],
+                      bool(load_profile().get("boxart_online")))
         if not f:
             return self._send(404, b"no", "text/plain")
         with open(f, "rb") as fh:

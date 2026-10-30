@@ -1175,6 +1175,14 @@ function wire() {
     touch(); buildOC();
   };
   $("#oc-throttle").onchange = e => { CFG.throttle = e.target.value; touch(); render(); };
+  // Caratulas de libretro-thumbnails: opcionales y apagadas de fabrica. Al encenderlas se
+  // guarda el perfil ANTES de repintar, que es cuando el servidor decide si sale a la red.
+  $("#art-online").checked = !!CFG.boxart_online;
+  $("#art-online").onchange = async e => {
+    CFG.boxart_online = e.target.checked;
+    await api("/api/config", CFG);
+    if (CFG.romdir) loadRoms(CFG.romdir); else renderStage();
+  };
 
   $$(".modal").forEach(m => {
     m.onclick = e => { if (e.target === m) closeModal(m); };

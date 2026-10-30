@@ -10526,3 +10526,16 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   quitarlo.
 - GAPS #6 decia que faltaban texturas HD en la GPU: ya estaban en GPU-RDP desde 2026-10-06.
   Corregido; queda solo el contorno cel por profundidad.
+
+## 2026-10-30 — biblioteca de trucos y manuales; descargas en linea opcionales
+
+- Ficha del exe, Trucos: biblioteca global `<estado>/cheats/` bajada de una fuente (de fabrica
+  libretro-database N64, CC BY-SA 4.0), "Bajar este juego" / "Bajar todos", convertida al formato
+  del emulador y toda apagada; al tocar un truco se copia a `<base>.cht`. Detalle en
+  `docs/LAUNCHER.md` "Ficha de juego en el exe".
+- Manuales: "Descargar todos" lleva el indice del usuario entero a `<estado>/manuals/`, que la
+  ficha tambien recorre. Sigue sin fuente de fabrica.
+- **Toda descarga en linea viene apagada**: casilla "Bajar de" (trucos) e interruptor
+  "Caratulas en linea" del lanzador (`boxart_online`). Apagadas, solo se usa lo que ya hay.
+- Prueba `gamecard_test`: fuente on/off, resolver URL/carpeta, arbol, casado por region,
+  conversion RetroArch, copia al tocar y biblioteca intacta. OK.

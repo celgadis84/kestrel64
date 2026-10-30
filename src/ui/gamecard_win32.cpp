@@ -20,7 +20,11 @@
 #include <atomic>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
+#include <iterator>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace kestrel::ui::card {
@@ -30,8 +34,9 @@ enum : int {
   kTab0 = 100,   // 100..104
   kPlay = 110, kClose,
   kInfoSave = 120, kFav,
-  kManList = 130, kManOpen, kManAdd, kManDir, kManSrc, kManGet,
-  kChtList = 140, kChtToggle, kChtDel, kChtAdd, kChtName, kChtCodes,
+  kManList = 130, kManOpen, kManAdd, kManDir, kManSrc, kManGet, kManAll,
+  kChtList = 140, kChtToggle, kChtDel, kChtAdd, kChtName, kChtCodes, kChtSrc, kChtGet, kChtAll,
+  kChtOn,
   kSavList = 150, kSavDir,
   kHbWeb = 155,
   kEdit0 = 160,   // 160.. campos de Info
@@ -55,6 +60,7 @@ struct Dlg {
   HWND edit[kNF] = {}, notes = nullptr, fav = nullptr, stats = nullptr, infoMsg = nullptr;
   HWND manList = nullptr, manSrc = nullptr, manMsg = nullptr, chtList = nullptr, chtName = nullptr, chtCodes = nullptr,
        chtMsg = nullptr, savList = nullptr, hbText = nullptr;
+  HWND chtSrc = nullptr, chtOn = nullptr, chtFile = nullptr, btnChtGet = nullptr, btnChtAll = nullptr, btnManAll = nullptr;
   hb::Meta hbMeta;
   std::vector<std::string> man;
   HFONT font = nullptr, big = nullptr;
@@ -194,6 +200,13 @@ auto fillCheats(int keepSel) -> void {
   }
   if(!lst.empty())
     SendMessageW(d.chtList, LB_SETCURSEL, keepSel >= 0 && keepSel < (int)lst.size() ? keepSel : 0, 0);
+  const std::string mine = chtPath(d.rom), shown = cheatFile(d.rom);
+  std::string lbl = "Fichero: " + baseName(mine);
+  if(shown.empty()) lbl += " (todavia no existe)";
+  else if(shown != mine)
+    lbl = "Biblioteca: " + baseName(shown) + " (todo apagado; al tocar un truco se copia a " +
+          baseName(mine) + ")";
+  if(d.chtFile) SetWindowTextW(d.chtFile, aw(lbl).c_str());
 }
 
 auto fillSaves() -> void {
@@ -426,6 +439,273 @@ auto addCheatUi() -> void {
   chtMsg("Anadido. Los trucos se leen al arrancar la ROM.");
 }
 
+// ---------------------------------------------------------------- bibliotecas (trucos, manuales)
+auto say(HWND h, const std::string& s) -> void { SetWindowTextW(h, u8w(s).c_str()); }
+
+auto trimmed(std::string s) -> std::string {
+  while(!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+  size_t a = s.find_first_not_of(" \t");
+  return a == std::string::npos ? std::string() : s.substr(a);
+}
+
+auto slurp(const std::string& f, std::string& out) -> bool {
+  FILE* fp = _wfopen(aw(f).c_str(), L"rb");
+  if(!fp) return false;
+  out.clear();
+  char buf[16384];
+  for(size_t n; (n = std::fread(buf, 1, sizeof buf, fp)) > 0;) out.append(buf, n);
+  std::fclose(fp);
+  return true;
+}
+
+// "Descargar todos" va en segundo plano: los ~1300 ficheros de trucos de libretro son minutos.
+// Un solo trabajo a la vez; la ficha mira el progreso con un temporizador y lo corta al
+// cerrarse. Lo ya bajado se queda y la siguiente vez se salta.
+struct Item {
+  std::string name, url, dst;
+  unsigned long long size = 0;
+};
+struct Job {
+  int kind = 0;   // 1 trucos, 2 manuales
+  std::string dir;
+  std::vector<Item> items;
+  std::atomic<int> next{0}, got{0}, skip{0}, fail{0}, running{0};
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> th;
+};
+std::unique_ptr<Job> g_job;
+constexpr UINT_PTR kJobTimer = 7;
+constexpr int kJobThreads = 4;
+
+auto jobWorker(Job* j) -> void {
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  for(;;) {
+    if(j->stop.load()) break;
+    const int i = j->next.fetch_add(1);
+    if(i >= (int)j->items.size()) break;
+    const Item& it = j->items[(size_t)i];
+    const unsigned long long have = fileSize(it.dst);
+    if(have && (j->kind == 1 || !it.size || have == it.size)) { j->skip++; continue; }
+    const std::string tmp = it.dst + ".part";
+    std::string err;
+    bool ok = fetch(it.url, tmp, err);
+    if(ok && j->kind == 1) {
+      std::string raw;
+      ok = slurp(tmp, raw) && cheatDbStore(j->dir, it.name, raw, err);
+      DeleteFileW(aw(tmp).c_str());
+    } else if(ok) {
+      ok = (!it.size || fileSize(tmp) == it.size) &&
+           MoveFileExW(aw(tmp).c_str(), aw(it.dst).c_str(), MOVEFILE_REPLACE_EXISTING);
+      if(!ok) DeleteFileW(aw(tmp).c_str());
+    }
+    (ok ? j->got : j->fail)++;
+  }
+  CoUninitialize();
+  j->running--;
+}
+
+auto jobButtons(bool on) -> void {
+  // Los de trucos ademas dependen de la casilla: la descarga viene apagada de fabrica.
+  const bool cht = on && d.chtOn && SendMessageW(d.chtOn, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  for(HWND b : {d.chtSrc, d.btnChtGet, d.btnChtAll})
+    if(b) EnableWindow(b, cht);
+  if(d.chtOn) EnableWindow(d.chtOn, on);
+  if(d.btnManAll) EnableWindow(d.btnManAll, on);
+}
+
+// Casilla "Bajar de": recordarla con la fuente que haya escrita.
+auto cheatOnToggled() -> void {
+  const bool on = SendMessageW(d.chtOn, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  std::string src = narrow(textOf(d.chtSrc), CP_UTF8);
+  while(!src.empty() && (src.back() == ' ' || src.back() == '\t')) src.pop_back();
+  setCheatSource(src.empty() ? std::string(kCheatSourceDefault) : src, on);
+  jobButtons(!g_job);
+  say(d.chtMsg, on ? "Descarga de trucos encendida." : "Descarga de trucos apagada: no sale nada a la red.");
+}
+
+auto startJob(int kind, const std::string& dir, std::vector<Item> items) -> void {
+  g_job = std::make_unique<Job>();
+  g_job->kind = kind;
+  g_job->dir = dir;
+  g_job->items = std::move(items);
+  CreateDirectoryW(aw(dir).c_str(), nullptr);
+  g_job->running = kJobThreads;
+  for(int i = 0; i < kJobThreads; i++) g_job->th.emplace_back(jobWorker, g_job.get());
+  jobButtons(false);
+  SetTimer(d.win, kJobTimer, 300, nullptr);
+}
+
+auto endJob() -> void {
+  if(!g_job) return;
+  g_job->stop = true;
+  for(std::thread& t : g_job->th)
+    if(t.joinable()) t.join();
+  g_job.reset();
+}
+
+auto pollJob() -> void {
+  if(!g_job) return;
+  Job& j = *g_job;
+  const bool done = j.running.load() == 0;
+  char b[200];
+  std::snprintf(b, sizeof b, "%s%s: %d de %d (%d nuevos, %d ya estaban, %d fallos)",
+                done ? "Terminado. " : "", j.kind == 1 ? "Trucos" : "Manuales",
+                j.got.load() + j.skip.load() + j.fail.load(), (int)j.items.size(), j.got.load(),
+                j.skip.load(), j.fail.load());
+  say(j.kind == 1 ? d.chtMsg : d.manMsg, b);
+  if(!done) return;
+  const int kind = j.kind;
+  KillTimer(d.win, kJobTimer);
+  endJob();
+  jobButtons(true);
+  if(kind == 1) fillCheats(0);
+  else fillManuals();
+}
+
+// Fuente de trucos escrita en la ficha (vacia = la de fabrica); se recuerda para todas.
+auto cheatSrcFromUi(CheatSrc& cs, std::string& src) -> bool {
+  src = trimmed(narrow(textOf(d.chtSrc), CP_UTF8));
+  if(src.empty()) {
+    src = kCheatSourceDefault;
+    SetWindowTextW(d.chtSrc, u8w(src).c_str());
+  }
+  cs = cheatSrcResolve(src);
+  if(!cs.ok) {
+    say(d.chtMsg, cs.local ? "No existe la carpeta " + src
+                           : std::string("Fuente no admitida: URL de GitHub (github.com/.../tree/... o "
+                                         "raw.githubusercontent.com/...) o carpeta local."));
+    return false;
+  }
+  if(!cheatSourceOn()) {
+    say(d.chtMsg, "La descarga de trucos esta apagada: marca \"Bajar de\".");
+    return false;
+  }
+  if(src != cheatSource()) setCheatSource(src, true);
+  return true;
+}
+
+// Ficheros .cht de la fuente: la carpeta local, el indice cacheado o el API de arboles.
+auto cheatIndex(const std::string& src, const CheatSrc& cs, std::vector<std::string>& names,
+                std::string& err) -> bool {
+  names.clear();
+  if(cs.local) {
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((cs.base + "*.cht").c_str(), &fd);
+    if(h != INVALID_HANDLE_VALUE) {
+      do {
+        if(!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) names.push_back(fd.cFileName);
+      } while(FindNextFileA(h, &fd));
+      FindClose(h);
+    }
+    if(names.empty()) err = "la carpeta no tiene ficheros .cht";
+    return !names.empty();
+  }
+  if(cheatIndexCached(src, names)) return true;
+  CreateDirectoryW(aw(cheatDbDir()).c_str(), nullptr);
+  const std::string tmp = cheatDbDir() + "/index.json.part";
+  std::string js;
+  const bool ok = fetch(cs.index, tmp, err) && slurp(tmp, js);
+  DeleteFileW(aw(tmp).c_str());
+  if(!ok) return false;
+  names = cheatTreeParse(js);
+  if(names.empty()) { err = "la fuente no lista ningun .cht (" + cs.index + ")"; return false; }
+  cheatIndexStore(src, names);
+  return true;
+}
+
+auto cheatUrl(const CheatSrc& cs, const std::string& name) -> std::string {
+  return cs.base + (cs.local ? name : urlEncodePath(name));
+}
+
+auto downloadCheatsOne() -> void {
+  if(g_job) { say(d.chtMsg, "Ya hay una descarga en marcha."); return; }
+  std::string src, err;
+  CheatSrc cs;
+  if(!cheatSrcFromUi(cs, src)) return;
+  HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+  say(d.chtMsg, "Leyendo el indice de la fuente...");
+  UpdateWindow(d.win);
+  std::vector<std::string> names;
+  if(!cheatIndex(src, cs, names, err)) { SetCursor(old); say(d.chtMsg, err); return; }
+  const std::string m = cheatNameMatch(names, d.rom, d.hdr.name, d.hdr.region);
+  if(m.empty()) {
+    SetCursor(old);
+    say(d.chtMsg, "La fuente tiene " + std::to_string(names.size()) +
+                      " juegos; ninguno casa con este (prueba con la ROM nombrada como No-Intro).");
+    return;
+  }
+  say(d.chtMsg, "Descargando " + m + "...");
+  UpdateWindow(d.win);
+  const std::string dir = cheatDbDir();
+  CreateDirectoryW(aw(dir).c_str(), nullptr);
+  const std::string tmp = dir + "/" + dbFileName(m) + ".part";
+  std::string raw;
+  const bool ok = fetch(cheatUrl(cs, m), tmp, err) && slurp(tmp, raw) && cheatDbStore(dir, m, raw, err);
+  DeleteFileW(aw(tmp).c_str());
+  SetCursor(old);
+  fillCheats(0);
+  if(!ok) { say(d.chtMsg, err); return; }
+  if(cheatFile(d.rom) == chtPath(d.rom))
+    say(d.chtMsg, "Bajado " + m + " a la biblioteca, pero manda tu " + baseName(chtPath(d.rom)) +
+                      " (borralo para ver los de la biblioteca).");
+  else
+    say(d.chtMsg, "Bajado " + m + ": " + std::to_string(cheats(d.rom).size()) +
+                      " trucos, todos apagados. Enciende los que quieras.");
+}
+
+auto downloadCheatsAll() -> void {
+  if(g_job) { say(d.chtMsg, "Ya hay una descarga en marcha."); return; }
+  std::string src, err;
+  CheatSrc cs;
+  if(!cheatSrcFromUi(cs, src)) return;
+  HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+  say(d.chtMsg, "Leyendo el indice de la fuente...");
+  UpdateWindow(d.win);
+  std::vector<std::string> names;
+  const bool ok = cheatIndex(src, cs, names, err);
+  SetCursor(old);
+  if(!ok) { say(d.chtMsg, err); return; }
+  const std::string dir = cheatDbDir();
+  const std::wstring q = L"La fuente tiene " + std::to_wstring(names.size()) +
+                         L" ficheros de trucos. Se bajan a la biblioteca\n" + aw(dir) +
+                         L"\nsaltando los que ya est\u00e9n. Todo queda apagado. \u00bfSeguir?";
+  if(MessageBoxW(d.win, q.c_str(), L"Trucos", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+  std::vector<Item> items;
+  for(const std::string& n : names) items.push_back({n, cheatUrl(cs, n), dir + "/" + dbFileName(n), 0});
+  startJob(1, dir, std::move(items));
+}
+
+auto downloadManualsAll() -> void {
+  if(g_job) { say(d.manMsg, "Ya hay una descarga en marcha."); return; }
+  const std::string src = trimmed(narrow(textOf(d.manSrc), CP_UTF8));
+  if(src.empty()) { say(d.manMsg, "Escribe primero la URL (o ruta) de un \u00edndice CSV de manuales."); return; }
+  if(src != manualSource()) setManualSource(src);
+  HCURSOR old = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+  say(d.manMsg, "Leyendo el \u00edndice...");
+  UpdateWindow(d.win);
+  std::string err, csv;
+  const std::string idxFile = stateDir() + "/manuals_index.csv";
+  std::vector<ManualEntry> idx;
+  if(fetch(src, idxFile, err) && slurp(idxFile, csv)) idx = manualIndexParse(csv);
+  DeleteFileW(aw(idxFile).c_str());
+  SetCursor(old);
+  if(idx.empty()) {
+    say(d.manMsg, err.empty() ? std::string("La fuente no es un \u00edndice CSV de manuales (Path,URL,...).") : err);
+    return;
+  }
+  unsigned long long total = 0;
+  for(const ManualEntry& m : idx) total += m.size;
+  const std::string dir = manualDbDir();
+  const std::wstring q = L"El \u00edndice tiene " + std::to_wstring(idx.size()) + L" manuales" +
+                         (total ? L" (" + aw(fmtSize(total)) + L")" : std::wstring()) +
+                         L". Se bajan a la biblioteca\n" + aw(dir) +
+                         L"\nsaltando los que ya est\u00e9n. \u00bfSeguir?";
+  if(MessageBoxW(d.win, q.c_str(), L"Manuales", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+  std::vector<Item> items;
+  for(const ManualEntry& m : idx) items.push_back({m.path, m.url, dir + "/" + dbFileName(m.path), m.size});
+  startJob(2, dir, std::move(items));
+}
+
 LRESULT CALLBACK cardProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch(m) {
     case WM_COMMAND: {
@@ -440,6 +720,10 @@ LRESULT CALLBACK cardProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case kManAdd: addManual(); return 0;
         case kManDir: openFolder(romDir()); return 0;
         case kManGet: downloadManuals(); return 0;
+        case kManAll: downloadManualsAll(); return 0;
+        case kChtGet: downloadCheatsOne(); return 0;
+        case kChtAll: downloadCheatsAll(); return 0;
+        case kChtOn: cheatOnToggled(); return 0;
         case kChtToggle: toggleCheat(); return 0;
         case kChtList: if(code == LBN_DBLCLK) toggleCheat(); return 0;
         case kChtDel: deleteCheat(); return 0;
@@ -458,10 +742,15 @@ LRESULT CALLBACK cardProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
       }
       break;
+    case WM_TIMER:
+      if(w == kJobTimer) { pollJob(); return 0; }
+      break;
     case WM_CLOSE:
       DestroyWindow(h);
       return 0;
     case WM_DESTROY:
+      KillTimer(h, kJobTimer);
+      endJob();   // corta la descarga en bloque; lo bajado se queda
       PostQuitMessage(0);
       return 0;
   }
@@ -541,20 +830,31 @@ auto build(HWND owner) -> bool {
   mk(L"BUTTON", L"Abrir", WS_TABSTOP, 12, y0 + 188, 100, 26, kManOpen, 1);
   mk(L"BUTTON", L"A\u00f1adir...", WS_TABSTOP, 120, y0 + 188, 100, 26, kManAdd, 1);
   mk(L"BUTTON", L"Abrir carpeta", WS_TABSTOP, 228, y0 + 188, 110, 26, kManDir, 1);
+  d.btnManAll = mk(L"BUTTON", L"Descargar todos", WS_TABSTOP, cw - 158, y0 + 188, 146, 26, kManAll, 1);
   // Fuente de manuales: la pone el usuario (indice CSV estilo external_files.csv de MiSTer).
   mk(L"STATIC", L"Fuente (\u00edndice CSV):", 0, 12, y0 + 229, 120, 18, 0, 1);
   d.manSrc = mk(L"EDIT", u8w(manualSource()), WS_TABSTOP | ES_AUTOHSCROLL, 134, y0 + 226,
                 cw - 300, 22, kManSrc, 1);
   mk(L"BUTTON", L"Buscar y descargar", WS_TABSTOP, cw - 158, y0 + 225, 146, 26, kManGet, 1);
   d.manMsg = mk(L"STATIC", L"", SS_ENDELLIPSIS, 12, y0 + 258, cw - 24, 18, 0, 1);
-  mk(L"STATIC", L"Todo va a manuals/ junto a la ROM. La fuente es tuya: el emulador no trae ninguna.",
-     0, 12, y0 + 284, cw - 24, 18, 0, 1);
+  mk(L"STATIC", L"Este juego: a manuals/ junto a la ROM. Todos: a la biblioteca del perfil. "
+                L"La fuente es tuya: el emulador no trae ninguna.",
+     SS_ENDELLIPSIS, 12, y0 + 284, cw - 24, 18, 0, 1);
 
   // ---- Trucos
   d.chtList = mk(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT,
-                 12, y0, 380, 230, kChtList, 2);
-  mk(L"BUTTON", L"Activar / desactivar", WS_TABSTOP, 12, y0 + 236, 150, 26, kChtToggle, 2);
-  mk(L"BUTTON", L"Borrar", WS_TABSTOP, 170, y0 + 236, 80, 26, kChtDel, 2);
+                 12, y0, 380, 190, kChtList, 2);
+  mk(L"BUTTON", L"Activar / desactivar", WS_TABSTOP, 12, y0 + 196, 150, 26, kChtToggle, 2);
+  mk(L"BUTTON", L"Borrar", WS_TABSTOP, 170, y0 + 196, 80, 26, kChtDel, 2);
+  // Biblioteca de trucos: de fabrica libretro-database (como las caratulas); se puede cambiar.
+  // La fuente se ensena siempre, pero la descarga viene apagada hasta marcar la casilla.
+  d.chtOn = mk(L"BUTTON", L"Bajar de:", WS_TABSTOP | BS_AUTOCHECKBOX, 12, y0 + 239, 82, 22,
+               kChtOn, 2);
+  SendMessageW(d.chtOn, BM_SETCHECK, cheatSourceOn() ? BST_CHECKED : BST_UNCHECKED, 0);
+  d.chtSrc = mk(L"EDIT", u8w(cheatSource()), WS_TABSTOP | ES_AUTOHSCROLL, 96, y0 + 238, 294, 22,
+                kChtSrc, 2);
+  d.btnChtGet = mk(L"BUTTON", L"Bajar este juego", WS_TABSTOP, 398, y0 + 237, 112, 26, kChtGet, 2);
+  d.btnChtAll = mk(L"BUTTON", L"Bajar todos", WS_TABSTOP, 516, y0 + 237, cw - 528, 26, kChtAll, 2);
   mk(L"STATIC", L"Nuevo truco", 0, 404, y0, 200, 18, 0, 2);
   d.chtName = mk(L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, 404, y0 + 20, cw - 416, 22, kChtName, 2);
   mk(L"STATIC", L"C\u00f3digos (AAAAAAAA VVVV)", 0, 404, y0 + 48, 200, 18, 0, 2);
@@ -562,9 +862,9 @@ auto build(HWND owner) -> bool {
                                     WS_VSCROLL,
                   404, y0 + 68, cw - 416, 130, kChtCodes, 2);
   mk(L"BUTTON", L"A\u00f1adir", WS_TABSTOP, 404, y0 + 204, 100, 26, kChtAdd, 2);
-  d.chtMsg = mk(L"STATIC", L"", SS_ENDELLIPSIS, 12, y0 + 270, cw - 24, 18, 0, 2);
-  mk(L"STATIC", aw("Fichero: " + baseName(chtPath(d.rom))), SS_ENDELLIPSIS, 12, y0 + 290,
-     cw - 24, 18, 0, 2);
+  d.chtMsg = mk(L"STATIC", L"", SS_ENDELLIPSIS, 12, y0 + 268, cw - 24, 18, 0, 2);
+  d.chtFile = mk(L"STATIC", L"", SS_ENDELLIPSIS, 12, y0 + 290, cw - 24, 18, 0, 2);
+  jobButtons(true);
 
   // ---- Partidas
   d.savList = mk(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | LBS_NOINTEGRALHEIGHT, 12, y0, cw - 24,

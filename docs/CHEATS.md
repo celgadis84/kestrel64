@@ -8,6 +8,10 @@ Un fichero de texto `.cht` al lado de la ROM y con su mismo nombre
 Sin fichero no hay ni motor ni coste: `Cheats::enabled()` es falso y el bucle no llama a
 nada.
 
+Coleccion bajada (opcional, apagada de fabrica): la ficha del exe puede traer los `.cht` de
+libretro-database u otra fuente a una biblioteca del perfil, convertidos y todo apagado; al
+encender uno se copia al `.cht` de la ROM. Ver `docs/LAUNCHER.md` "Ficha de juego en el exe".
+
 ```
 # Super Mario 64 (USA)
 [Vidas infinitas]
