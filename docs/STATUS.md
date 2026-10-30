@@ -10460,3 +10460,15 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   el cuadro presentado sale 320x120 / 160x240 / 320x240; un invitado no puede cambiarla.
 - **Pendiente**: servidor publico de encuentro/NAT (no hay; hoy IP+puerto directos), rollback
   (hoy espera si la red pasa del retardo), invitados que entran a mitad sin parar al resto.
+
+## 2026-10-30 — escalado en caliente de GPU-RDP, 4x automatico al partir pantalla
+
+- `gpurdp::requestUpscale(f)` (1/2/4, 0 = el de arranque): lo aplica `flush` al empezar el
+  siguiente vaciado (GPU parada). Primera vez crea hram/hhid y `setHi` a la medida; al encender
+  pone a cero el espejo de 1x, asi `resyncHi`/`scanoutHi` dan por vieja la copia de alta: se
+  rehace al repintar y mientras el barrido replica la fila de 1x. La RDRAM sigue a 1x: no
+  afecta al lockstep.
+- `present.cpp`: al activarse la pantalla partida pide `KESTREL_SPLIT_UPSCALE` (4) si el
+  escalado es menor; al volver a completa, el de arranque.
+- Validado (SM64 en red, GPU-RDP, arranque a 1x): rows 1280x480, cols 640x960, full 320x240
+  en los dos, x1->x4->x1 dos veces, 0 desincronias. paraLLEl-RDP: sin cambio en caliente.

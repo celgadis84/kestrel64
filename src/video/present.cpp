@@ -1413,7 +1413,19 @@ auto Presenter::pumpFrame() -> bool {
   // campo). Antes del HUD, para que el HUD caiga dentro de lo que se ve.
   s_cropW = s_fullW = width; s_cropH = s_fullH = height;
   { u32 cx, cy, cw, ch;
-    if(netplay::viewCrop(width, height, cx, cy, cw, ch)) {
+    const bool split = netplay::viewCrop(width, height, cx, cy, cw, ch);
+    // Al partir, el trozo propio se amplia a toda la ventana: GPU-RDP sube a 4x mientras dure
+    // (KESTREL_SPLIT_UPSCALE, 0 = no tocar) y al volver a pantalla completa recupera el suyo.
+    static bool s_split = false;
+    static const u32 splitUp = [] {
+      const char* e = std::getenv("KESTREL_SPLIT_UPSCALE");
+      return e && e[0] ? (u32)std::atoi(e) : 4u;
+    }();
+    if(split != s_split && splitUp) {
+      s_split = split;
+      if(!split || gpurdp::upscale() < splitUp) gpurdp::requestUpscale(split ? splitUp : 0);
+    }
+    if(split) {
       std::vector<u32> sub((usize)cw * ch);
       for(u32 y = 0; y < ch; y++)
         std::memcpy(&sub[(usize)y * cw], &frame[(usize)(cy + y) * width + cx], (usize)cw * 4);

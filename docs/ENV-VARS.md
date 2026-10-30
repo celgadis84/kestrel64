@@ -215,3 +215,7 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 - `KESTREL_NETPLAY_DELAY=N` (2, max 30) — retardo de entrada en campos que fija el
   anfitrion: margen de la red antes de que una maquina tenga que esperar. ~1 campo por cada
   16 ms de ida y vuelta.
+- `KESTREL_SPLIT_UPSCALE=N` (4; 0 = no tocar) — con pantalla partida GPU-RDP sube en caliente
+  su escalado interno a N mientras dura (el trozo propio se amplia a toda la ventana) y al
+  volver a pantalla completa recupera el de arranque. paraLLEl-RDP no cambia en caliente: alli
+  se pone a mano con `KESTREL_UPSCALE`.

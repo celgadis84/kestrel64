@@ -90,6 +90,7 @@ inline auto pending() -> bool { return false; }
 inline auto queueTri(const TriRec&, const u8* = nullptr) -> bool { return false; }
 inline auto flush(u8*, u32, u8*, std::vector<TriOut>* = nullptr) -> void {}
 inline auto upscale() -> u32 { return 1; }
+inline auto requestUpscale(u32) -> void {}
 inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&) -> bool { return false; }
 inline auto hdUpload(const void*, double, double) -> u32 { return 0; }
 #else
@@ -117,6 +118,9 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs = nullptr)
 // cada primitiva se pinta ademas en una copia de la RDRAM a S veces la resolucion (bloque SxS
 // por pixel de 1x); la RDRAM y todo lo que ve el invitado siguen siendo los de 1x.
 auto upscale() -> u32;
+// Cambia el escalado en caliente (1, 2 o 4; 0 = el de arranque). Se aplica al empezar el
+// siguiente vaciado; lo pintado antes se ve a 1x hasta que el RDP lo repinta.
+auto requestUpscale(u32 factor) -> void;
 // Barrido del VI desde la copia de alta: imagen de `type` (2 = 5551, 3 = 8888) en `origin`, paso
 // `stride` pixeles, w x h. Sale (w*S) x (h*S) en el formato del cuadro del presentador
 // (0xAABBGGRR). Fila cuya RDRAM ya no es la que dejo el RDP (la escribio el CPU o un DMA): se

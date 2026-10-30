@@ -92,7 +92,7 @@ struct Ctx {
   VkDescriptorSet set = VK_NULL_HANDLE;
   // Fase 6: copia de alta resolucion (S = 1 << up) de la RDRAM y de sus bits ocultos, y el set
   // que la pone en los enlaces 0/1 (el resto, los mismos).
-  u32 up = 0;
+  u32 up = 0, baseUp = 0, hiShift = 0;   // en uso, el de arranque, el de hram/hhid
   Buf hram, hhid;
   VkDescriptorSet setHi = VK_NULL_HANDLE;
   std::vector<FillRect> q;
@@ -114,6 +114,8 @@ struct Ctx {
 
 Ctx* g = nullptr;
 std::atomic<bool> g_live{false};
+constexpr u32 kBind = 7;       // enlaces del set: ram, hid, registros, blender, resultados, TMEM, HD
+std::atomic<int> g_upReq{-1};   // requestUpscale: desplazamiento pedido, lo aplica flush
 
 auto pickMemory(VkPhysicalDevice pd, u32 typeBits, bool& coherent) -> int {
   VkPhysicalDeviceMemoryProperties mp;
@@ -304,7 +306,7 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     const u32 up = f >= 4 ? 2 : f >= 2 ? 1 : 0;
     if(up) {
       if(makeBuf(c, c.hram, VkDeviceSize(rdramSize) << (2 * up))
-         && makeBuf(c, c.hhid, VkDeviceSize(rdramSize / 2) << (2 * up))) c.up = up;
+         && makeBuf(c, c.hhid, VkDeviceSize(rdramSize / 2) << (2 * up))) c.up = c.baseUp = c.hiShift = up;
       else {
         freeBuf(c, c.hram); freeBuf(c, c.hhid); c.hram = Buf{}; c.hhid = Buf{};
         std::fprintf(stderr, "[gpurdp] sin memoria para escalar x%d; sigue a 1x\n", f);
@@ -345,7 +347,7 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     }
   }
 
-  constexpr u32 kBind = 7;   // ram, hid, registros, tabla del blender, resultados, TMEM, HD
+  // kBind (7): ram, hid, registros, tabla del blender, resultados, TMEM, HD
   VkDescriptorSetLayoutBinding b[kBind] = {};
   for(u32 i = 0; i < kBind; i++) {
     b[i].binding = i; b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -527,9 +529,56 @@ auto resyncHi(Ctx& c, const u8* rdram, u32 size, const u8* hidden) -> void {
   }
 }
 
+// Cambio de escalado en caliente (al empezar un vaciado: la GPU esta parada). La copia de alta
+// y su set se hacen a la medida la primera vez; al encender, el espejo de 1x va a cero para que
+// resyncHi y scanoutHi den por vieja toda la copia de alta: se rehace desde la RDRAM al pintar
+// encima y, mientras tanto, el barrido replica la fila de 1x.
+auto applyUp(Ctx& c, u32 up) -> void {
+  if(up == c.up) return;
+  if(up && up != c.hiShift) {
+    freeBuf(c, c.hram); freeBuf(c, c.hhid); c.hiShift = 0;
+    if(!makeBuf(c, c.hram, c.ram.size << (2 * up)) || !makeBuf(c, c.hhid, c.hid.size << (2 * up))) {
+      freeBuf(c, c.hram); freeBuf(c, c.hhid);
+      std::fprintf(stderr, "[gpurdp] sin memoria para escalar x%u; sigue a x%u\n", 1u << up, 1u << c.up);
+      c.up = 0;
+      return;
+    }
+    c.hiShift = up;
+    if(!c.setHi) {
+      VkDescriptorSetAllocateInfo dai = {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+      dai.descriptorPool = c.dpool; dai.descriptorSetCount = 1; dai.pSetLayouts = &c.dsl;
+      if(vkAllocateDescriptorSets(c.dev, &dai, &c.setHi) != VK_SUCCESS) {
+        c.setHi = VK_NULL_HANDLE; c.up = 0;
+        std::fprintf(stderr, "[gpurdp] sin set para escalar; sigue a 1x\n");
+        return;
+      }
+    }
+    VkDescriptorBufferInfo bufs[kBind] = {{c.hram.buf, 0, VK_WHOLE_SIZE}, {c.hhid.buf, 0, VK_WHOLE_SIZE},
+                                           {c.recs.shaderBuf(), 0, VK_WHOLE_SIZE}, {c.lut.shaderBuf(), 0, VK_WHOLE_SIZE},
+                                           {c.outs.shaderBuf(), 0, VK_WHOLE_SIZE}, {c.tmem.shaderBuf(), 0, VK_WHOLE_SIZE},
+                                           {c.hd.buf, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet wr[kBind] = {};
+    for(u32 i = 0; i < kBind; i++) {
+      wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet = c.setHi; wr[i].dstBinding = i;
+      wr[i].descriptorCount = 1; wr[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      wr[i].pBufferInfo = &bufs[i];
+    }
+    vkUpdateDescriptorSets(c.dev, kBind, wr, 0, nullptr);
+  }
+  if(up) { std::memset(c.ram.map, 0, (size_t)c.ram.size); std::memset(c.hid.map, 0, (size_t)c.hid.size); }
+  std::fprintf(stderr, "[gpurdp] escalado interno x%u -> x%u\n", 1u << c.up, 1u << up);
+  c.up = up;
+}
+
 }  // namespace
 
 auto upscale() -> u32 { return active() ? 1u << g->up : 1u; }
+
+auto requestUpscale(u32 factor) -> void {
+  if(!active()) return;
+  const int up = factor == 0 ? (int)g->baseUp : factor >= 4 ? 2 : factor >= 2 ? 1 : 0;
+  g_upReq.store(up, std::memory_order_release);
+}
 
 auto stats() -> Stats {
   Stats st;
@@ -728,6 +777,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   if(outs) outs->clear();
   if(!g || g->ops.empty()) return;
   Ctx& c = *g;
+  if(const int r = g_upReq.exchange(-1, std::memory_order_acq_rel); r >= 0) applyUp(c, (u32)r);
   using clk = std::chrono::steady_clock;
   auto ns = [](clk::time_point a, clk::time_point b) { return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
   const auto t0 = clk::now();
