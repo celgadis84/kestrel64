@@ -17,6 +17,7 @@
 // 6105 algorithm, so a typo in either the table or the state machine fails the test rather
 // than silently producing a plausible-looking answer.
 #include "../src/core/memory.hpp"
+#include "../src/core/cic.hpp"
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -188,17 +189,37 @@ auto main() -> int {
   // --- 8. HLE boot leaves the PIF where IPL2 leaves it --------------------------------
   {
     auto m = makeMem();
-    m->pifBootHle(kSum6102);
+    m->pifBootHle(kSum6102, kSum6102);
     check("tras IPL2 HLE: ROM bloqueada, checksum entregado, aun modo reset",
-          m->pifRomLocked && m->pifSumGot && m->pifBootMode);
+          m->pifRomLocked && m->pifSumGot && m->pifBootMode && !m->pifFrozen);
     m->write32(PIF_CTRL_WORD, 0x40);
     check("re-verificar tras IPL2 HLE no congela", !m->pifFrozen);
+  }
+  {
+    auto m = makeMem();
+    m->pifBootHle(kSum6102, kSum6102 ^ 0x100);
+    check("IPL2 HLE con IPL3 que no casa con el CIC congela", m->pifFrozen);
+  }
+
+  // --- 8b. The IPL2 checksum algorithm (core/cic.hpp) ---------------------------------
+  // Golden values from an independent transcription of the published algorithm over a
+  // synthetic IPL3 (word i = i * 0x9E3779B9 + 0x12345); the real chip table was checked
+  // against cart IPL3s offline (they are not shipped).
+  {
+    static u8 ipl3[cic::kIpl3Words * 4];
+    for(u32 i = 0; i < cic::kIpl3Words; i++) {
+      u32 w = i * 0x9E37'79B9u + 0x12345u;
+      for(int b = 0; b < 4; b++) ipl3[4 * i + b] = (u8)(w >> (24 - 8 * b));
+    }
+    check("checksum IPL2 seed 0x3f == vector de oro", cic::ipl2Checksum(0x3f, ipl3) == 0xab80'dff0'5e64ull);
+    check("checksum IPL2 seed 0x91 == vector de oro", cic::ipl2Checksum(0x91, ipl3) == 0x1f38'1d84'a405ull);
+    check("IPL3 sin firmar: ningun chip lo acepta", cic::chipForIpl3(ipl3) == nullptr);
   }
 
   // --- 9. Unknown CIC (homebrew IPL3): no verdict invented -----------------------------
   {
     auto m = makeMem();
-    m->pifBootHle(0);
+    m->pifBootHle(0, 0x1234'5678'9abcull);
     putSum(*m, 0x1234'5678'9abcull);
     m->write32(PIF_CTRL_WORD, 0x20);
     m->write32(PIF_CTRL_WORD, 0x40);

@@ -2439,15 +2439,18 @@ auto Memory::siFinish() -> void {
 // --- Modo de arranque del PIF -------------------------------------------------------
 // Ver la cabecera en memory.hpp. Solo se atienden aqui los bits del MODO RESET; los del modo
 // normal (joybus, desafio del CIC) siguen en siDma porque dependen del sentido del DMA.
-auto Memory::pifBootHle(u64 cicChecksum) -> void {
-  // Lo que ya hizo el IPL2 antes de saltar al IPL3: bloquear la ROM (0x10) y entregar el
-  // checksum del IPL3 (0x20) para que el PIF lo compare con el del CIC (0x40). Un cartucho
-  // que arranca es uno cuyo IPL3 paso esa comprobacion, asi que el checksum entregado ES el
-  // del CIC. Sigue en modo reset: falta el 0x08 del cartucho.
+auto Memory::pifBootHle(u64 cicChecksum, u64 ipl2Sum) -> void {
+  // Lo que ya hizo el IPL2 antes de saltar al IPL3: bloquear la ROM (0x10), entregar el
+  // checksum que calculo sobre el IPL3 del cartucho (0x20, `ipl2Sum`, ver core/cic.hpp) y
+  // pedir al PIF que lo compare con el del CIC (0x40). Si no casa, la consola se queda ahi.
+  // Sigue en modo reset: falta el 0x08 del cartucho. La palabra 0x24 (seeds + tipo de
+  // arranque) no se deja visible: el PIF la vuelve a ocultar con el 0x20, y el IPL2 ya paso
+  // lo que lleva por registros (s3/s5/s6/s7, CPU::fastBoot).
   cicSum = cicChecksum;
   pifRomLocked = true;
-  for(int i = 0; i < 6; i++) pifSum[i] = (u8)(cicChecksum >> (8 * (5 - i)));
-  pifSumGot = cicChecksum != 0;
+  for(int i = 0; i < 6; i++) pifSum[i] = (u8)(ipl2Sum >> (8 * (5 - i)));
+  pifSumGot = true;
+  if(cicSum && ipl2Sum != cicSum) pifFreeze("checksum IPL2 distinto del del CIC (orden 0x40)");
 }
 
 auto Memory::pifFreeze(const char* why) -> void {

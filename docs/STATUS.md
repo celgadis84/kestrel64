@@ -10539,3 +10539,14 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   "Caratulas en linea" del lanzador (`boxart_online`). Apagadas, solo se usa lo que ya hay.
 - Prueba `gamecard_test`: fuente on/off, resolver URL/carpeta, arbol, casado por region,
   conversion RetroArch, copia al tocar y biblioteca intacta. OK.
+
+## 2026-10-30 (b) — PIF: suma IPL2 real y CIC por firma (GAPS #14 cerrado)
+
+- `src/core/cic.hpp`: algoritmo de la suma IPL2 de 48 bits (transcrito de ares, ISC) y tabla
+  de chips con semilla y suma (5101 incluido). `CPU::fastBoot` la calcula sobre el IPL3 del
+  cartucho y `Memory::pifBootHle(cicSum, ipl2Sum)` la compara como la orden 0x40.
+- IPL3 desconocido: el chip sale de la semilla que lo firma, no se supone 6102. Sin firma:
+  `[boot] IPL3 sin firma ...` y sin veredicto.
+- Verificado: 59/59 ROMs locales casan con la tabla n64brew; SM64, DK64 y testrom de
+  libdragon arrancan igual (20 swaps). `pif_test` 23/23 (vector de oro sintetico de una
+  transcripcion independiente).

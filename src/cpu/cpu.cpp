@@ -2,6 +2,7 @@
 #include "cpu.hpp"
 #include "jit.hpp"          // CodeCache completo: cacheOp desenlaza las cadenas del dynarec
 #include "../core/memory.hpp"
+#include "../core/cic.hpp"
 #include "../video/vifilter.hpp"
 #include "../video/capture.hpp"
 #include <algorithm>
@@ -262,19 +263,11 @@ static const CicInfo kCicTable[] = {
 };
 static constexpr u32 kCrcCic6105 = 0x98BC2C86;  // the one IPL3 with an RSP boot stage
 
-// IPL2 checksum (48 bits) the CIC holds and hands to the PIF at boot; the PIF compares it
-// with the one IPL2 computes over IPL3 (commands 0x20/0x40). Table from n64brew PIF-NUS.
-// 0 = no published value (5101) or unknown IPL3.
+// IPL2 checksum (48 bits) the CIC holds; the PIF compares it with the one IPL2 computes over
+// IPL3 (commands 0x20/0x40). 0 = unknown chip (unsigned IPL3).
 static auto cicIpl2Checksum(int id) -> u64 {
-  switch(id) {
-  case 6101:             return 0x45CC'73EE'317Aull;
-  case 6102: case 7101:  return 0xA536'C0F1'D859ull;
-  case 7102:             return 0x4416'0EC5'D9AFull;
-  case 6103: case 7103:  return 0x586F'D470'9867ull;
-  case 6105: case 7105:  return 0x8618'A45B'C2D3ull;
-  case 6106: case 7106:  return 0x2BBA'D4E6'EB74ull;
-  default:               return 0;
-  }
+  for(auto& c : cic::kChips) if(c.idNtsc == id || c.idPal == id) return c.sum;
+  return 0;
 }
 
 static auto crc32(const u8* p, usize n) -> u32 {
@@ -290,8 +283,13 @@ static auto detectCic(const std::vector<u8>& rom) -> CicInfo {
   if(rom.size() >= 0x1000) {
     u32 c = crc32(rom.data() + 0x40, 0x1000 - 0x40);
     for(auto& e : kCicTable) if(e.crc == c) return e;
+    // Not an IPL3 we know (homebrew bootcode, e.g. libdragon's open IPL3): it can only boot
+    // if it was signed for some chip, so find the chip whose seed makes IPL2 yield that
+    // chip's checksum. crc stays 0 = "run it LLE".
+    if(auto* chip = cic::chipForIpl3(rom.data() + cic::kIpl3Off))
+      return { 0, chip->idNtsc, chip->idPal, chip->seed, 0, 0 };
   }
-  return { 0, 6102, 7101, 0x3f, 0, 0 };  // unknown → assume the common 6102/7101
+  return { 0, 6102, 7101, 0x3f, 0, 0 };  // unsigned → assume the common 6102/7101 (no verdict)
 }
 
 // Instruction field extractors.
@@ -482,12 +480,23 @@ auto CPU::fastBoot(u32 entryPoint) -> void {
   CicInfo cic = mem ? detectCic(mem->rom) : CicInfo{ 0, 6102, 7101, 0x3f, 0, 0 };
   bool pal = (bootTvType == 0);                     // 0 PAL / 1 NTSC / 2 MPAL (MPAL carts use NTSC chips)
   int  cicId = pal ? cic.idPal : cic.idNtsc;
-  bool is6105 = (cic.crc == kCrcCic6105);
-  // El PIF necesita saberlo: el desafio anti-pirateria solo lo contesta este chip.
-  if(mem) mem->cic6105 = is6105;
-  // IPL1/IPL2 are HLE: leave the PIF where real IPL2 leaves it (ROM locked, checksum handed
-  // over), still in reset mode. Unknown IPL3 -> unknown chip -> no CIC checksum.
-  if(mem) mem->pifBootHle(cic.crc ? cicIpl2Checksum(cicId) : 0);
+  bool is6105 = (cic.crc == kCrcCic6105);   // this IPL3 image (it has an RSP boot stage)
+  // El PIF necesita saberlo: el desafio anti-pirateria solo lo contesta el chip 6105, lleve
+  // el IPL3 que lleve (un homebrew firmado para 6105 tambien lo tiene).
+  if(mem) mem->cic6105 = (cicId == 6105 || cicId == 7105);
+  // IPL1/IPL2 are HLE: leave the PIF where real IPL2 leaves it (ROM locked, checksum it
+  // computed over the cart's IPL3 handed over and checked), still in reset mode. An IPL3
+  // no chip accepts would halt real hardware; with no chip to name, no verdict is given.
+  if(mem) {
+    u64 ipl2 = mem->rom.size() >= 0x1000 ? cic::ipl2Checksum(cic.seed, mem->rom.data() + cic::kIpl3Off) : 0;
+    u64 chip = cicIpl2Checksum(cicId);
+    if(cic.crc == 0 && ipl2 != chip) {
+      chip = 0;
+      std::fprintf(stderr, "[boot] IPL3 sin firma para ningun CIC conocido (checksum IPL2 %012llx)\n",
+                   (unsigned long long)ipl2);
+    }
+    mem->pifBootHle(chip, ipl2);
+  }
   // Arrancar por IPL3 real o emular su resultado. El camino HLE no es generico: sabe
   // reproducir el efecto de los IPL3 que CONOCE (direccion de arranque propia de cada CIC,
   // la etapa RSP del 6105, la copia del primer megabyte desde ROM+0x1000). Un cartucho con

@@ -1860,7 +1860,7 @@ public:
   u64  pifBootDeadline = 0;      // instante (reloj de invitado) del plazo de 0x08; 0 = sin armar
   const char* pifFreezeWhy = nullptr;
   static constexpr u64 kPifBootUs = 5'000'000;   // ~5 s desde el encendido
-  auto pifBootHle(u64 cicChecksum) -> void;      // estado tras IPL1+IPL2 (lo pone CPU::fastBoot)
+  auto pifBootHle(u64 cicChecksum, u64 ipl2Sum) -> void;  // estado tras IPL1+IPL2 (lo pone CPU::fastBoot)
   auto pifCommand() -> void;     // la CPU acaba de escribir el byte de control (0x3F)
   auto pifFreeze(const char* why) -> void;
 };
