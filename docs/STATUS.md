@@ -10394,3 +10394,25 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   cuadros; sigue siendo divergencia de logica (algo que el juego lee vale distinto), ver la
   seccion "Estado de la prueba de la liana de DK64" mas arriba. Ninguna correccion de hoy la
   toca.
+
+## 2026-10-30 — capturas: foto PNG y video AVI (teclas, menu, MCP)
+
+`src/video/capture.{hpp,cpp}`, sin dependencias nuevas (encoders propios):
+- **Foto**: PNG (deflate Huffman fijo + LZ77, filtro por fila). F9, Video > Captura de
+  pantalla, MCP `screenshot(path)` (`capture.screenshot`). Se atiende en el hilo del nucleo al
+  cerrar el campo o, en pausa, en la vuelta de espera del bucle.
+- **Video**: AVI 1.0 MJPEG (JPEG base 4:2:0, tablas anexo K) + PCM s16 estereo. F8 / Video >
+  Grabar video (marcado mientras graba), MCP `video_start(path, every, quality, scale, audio)`
+  / `video_stop` / `video_status` (`capture.video.*`), `KESTREL_RECORD`. Un cuadro por campo
+  VI en tiempo de INVITADO (`dwRate = viFieldHzMilli`), audio del AI en ese mismo tiempo:
+  casan a cualquier velocidad de emulacion. Silencio de relleno cuando el AI se calla >3
+  campos (cargas), para no adelantar el audio. Codifica un hilo propio con cola de 16; llena,
+  el nucleo espera (nunca se tira un cuadro). Trozos de 1 GiB (`_002.avi`...). Tamano fijado
+  por el primer cuadro; cambios de resolucion se reescalan a el.
+- Ambos leen el framebuffer de la RDRAM con la geometria de `KESTREL_FBDUMP`
+  (`grabFramebuffer` en cpu.cpp, extraida del volcado BMP; md5 del BMP sin cambios).
+  Con parallel-rdp vivo la RDRAM puede no llevar la imagen final (`capture_framebuffer`
+  usa `vrdp::scanout`); las capturas nuevas siguen en RDRAM.
+- Validado (SM64, build/): AVI 357 cuadros 59,94 fps 5,96 s, audio 32006 Hz 5,92 s, JPEG
+  decodifican (PIL); MCP: foto corriendo/en pausa, video every=2 scale=2 640x480 29,97 fps;
+  PNG = `capture_framebuffer` pixel a pixel.

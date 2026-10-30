@@ -12,6 +12,7 @@
 
 #include "audio.hpp"
 #include "../core/runtime.hpp"
+#include "../video/capture.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -285,6 +286,7 @@ static auto wavDump(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate)
 
 auto pushRdram(const u8* base, u32 size, u32 addr, u32 len, u32 sampleRate) -> void {
   wavDump(base, size, addr, len, sampleRate);
+  capture::onAudio(base, size, addr, len, sampleRate);   // pista del video en grabacion
 #ifdef _WIN32
   if(g.disabled) return;
   init(sampleRate);

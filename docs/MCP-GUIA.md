@@ -123,6 +123,10 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
 **Imagen**
 - `capture_framebuffer(path)`: PNG de lo que esta mostrando el VI, mas un histograma de
   color. Para comprobar que se ve lo esperado. Leer el PNG con la herramienta Read.
+- `screenshot(path)`: PNG escrito por el propio emulador (como F9), sin pasar pixeles por el
+  socket. Ruta vacia = `KESTREL_CAPTURE_DIR` o Imagenes\kestrel64. Funciona en pausa.
+- `video_start(path, every, quality, scale, audio)` / `video_stop()` / `video_status()`:
+  AVI MJPEG + PCM en tiempo de invitado (como F8). Ruta vacia = Videos\kestrel64.
 
 **Perfilado**
 - `profile_start` → dejar correr la carga → `profile_cpu(top)` / `profile_rsp(top)` →

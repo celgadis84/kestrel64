@@ -284,6 +284,49 @@ def controller_state(pad: int = 1) -> dict:
     return data
 
 
+def screenshot(path: str = "", timeout_ms: int = 5000) -> dict:
+    """Save a PNG screenshot, written by the emulator itself (same as the F9 hotkey).
+
+    Taken in guest time from the framebuffer the VI scans out, at the next field close
+    (or right away while paused). `path` empty = default captures folder
+    (KESTREL_CAPTURE_DIR, else the user's Pictures\\kestrel64) named <rom>_<date>_<time>.png.
+    Unlike capture_framebuffer, no pixels travel over the socket.
+    Returns {path, width, height, format}."""
+    data, _ = query("capture.screenshot", _wait_s=timeout_ms / 1000 + 10,
+                    path=path, timeout_ms=int(timeout_ms))
+    return data
+
+
+def video_start(path: str = "", every: int = 1, quality: int = 90, scale: int = 1,
+                audio: bool = True) -> dict:
+    """Start recording video to an AVI (MJPEG + PCM s16 stereo), same as the F8 hotkey.
+
+    One frame per emulated VI field (59.94/50 fps; `every`=2 keeps one of every two) and
+    the audio the AI played in that same guest time, so A/V stay in sync at any emulation
+    speed. `quality` = JPEG 1..100, `scale` = integer upscale 1..4. `path` empty = default
+    videos folder (KESTREL_CAPTURE_DIR, else the user's Videos\\kestrel64). Files over
+    1 GiB continue in <name>_002.avi, ... Starts at the next field close.
+    Returns the recording status (see video_status)."""
+    data, _ = query("capture.video.start", path=path, every=int(every), quality=int(quality),
+                    scale=int(scale), audio=bool(audio))
+    return data
+
+
+def video_stop() -> dict:
+    """Stop the recording and finalize the AVI (waits for the encoder to drain).
+    Returns {path, width, height, frames, audioFrames, audioRate, fps, seconds, bytes, segments}."""
+    data, _ = query("capture.video.stop", _wait_s=120.0)
+    return data
+
+
+def video_status() -> dict:
+    """Recording status: {recording, path, width, height, frames, audioFrames, audioRate,
+    fps, seconds (guest time), bytes, segments, queued (frames waiting for the encoder)}.
+    When idle, the stats of the last finished recording."""
+    data, _ = query("capture.video.status")
+    return data
+
+
 def capture_framebuffer(path: str = "kestrel_fb.png", height: int = 240, frame: int = 0) -> dict:
     """Grab the live VI framebuffer and write it as a PNG to `path`.
 
@@ -679,6 +722,10 @@ def _serve_mcp():
     mcp.tool()(controller_set)
     mcp.tool()(controller_state)
     mcp.tool()(capture_framebuffer)
+    mcp.tool()(screenshot)
+    mcp.tool()(video_start)
+    mcp.tool()(video_stop)
+    mcp.tool()(video_status)
     mcp.tool()(breakpoint_add)
     mcp.tool()(breakpoint_del)
     mcp.tool()(breakpoint_list)

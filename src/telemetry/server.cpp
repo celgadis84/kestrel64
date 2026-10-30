@@ -7,6 +7,7 @@
 #include "../core/movie.hpp"
 #include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
+#include "../video/capture.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -145,6 +146,8 @@ auto Server::dispatch(const json::Value& req, const std::vector<u8>& reqBlob, js
     cmdRspRegs(args, data); done();
   } else if(cmd == "vi.capture") {
     if(cmdViCapture(args, data, blob)) done(); else fail("vi.capture: VI blanked or bad geometry");
+  } else if(cmd.rfind("capture.", 0) == 0) {
+    if(cmdCapture(cmd, args, data)) done(); else fail(cmd + ": " + data.get("msg").asString());
   } else if(cmd == "cpu.bp.add") {
     cmdBpAdd(args, data); done();
   } else if(cmd == "cpu.bp.del") {
@@ -823,6 +826,51 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
 // then expands the pixels the same way the DAC does: 5/5/5/1 for 16bpp, direct
 // 8/8/8/8 for 32bpp. Height is not a hardware register — it falls out of the active
 // scan window, so we accept an optional `height` arg and default to what the VI scans.
+// capture.screenshot {path?} / capture.video.start {path?,every?,quality?,scale?,audio?} /
+// capture.video.stop / capture.video.status. Los ficheros los escribe el emulador (PNG y AVI
+// MJPEG+PCM, ver src/video/capture.hpp); aqui solo se encargan y se espera el parte.
+auto Server::cmdCapture(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
+  auto stats = [&](const capture::VideoStats& s) {
+    data.set("recording", s.recording).set("path", s.path)
+        .set("width", s.width).set("height", s.height)
+        .set("frames", s.frames).set("audioFrames", s.audioFrames).set("audioRate", s.audioRate)
+        .set("fps", s.fps).set("seconds", s.seconds).set("bytes", s.bytes)
+        .set("segments", s.segments).set("queued", s.queued);
+  };
+  if(cmd == "capture.screenshot") {
+    // La atiende el hilo del nucleo al cerrar el campo o, en pausa, en su vuelta de espera.
+    u64 id = capture::requestScreenshot(args.get("path").asString());
+    std::string path, err;
+    u32 w = 0, h = 0;
+    bool ok = capture::waitScreenshot(id, args.has("timeout_ms") ? args.get("timeout_ms").asU32() : 5000, path, w, h, err);
+    if(!ok) { data.set("msg", err); return false; }
+    data.set("path", path).set("width", w).set("height", h).set("format", "png");
+    if(vrdp::active()) data.set("note", "parallel-rdp activo: la foto sale de la RDRAM, no del escaneo de la GPU");
+    return true;
+  }
+  if(cmd == "capture.video.start") {
+    capture::VideoOpts o;
+    o.path = args.get("path").asString();
+    o.every = args.get("every").asU32(1);
+    o.quality = args.get("quality").asU32(90);
+    o.scale = args.get("scale").asU32(1);
+    const json::Value& a = args.get("audio");
+    if(a.type == json::Value::Type::Bool) o.audio = a.b;
+    std::string err;
+    if(!capture::startVideo(o, err)) { data.set("msg", err); return false; }
+    stats(capture::videoStats());
+    return true;
+  }
+  if(cmd == "capture.video.stop") {
+    if(!capture::recording()) { data.set("msg", "no hay grabacion en marcha"); return false; }
+    stats(capture::stopVideo());
+    return true;
+  }
+  if(cmd == "capture.video.status") { stats(capture::videoStats()); return true; }
+  data.set("msg", "comando desconocido");
+  return false;
+}
+
 auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool {
   // Con el backend de GPU vivo, la imagen BUENA no esta en la RDRAM: parallel-rdp rasteriza
   // y escanea por su cuenta, y lo que se ve en la ventana sale de vrdp::scanout() ya con el

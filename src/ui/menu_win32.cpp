@@ -4,6 +4,7 @@
 #include "library.hpp"
 #include "gamecard.hpp"
 #include "../core/runtime.hpp"
+#include "../video/capture.hpp"
 #include "debugger.hpp"
 
 #ifdef _WIN32
@@ -46,6 +47,7 @@ enum : UINT {
   kPause, kReset, kSaveState, kLoadState, kNextSlot,
   kFull, kHud,
   kAudioOn, kPadCfg, kAllOpts, kAbout, kDebugger, kGameCard, kCardDirect,
+  kShot, kRecord,
   kScale1  = 0x8140,              // +0..+6 (escala 1x..7x)
   kThrHw = 0x8160, kThrAuto, kThrOn, kThrOff,
   kSlot0   = 0x8170,              // +0..+9
@@ -228,6 +230,8 @@ auto buildMenu() -> void {
   addOptMenu(vid, "aspect", "&Aspecto");
   addOptMenu(vid, "filter", "&Filtro de imagen");
   addItem(vid, kFull, "&Pantalla completa\tF11");
+  addItem(vid, kShot, "Ca&ptura de pantalla\tF9");
+  addItem(vid, kRecord, "&Grabar video\tF8");
   addSep(vid);
   addOptMenu(vid, "plugin", "&Rasterizador");
   addOptMenu(vid, "upscale", "Escalado &interno");
@@ -295,6 +299,7 @@ auto syncMenu() -> void {
                 MF_BYCOMMAND | (rt::audioOn.load() ? MF_CHECKED : MF_UNCHECKED));
   CheckMenuItem(g_menu, kFull,
                 MF_BYCOMMAND | (g_prof.getBool("fullscreen") ? MF_CHECKED : MF_UNCHECKED));
+  CheckMenuItem(g_menu, kRecord, MF_BYCOMMAND | (capture::recording() ? MF_CHECKED : MF_UNCHECKED));
   CheckMenuItem(g_menu, kPause,
                 MF_BYCOMMAND | ((g_h.paused && g_h.paused->load()) ? MF_CHECKED : MF_UNCHECKED));
   CheckMenuItem(g_menu, kCardDirect,
@@ -1577,6 +1582,17 @@ auto onCommand(UINT id) -> void {
     case kNextSlot:
       if(g_h.stSlot) g_h.stSlot->store((g_h.stSlot->load() + 1) % 10);
       return;
+    case kShot:
+      // La escribe el hilo del nucleo al cerrar el campo; no se espera aqui (la ventana no
+      // se bloquea). La ruta sale por consola.
+      capture::requestScreenshot();
+      return;
+    case kRecord:
+      // stopVideo espera a que el codificador vacie la cola: unos pocos cuadros, no bloquea
+      // de forma apreciable.
+      capture::toggleVideo();
+      syncMenu();
+      return;
     case kFull: {
       bool now = !g_prof.getBool("fullscreen");
       g_prof.set("fullscreen", now ? "1" : "0");
@@ -1724,6 +1740,8 @@ LRESULT CALLBACK gameProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if(w == VK_F12) onCommand(kAllOpts);
         else if(w == VK_F11) onCommand(kFull);
+        else if(w == VK_F9) onCommand(kShot);
+        else if(w == VK_F8) onCommand(kRecord);
         else if(ctrl && w == 'O') onCommand(kOpenRom);
         else if(ctrl && w == 'P') onCommand(kPause);
         else if(ctrl && w == 'R') onCommand(kReset);

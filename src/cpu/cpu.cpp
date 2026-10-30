@@ -3,6 +3,7 @@
 #include "jit.hpp"          // CodeCache completo: cacheOp desenlaza las cadenas del dynarec
 #include "../core/memory.hpp"
 #include "../video/vifilter.hpp"
+#include "../video/capture.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -117,8 +118,10 @@ auto fbSeqField(Memory* mem, u32 field) -> void {
   dumpFramebufferBmp(mem, path);
 }
 
-static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
-  if(!mem) return;
+// Framebuffer que barre el VI en RGB24 de arriba abajo; lo comparten el volcado BMP y las
+// capturas (src/video/capture.hpp).
+auto grabFramebuffer(Memory* mem, FbGrab& out) -> bool {
+  if(!mem) return false;
   // KESTREL_FBFRAME=1: en entrelazado (SERRATE), el cuadro entero de los dos campos en vez
   // del campo que tocaba al salir.
   static const bool frame = [] { const char* e = std::getenv("KESTREL_FBFRAME"); return e && e[0] == '1'; }();
@@ -182,15 +185,29 @@ static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
     vi::fetchFiltered(ram.data(), ram.size(), mem->rdramHidden.data(), mem->rdramHidden.size(),
                       origin, srcW, w, h, viCtrl, filt.data());
   }
-  std::vector<u8> rgb((usize)w * h * 3, 0);
+  out.w = w; out.h = h; out.type = type; out.origin = origin;
+  out.rgb.assign((usize)w * h * 3, 0);
   for(u32 y = 0; y < h; y++) for(u32 x = 0; x < w; x++) {
     u32 R=0,G=0,B=0;
     u32 sx = x;
     if(!filt.empty()) { u32 c = filt[(usize)y*w+x]; R=c>>16; G=(c>>8)&0xff; B=c&0xff; }
     else if(type == 2) { u32 p = origin + (y*srcW+sx)*2; if(p+1 < ram.size()) { u32 px=((u32)ram[p]<<8)|ram[p+1]; R=exp5((px>>11)&0x1f); G=exp5((px>>6)&0x1f); B=exp5((px>>1)&0x1f); } }
     else if(type == 3) { u32 p = origin + (y*srcW+sx)*4; if(p+3 < ram.size()) { R=ram[p]; G=ram[p+1]; B=ram[p+2]; } }
-    usize o = ((usize)(h-1-y)*w + x)*3;             // BMP is bottom-up; store BGR
-    rgb[o]=(u8)B; rgb[o+1]=(u8)G; rgb[o+2]=(u8)R;
+    usize o = ((usize)y*w + x)*3;
+    out.rgb[o]=(u8)R; out.rgb[o+1]=(u8)G; out.rgb[o+2]=(u8)B;
+  }
+  return true;
+}
+
+static auto dumpFramebufferBmp(Memory* mem, const char* path) -> void {
+  FbGrab g;
+  if(!grabFramebuffer(mem, g)) return;
+  const u32 w = g.w, h = g.h, type = g.type, origin = g.origin;
+  std::vector<u8> rgb((usize)w * h * 3);
+  for(u32 y = 0; y < h; y++) for(u32 x = 0; x < w; x++) {   // BMP is bottom-up; store BGR
+    const u8* s = &g.rgb[((usize)y*w + x)*3];
+    u8* d = &rgb[((usize)(h-1-y)*w + x)*3];
+    d[0]=s[2]; d[1]=s[1]; d[2]=s[0];
   }
   u32 rowSize = ((w*3 + 3) & ~3u), imgSize = rowSize*h, fileSize = 54 + imgSize;
   FILE* f = std::fopen(path, "wb"); if(!f) return;

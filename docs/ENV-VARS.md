@@ -191,3 +191,13 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 - `KESTREL_USB=1` — USB del SummerCart64 (registros USB_*, salida de depuracion del homebrew); se lee por MCP `usb.log` y en el panel USB del depurador. Ver `docs/DEBUGGER.md`.
 - `KESTREL_DEBUGGER=1` (o `--debugger`) — abre la ventana del depurador al arrancar. Menu Depurar > Depurador... la abre en marcha.
 - `KESTREL_DEBUGGER_SHOT=<ruta.bmp>` — la ventana del depurador vuelca su backbuffer a los 180 cuadros (pruebas sin pantalla, `scripts/debugger_smoke.py`).
+
+## Capturas (2026-10-30, `src/video/capture.{hpp,cpp}`)
+
+- `KESTREL_CAPTURE_DIR=<carpeta>` — destino de fotos y videos sin ruta. Por defecto
+  `%USERPROFILE%\Pictures\kestrel64` (PNG) y `%USERPROFILE%\Videos\kestrel64` (AVI), nombre
+  `<rom>_<AAAAMMDD>_<HHMMSS>.png/.avi`.
+- `KESTREL_RECORD=<fichero.avi>` (vacio o `1` = carpeta por defecto) — graba video desde el
+  primer campo, para ejecuciones sin ventana; se cierra al salir. `KESTREL_RECORD_EVERY=N`
+  (un cuadro de cada N campos), `KESTREL_RECORD_QUALITY=1..100` (JPEG, 90),
+  `KESTREL_RECORD_SCALE=1..4` (ampliacion entera).

@@ -12,6 +12,7 @@
 #include "../gpurdp/gpurdp.hpp"
 #include "../vrdp/vrdp.hpp"   // vrdp::built: si ESTE .exe lleva el backend de GPU
 #include "runtime.hpp"
+#include "../video/capture.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -59,6 +60,19 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   this->romPath = romPath;         // base de los nombres de ranura de estado (rom.stN)
   cheats.loadForRom(romPath);      // KESTREL_CHEATS, o el .cht que haya al lado de la ROM
   texpack::init(rom.header.name); // KESTREL_TEXDUMP / KESTREL_TEXPACK / KESTREL_TEXFX
+  capture::setRomName(rom.header.name);
+  // KESTREL_RECORD=<fichero.avi> (vacio o "1" = carpeta por defecto): graba video desde el
+  // primer campo, para ejecuciones sin ventana. KESTREL_RECORD_EVERY/_QUALITY/_SCALE.
+  if(const char* rec = std::getenv("KESTREL_RECORD")) {
+    capture::VideoOpts vo;
+    if(*rec && std::strcmp(rec, "1")) vo.path = rec;
+    auto envU = [](const char* n, u32 d) { const char* e = std::getenv(n); return e && *e ? (u32)std::strtoul(e, nullptr, 0) : d; };
+    vo.every = envU("KESTREL_RECORD_EVERY", 1);
+    vo.quality = envU("KESTREL_RECORD_QUALITY", 90);
+    vo.scale = envU("KESTREL_RECORD_SCALE", 1);
+    std::string err;
+    if(!capture::startVideo(vo, err)) std::printf("[captura] %s\n", err.c_str());
+  }
   if(texpack::active() && vrdp::built && !(gpurdp::built && gpurdp::wanted())) {
     const char* pe = std::getenv("KESTREL_PRDP");
     if(!pe || pe[0] != '0')
@@ -965,6 +979,7 @@ auto System::run() -> void {
     // Una peticion de estado en pausa hace correr la CPU hasta el reposo del RCP (ver
     // rcpAtRest); en cuanto se atiende, la pausa vuelve a mandar.
     if((paused.load() && !fadv && !stateReqPending()) || cpu.halted) {
+      { std::lock_guard<CoreMutex> lk(coreMutex); capture::onIdle(&memory); }   // foto en pausa
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       winT0 = clock::now(); winInsn = 0; winRsp = rspNow();  // don't fold idle time into speed
       winRdpNs = memory.rdpBusyNs.load(std::memory_order_relaxed);
@@ -991,6 +1006,7 @@ auto System::run() -> void {
       // VI_V_CURRENT y drena el AI en cada subtramo aunque no haya cruzado nada.
       if(viFieldPend) { fieldClosed = true; viFieldPend = false; }
       if(fieldClosed) fbSeqField(&memory, memory.rcp.viFields);   // KESTREL_FBSEQ (cpu.cpp)
+      if(fieldClosed) capture::onField(&memory);                  // fotos F9/MCP y video
       // El PIF paro la CPU (NMI sostenida): la consola se queda congelada hasta apagarla.
       if(memory.pifFrozen && !cpu.halted) cpu.halted = true;
       resetButton();
@@ -1555,6 +1571,7 @@ auto System::run() -> void {
   }
   hostprof::stop();
   movie::finish();
+  capture::shutdown();       // cierra el AVI abierto (cabecera e idx1)
   shutdown.store(true);
   if(wdog.joinable()) { shutdown.store(true); wdog.join(); }
   if(occTh.joinable()) occTh.join();

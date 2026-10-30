@@ -56,6 +56,7 @@ add_executable(kestrel64
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/ui/optdefs.cpp
   src/ui/profile.cpp
   src/ui/menu_win32.cpp
@@ -95,6 +96,7 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(rsp_test PRIVATE src)
@@ -117,6 +119,7 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(save_test PRIVATE src)
@@ -139,6 +142,7 @@ add_executable(tpak_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(tpak_test PRIVATE src)
@@ -163,6 +167,7 @@ add_executable(wildmem_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(wildmem_test PRIVATE src)
@@ -187,6 +192,7 @@ add_executable(watch_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(watch_test PRIVATE src)
@@ -210,6 +216,7 @@ add_executable(pif_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(pif_test PRIVATE src)
@@ -233,6 +240,7 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
+  src/video/capture.cpp
   src/debug/dbg.cpp
 )
 target_include_directories(cheat_test PRIVATE src)
