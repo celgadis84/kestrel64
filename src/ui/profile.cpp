@@ -384,8 +384,8 @@ auto toEnv(const Profile& p, std::vector<std::pair<std::string, std::string>>& e
 
   std::string plug = p.get("plugin");
   // Automatico = el defecto del binario (GPU-RDP); texturas HD y realce van en GPU-RDP y SoftRDP.
-  if(plug == "gpurdp") put("KESTREL_GPURDP", "1");
-  else if(plug == "prdp") { put("KESTREL_GPURDP", "0"); put("KESTREL_PRDP", "1"); }
+  // "prdp" (paraLLEl-RDP, retirado del menu 2026-10-30) en un perfil viejo = GPU-RDP.
+  if(plug == "gpurdp" || plug == "prdp") put("KESTREL_GPURDP", "1");
   else if(plug == "soft") { put("KESTREL_GPURDP", "0"); put("KESTREL_PRDP", "0"); }
 
   // Relanzarse siempre es "modo usuario": corriendo Y con ventana, salvo que se pida pausa

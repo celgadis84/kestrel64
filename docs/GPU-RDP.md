@@ -571,5 +571,14 @@ Medido (SM64, 100 intercambios desde arranque, ventana, RX 570):
 - 1x de la RDRAM intacto: sm64 `gpurdp-jit` md5 `b5521b24` con y sin `KESTREL_UPSCALE=4`.
 - 6/6 arranques x4 sin cuelgue (vigilar: un primer intento se paso de 60 s y no se repitio).
 - **Retirar parallel-RDP**: el bloqueo de rendimiento ya no existe (1x en ruido, x2/x4 a la
-  par, x8 7x mejor). Quedan dependencias de herramientas: `pdbench.py` fija prdp,
-  `gate_prdp.sh` y sus baselines, opcion de Rasterizador del menu/lanzador.
+  par, x8 7x mejor).
+  - **Fase 1 HECHA 2026-10-30**: fuera de la opcion Rasterizador (menu del exe y lanzador; un
+    `prdp` guardado = GPU-RDP), fuera de `release.sh --gates` (ahora `gate_all` +
+    `gate_gpurdp` sobre el exe estatico), `pdbench.py` mide con GPU-RDP (las filas viejas de
+    `docs/baselines/pd-opt.md` eran parallel-RDP), `fidelity.py --rdp gpu` por defecto.
+    `KESTREL_PRDP=1` a mano sigue funcionando y avisa por stderr.
+  - **Fase 2 (siguiente version)**: borrar `third_party/parallel-rdp*`, la parte Granite de
+    `src/vrdp/` (lo que comparten presentador y GPU-RDP, como `vrdp::queueLock` y el contexto
+    Vulkan compartido, se queda), `gate_prdp.sh` y sus baselines (`krom-prdp.tsv`,
+    `sm64-prdp.txt`), los modos `prdp*` de `validate.py`, `KESTREL_PRDP_STATS`; renombrar la
+    opcion de cmake y los arboles `build-prdp*`.

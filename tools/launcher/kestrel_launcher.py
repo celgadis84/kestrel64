@@ -202,11 +202,13 @@ def builds():
                 out.append(dict(id=p2, label=l2, dir=".", exe=exe,
                                 desc=DESC[p2], mtime=int(os.path.getmtime(exe))))
     # GPU-RDP (propio, Vulkan compute) va dentro del mismo .exe que parallel-RDP y es su
-    # defecto desde la fase 7 (2026-10-06, docs/GPU-RDP.md).
-    for x in list(out):
+    # defecto desde la fase 7 (2026-10-06, docs/GPU-RDP.md). parallel-RDP ya no se ofrece
+    # (2026-10-30): el exe que lo lleva se presenta como GPU-RDP.
+    for i, x in enumerate(out):
         if x["id"] == "prdp":
-            out.insert(0, dict(x, id="gpurdp", label="GPU-RDP", desc=GPURDP_DESC))
+            out[i] = dict(x, id="gpurdp", label="GPU-RDP", desc=GPURDP_DESC)
             break
+    out.sort(key=lambda x: x["id"] != "gpurdp")
     return out
 
 
@@ -214,12 +216,14 @@ def pick_exe(plugin):
     b = builds()
     if not b:
         return None
-    if plugin in ("gpurdp", "soft", "prdp"):
+    if plugin == "prdp":          # config de antes de retirarlo del menu
+        plugin = "gpurdp"
+    if plugin in ("gpurdp", "soft"):
         for x in b:
             if x["id"] == plugin:
                 return x
     # auto: GPU-RDP si esta compilado (el .exe de parallel-RDP lo lleva), si no SoftRDP.
-    for want in ("gpurdp", "prdp", "soft"):
+    for want in ("gpurdp", "soft"):
         for x in b:
             if x["id"] == want:
                 return x

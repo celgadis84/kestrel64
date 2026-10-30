@@ -10581,3 +10581,12 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   (parallel-RDP 52,5), x2 5,9 s. Detalle x4 igual que el camino sincrono (0,336 / 0,337); md5
   1x `b5521b24` con y sin x4. `KESTREL_GPURDP_MINPX_HI` retirado; `KESTREL_GPURDP_HISYNC=1` =
   camino anterior. Detalle `docs/GPU-RDP.md` Fase 7.
+
+## 2026-10-30 (f) — parallel-RDP retirado del menu y de las puertas (GAPS #15, fase 1)
+
+- Opcion Rasterizador (exe y lanzador): solo Automatico / GPU-RDP / SoftRDP; un `prdp` guardado
+  se lee como GPU-RDP. `KESTREL_PRDP_STATS` fuera del menu.
+- `release.sh --gates`: `gate_all` + `gate_gpurdp` (sobre el exe estatico); `gate_prdp` ya no.
+  `pdbench.py` mide con GPU-RDP; `fidelity.py --rdp gpu` por defecto.
+- El codigo sigue una version mas: `KESTREL_PRDP=1` a mano lo elige y avisa por stderr. Fase 2
+  (borrar `third_party/`, Granite de `src/vrdp/`, `gate_prdp` y baselines) en `docs/GPU-RDP.md`.

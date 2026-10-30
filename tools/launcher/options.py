@@ -173,11 +173,10 @@ CATEGORIES = [
     O("plugin", None, "Rasterizador (plugin grafico)", "choice", "auto",
       values=[["auto", "Automatico - la compilacion disponible"],
               ["gpurdp", "GPU-RDP - rasterizador propio en Vulkan compute, igual que SoftRDP"],
-              ["soft", "SoftRDP - rasterizador propio en CPU, determinista"],
-              ["prdp", "paraLLEl-RDP - LLE por Vulkan en GPU (se retirara)"]],
-      help="Un solo ejecutable con los tres. Automatico = GPU-RDP si hay GPU con Vulkan, "
-           "si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Texturas HD y realce "
-           "van con GPU-RDP y SoftRDP, no con paraLLEl-RDP. Cambiarlo relanza el emulador."),
+              ["soft", "SoftRDP - rasterizador propio en CPU, determinista"]],
+      help="Un solo ejecutable con los dos. Automatico = GPU-RDP si hay GPU con Vulkan, "
+           "si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Cambiarlo relanza "
+           "el emulador."),
     O("video", "KESTREL_VIDEO", "Abrir ventana", "bool", True,
       "Apagado = sin ventana (modo lote / captura)."),
     O("winscale", "KESTREL_WINSCALE", "Escala de ventana", "choice", "2",
@@ -245,7 +244,6 @@ CATEGORIES = [
     O("noblend", "KESTREL_NOBLEND", "Mezclador (blender)", "bool", True, invert=True),
     O("noraster", "KESTREL_NORASTER", "Rasterizado", "bool", True, invert=True, adv=True,
       help="Apagado no dibuja nada: sirve para medir cuanto cuesta el rasterizador."),
-    O("prdp_stats", "KESTREL_PRDP_STATS", "Estadisticas de paraLLEl-RDP", "bool", False, adv=True),
     O("video_test", "KESTREL_VIDEO_TEST", "Patron de prueba", "bool", False, adv=True),
     O("video_dump", "KESTREL_VIDEO_DUMP", "Volcar cada campo a BMP", "path", "", adv=True),
   ]),
@@ -545,11 +543,9 @@ def to_env(profile):
     # nada y deja el defecto del binario, que es la GPU cuando el backend esta compilado;
     # "soft" tiene que decir "0" EXPLICITO, porque quitar la variable ya no apaga nada.
     plug = str(p.get("plugin", "auto"))
-    if plug == "gpurdp":
+    # "prdp" (paraLLEl-RDP, retirado del menu 2026-10-30) en una config vieja = GPU-RDP.
+    if plug in ("gpurdp", "prdp"):
         env["KESTREL_GPURDP"] = "1"
-    elif plug == "prdp":
-        env["KESTREL_GPURDP"] = "0"
-        env["KESTREL_PRDP"] = "1"
     elif plug == "soft":
         env["KESTREL_GPURDP"] = "0"
         env["KESTREL_PRDP"] = "0"

@@ -102,10 +102,11 @@ maquina sin Vulkan, y eso es lo que se arreglo:
   falte el driver.
 
 El plugin se elige como en el resto de emuladores: menu de la ventana Opciones > Video >
-Rasterizador (`auto`/`gpurdp`/`soft`/`prdp`, se relanza solo) o la misma opcion en el
+Rasterizador (`auto`/`gpurdp`/`soft`, se relanza solo) o la misma opcion en el
 lanzador. Desde 2026-10-06 (fase 7 de `docs/GPU-RDP.md`) `auto` = GPU-RDP propio si hay GPU con
-Vulkan, si no SoftRDP; texturas HD y realce van en los dos. parallel-RDP queda como alternativa
-hasta retirarlo. El lanzador, instalado, ofrece los tres sobre el mismo exe.
+Vulkan, si no SoftRDP; texturas HD y realce van en los dos. parallel-RDP salio del menu y del
+lanzador el 2026-10-30 (un `prdp` guardado en una config vieja se lee como GPU-RDP); queda en
+el exe una version mas, solo con `KESTREL_PRDP=1` a mano.
 `build-static` (SoftRDP sin parallel-RDP) se sigue compilando porque es el exe de las
 puertas rapidas, pero ya no viaja.
 

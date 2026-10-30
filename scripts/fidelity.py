@@ -491,8 +491,8 @@ def main():
     ap.add_argument("--libdragon-rom", default="testrom_emu.z64")
     ap.add_argument("--kmode", default="faithful", choices=["faithful", "default"],
                     help="kestrel: faithful (gate settings) or default (shipped speed settings)")
-    ap.add_argument("--rdp", default="prdp", choices=sorted(RDP_ENV),
-                    help="kestrel RDP backend: prdp (parallel-rdp, reference), gpu (GPU-RDP), soft")
+    ap.add_argument("--rdp", default="gpu", choices=sorted(RDP_ENV),
+                    help="kestrel RDP backend: gpu (GPU-RDP, default), soft, prdp (parallel-rdp, being retired)")
     ap.add_argument("--report", default=str(OUT / "fidelity.md"))
     ap.add_argument("--quiet", action="store_true")
     ARGS = args = ap.parse_args()

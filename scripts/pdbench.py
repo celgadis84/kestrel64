@@ -83,12 +83,11 @@ def main():
     env = dict(os.environ)
     env.update({"KESTREL_SPEEDMODE": "hw", "KESTREL_SPLEAD": "0",
                 "KESTREL_THROTTLE": "0"})   # con ventana el modo fiel limita a 59,94 Hz
-    # Rasterizador fijo para que la tabla de docs/baselines/pd-opt.md siga comparable: desde la
-    # fase 7 del GPU-RDP (2026-10-06) el defecto del exe es GPU-RDP y aqui se media con
-    # parallel-RDP. Se puede pisar desde el entorno (KESTREL_GPURDP=1 da pixeles escritos y de z
-    # EXACTOS en rdp.stats; con parallel-RDP son cota superior).
-    if not env.get("KESTREL_GPURDP"):
-        env.setdefault("KESTREL_PRDP", "1")
+    # Rasterizador: GPU-RDP (defecto del exe; pixeles escritos y de z EXACTOS en rdp.stats).
+    # Hasta 2026-10-30 se fijaba parallel-RDP: las filas de docs/baselines/pd-opt.md
+    # anteriores se midieron con el y no son comparables 1:1. KESTREL_PRDP=1 lo sigue
+    # eligiendo mientras el codigo exista.
+    env.setdefault("KESTREL_GPURDP", "1")
     if a.mode == "lockstep":
         env.update({"KESTREL_THREADS": "0", "KESTREL_JIT": "1"})
     else:

@@ -57,13 +57,16 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
   `dist/` + zip. See `docs/distribucion.md`.
 - **REGLA: cada generacion de .exe genera TODO** — los cuatro arboles, el lanzador grafico
   congelado, el zip portable y el instalador. Un solo comando, `sh scripts/release.sh`
-  (`--gates` para pasar antes `gate_all` + `gate_prdp`, `--quick` para saltarse `build/` y
+  (`--gates` para pasar `gate_all` + `gate_gpurdp`, `--quick` para saltarse `build/` y
   `build-prdp/` e iterar solo sobre los estaticos, `NOISS=1` para omitir el instalador). Deja
   `dist/VERSION.txt` con version, commit y md5 para que un zip suelto diga de donde salio.
-- Desde 2026-10-06 ese exe arranca con **GPU-RDP** (propio) de fabrica; parallel-RDP queda como
-  alternativa (`KESTREL_PRDP=1`) hasta retirarlo. Las puertas fijan `KESTREL_PRDP` siempre.
+- Desde 2026-10-06 ese exe arranca con **GPU-RDP** (propio) de fabrica. **parallel-RDP retirado
+  del menu, del lanzador y de las puertas el 2026-10-30** (fase 1); su codigo (`third_party/`,
+  `src/vrdp/`) sigue una version mas y solo se elige a mano con `KESTREL_PRDP=1` (avisa).
+  `-DKESTREL_PRDP=ON` sigue siendo la opcion de cmake que compila el backend Vulkan (GPU-RDP
+  incluido). Las puertas fijan `KESTREL_PRDP` siempre.
 - El paquete lleva **un** ejecutable (desde 2026-10-05): `kestrel64.exe` (`build-prdp-static`)
-  trae parallel-RDP y SoftRDP, elegibles en Video > Rasterizador (`KESTREL_PRDP=0/1`), y sin
+  trae GPU-RDP y SoftRDP, elegibles en Video > Rasterizador (`KESTREL_PRDP=0`), y sin
   Vulkan cae a SoftRDP con la ventana pintada por GDI (`KESTREL_FORCEGDI=1` lo fuerza).
   `build-static` sigue existiendo para las puertas pero no viaja. Ver `docs/distribucion.md`.
 - La carpeta de ROMs se recorre **recursiva** (biblioteca del exe y lanzador), tope 8 niveles,

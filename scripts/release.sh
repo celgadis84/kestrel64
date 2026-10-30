@@ -20,7 +20,8 @@
 #
 # Uso:
 #   sh scripts/release.sh            # todo
-#   sh scripts/release.sh --gates    # ademas pasa gate_all + gate_prdp ANTES de empaquetar
+#   sh scripts/release.sh --gates    # ademas gate_all ANTES de empaquetar y gate_gpurdp sobre
+#                                    # el exe estatico (parallel-RDP fuera de puertas 2026-10-30)
 #   sh scripts/release.sh --quick    # solo los arboles estaticos + empaquetado (iteracion rapida)
 #   NOISS=1 sh scripts/release.sh    # sin instalador
 set -e
@@ -74,13 +75,16 @@ fi
 if [ -n "$GATES" ]; then
   echo "== puertas =="
   sh scripts/gate_all.sh
-  sh scripts/gate_prdp.sh
   kill_exes
 fi
 
 echo "== build-prdp-static/ (lo que se distribuye) =="
 conf build-prdp-static -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
 cmake --build build-prdp-static -j8
+if [ -n "$GATES" ]; then
+  sh scripts/gate_gpurdp.sh
+  kill_exes
+fi
 
 # build-static (sin parallel-RDP) ya NO viaja en el paquete: el exe que se distribuye lleva
 # los dos rasterizadores. Se sigue compilando porque es el exe de las puertas rapidas.

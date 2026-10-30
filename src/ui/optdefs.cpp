@@ -28,7 +28,6 @@ static const Choice kCh_plugin[] = {
   {"auto", "Automatico - la compilacion disponible"},
   {"gpurdp", "GPU-RDP - rasterizador propio en Vulkan compute, igual que SoftRDP"},
   {"soft", "SoftRDP - rasterizador propio en CPU, determinista"},
-  {"prdp", "paraLLEl-RDP - LLE por Vulkan en GPU (se retirara)"},
 };
 static const Choice kCh_winscale[] = {
   {"1", "1x - 320x240"},
@@ -150,7 +149,7 @@ static const Option kOpt_oc[] = {
 };
 
 static const Option kOpt_video[] = {
-  {"plugin", nullptr, "Rasterizador (plugin grafico)", OType::Choice, "auto", "Un solo ejecutable con los tres. Automatico = GPU-RDP si hay GPU con Vulkan, si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Texturas HD y realce van con GPU-RDP y SoftRDP, no con paraLLEl-RDP. Cambiarlo relanza el emulador.", false, false, false, 0, 0, 0, kCh_plugin, 4, false},
+  {"plugin", nullptr, "Rasterizador (plugin grafico)", OType::Choice, "auto", "Un solo ejecutable con los dos. Automatico = GPU-RDP si hay GPU con Vulkan, si no SoftRDP (y sin Vulkan la ventana se pinta por GDI). Cambiarlo relanza el emulador.", false, false, false, 0, 0, 0, kCh_plugin, 3, false},
   {"video", "KESTREL_VIDEO", "Abrir ventana", OType::Bool, "1", "Apagado = sin ventana (modo lote / captura).", false, false, false, 0, 0, 0, nullptr, 0, false},
   {"winscale", "KESTREL_WINSCALE", "Escala de ventana", OType::Choice, "2", "", false, false, false, 0, 0, 0, kCh_winscale, 7, true},
   {"winsize", "KESTREL_WINSIZE", "Tamano exacto WxH", OType::Text, "", "Vacio = usar la escala. Ejemplo: 1600x900. Manda sobre la escala.", false, false, false, 0, 0, 0, nullptr, 0, true},
@@ -167,7 +166,6 @@ static const Option kOpt_video[] = {
   {"nofilter", "KESTREL_NOFILTER", "Filtrado de texturas", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, false},
   {"noblend", "KESTREL_NOBLEND", "Mezclador (blender)", OType::Bool, "1", "", false, true, false, 0, 0, 0, nullptr, 0, false},
   {"noraster", "KESTREL_NORASTER", "Rasterizado", OType::Bool, "1", "Apagado no dibuja nada: sirve para medir cuanto cuesta el rasterizador.", true, true, false, 0, 0, 0, nullptr, 0, false},
-  {"prdp_stats", "KESTREL_PRDP_STATS", "Estadisticas de paraLLEl-RDP", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"video_test", "KESTREL_VIDEO_TEST", "Patron de prueba", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"video_dump", "KESTREL_VIDEO_DUMP", "Volcar cada campo a BMP", OType::Path, "", "", true, false, false, 0, 0, 0, nullptr, 0, false},
 };

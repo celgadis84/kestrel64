@@ -212,11 +212,8 @@ function buildVideo() {
     {id: "soft", label: "SoftRDP",
      desc: "Rasterizador propio en CPU. Determinista y sin GPU: es el oraculo de correccion.",
      ok: have.has("soft"), tag: "build/"},
-    {id: "prdp", label: "paraLLEl-RDP",
-     desc: "RDP a bajo nivel sobre Vulkan, en la GPU. Alternativa; se retirara.",
-     ok: have.has("prdp"), tag: "build-prdp/"},
   ];
-  const cur = CFG.plugin || "auto";
+  const cur = CFG.plugin === "prdp" ? "gpurdp" : (CFG.plugin || "auto");   // prdp retirado
   cards.innerHTML = "";
   defs.forEach(d => {
     const c = document.createElement("div");
@@ -662,7 +659,8 @@ function updateDock() {
   img.src = artUrl(r);
   img.onerror = () => img.removeAttribute("src");
   const bl = BUILDS.find(b => b.id === (CFG.plugin === "auto" || !CFG.plugin
-    ? (BUILDS.some(x => x.id === "prdp") ? "prdp" : "soft") : CFG.plugin));
+    ? (BUILDS.some(x => x.id === "gpurdp") ? "gpurdp" : "soft")
+    : CFG.plugin === "prdp" ? "gpurdp" : CFG.plugin));
   const link = CFG.oc_link !== false;
   const oc = link ? Number(CFG.oc_all || 1) : Number(CFG.oc_cpu || 1);
   $("#dock-badges").innerHTML = [

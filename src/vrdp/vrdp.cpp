@@ -173,6 +173,9 @@ auto init(u8* rdram, u32 size) -> bool {
   // solo -- no hay configuracion que dejar puesta para que una maquina sin GPU funcione.
   const char* e = std::getenv("KESTREL_PRDP");
   if(e && e[0] == '0') return false;
+  if(e && e[0])
+    std::fprintf(stderr, "[vrdp] parallel-RDP esta retirado del menu y se quitara del todo; "
+                         "GPU-RDP es el defecto (docs/GPU-RDP.md)\n");
 
   // This thread (the RDP worker) is the sole Granite driver — register it as index 0 so
   // Granite's per-thread lookups resolve instead of spamming "thread does not exist".
