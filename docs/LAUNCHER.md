@@ -708,5 +708,23 @@ MISMOS ficheros que el lanzador, asi que las dos caras ven la misma ficha. Prueb
 
 ## Que falta
 
-- Segundo, tercer y cuarto mando (hoy solo `KESTREL_PAD1`).
-- Cambiar opciones en caliente sin reiniciar el emulador.
+- ~~Segundo, tercer y cuarto mando~~ hecho 2026-09-04 (dialogo de mandos 1-4, `docs/GAPS.md` #1).
+- ~~Cambiar opciones en caliente sin reiniciar el emulador~~ hecho 2026-10-30 para lo que no
+  monta la maquina: ventana, HUD, audio, limitador, aspecto, filtro (de antes) y ahora trucos,
+  rebobinado y texturas HD / realce / volcado. El menu marca con (*) las que siguen pidiendo
+  relanzar (CPU/JIT, RCP, RDRAM, guardado, rasterizador, escalado interno, overclock).
+
+### Opciones en caliente (2026-10-30)
+
+El catalogo (`tools/gen_optdefs.py`, conjunto `LIVE`) dice cuales se aplican sin relanzar. Las
+nuevas las recoge el NUCLEO, no el presentador: el menu traduce el perfil con `toEnv` (mismas
+reglas que al relanzar), deja los valores en `rt::LiveOpts` (`src/core/runtime.hpp`) y sube
+`rt::liveReq`; `System::serviceStateReq` lo atiende como un estado guardado -- espera al reposo
+del RCP, para el nucleo -- y `System::applyLiveOpts` toca solo lo que cambio:
+
+- trucos: `Cheats::reload` (los A0/A1 de arranque no se repiten si el arranque ya paso);
+- rebobinado: `rewind::Engine::configure` (encender/apagar, tope, ritmo; la cinta se tira);
+- texturas: `texpack::reconfigure` (tira caches y sube `g_epoch`, que el GPU-RDP ya vigila).
+
+Los valores viajan por memoria y no por `setenv`: tocar el entorno con otros hilos leyendolo no
+es seguro. Lo mismo por telemetria: `options.live` / MCP `options_live(...)`.

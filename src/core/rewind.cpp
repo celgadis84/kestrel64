@@ -12,15 +12,26 @@ namespace kestrel::rewind {
 
 auto Engine::init() -> void {
   const char* on = std::getenv("KESTREL_REWIND");
-  enabled = on && *on && std::strcmp(on, "0") != 0;
-  if(!enabled) return;
+  if(!(on && *on && std::strcmp(on, "0") != 0)) { enabled = false; return; }
   const char* mb = std::getenv("KESTREL_REWIND_MB");
   const char* iv = std::getenv("KESTREL_REWIND_FIELDS");
-  u64 mbv = mb ? std::strtoull(mb, nullptr, 0) : 256;
+  configure(true, mb ? (u32)std::strtoul(mb, nullptr, 0) : 256, iv ? (u32)std::strtoul(iv, nullptr, 0) : 2);
+}
+
+auto Engine::configure(bool on, u32 mb, u32 fields) -> void {
+  clear();
+  enabled = on;
+  if(!enabled) {
+    std::vector<u8>().swap(cur);
+    std::vector<u8>().swap(scratch);
+    std::printf("[rewind] apagado\n");
+    std::fflush(stdout);
+    return;
+  }
+  u64 mbv = mb;
   if(mbv < 8) mbv = 8;
   budget = mbv << 20;
-  interval = iv ? (u32)std::strtoul(iv, nullptr, 0) : 2;
-  if(interval == 0) interval = 1;
+  interval = fields ? fields : 1;
   std::printf("[rewind] activo: foto cada %u campos, tope %llu MB\n",
               interval, (unsigned long long)(budget >> 20));
   std::fflush(stdout);

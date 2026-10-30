@@ -620,17 +620,19 @@ auto System::serviceStateReq() -> void {
   int load = stateLoadReq.exchange(-1, std::memory_order_acq_rel);
   u32 rew  = rewindReq.exchange(0, std::memory_order_acq_rel);
   const bool netSync = netSyncReq.exchange(false, std::memory_order_acq_rel);
+  const bool live = rt::liveReq.exchange(false, std::memory_order_acq_rel);
   // En red la maquina es de todos: cargar o rebobinar aqui la sacaria de la partida.
   if(netplay::lockstep() && (load >= 0 || rew)) {
     load = -1; rew = 0;
     std::printf("[state] no se carga ni se rebobina durante el juego en red\n");
     std::fflush(stdout);
   }
-  if(save < 0 && load < 0 && !rew && !netSync) return;
+  if(save < 0 && load < 0 && !rew && !netSync && !live) return;
 
   std::lock_guard<CoreMutex> lk(coreMutex);
   quiesceRcp();
   if(netSync) netplay::serviceSync(*this);
+  if(live) applyLiveOpts();
   if(save < 0 && load < 0 && !rew) return;
 
   std::string err, msg;
@@ -663,6 +665,25 @@ auto System::serviceStateReq() -> void {
   std::fflush(stdout);
   { std::lock_guard<std::mutex> ml(stateMsgMutex); stateMsg = msg; }
   stateSeq.fetch_add(1, std::memory_order_release);
+}
+
+auto System::applyLiveOpts() -> void {
+  rt::LiveOpts o;
+  { std::lock_guard<std::mutex> lk(rt::liveMx); o = rt::liveOpts; }
+  // Lo aplicado la ultima vez: solo se toca lo que cambio (recargar trucos o tirar la cinta
+  // de rebobinado sin motivo no es gratis ni inocuo).
+  static rt::LiveOpts cur = rt::liveFromEnv();
+  if(o.cheats != cur.cheats) cheats.reload(romPath, o.cheats);
+  if(o.rewind != cur.rewind || o.rewindMb != cur.rewindMb || o.rewindFields != cur.rewindFields)
+    rewinder.configure(o.rewind, o.rewindMb, o.rewindFields);
+  if(o.texfx != cur.texfx || o.texdump != cur.texdump || o.texpack != cur.texpack) {
+    texpack::reconfigure(o.texfx, o.texdump, o.texpack);
+    if(texpack::active() && vrdp::built && !(gpurdp::built && gpurdp::wanted()))
+      std::printf("[texpack] texturas HD/realce solo con GPU-RDP o SoftRDP: Video > "
+                  "Rasterizador (parallel-RDP no las admite)\n");
+  }
+  cur = o;
+  std::fflush(stdout);
 }
 
 auto System::run() -> void {

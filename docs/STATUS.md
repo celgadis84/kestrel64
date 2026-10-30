@@ -10509,3 +10509,20 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   detectado por el invitado. UPnP: en esta red ningun dispositivo responde a SSDP (ni
   `ssdp:all`), asi que solo esta probado el camino "sin router" (aviso y la partida sigue);
   el mapeo real queda por probar en una red con UPnP.
+
+## 2026-10-30 — opciones en caliente: trucos, rebobinado y texturas HD sin relanzar
+
+- Antes solo ventana/HUD/audio/limitador/aspecto/filtro se aplicaban en marcha; el resto pedia
+  "Guardar y reiniciar". Ahora tambien trucos (`KESTREL_CHEATS`), rebobinado (encender, tope,
+  ritmo) y texturas HD / realce / volcado (`KESTREL_TEXPACK/TEXFX/TEXDUMP`).
+- Camino: menu -> `rt::LiveOpts` + `rt::liveReq` (`src/core/runtime.hpp`) -> `System::serviceStateReq`
+  (reposo del RCP, nucleo parado, igual que un estado guardado) -> `System::applyLiveOpts`, que
+  solo toca lo que cambio: `Cheats::reload`, `rewind::Engine::configure`, `texpack::reconfigure`.
+  Telemetria `options.live`, MCP `options_live`. Detalle en `docs/LAUNCHER.md`.
+- Probado (SM64, `build/` SoftRDP y `build-prdp/` GPU-RDP con escalado 2x): rebobinado
+  encendido en marcha (80 pasos en 3 s, rebobinar 5 vale) y apagado (rewind_step rechazado);
+  truco 81 cargado en marcha escribe su palabra; misma escena (rebobinar 3 + avanzar 6 campos
+  en pausa) da el mismo md5 dos veces, otro con realce `poster` y otra vez el original al
+  quitarlo.
+- GAPS #6 decia que faltaban texturas HD en la GPU: ya estaban en GPU-RDP desde 2026-10-06.
+  Corregido; queda solo el contorno cel por profundidad.

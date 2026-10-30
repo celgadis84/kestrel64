@@ -9,7 +9,9 @@ Canal de sustitucion de texturas del SoftRDP (`src/rdp/texpack.{hpp,cpp}` + ganc
 | `KESTREL_TEXDUMP=<carpeta>` | vuelca cada textura distinta que dibuja el juego, con nombre de pack |
 | `KESTREL_TEXFX=scale4x\|cel\|poster` | realza por algoritmo las texturas originales (sin pack) |
 
-Las tres van tambien en el lanzador y el menu (grupo de video). Apagadas no hacen nada:
+Las tres van tambien en el lanzador y el menu (grupo de video), y desde el menu se cambian en
+caliente (Opciones > Aplicar, o MCP `options_live`): el nucleo las recoge en el proximo reposo
+del RCP, sin relanzar. Apagadas no hacen nada:
 cada gancho mira `texpack::active()` y sale; puertas y md5 no se mueven.
 
 **GPU-RDP (de fabrica) y SoftRDP.** Desde 2026-10-06 el GPU-RDP muestrea el sustituto en la GPU
@@ -67,8 +69,9 @@ y el color/forma del dibujo nuevo. Para que no centellee de lejos:
 - No se sustituye cuando el juego usa su propio mipmap (`TEX_LOD_EN`), ni en COPY a un
   framebuffer de 8 bits (escribe indices), ni YUV.
 
-Para verlo de verdad en alta resolucion habria que rasterizar a mas resolucion, que es lo que
-hace parallel-RDP con `KESTREL_UPSCALE`; las dos cosas no se combinan hoy.
+Para verlo de verdad en alta resolucion hay que rasterizar a mas resolucion: el GPU-RDP (el de
+fabrica) muestrea los sustitutos en la GPU (`docs/GPU-RDP.md`, fase 6 parte 2) y lo combina
+con `KESTREL_UPSCALE`. parallel-RDP no los admite.
 
 ## Hacer un pack propio con IA (Real-ESRGAN y similares)
 

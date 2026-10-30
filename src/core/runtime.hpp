@@ -57,6 +57,41 @@ inline std::mutex       tpakMx;
 inline std::string      tpakRom[4];
 inline std::atomic<u32> tpakGen[4] = {{0}, {0}, {0}, {0}};
 
+// Opciones que el nucleo recoge EN CALIENTE (menu Opciones > Aplicar): trucos, rebobinado y
+// texturas HD / realce. El menu deja aqui los valores ya traducidos con las reglas de
+// `toEnv` y sube `liveReq`; System::serviceStateReq los aplica con el RCP en reposo y el
+// nucleo parado, que es el unico momento en que nadie esta leyendo un truco, una foto de la
+// cinta o una textura sustituta. Los valores viajan aqui y no por setenv: cambiar el entorno
+// con otros hilos leyendolo no es seguro.
+struct LiveOpts {
+  std::string cheats;              // KESTREL_CHEATS ("" = el .cht de al lado de la ROM)
+  std::string texfx, texdump, texpack;
+  bool rewind = false;
+  u32  rewindMb = 256, rewindFields = 2;
+  auto operator==(const LiveOpts&) const -> bool = default;
+};
+inline auto liveFromEnv() -> LiveOpts {
+  auto env = [](const char* n) { const char* e = std::getenv(n); return std::string(e ? e : ""); };
+  LiveOpts o;
+  o.cheats = env("KESTREL_CHEATS");
+  o.texfx = env("KESTREL_TEXFX"); o.texdump = env("KESTREL_TEXDUMP"); o.texpack = env("KESTREL_TEXPACK");
+  const std::string rw = env("KESTREL_REWIND");
+  o.rewind = !rw.empty() && rw != "0";
+  const std::string mb = env("KESTREL_REWIND_MB"), iv = env("KESTREL_REWIND_FIELDS");
+  if(!mb.empty()) o.rewindMb = (u32)std::strtoul(mb.c_str(), nullptr, 0);
+  if(!iv.empty()) o.rewindFields = (u32)std::strtoul(iv.c_str(), nullptr, 0);
+  return o;
+}
+inline std::mutex        liveMx;
+inline LiveOpts          liveOpts;
+inline bool              liveSeeded = false;   // liveOpts ya partio del entorno de arranque
+inline std::atomic<bool> liveReq{false};
+// Ultimo juego de valores pedido (o el de arranque). Con liveMx cogido.
+inline auto liveCurrentLocked() -> LiveOpts& {
+  if(!liveSeeded) { liveOpts = liveFromEnv(); liveSeeded = true; }
+  return liveOpts;
+}
+
 // Mandos que Windows tiene enchufados AHORA, publicados por el presentador (que es el unico
 // hilo que puede preguntarle a GLFW) para que el dialogo de mando pueda ensenar nombres de
 // verdad en vez de numeros. La generacion sube cuando cambia la lista.

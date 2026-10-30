@@ -58,6 +58,10 @@ struct Cheats {
   // Fuente por defecto: KESTREL_CHEATS si esta puesta, y si no el `.cht` que haya al lado
   // de la ROM con su mismo nombre. Silencioso cuando no hay ninguno.
   auto loadForRom(const std::string& romPath) -> void;
+  // Cambio en caliente: vacia la lista y carga `file` (vacio = el .cht de al lado de la ROM).
+  // Las familias A0/A1 son de arranque: si el arranque ya paso, no se vuelven a aplicar.
+  // Con el nucleo parado (coreMutex), como applyField.
+  auto reload(const std::string& romPath, const std::string& file) -> void;
 
   auto enabled() const -> bool { return armed; }
   // Se llama al cierre de cada campo de video, con el nucleo parado (coreMutex tomado).

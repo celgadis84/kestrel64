@@ -192,6 +192,9 @@ struct Engine {
 
   // Lee KESTREL_REWIND / KESTREL_REWIND_MB / KESTREL_REWIND_FIELDS. Una vez, al arrancar.
   auto init() -> void;
+  // Cambio en caliente (con el nucleo parado): encender/apagar o cambiar tope y ritmo. La
+  // cinta se tira siempre; apagado libera la foto viva.
+  auto configure(bool on, u32 mb, u32 fields) -> void;
 
   // Al cerrar un campo de video, con el RCP en reposo y coreMutex cogido.
   auto onField(System& sys) -> void;

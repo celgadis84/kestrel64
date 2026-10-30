@@ -374,19 +374,31 @@ auto enhance(u64 crc64, u32 fmt, u32 siz, int w, int h, const u32* rgba) -> cons
 }
 
 auto init(const std::string& ident) -> void {
+  auto env = [](const char* n) { const char* e = std::getenv(n); return std::string(e ? e : ""); };
+  configure(ident, env("KESTREL_TEXFX"), env("KESTREL_TEXDUMP"), env("KESTREL_TEXPACK"));
+}
+
+auto reconfigure(const std::string& fx, const std::string& dump, const std::string& pack) -> void {
+  std::string id;
+  { std::lock_guard<std::mutex> lk(g_mu); id = g_ident; }
+  configure(id, fx, dump, pack);
+}
+
+auto configure(const std::string& ident, const std::string& fxs, const std::string& dumps,
+               const std::string& packs) -> void {
   std::lock_guard<std::mutex> lk(g_mu);
   g_ident = ident;
   g_full.clear(); g_byCrc.clear(); g_dumpedKeys.clear(); g_fxCache.clear();
   g_epoch++;
   g_dump = g_load = false;
   g_fx = FxNone;
-  if(const char* f = std::getenv("KESTREL_TEXFX"); f && *f) {
+  if(const char* f = fxs.c_str(); *f) {
     const std::string v = lower(f);
     g_fx = v == "scale4x" || v == "1" ? FxScale4x : v == "cel" || v == "toon" || v == "2" ? FxCel
          : v == "poster" || v == "3" ? FxPoster : FxNone;
     if(g_fx) std::fprintf(stderr, "[texpack] realce de texturas: %s\n", v.c_str());
   }
-  if(const char* d = std::getenv("KESTREL_TEXDUMP"); d && *d) {
+  if(const char* d = dumps.c_str(); *d) {
     std::error_code ec;
     g_dumpDir = fs::path(d) / ident;
     fs::create_directories(g_dumpDir, ec);
@@ -403,7 +415,7 @@ auto init(const std::string& ident) -> void {
       std::fprintf(stderr, "[texpack] volcado en %s (%zu ya presentes)\n", g_dumpDir.string().c_str(), g_dumpedKeys.size());
     }
   }
-  if(const char* p = std::getenv("KESTREL_TEXPACK"); p && *p) {
+  if(const char* p = packs.c_str(); *p) {
     std::error_code ec;
     fs::path dir(p);
     int n = 0;

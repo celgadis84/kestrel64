@@ -48,6 +48,12 @@ auto enhance(u64 crc64, u32 fmt, u32 siz, int w, int h, const u32* rgba) -> cons
 // KESTREL_TEXFX (realce por algoritmo, ver abajo) y prepara
 // el indice. `ident` = nombre interno de la ROM (cabecera 0x20, sin espacios al final).
 auto init(const std::string& ident) -> void;
+// Lo mismo con los valores dados en vez de leidos del entorno (cambio en caliente). Tira las
+// caches y sube g_epoch. Llamarlo solo con el RDP parado: un Tex* de antes deja de valer.
+auto configure(const std::string& ident, const std::string& fx, const std::string& dump,
+               const std::string& pack) -> void;
+// configure() con el nombre de ROM del ultimo init().
+auto reconfigure(const std::string& fx, const std::string& dump, const std::string& pack) -> void;
 
 extern bool g_dump;   // KESTREL_TEXDUMP puesto
 extern bool g_load;   // KESTREL_TEXPACK puesto y con algun fichero valido

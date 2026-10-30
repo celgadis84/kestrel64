@@ -140,6 +140,28 @@ auto Server::dispatch(const json::Value& req, const std::vector<u8>& reqBlob, js
     cmdFrameAdvance(args, data); done();
   } else if(cmd == "rewind.step") {
     if(cmdRewind(args, data)) done(); else fail(data.has("msg") ? data.get("msg").asString() : "rewind");
+  } else if(cmd == "options.live") {
+    // Lo mismo que Opciones > Aplicar del menu para lo que el nucleo recoge en caliente.
+    // Solo se cambian las claves dadas: cheats, texfx, texdump, texpack (texto, "" = quitar),
+    // rewind (0/1), rewind_mb, rewind_fields. Se aplica en el proximo reposo del RCP.
+    rt::LiveOpts o;
+    {
+      std::lock_guard<std::mutex> lk(rt::liveMx);
+      rt::LiveOpts& c = rt::liveCurrentLocked();
+      if(args.has("cheats"))  c.cheats  = args.get("cheats").asString();
+      if(args.has("texfx"))   c.texfx   = args.get("texfx").asString();
+      if(args.has("texdump")) c.texdump = args.get("texdump").asString();
+      if(args.has("texpack")) c.texpack = args.get("texpack").asString();
+      if(args.has("rewind"))  c.rewind  = args.get("rewind").asU32() != 0;
+      if(args.has("rewind_mb"))     c.rewindMb     = args.get("rewind_mb").asU32(256);
+      if(args.has("rewind_fields")) c.rewindFields = args.get("rewind_fields").asU32(2);
+      o = c;
+    }
+    rt::liveReq.store(true, std::memory_order_release);
+    data.set("cheats", o.cheats).set("texfx", o.texfx).set("texdump", o.texdump)
+        .set("texpack", o.texpack).set("rewind", (u64)o.rewind)
+        .set("rewind_mb", (u64)o.rewindMb).set("rewind_fields", (u64)o.rewindFields);
+    done();
   } else if(cmd == "rcp.regs") {
     cmdRcpRegs(args, data); done();
   } else if(cmd == "rdp.stats" || cmd == "rdp.stats.reset" || cmd == "rdp.stats.off") {

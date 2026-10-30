@@ -16,6 +16,8 @@ import options as OPT
 LIVE = {
   "winscale", "winsize", "fullscreen", "hud", "audio", "volume", "throttle", "aspect",
   "filter",
+  # recogidas por el nucleo en su proximo reposo (rt::LiveOpts / System::applyLiveOpts)
+  "cheats", "rewind", "rewind_fields", "rewind_mb", "texpack", "texfx", "texdump",
 }
 
 TYPE = {"bool": "Bool", "int": "Int", "float": "Float", "text": "Text",

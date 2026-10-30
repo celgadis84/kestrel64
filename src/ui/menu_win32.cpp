@@ -99,9 +99,35 @@ auto ocNotStock(const Profile& p) -> bool {
   return false;
 }
 
+// Trucos, rebobinado y texturas HD: los recoge el nucleo en su proximo reposo
+// (System::applyLiveOpts). Se traducen con toEnv para seguir las mismas reglas que al
+// relanzar, y solo se manda la peticion si algo cambio.
+auto postCoreLive(const Profile& p) -> void {
+  std::vector<std::pair<std::string, std::string>> env;
+  std::vector<std::string> argv;
+  toEnv(p, env, argv);
+  auto get = [&](const char* k) -> std::string {
+    for(auto& kv : env) if(kv.first == k) return kv.second;
+    return {};
+  };
+  rt::LiveOpts o;
+  o.cheats = get("KESTREL_CHEATS");
+  o.texfx = get("KESTREL_TEXFX"); o.texdump = get("KESTREL_TEXDUMP"); o.texpack = get("KESTREL_TEXPACK");
+  const std::string rw = get("KESTREL_REWIND"), mb = get("KESTREL_REWIND_MB"), iv = get("KESTREL_REWIND_FIELDS");
+  o.rewind = !rw.empty() && rw != "0";
+  if(!mb.empty()) o.rewindMb = (u32)std::strtoul(mb.c_str(), nullptr, 0);
+  if(!iv.empty()) o.rewindFields = (u32)std::strtoul(iv.c_str(), nullptr, 0);
+  static rt::LiveOpts last = rt::liveFromEnv();
+  if(o == last) return;
+  last = o;
+  { std::lock_guard<std::mutex> lk(rt::liveMx); rt::liveCurrentLocked() = o; }
+  rt::liveReq.store(true, std::memory_order_release);
+}
+
 // Aplica al vuelo lo que se puede aplicar al vuelo. El resto del perfil ya esta guardado y
 // solo se hace efectivo relanzando.
 auto applyLive(const Profile& p, bool windowToo) -> void {
+  postCoreLive(p);
   rt::hud.store(p.getBool("hud"));
   rt::audioOn.store(p.getBool("audio"));
   int vol = std::atoi(p.get("volume").c_str());

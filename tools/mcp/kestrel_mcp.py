@@ -208,6 +208,21 @@ def frame_advance(fields: int = 1, timeout_ms: int = 5000) -> dict:
     return data
 
 
+def options_live(cheats: str | None = None, texfx: str | None = None,
+                 texdump: str | None = None, texpack: str | None = None,
+                 rewind: int | None = None, rewind_mb: int | None = None,
+                 rewind_fields: int | None = None) -> dict:
+    """Change, without restarting, the options the core picks up live (same as the window's
+    Options > Apply): cheats (path to .cht, "" = the one next to the ROM), texfx
+    (scale4x|cel|poster|""), texdump / texpack (folders, "" = off), rewind (0/1),
+    rewind_mb, rewind_fields. Only the keys given change; applied at the next RCP rest
+    point (a field or so). Returns the full requested set."""
+    opts = {k: v for k, v in dict(cheats=cheats, texfx=texfx, texdump=texdump, texpack=texpack,
+            rewind=rewind, rewind_mb=rewind_mb, rewind_fields=rewind_fields).items() if v is not None}
+    data, _ = query("options.live", **opts)
+    return data
+
+
 def rewind_step(steps: int = 1) -> dict:
     """Rewind `steps` snapshots (each one KESTREL_REWIND_FIELDS video fields back).
 
@@ -762,6 +777,7 @@ def _serve_mcp():
     mcp.tool()(run_control)
     mcp.tool()(frame_advance)
     mcp.tool()(rewind_step)
+    mcp.tool()(options_live)
     mcp.tool()(rcp_registers)
     mcp.tool()(rdp_stats)
     mcp.tool()(rsp_registers)

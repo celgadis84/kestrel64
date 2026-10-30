@@ -75,7 +75,10 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   ficheros que F5/F7 en la ventana). **La forma buena de volver una y otra vez al mismo
   punto de un nivel entre experimentos.** El savestate va ligado a la ROM: si se recompila
   el juego y cambia el codigo, el estado viejo no sirve, hay que rehacerlo.
-- `rewind_step(steps)`: solo si se arranco con `KESTREL_REWIND=1`.
+- `rewind_step(steps)`: solo con el rebobinado activo (`KESTREL_REWIND=1` u `options_live(rewind=1)`).
+- `options_live(cheats=, texfx=, texdump=, texpack=, rewind=, rewind_mb=, rewind_fields=)`: lo que
+  el nucleo cambia sin relanzar (lo mismo que Opciones > Aplicar). Solo cambian las claves dadas;
+  se aplica en el proximo reposo del RCP.
 
 **Memoria**
 - `memory_regions`: lista de regiones (`rdram`, `dmem`, `imem`...).

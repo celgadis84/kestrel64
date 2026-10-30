@@ -8,6 +8,7 @@
 #include "rom.hpp"
 #include "cheats.hpp"
 #include "rewind.hpp"
+#include "runtime.hpp"
 #include "../cpu/cpu.hpp"
 #include "../video/present.hpp"
 #include <atomic>
@@ -240,8 +241,12 @@ struct System {
     return stateSaveReq.load(std::memory_order_relaxed) >= 0 ||
            stateLoadReq.load(std::memory_order_relaxed) >= 0 ||
            rewindReq.load(std::memory_order_relaxed) != 0 ||
-           netSyncReq.load(std::memory_order_relaxed);
+           netSyncReq.load(std::memory_order_relaxed) ||
+           rt::liveReq.load(std::memory_order_relaxed);
   }
+  // Opciones en caliente del menu (rt::LiveOpts): trucos, rebobinado, texturas HD. Con el
+  // nucleo parado y el RCP quieto; la llama serviceStateReq.
+  auto applyLiveOpts() -> void;
   u32  stateWaitSlices = 0;   // subtramos corridos esperando reposo para una peticion
   bool rewindDue = false;     // foto de rebobinado pedida por un cierre de campo y aun no hecha
   u32  rewindWaitSlices = 0;

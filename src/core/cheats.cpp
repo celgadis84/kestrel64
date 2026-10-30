@@ -82,8 +82,15 @@ auto Cheats::loadFile(const std::string& path, std::string& error) -> bool {
 }
 
 auto Cheats::loadForRom(const std::string& romPath0) -> void {
-  std::string path;
-  if(const char* c = std::getenv("KESTREL_CHEATS")) { if(*c) path = c; }
+  const char* c = std::getenv("KESTREL_CHEATS");
+  reload(romPath0, c ? c : "");
+}
+
+auto Cheats::reload(const std::string& romPath0, const std::string& file) -> void {
+  const bool booted = bootDone;
+  list.clear();
+  armed = false;
+  std::string path = file;
   if(path.empty()) {
     const std::string romPath = archive::stripContainerExt(romPath0);   // .zip/.gz no cuentan
     usize dot = romPath.find_last_of('.');
@@ -95,6 +102,7 @@ auto Cheats::loadForRom(const std::string& romPath0) -> void {
   }
   std::string err;
   if(!loadFile(path, err)) std::printf("[cheats] %s\n", err.c_str());
+  if(booted) bootDone = true;
 }
 
 auto Cheats::applyField(CPU& cpu) -> void {
