@@ -1,5 +1,21 @@
 # GPU-RDP propio — plan (GAPS #15)
 
+> **English summary.** Plan and status log (GAPS #15) for kestrel's own GPU RDP rasterizer in Vulkan
+> compute, meant to replace the parallel-RDP dependency (`third_party/parallel-rdp`). SoftRDP stays
+> the bit-exact oracle.
+> - Why: large foreign dependency, semantics fixed twice, and features it lacks (HD textures,
+>   per-primitive telemetry). Vulkan compute was chosen over D3D12/Metal/OpenGL/WebGPU.
+> - Approach: SoftRDP keeps decoding the FIFO and the GPU takes primitives piece by piece (fills,
+>   triangles, textured triangles, texrects, 8/32-bit color images).
+> - Phases 0-7 are recorded with dates; the doc reports them as done through 2026-10-30. Gates:
+>   `scripts/gate_gpurdp.sh`, results compared bit by bit with SoftRDP (krom, SM64, PD).
+> - Per-span CPU/GPU split (`KESTREL_GPURDP_MINPX`, default 4096); internal upscaling
+>   (`KESTREL_GPURDP_UPSCALE`, x8 added) with an asynchronous shadow mode; HD textures on GPU.
+> - GPU-RDP is the default rasterizer (`KESTREL_GPURDP` selects). Retiring parallel-RDP: phase 1
+>   done, phase 2 (deleting its code) planned for the next version. Performance notes and discarded
+>   experiments are kept in detail.
+> The rest of this document is in Spanish.
+
 Objetivo a largo plazo: un rasterizador RDP en GPU escrito en kestrel, que sustituya a
 parallel-RDP (`third_party/parallel-rdp`, Themaister, MIT) y quite esa dependencia.
 Hoy hay dos backends: SoftRDP (`src/rdp/rdp.cpp`, ~2,5 k lineas, CPU, oraculo de las

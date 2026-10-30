@@ -1,5 +1,22 @@
 # kestrel64 — variables de entorno `KESTREL_*`
 
+> **English summary.** Reference for the `KESTREL_*` environment variables, moved out of CLAUDE.md
+> on 2026-10-23. Entries are dense Spanish paragraphs mixing the knob, its default, measurements and
+> rationale.
+> - Core/performance: `KESTREL_THREADS` (threaded RCP, default ON), `KESTREL_JIT` (CPU dynarec,
+>   default ON; `=0` turns off), `KESTREL_RSPJIT` and its A/B switches, many `KESTREL_JIT_*` knobs.
+> - Host/RCP pacing and sync: `KESTREL_SPLEAD`, `KESTREL_RSPTANDA`, `KESTREL_DPLOG`,
+>   `KESTREL_RDPSPIN`, `KESTREL_RDVPOLL`, `KESTREL_PACESLACK`, etc. Mostly host tuning, A/B and
+>   bisection switches.
+> - Diagnostics: `KESTREL_HEARTBEAT`, `KESTREL_MAXINSN`, `KESTREL_MAXFLIPS`, `KESTREL_GPCPROF`,
+>   `KESTREL_RSPTRACE`, `KESTREL_DPSYNCLOG`, RDP validators and corruption canaries.
+> - Product options: `KESTREL_OC*`, `KESTREL_WINSCALE`, `KESTREL_RDRAM`, `KESTREL_CHEATS`,
+>   `KESTREL_REWIND`, movies (TAS), accessories and Transfer Pak.
+> - Newer sections: debugger and USB, captures/recording (`KESTREL_RECORD*`), netplay
+>   (`KESTREL_NETPLAY_*`), homebrew header (`KESTREL_HBPADS`, `KESTREL_LANG`).
+> - Python note: use the Windows python (`PY` in `scripts/local.env`) for `scripts/validate.py`.
+> The rest of this document is in Spanish.
+
 Movido desde CLAUDE.md (2026-10-23) sin cambios de contenido.
 
 

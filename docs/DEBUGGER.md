@@ -1,5 +1,21 @@
 # kestrel64 — depurador (capas de depuración, ventana y MCP)
 
+> **English summary.** Describes kestrel64's own debugging layers (a clean reimplementation, not a
+> copy, of what the homebrew community uses in ares): RDP/RSP frame recorder, timeline, TMEM, TLB,
+> framebuffer, RCP events, watchpoints, SC64 USB, hot code loading.
+> - Everything lives in the telemetry server (`src/telemetry/server_dbg.cpp`, recorder in
+>   `src/debug/dbg.{hpp,cpp}`); the debugger window is just another client of the same server.
+> - MCP commands (added 2026-10-23), listed in a table: `dbg.enable`/`dbg.freeze`/`dbg.status`,
+>   `dbg.rdp.frame`, `dbg.rsp.tasks`, `dbg.timeline`, `dbg.fb`/`dbg.tmem`, `cpu.tlb`, `ev.log`,
+>   `mem.watch`, `code.load`/`rsp.load`, `rom.load`, `usb.log`, `rsp.bp.*`, `rsp.disasm`.
+> - RSP breakpoints: 1024-slot map; the RSP and CPU use the interpreter while any is set; the core
+>   pauses before executing the hit PC.
+> - Window (`src/ui/debugger_win32.cpp`, Win32 + D3D11 + Dear ImGui): open with `--debugger`,
+>   `KESTREL_DEBUGGER=1` or the Depurar menu; many dockable panels; layout in
+>   `kestrel64_debugger.ini`.
+> - Also covers the fair CoreMutex and smoke tests; pending: hot function reload (phase 2).
+> The rest of this document is in Spanish.
+
 Reimplementación propia (no copia) de las capas de depuración que la comunidad homebrew
 usa en ares: grabadora del cuadro RDP/RSP, línea de tiempo, TMEM, TLB, framebuffer, eventos
 RCP, puntos de observación, USB SC64, carga de código en caliente. Todo vive en el servidor

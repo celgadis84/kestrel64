@@ -1,5 +1,20 @@
 # kestrel64 — Plan del recompilador (dynarec) y optimización del intérprete
 
+> **English summary.** Original plan and measurement log for the CPU recompiler (dynarec); marked
+> HISTORICAL in its own header (2026-09-24): the CPU dynarec is now ON by default (`KESTREL_JIT=0`
+> turns it off) and the future work listed here is implemented. Current state:
+> `docs/CORES-CPU-RSP.md` section 3.
+> - Goal: 100% N64 speed (`speed.cpuPct`) with systemtest still at 0/3721 at every step.
+> - Diagnosis: the interpreter plateaued around 21% on the old test host; removing fetch, D-cache or
+>   ALU work gave ~0%, so the cost is host I-cache thrash. Fix = per-block codegen.
+> - Strategy: staged dynarec behind `KESTREL_JIT`, interpreter as oracle and fallback.
+> - Stages recorded: x86-64 emitter and code cache; ALU-only blocks (byte-exact but slower);
+>   loads/stores; branches plus delay slots in blocks (first build where the dynarec wins on Perfect
+>   Dark); J/JAL/JR/JALR and inline SMC validation; block-linking design (`KESTREL_JIT_LINK`).
+> - Diagnostic switches mentioned: `KESTREL_JIT_STATS`, `KESTREL_JIT_BRDIFF`,
+>   `KESTREL_JIT_NOBRANCH`, `KESTREL_JIT_NOJMP`, `KESTREL_JIT_NOSMC`.
+> The rest of this document is in Spanish.
+
 > **Estado 2026-09-24:** documento HISTORICO. El dynarec de CPU esta ACTIVO de fabrica
 > (`KESTREL_JIT=0` lo apaga) y lo que aqui figura como trabajo futuro — enlace de
 > bloques, cache de destinos indirectos, residencia de registros, fastmem, bloques que

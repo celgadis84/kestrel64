@@ -21,6 +21,8 @@ marked *(EN)* are in English.
 
 ## Arquitectura / Architecture
 
+- [ARQUITECTURA.md](ARQUITECTURA.md) / [ARCHITECTURE.md](ARCHITECTURE.md) — **empieza aquí**:
+  visión general del emulador. **Start here**: architecture overview (same sections in both).
 - [ARCH-THREADING.md](ARCH-THREADING.md) — arquitectura multihilo (RCP asíncrono).
   Multithreaded architecture (asynchronous RCP).
 - [ARCH-COMM.md](ARCH-COMM.md) — modelo de ejecución y comunicación entre componentes.

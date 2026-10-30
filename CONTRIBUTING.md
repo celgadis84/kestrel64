@@ -70,6 +70,9 @@ hang, and the fix is to bisect it, never to raise the timeout.
 
 ## Where the context lives
 
+- `docs/ARCHITECTURE.md` / `docs/ARQUITECTURA.md` — architecture overview in English and
+  Spanish. Change both in the same commit and bump their `Synced with:` line together;
+  `scripts/check_docs_sync.py` (run in CI) fails if their section structure diverges
 - `docs/STATUS.md` — current state per subsystem (short; updated in place)
 - `docs/history/STATUS-2026.md` — running log: what was tried, what it measured, what was
   reverted and why (new entries are appended at the end)

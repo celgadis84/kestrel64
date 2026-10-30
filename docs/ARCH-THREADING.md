@@ -1,5 +1,21 @@
 # kestrel64 — Reconstrucción arquitectura multihilo (RCP async)
 
+> **English summary.** Design doc (dated 2026-08-10) for rebuilding the core as a multithreaded RCP
+> with RSP, RDP, VI and input modelled faithfully to the hardware.
+> - Hard constraint: systemtest must stay at 0/3721 failures (Base/Timing/Cycle); every change must
+>   be genuine VR4300/RCP semantics, never a hack to pass a ROM.
+> - Section 1 describes the single-threaded core at the time (main/present thread, cpu worker,
+>   telemetry thread; RSP interleaved 2:3 inline; RDP run synchronously on the DPC_END store) and
+>   tabulates the sync points (RSP start/done, RDP kick/done, VI field, MI interrupts).
+> - Key contract: games wait for the interrupt (MI_SP / MI_DP / MI_VI) before touching RCP output,
+>   so release in the producer and acquire in the consumer are enough; no per-pixel coherence.
+> - Section 2: two modes chosen at runtime (`System::rcpMode`): lockstep (deterministic reference,
+>   keeps systemtest valid by construction) and threaded (`KESTREL_THREADS=1` in this doc), with an
+>   RDP thread (SPSC job queue, atomic `mi_intr`) first, then an RSP thread (atomic `sp_status`).
+> - Sections 3-4: incremental work order (0/3721 checked after each step) and the determinism
+>   strategy. ENV-VARS.md notes threaded is now the default.
+> The rest of this document is in Spanish.
+
 Objetivo (mandato usuario, 2026-08-10): reconstruir el core a multihilo e implementar
 todo RSP / RDP / VI / input de forma HW-fiel. Luego optimizar intérprete, luego dynarec,
 y SOLO entonces volver a PD. Restricción dura: **systemtest 0/3721 (Base/Timing/Cycle)

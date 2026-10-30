@@ -1,5 +1,20 @@
 # RSP dynarec (`src/rsp/rspjit.{hpp,cpp}`)
 
+> **English summary.** Notes on the RSP dynarec (`src/rsp/rspjit.{hpp,cpp}`), a block compiler to
+> native x86-64. Its header says it is ON by default (`KESTREL_RSPJIT=0` turns it off) and stages 1,
+> 2, 2b and 3 are done; summary and knobs also in `docs/CORES-CPU-RSP.md` section 5.
+> - Oracle = the RSP interpreter: same framebuffer md5 with the JIT on and off (`gate_all.sh`).
+> - Easy target: no TLB, no exceptions, 4 KB IMEM, so blocks never fault and the block table is a
+>   flat 1024-entry array indexed by `pc >> 2`. Hard cases call the interpreter's own helpers.
+> - Compiled inline: scalar ALU, branches with delay slots, COP0 bridge, most of COP2 (VU), vector
+>   loads/stores, shuffles and scalar<->vector moves; each has an A/B switch.
+> - Invalidation is by content (IMEM shadow diff), plus a cache of several microcode images
+>   (`KESTREL_RSPJIT_WAYS`, `KESTREL_RSPJIT_NEWWAY`); blocks link through the table
+>   (`KESTREL_RSPJIT_LINK`).
+> - Oracles: `--rspjitfuzz N` (inline VU vs interpreter) and md5 equality. Measurements and dead
+>   ends are recorded; the RSP thread usually has slack, so wall-clock gains are small.
+> The rest of this document is in Spanish.
+
 > **Estado 2026-09-24:** ACTIVO de fabrica (`KESTREL_RSPJIT=0` lo apaga). Etapas 1, 2,
 > 2b y 3 hechas: linea recta, saltos+delay slot absorbidos, COP0 en bloque y enlace de
 > bloques por tabla. Resumen corto y perillas: `docs/CORES-CPU-RSP.md` §5. Lo de abajo

@@ -1,5 +1,20 @@
 # Guia MCP de kestrel64 (para otra sesion que depura/optimiza un juego)
 
+> **English summary.** Guide for a Claude session working on ANOTHER project (e.g. optimizing a game
+> decomp) that uses kestrel64 as a test bench through its built-in telemetry server and MCP bridge.
+> - Rules: only USE kestrel64, never edit it; the ares MCP is dead, use `mcp__kestrel64__*` only.
+> - Executable: `build-prdp-static\kestrel64.exe` is the normal one; `build-static` uses SoftRDP.
+> - Launch: telemetry on port 9128 (`--port N`). No flag = paused with a black window (use
+>   `run_control('resume')`); `--play` = running with window; `--run` = running without window.
+> - Always use `timeout` plus `KESTREL_MAXFLIPS` or `KESTREL_MAXINSN`; no VI field progress in ~5 s
+>   means a hang.
+> - Bridge: `tools/mcp/kestrel_mcp.py` (needs the Python `mcp` package; `--selftest` available).
+> - Tool groups: status/control, savestates, memory (`coherent=True` for D-cache), CPU/RSP/RCP
+>   registers, `rdp_stats`, breakpoints, controller, screenshots/video, netplay, profiling.
+> - Useful env vars: `KESTREL_HEARTBEAT`, `KESTREL_GPCPROF`, `KESTREL_SPEEDMODE=hw`. Also a Perfect
+>   Dark A/B workflow and a list of known pitfalls.
+> The rest of this document is in Spanish.
+
 Pensada para una sesion de Claude que trabaja en OTRO proyecto (p. ej. optimizar la decomp
 de Perfect Dark en `<workspace>\perfect_dark`) y usa kestrel64 como banco de pruebas:
 arrancar la ROM que acaba de compilar, llevarla a un punto concreto, mirar memoria/CPU/RCP
