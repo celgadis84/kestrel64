@@ -46,6 +46,8 @@ add_executable(kestrel64
   src/cpu/jit.cpp
   src/net/tcp.cpp
   src/net/netplay.cpp
+  src/net/relay.cpp
+  src/net/upnp.cpp
   src/telemetry/server.cpp
   src/telemetry/server_dbg.cpp
   src/telemetry/hostprof.cpp

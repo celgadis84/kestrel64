@@ -134,9 +134,10 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
 - `emu_status` -> `game.homebrew` (solo ROMs con cabecera avanzada "ED": que va en cada
   puerto, partida, rtc, regionFree, embeddedMeta) y `game.meta` (metadatos de n64brew del zip
   final o del `<rom>.meta`: name, author, website..., `longDescText`, `source`).
-- `netplay_host(port)` / `netplay_join("ip:puerto")` / `netplay_stop()` / `netplay_status()`:
-  lockstep de entradas, anfitrion + hasta 3 invitados (jugadores 2-4). `status`: synced, slot,
-  players, field, epoch, desyncs/checks (hash de CPU cada 60 campos), waitMs, view.
+- `netplay_host(port, relay="")` / `netplay_join("ip:puerto" | "rele:puerto/SALA")` /
+  `netplay_stop()` / `netplay_status()`: lockstep de entradas, anfitrion + hasta 3 invitados
+  (jugadores 2-4). `status`: synced, slot, players, field, epoch, desyncs/checks (hash de CPU
+  cada 60 campos), waitMs, view, `room` (sala en el rele) y `publicAddr` (UPnP).
 - `netplay_view(mode)` (solo anfitrion): `full|rows|cols|quad|auto`. Pantalla partida: cada
   maquina presenta solo el trozo de su jugador; viaja en las entradas, asi que todas cambian
   en el mismo campo. Encender en juego, apagar en los menus. Solo presentacion.

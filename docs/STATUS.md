@@ -10488,3 +10488,24 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   -> `game.homebrew` (puertos, partida, rtc, regionFree, embeddedMeta) y `game.meta`.
 - Validado con una ROM de prueba (cabecera ED + zip pegado, solo en local): 3 lineas `[pad]`,
   EEPROM 4K, RTC, region libre, metadatos embebidos, idioma `es` y long-desc: VEREDICTO OK.
+
+## 2026-10-30 — juego en red por internet: rele con sala y UPnP
+
+- `src/net/relay.{hpp,cpp}`: `kestrel64 --relay [puerto]` (6465), sin ROM ni ventana. El
+  anfitrion abre sala ("room.open" -> codigo de 6 letras sin ambiguas) y mantiene esa conexion
+  de control; un invitado pide "room.join" con el codigo, el rele avisa al anfitrion con una
+  ficha, el anfitrion abre una conexion nueva "room.accept" y el rele empalma las dos y reenvia
+  tramas tal cual. Para netplay.cpp esa conexion es como una aceptada en su puerto (`admit`,
+  el cuerpo que antes vivia en `acceptLoop`). Invitados sin recoger se purgan a los 30 s; al
+  cerrar el control se borra la sala.
+- `src/net/upnp.{hpp,cpp}`: SSDP (IGD v1/v2) -> descripcion -> WANIPConnection/WANPPPConnection
+  -> AddPortMapping TCP (plazo 2 h; 725 -> sin plazo) + GetExternalIPAddress; DeletePortMapping
+  al cerrar. Hilo suelto con numero de sesion: si la sesion cambia, deshace el mapeo.
+- `netplay::host(sys, port, err, relay)`; join acepta `rele[:puerto]/SALA`. Status `room`,
+  `publicAddr`. Env `KESTREL_NETPLAY_RELAY`, `KESTREL_NETPLAY_UPNP=0`. Dialogo Red: campo
+  "con rele" y sala/IP publica en el estado. MCP `netplay_host(port, relay)`.
+- Probado en local (SM64, exe de `build/`): sala abierta, sala falsa rechazada, invitado por el
+  rele sincronizado con 2 jugadores, 4 hashes comparados y 0 desincronias, cierre del anfitrion
+  detectado por el invitado. UPnP: en esta red ningun dispositivo responde a SSDP (ni
+  `ssdp:all`), asi que solo esta probado el camino "sin router" (aviso y la partida sigue);
+  el mapeo real queda por probar en una red con UPnP.

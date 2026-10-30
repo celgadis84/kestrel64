@@ -1,8 +1,11 @@
 #include "netplay.hpp"
 #include "tcp.hpp"
+#include "relay.hpp"
+#include "upnp.hpp"
 #include "../core/system.hpp"
 #include "../core/savestate.hpp"
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -89,6 +92,14 @@ struct Session {
   net::TcpServer server;
   std::thread acceptTh;
   std::vector<std::unique_ptr<Link>> peers;
+  net::TcpConn relayCtl;           // control de la sala en el rele (vacio sin rele)
+  std::string relayAddr, room;
+  std::thread relayTh;
+  bool listening = false;          // puerto propio abierto (con rele es opcional)
+  u32 gen = 0;                     // sesion en curso: los hilos de UPnP no pisan otra
+  net::upnp::Gateway gw;                // router con el puerto abierto por UPnP (gw.ok)
+  u16 mappedPort = 0;
+  std::string publicAddr;
   std::map<u64, std::array<std::pair<bool, Pad>, 4>> partial;
   std::map<u64, u8> partialView;   // vista que puso el anfitrion al mandar su mando del campo
   u8 hostView = kViewFull;         // vista pedida (entra en el campo f+D de su siguiente mando)
@@ -250,40 +261,80 @@ auto hostRx(Link* l) -> void {
   S.cv.notify_all();
 }
 
+// Una conexion entrante, del puerto propio o empalmada por el rele: espera su "hello" y le
+// da conector. Falso = la sesion se cierra (dejar de aceptar).
+auto admit(net::TcpConn c) -> bool {
+  std::string t; std::vector<u8> b;
+  if(!c.recvFrame(t, b) || t != "hello") return true;
+  R r{b};
+  const u32 magic = r.b32(), ver = r.b32();
+  const u64 rh = r.b64();
+  auto reject = [&](const std::string& why) {
+    W w; for(char ch : why) w.b8((u8)ch);
+    c.sendFrame("reject", w.v.data(), (u32)w.v.size());
+  };
+  if(!r.ok || magic != kMagic || ver != kVersion) { reject("version de kestrel64 distinta"); return true; }
+  if(rh != S.romHash) { reject("la ROM no es la misma que la del anfitrion"); return true; }
+  std::lock_guard<std::mutex> lk(S.mu);
+  if(S.closing) return false;
+  u8 used = (u8)(S.mask | S.pendingMask | 1u);
+  for(auto& l : S.peers) if(l->alive) used |= (u8)(1u << l->slot);
+  int slot = -1;
+  for(int i = 1; i < 4; i++) if(!(used >> i & 1)) { slot = i; break; }
+  if(slot < 0) { reject("partida llena (4 jugadores)"); return true; }
+  auto l = std::make_unique<Link>();
+  l->conn = std::move(c);
+  l->slot = slot;
+  W w; w.b32((u32)slot); w.b32(S.delay);
+  if(!l->send("welcome", w)) return true;
+  S.pendingMask |= (u8)(1u << slot);
+  Link* lp = l.get();
+  l->rx = std::thread(hostRx, lp);
+  S.peers.push_back(std::move(l));
+  note("entra el jugador " + std::to_string(slot + 1) + ": sincronizando");
+  S.sys->netSyncReq.store(true, std::memory_order_release);
+  return true;
+}
+
 auto acceptLoop() -> void {
   for(;;) {
     net::TcpConn c = S.server.accept();
     if(!c.valid()) return;                        // escucha cerrada: fin de sesion
-    std::string t; std::vector<u8> b;
-    if(!c.recvFrame(t, b) || t != "hello") continue;
-    R r{b};
-    const u32 magic = r.b32(), ver = r.b32();
-    const u64 rh = r.b64();
-    auto reject = [&](const std::string& why) {
-      W w; for(char ch : why) w.b8((u8)ch);
-      c.sendFrame("reject", w.v.data(), (u32)w.v.size());
-    };
-    if(!r.ok || magic != kMagic || ver != kVersion) { reject("version de kestrel64 distinta"); continue; }
-    if(rh != S.romHash) { reject("la ROM no es la misma que la del anfitrion"); continue; }
-    std::lock_guard<std::mutex> lk(S.mu);
-    if(S.closing) return;
-    u8 used = (u8)(S.mask | S.pendingMask | 1u);
-    for(auto& l : S.peers) if(l->alive) used |= (u8)(1u << l->slot);
-    int slot = -1;
-    for(int i = 1; i < 4; i++) if(!(used >> i & 1)) { slot = i; break; }
-    if(slot < 0) { reject("partida llena (4 jugadores)"); continue; }
-    auto l = std::make_unique<Link>();
-    l->conn = std::move(c);
-    l->slot = slot;
-    W w; w.b32((u32)slot); w.b32(S.delay);
-    if(!l->send("welcome", w)) continue;
-    S.pendingMask |= (u8)(1u << slot);
-    Link* lp = l.get();
-    l->rx = std::thread(hostRx, lp);
-    S.peers.push_back(std::move(l));
-    note("entra el jugador " + std::to_string(slot + 1) + ": sincronizando");
-    S.sys->netSyncReq.store(true, std::memory_order_release);
+    if(!admit(std::move(c))) return;
   }
+}
+
+// Invitados que llegan por la sala del rele. Acaba cuando se cierra el control (stop) o se
+// cae el rele.
+auto relayLoop() -> void {
+  for(;;) {
+    net::TcpConn c = net::relay::nextGuest(S.relayCtl, S.relayAddr);
+    if(!c.valid()) break;
+    if(!admit(std::move(c))) return;
+  }
+  std::lock_guard<std::mutex> lk(S.mu);
+  if(!S.closing) note("conexion con el rele perdida: la sala " + S.room + " ya no admite a nadie");
+}
+
+// Abre el puerto en el router por UPnP y averigua la IP publica. Hilo suelto: si la sesion
+// cambia mientras tanto, deshace lo que haya hecho.
+auto upnpTask(u32 gen, u16 port) -> void {
+  net::upnp::Gateway g = net::upnp::discover();
+  std::string err, ip;
+  bool mapped = false;
+  if(g.ok) mapped = net::upnp::addMapping(g, port, err);
+  if(mapped) net::upnp::externalIp(g, ip);
+  std::lock_guard<std::mutex> lk(S.mu);
+  if(S.gen != gen || S.closing || !S.on) {
+    if(mapped) net::upnp::deleteMapping(g, port);
+    return;
+  }
+  if(!g.ok) { log("UPnP: " + g.err + " (abre el puerto a mano o usa un rele)"); return; }
+  if(!mapped) { log("UPnP: " + err); return; }
+  S.gw = g; S.mappedPort = port;
+  S.publicAddr = ip.empty() ? std::string() : ip + ":" + std::to_string(port);
+  note("UPnP: puerto " + std::to_string(port) + " abierto en el router" +
+       (ip.empty() ? std::string() : "; los invitados entran por " + S.publicAddr));
 }
 
 // --- invitado ----------------------------------------------------------------------------
@@ -357,6 +408,8 @@ auto resetSession() -> void {   // mu tomado o sin hilos vivos
   S.epoch = S.rxEpoch = 0; S.field = 0; S.mask = 1; S.pendingMask = 0;
   S.ready.clear(); S.partial.clear(); S.partialView.clear(); S.myHash.clear(); S.peerHash.clear();
   S.hostView = kViewFull; g_viewSlot.store(-1);
+  S.relayAddr.clear(); S.room.clear(); S.publicAddr.clear(); S.listening = false;
+  S.gw = net::upnp::Gateway{}; S.mappedPort = 0; S.gen++;
   S.desyncs = 0; S.checks = 0; S.waitAcc = 0; S.waitN = 0; S.waitMs = 0; S.msg.clear();
   setCur(Frame{});
 }
@@ -371,21 +424,43 @@ auto envDelay() -> u32 {
 
 // --- API ---------------------------------------------------------------------------------
 
-auto host(System& sys, u16 port, std::string& err) -> bool {
+auto host(System& sys, u16 port, std::string& err, const std::string& relay) -> bool {
   stop();
+  if(!port) port = kDefaultPort;
+  // La sala se abre antes de tomar mu: es red y puede tardar.
+  net::TcpConn ctl;
+  std::string code;
+  if(!relay.empty() && !net::relay::openRoom(relay, ctl, code, err)) {
+    err = "rele " + relay + ": " + err;
+    return false;
+  }
   std::lock_guard<std::mutex> lk(S.mu);
   resetSession();
   S.sys = &sys;
-  if(!S.server.listen(port ? port : kDefaultPort, true)) {
+  S.listening = S.server.listen(port, true);
+  // Sin rele el puerto propio es la unica entrada; con rele, solo un extra para la red local.
+  if(!S.listening && relay.empty()) {
     err = "no se puede escuchar en el puerto " + std::to_string(port);
     return false;
   }
   S.romHash = romHashOf(sys);
   S.on = true; S.isHost = true; S.slot = 0;
   S.delay = envDelay();
-  S.peerName = std::to_string(port ? port : kDefaultPort);
-  S.acceptTh = std::thread(acceptLoop);
-  note("partida abierta en el puerto " + S.peerName + " (retardo " + std::to_string(S.delay) + " campos)");
+  S.peerName = std::to_string(port);
+  if(S.listening) S.acceptTh = std::thread(acceptLoop);
+  const std::string d = " (retardo " + std::to_string(S.delay) + " campos)";
+  if(!relay.empty()) {
+    S.relayCtl = std::move(ctl);
+    S.relayAddr = relay;
+    S.room = code;
+    S.relayTh = std::thread(relayLoop);
+    note("partida abierta en el rele " + relay + ", sala " + code + ": los invitados entran con " +
+         relay + "/" + code + d);
+  } else {
+    note("partida abierta en el puerto " + S.peerName + d);
+    const char* u = std::getenv("KESTREL_NETPLAY_UPNP");
+    if(!(u && u[0] == '0')) std::thread(upnpTask, S.gen, port).detach();
+  }
   return true;
 }
 
@@ -393,14 +468,25 @@ auto join(System& sys, const std::string& addr, std::string& err) -> bool {
   stop();
   std::string h = addr;
   u16 port = kDefaultPort;
-  if(auto c = addr.rfind(':'); c != std::string::npos) {
-    h = addr.substr(0, c);
-    port = (u16)std::atoi(addr.c_str() + c + 1);
-  }
-  if(h.empty()) h = "127.0.0.1";
   auto l = std::make_unique<Link>();
-  l->conn = net::tcpConnect(h, port, err);
-  if(!l->conn.valid()) return false;
+  if(auto sl = addr.find('/'); sl != std::string::npos) {
+    // rele[:puerto]/CODIGO: el rele empalma con el anfitrion y desde ahi es como directo.
+    const std::string rel = addr.substr(0, sl);
+    std::string code = addr.substr(sl + 1);
+    for(char& ch : code) ch = (char)std::toupper((unsigned char)ch);
+    l->conn = net::relay::joinRoom(rel, code, err);
+    if(!l->conn.valid()) { err = "rele " + rel + ": " + err; return false; }
+    h = rel + "/" + code;
+  } else {
+    if(auto c = addr.rfind(':'); c != std::string::npos) {
+      h = addr.substr(0, c);
+      port = (u16)std::atoi(addr.c_str() + c + 1);
+    }
+    if(h.empty()) h = "127.0.0.1";
+    l->conn = net::tcpConnect(h, port, err);
+    if(!l->conn.valid()) return false;
+    h += ":" + std::to_string(port);
+  }
   W w; w.b32(kMagic); w.b32(kVersion); w.b64(romHashOf(sys));
   std::string t; std::vector<u8> b;
   if(!l->send("hello", w) || !l->conn.recvFrame(t, b)) { err = "el anfitrion no responde"; return false; }
@@ -412,7 +498,7 @@ auto join(System& sys, const std::string& addr, std::string& err) -> bool {
   resetSession();
   S.sys = &sys;
   S.on = true; S.isHost = false; S.slot = (int)slot; S.delay = d;
-  S.peerName = h + ":" + std::to_string(port);
+  S.peerName = h;
   l->slot = (int)slot;
   S.up = std::move(l);
   S.up->rx = std::thread(clientRx, S.up.get());
@@ -423,13 +509,18 @@ auto join(System& sys, const std::string& addr, std::string& err) -> bool {
 auto stop() -> void {
   std::vector<std::unique_ptr<Link>> peers;
   std::unique_ptr<Link> up;
-  std::thread acc;
+  std::thread acc, rel;
+  net::upnp::Gateway gw;
+  u16 mapped = 0;
   {
     std::lock_guard<std::mutex> lk(S.mu);
     if(!S.on) return;
     S.closing = true;
     g_lockstep.store(false);
     S.server.close();
+    S.relayCtl.close();                           // despierta a relayLoop y cierra la sala
+    rel = std::move(S.relayTh);
+    gw = S.gw; mapped = S.mappedPort;
     for(auto& l : S.peers) { if(l->alive) l->send("bye", W{}); l->kill(); }
     if(S.up) { S.up->send("bye", W{}); S.up->kill(); }
     peers = std::move(S.peers);
@@ -438,6 +529,8 @@ auto stop() -> void {
     S.cv.notify_all();
   }
   if(acc.joinable()) acc.join();
+  if(rel.joinable()) rel.join();
+  if(gw.ok && mapped) net::upnp::deleteMapping(gw, mapped);
   for(auto& l : peers) if(l->rx.joinable()) l->rx.join();
   if(up && up->rx.joinable()) up->rx.join();
   {
@@ -459,12 +552,13 @@ auto status() -> Status {
   int n = 0; for(int i = 0; i < 4; i++) n += S.mask >> i & 1;
   s.players = n;
   s.view = g_view.load(std::memory_order_relaxed);
+  s.room = S.room; s.publicAddr = S.publicAddr;
   return s;
 }
 
-auto host(u16 port, std::string& err) -> bool {
+auto host(u16 port, std::string& err, const std::string& relay) -> bool {
   if(!g_sys) { err = "emulador sin arrancar"; return false; }
-  return host(*g_sys, port, err);
+  return host(*g_sys, port, err, relay);
 }
 
 auto join(const std::string& addr, std::string& err) -> bool {
@@ -496,7 +590,8 @@ auto startFromEnv(System& sys) -> void {
   g_sys = &sys;
   std::string err;
   if(const char* h = std::getenv("KESTREL_NETPLAY_HOST"); h && *h) {
-    if(!host(sys, (u16)std::atoi(h), err)) log("error: " + err);
+    const char* r = std::getenv("KESTREL_NETPLAY_RELAY");
+    if(!host(sys, (u16)std::atoi(h), err, r ? r : "")) log("error: " + err);
   } else if(const char* j = std::getenv("KESTREL_NETPLAY_JOIN"); j && *j) {
     if(!join(sys, j, err)) log("error: " + err);
   }

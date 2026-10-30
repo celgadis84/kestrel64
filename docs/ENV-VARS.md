@@ -208,10 +208,15 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 ## Juego en red (2026-10-30, `src/net/netplay.{hpp,cpp}`)
 
 - `KESTREL_NETPLAY_HOST=<puerto>` — abre partida al arrancar, escuchando en todas las
-  interfaces (6464 si vale 0). Por internet el puerto TCP se abre/redirige en el router del
-  anfitrion; no hay servidor intermedio.
-- `KESTREL_NETPLAY_JOIN=<host:puerto>` — se une al arrancar. Misma ROM (hash) y misma version
-  de protocolo, si no el anfitrion rechaza.
+  interfaces (6464 si vale 0). Sin rele intenta abrir ese puerto en el router por UPnP
+  (status `publicAddr` = IP publica:puerto).
+- `KESTREL_NETPLAY_RELAY=<rele[:puerto]>` — con HOST: abre ademas sala en un rele
+  (`kestrel64 --relay [puerto]`, 6465 por defecto) y los invitados entran por el sin abrir
+  puertos. Tambien rellena el campo "con rele" del dialogo Red.
+- `KESTREL_NETPLAY_UPNP=0` — no intentar abrir el puerto por UPnP.
+- `KESTREL_NETPLAY_JOIN=<host:puerto | rele[:puerto]/SALA>` — se une al arrancar, directo o
+  por la sala de un rele. Misma ROM (hash) y misma version de protocolo, si no el anfitrion
+  rechaza.
 - `KESTREL_NETPLAY_DELAY=N` (2, max 30) — retardo de entrada en campos que fija el
   anfitrion: margen de la red antes de que una maquina tenga que esperar. ~1 campo por cada
   16 ms de ida y vuelta.

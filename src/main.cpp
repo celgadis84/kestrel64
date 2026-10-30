@@ -3,6 +3,7 @@
 
 #include "core/system.hpp"
 #include "net/netplay.hpp"
+#include "net/relay.hpp"
 #include "cpu/jit.hpp"
 #include "rsp/rsp.hpp"
 #include "audio/audio.hpp"
@@ -177,6 +178,11 @@ int main(int argc, char** argv) {
     // shell: al abrir con doble clic sale solo.
     else if(a == "--library" || a == "--lib") { play = true; useLibrary = true; }
 #endif
+    // Rele de juego en red (src/net/relay.hpp): solo empareja salas, sin ROM ni ventana.
+    else if(a == "--relay") {
+      const int p = (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 0;
+      return kestrel::net::relay::serve(p > 0 && p < 65536 ? (kestrel::u16)p : kestrel::net::relay::kDefaultPort);
+    }
     else if(a == "--rspfuzz") {                 // differential VU fuzz: scalar vs SSE, then exit
       unsigned long long iters = (i + 1 < argc && argv[i + 1][0] != '-') ? std::strtoull(argv[++i], nullptr, 10) : 20000000ull;
       kestrel::Rsp rsp;

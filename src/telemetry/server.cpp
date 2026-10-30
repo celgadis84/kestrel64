@@ -902,12 +902,13 @@ auto Server::cmdCapture(const std::string& cmd, const json::Value& args, json::V
   return false;
 }
 
-// netplay.host {port?} / netplay.join {addr} / netplay.stop / netplay.status. Juego en red por
+// netplay.host {port?, relay?} / netplay.join {addr: host:puerto | rele/CODIGO} / netplay.stop / netplay.status. Juego en red por
 // sincronizacion de entradas (src/net/netplay.hpp). Todas devuelven el estado de la sesion.
 auto Server::cmdNetplay(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
   std::string err;
   if(cmd == "netplay.host") {
-    if(!netplay::host(system, (u16)args.get("port").asU32(netplay::kDefaultPort), err)) { data.set("msg", err); return false; }
+    if(!netplay::host(system, (u16)args.get("port").asU32(netplay::kDefaultPort), err,
+                      args.get("relay").asString())) { data.set("msg", err); return false; }
   } else if(cmd == "netplay.join") {
     if(!netplay::join(system, args.get("addr").asString(), err)) { data.set("msg", err); return false; }
   } else if(cmd == "netplay.stop") {
@@ -929,7 +930,8 @@ auto Server::cmdNetplay(const std::string& cmd, const json::Value& args, json::V
   data.set("active", s.active).set("host", s.host).set("synced", s.synced)
       .set("slot", (u64)s.slot).set("players", (u64)s.players).set("delay", s.delay)
       .set("field", s.field).set("epoch", s.epoch).set("desyncs", s.desyncs).set("checks", s.checks)
-      .set("waitMs", s.waitMs).set("peer", s.peer).set("msg", s.msg).set("view", (u64)s.view);
+      .set("waitMs", s.waitMs).set("peer", s.peer).set("msg", s.msg).set("view", (u64)s.view)
+      .set("room", s.room).set("publicAddr", s.publicAddr);
   return true;
 }
 

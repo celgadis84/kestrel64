@@ -330,16 +330,19 @@ def video_status() -> dict:
     return data
 
 
-def netplay_host(port: int = 6464) -> dict:
-    """Open a netplay session on `port` (all interfaces; open/forward it for internet play).
-    Up to 3 guests join; each one's local pad 1 becomes player 2/3/4. Returns the session
-    status (see netplay_status)."""
-    data, _ = query("netplay.host", port=int(port))
+def netplay_host(port: int = 6464, relay: str = "") -> dict:
+    """Open a netplay session on `port` (all interfaces). Up to 3 guests join; each one's
+    local pad 1 becomes player 2/3/4. Without `relay` the host tries to open the port on the
+    router via UPnP (status `publicAddr`). With `relay` ("host[:port]" of a `kestrel64
+    --relay` server, default port 6465) it also opens a room there (status `room`) and guests
+    join with "relay/ROOM" without opening any port. Returns the session status."""
+    data, _ = query("netplay.host", port=int(port), relay=relay, _wait_s=15.0)
     return data
 
 
 def netplay_join(addr: str) -> dict:
-    """Join a netplay host at "host:port" (same ROM and kestrel64 version required). The
+    """Join a netplay host at "host:port", or through a relay room at "relay[:port]/ROOM"
+    (same ROM and kestrel64 version required). The
     guest waits for the host's savestate, then runs in lockstep; its own save files are
     never written for the rest of the process."""
     data, _ = query("netplay.join", addr=addr, _wait_s=30.0)

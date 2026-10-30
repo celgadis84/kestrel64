@@ -1525,13 +1525,18 @@ auto padDialogThread() -> void {
 // ---------------------------------------------------------------- dialogo de partida en red
 
 // Crear partida (escuchar en un puerto) o unirse a IP:puerto, y el estado de la sesion al
-// vuelo. Sin servidor intermedio: por internet el anfitrion abre o redirige el puerto TCP en
-// su router y pasa su IP publica a los demas.
+// vuelo. Por internet: el anfitrion intenta abrir el puerto en su router por UPnP y, si no
+// puede, se usa un rele (`kestrel64 --relay`): el anfitrion abre sala y los demas entran con
+// rele/CODIGO sin abrir nada.
 constexpr int kIdNetPort = 2400, kIdNetAddr = 2401, kIdNetHost = 2402, kIdNetJoin = 2403;
-constexpr int kIdNetStop = 2404, kIdNetView = 2405;
-struct NetDlg { HWND port = nullptr, addr = nullptr, state = nullptr, view = nullptr; };
+constexpr int kIdNetStop = 2404, kIdNetView = 2405, kIdNetRelay = 2406;
+struct NetDlg { HWND port = nullptr, addr = nullptr, state = nullptr, view = nullptr, relay = nullptr; };
 NetDlg g_net;
 std::string g_netAddr = "127.0.0.1:6464";   // ultima direccion tecleada (vive con el proceso)
+std::string g_netRelay = [] {               // rele del anfitrion (vacio = sin rele)
+  const char* e = std::getenv("KESTREL_NETPLAY_RELAY");
+  return std::string(e ? e : "");
+}();
 
 auto netRefresh() -> void {
   if(!g_net.state) return;
@@ -1540,6 +1545,8 @@ auto netRefresh() -> void {
   if(!s.active) t = "Sin partida.";
   else {
     t = s.host ? "Anfitrion en el puerto " + s.peer : "Invitado de " + s.peer;
+    if(!s.room.empty()) t += " - SALA " + s.room;
+    if(!s.publicAddr.empty()) t += " - IP publica " + s.publicAddr;
     t += " - jugador " + std::to_string(s.slot + 1);
     t += s.synced ? " - jugando (" + std::to_string(s.players) + " jugadores)" : " - esperando";
     char b[96];
@@ -1565,7 +1572,12 @@ LRESULT CALLBACK netProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           char b[16] = {0};
           GetWindowTextA(g_net.port, b, sizeof b);
           int p = std::atoi(b);
-          ok = netplay::host((u16)(p > 0 && p < 65536 ? p : netplay::kDefaultPort), err);
+          char r[256] = {0};
+          GetWindowTextA(g_net.relay, r, sizeof r);
+          g_netRelay = r;
+          while(!g_netRelay.empty() && g_netRelay.back() == ' ') g_netRelay.pop_back();
+          SetWindowTextA(g_net.state, g_netRelay.empty() ? "Abriendo partida..." : "Abriendo sala en el rele...");
+          ok = netplay::host((u16)(p > 0 && p < 65536 ? p : netplay::kDefaultPort), err, g_netRelay);
           break;
         }
         case kIdNetJoin: {
@@ -1612,7 +1624,7 @@ auto netDialogThread() -> void {
     RegisterClassA(&wc);
     cls = true;
   }
-  RECT want = {0, 0, 470, 268};
+  RECT want = {0, 0, 470, 300};
   const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME;
   AdjustWindowRect(&want, style, FALSE);
   HWND h = CreateWindowExA(0, "kestrel64_net", "kestrel64 - partida en red", style,
@@ -1633,17 +1645,20 @@ auto netDialogThread() -> void {
   g_net.port = mk("EDIT", std::to_string(netplay::kDefaultPort).c_str(),
                   WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER, 186, 12, 70, 22, kIdNetPort, WS_EX_CLIENTEDGE);
   mk("BUTTON", "Crear", WS_TABSTOP, 352, 10, 106, 26, kIdNetHost);
-  mk("STATIC", "Unirse a (IP:puerto):", 0, 12, 52, 170, 18, 0);
-  g_net.addr = mk("EDIT", g_netAddr.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, 186, 48, 160, 22,
+  mk("STATIC", "  con rele (opcional):", 0, 12, 46, 170, 18, 0);
+  g_net.relay = mk("EDIT", g_netRelay.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, 186, 42, 160, 22,
+                   kIdNetRelay, WS_EX_CLIENTEDGE);
+  mk("STATIC", "Unirse a (IP:puerto o rele/SALA):", 0, 12, 84, 172, 18, 0);
+  g_net.addr = mk("EDIT", g_netAddr.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, 186, 80, 160, 22,
                   kIdNetAddr, WS_EX_CLIENTEDGE);
-  mk("BUTTON", "Unirse", WS_TABSTOP, 352, 46, 106, 26, kIdNetJoin);
+  mk("BUTTON", "Unirse", WS_TABSTOP, 352, 78, 106, 26, kIdNetJoin);
   g_net.view = mk("BUTTON", "Pantalla partida: cada uno ve solo lo suyo (anfitrion, F4)",
-                  WS_TABSTOP | BS_CHECKBOX, 12, 84, 446, 20, kIdNetView);
-  g_net.state = mk("STATIC", "", SS_LEFT, 12, 112, 446, 70, 0);
-  mk("STATIC", "Por internet: el anfitrion abre el puerto TCP en su router y da su IP publica.\r\n"
-               "Misma ROM y misma version de kestrel64 en todas las maquinas.",
-     SS_LEFT, 12, 188, 446, 36, 0);
-  mk("BUTTON", "Salir de la partida", WS_TABSTOP, 12, 232, 150, 26, kIdNetStop);
+                  WS_TABSTOP | BS_CHECKBOX, 12, 116, 446, 20, kIdNetView);
+  g_net.state = mk("STATIC", "", SS_LEFT, 12, 144, 446, 70, 0);
+  mk("STATIC", "Por internet: el anfitrion intenta abrir el puerto en su router (UPnP); si no\r\n"
+               "puede, rele (kestrel64 --relay) y los demas entran con rele/SALA. Misma ROM y version.",
+     SS_LEFT, 12, 220, 446, 36, 0);
+  mk("BUTTON", "Salir de la partida", WS_TABSTOP, 12, 264, 150, 26, kIdNetStop);
   netRefresh();
   SetTimer(h, 1, 500, nullptr);
   ShowWindow(h, SW_SHOW);

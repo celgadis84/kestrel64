@@ -45,18 +45,25 @@ struct Status {
   std::string peer;         // anfitrion: puerto; invitado: direccion
   std::string msg;          // ultimo aviso
   int  view = 0;            // vista de pantalla partida vigente (kView*)
+  std::string room;         // anfitrion por rele: codigo de sala que dar a los invitados
+  std::string publicAddr;   // anfitrion: IP publica:puerto si UPnP abrio el puerto del router
 };
 
-// Abrir partida en `port` (todas las interfaces) o unirse a host:puerto. Fallan con el
-// motivo en err. Solo una sesion a la vez.
-auto host(System& sys, u16 port, std::string& err) -> bool;
+// Abrir partida en `port` (todas las interfaces) o unirse. Fallan con el motivo en err. Solo
+// una sesion a la vez.
+//  - host con `relay` ("rele[:puerto]", src/net/relay.hpp): ademas abre sala en el rele y
+//    admite a los invitados que entren por el (sin abrir puertos). Sin rele intenta abrir el
+//    puerto en el router por UPnP en segundo plano (KESTREL_NETPLAY_UPNP=0 no).
+//  - join: "host[:puerto]" directo, o "rele[:puerto]/CODIGO" por sala del rele.
+auto host(System& sys, u16 port, std::string& err, const std::string& relay = {}) -> bool;
 auto join(System& sys, const std::string& addr, std::string& err) -> bool;
 auto stop() -> void;
 auto status() -> Status;
-// KESTREL_NETPLAY_HOST=<puerto> / KESTREL_NETPLAY_JOIN=<host:puerto>, KESTREL_NETPLAY_DELAY.
+// KESTREL_NETPLAY_HOST=<puerto> / KESTREL_NETPLAY_JOIN=<host:puerto | rele/CODIGO>,
+// KESTREL_NETPLAY_RELAY=<rele[:puerto]> (con HOST), KESTREL_NETPLAY_DELAY, KESTREL_NETPLAY_UPNP.
 auto startFromEnv(System& sys) -> void;
 // Lo mismo con el System que dejo registrado startFromEnv (menu de la ventana, que no lo ve).
-auto host(u16 port, std::string& err) -> bool;
+auto host(u16 port, std::string& err, const std::string& relay = {}) -> bool;
 auto join(const std::string& addr, std::string& err) -> bool;
 
 // --- pantalla partida ---------------------------------------------------------------------
