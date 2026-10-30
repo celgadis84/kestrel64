@@ -700,8 +700,7 @@ auto Rsp::mfc0(int rt, int rd) -> void {
       const u64 ep0 = mem->dpcEpoch.load(std::memory_order_acquire);
       const u32 val = r == 2 ? mem->dpcCurrentFor(now, 1) : mem->dpcStatusFor(now, 1);
       // RDP parado visto por el RSP => pixeles en la RDRAM del anfitrion (ver rspRdpIdleWait).
-      // DMA_BUSY = trabajo vivo; CMD_BUSY ya no sirve: sigue puesto en reposo sin SYNC_FULL.
-      if(r == 3 && !(val & 0x100u)) mem->rspRdpIdleWait();
+      if(r == 3 && !(val & 0x140u)) mem->rspRdpIdleWait();
       setR(rt, val);
       if(r == 2) dpcFastFill(now, ep0, val);
       idleSkip(now, val, r == 2);

@@ -4104,7 +4104,6 @@ auto Memory::dpScheduleReload(u32 addr) -> void {
   dpJobEndAddr[seq & kDpRingM] = addr;
   dpJobStartG[seq & kDpRingM]  = t;
   dpJobEndG[seq & kDpRingM]    = t;
-  dpJobBusyAfter[seq & kDpRingM] = dpBusyAfterLast.load(std::memory_order_relaxed);   // vacio: hereda
   dpJobSync[seq & kDpRingM]    = false;
   dpJobKickG[seq & kDpRingM]   = kg;
   dpSchedEnd.store(t, std::memory_order_release);
@@ -4149,15 +4148,9 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpJobEndAddr[seq & kDpRingM] = end;
   dpJobStartG[seq & kDpRingM]  = t0;
   dpJobEndG[seq & kDpRingM]    = t1;
-  {
-    // CMD_BUSY tras el tramo (ver dpJobBusyAfter). Sin pase de coste no se sabe como acaba:
-    // se da por cerrado con SYNC_FULL, igual que dpLastSpanSync, o sea el modelo de antes.
-    const u8 tail = !costed ? (current != end ? 1 : 0) : softCost.cmdTail;
-    const bool after = tail == 0 ? dpBusyAfterLast.load(std::memory_order_relaxed) : tail == 2;
-    dpJobBusyAfter[seq & kDpRingM] = after;
-    dpJobSync[seq & kDpRingM]      = costed && tail == 1;
-    dpBusyAfterLast.store(after, std::memory_order_relaxed);
-  }
+  // El tramo acaba en SYNC_FULL (ventana del riesgo de dpcHazardCheck). Solo se sabe con el
+  // pase de coste.
+  dpJobSync[seq & kDpRingM] = costed && softCost.cmdTail == 1;
   // Desde que instante lo ve un lector. El RSP sella con el instante de SU ciclo, y eso ya es
   // lo que ve la CPU en su siguiente instruccion. La CPU sella con cartNow(), que son las ops
   // retiradas ANTES de la que escribe DPC_END: la escritura queda al final de esa instruccion,
@@ -4566,7 +4559,6 @@ auto Memory::rcpSchedReset() -> void {
   std::lock_guard<std::mutex> lk(rdpMx);
   dpSchedEnd.store(0, std::memory_order_relaxed);
   dpSyncEnds.clear();
-  dpBusyAfterLast.store(false, std::memory_order_relaxed);
   rdpHwHung.store(false, std::memory_order_relaxed);
   dpSyncBarAt.store(~0ull, std::memory_order_relaxed);
   dpSubSeq.store(0, std::memory_order_relaxed);
@@ -4989,7 +4981,6 @@ auto Memory::dpcStatusFor(u64 now, u32 who) -> u32 {
   if(!dpGuestOn()) {
     u32 pend = dpPending.load(std::memory_order_acquire);
     if(pend)      st |= 0x100u | 0x40u;
-    else if(dpBusyAfterLast.load(std::memory_order_relaxed)) st |= 0x40u;
     if(pend >= 2) st |= 0x200u;
     return st;
   }
@@ -4998,8 +4989,6 @@ auto Memory::dpcStatusFor(u64 now, u32 who) -> u32 {
   u64 out = vis > c ? vis - c : 0;   // trabajos vivos para ESTE reloj
   if(out >= 1) { st |= 0x100u | 0x40u;   // DMA_BUSY | CMD_BUSY
     bumpOwned(dpcRdBusy[who]); }
-  // RDP parado: CMD_BUSY sigue puesto si hubo comandos tras el ultimo SYNC_FULL (HW: 0x0C0).
-  else if(c > 0 && dpJobBusyAfter[(c - 1) & kDpRingM]) st |= 0x40u;
   // END_VALID: ya hay un buffer esperando ademas del que el motor esta leyendo, o sea que el
   // par START/END esta lleno y no cabe otro.
   if(out >= 2) { st |= 0x200u;

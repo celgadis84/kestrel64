@@ -875,12 +875,10 @@ struct Memory {
   std::atomic<bool> dpLogFlush{false};   // System::quiesceRcp: aplicar el diario sin esperar
   u32 dpJobAddr[kDpRingN]{};       // DPC_CURRENT al abrir
   u32 dpJobEndAddr[kDpRingN]{};    // DPC_CURRENT al cerrar
-  // CMD_BUSY tras cerrar el trabajo (HW, verificado en consola): lo baja el fin de un SYNC_FULL
-  // y lo vuelve a subir cualquier comando posterior, y se queda puesto con el RDP parado hasta
-  // el siguiente SYNC_FULL (STATUS 0x0C0 en reposo). dpJobSync = el tramo acaba en SYNC_FULL.
-  bool dpJobBusyAfter[kDpRingN]{};
+  // El tramo acaba en SYNC_FULL (ventana del riesgo de dpcHazardCheck). CMD_BUSY NO se queda
+  // puesto en reposo tras comandos sin SYNC_FULL: n64-systemtest "RDP STATUS: Flags during a
+  // run" (verificado en consola) espera 0xa8 ahi.
   bool dpJobSync[kDpRingN]{};
-  std::atomic<bool> dpBusyAfterLast{false};   // el del ultimo tramo fechado (modelo sin horario)
   // Riesgo de HW: escribir DPC_START/END con un SYNC_FULL en curso cuelga el RDP real. Se avisa
   // una vez; KESTREL_RDP_STRICT=1 ademas congela el RDP como la consola (ver dpcHazardCheck).
   bool dpHazardWarned = false;

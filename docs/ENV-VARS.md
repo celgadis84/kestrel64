@@ -154,7 +154,12 @@ HW (triangulo en COPY/FILL, LOAD de 4bpp, falta de SYNC_*...), vuelca los 24 com
 aviso n y los saltos del puntero de lectura · `KESTREL_RDPMODES=1` imprime una vez cada valor
 distinto de los comandos de estado (modos, combinador, imagenes, tile, colores): diff entre dos
 programas que deberian pintar igual · `[rdp!]` (siempre) avisa de un comando cortado entre dos
-buffers DPC, que en HW cuelga el RDP; `KESTREL_SPLITLOG=1` lista ademas los cortes dentro del
+buffers DPC, que en HW cuelga el RDP; `[rdp] HW hazard` (siempre, una vez) avisa de una
+escritura de DPC_START/DPC_END mientras el RDP ejecuta un SYNC_FULL, que en HW cuelga el RDP
+(DPC_STATUS 0x740, CURRENT parado a mitad de comando); `KESTREL_RDP_STRICT=1` ademas congela
+el RDP como la consola (START/END ignorados, STATUS fijo, sin MI_DP) ·
+`KESTREL_RDPTRACE=<n>` imprime los n primeros comandos RDP con su direccion, para casarlos con
+el volcado de una pantalla de panico; `KESTREL_SPLITLOG=1` lista ademas los cortes dentro del
 mismo buffer · `KESTREL_RDPGUARD=<lo>:<hi>`
 chiva cualquier escritura del RDP a RDRAM en ese rango fisico · `KESTREL_CIFLOOR=<phys>`
 baja el suelo por debajo del cual un SET_COLOR_IMAGE se considera basura (por defecto los

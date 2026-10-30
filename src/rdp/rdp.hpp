@@ -73,9 +73,8 @@ struct SoftRdp {
   // storm that starves the game thread. The caller gates raiseIntr(MI_DP) on this.
   bool sawSyncFull = false;
 
-  // Estado de CMD_BUSY que deja el ultimo run(): 0 = tramo vacio (hereda el anterior),
-  // 1 = el ultimo comando fue SYNC_FULL (en HW baja CMD_BUSY), 2 = hubo comandos despues del
-  // ultimo SYNC_FULL (CMD_BUSY queda puesto aun con el RDP parado). Ver Memory::dpcStatusFor.
+  // Ultimo comando del ultimo run(): 0 = tramo vacio, 1 = SYNC_FULL, 2 = otro. Lo usa
+  // Memory::dpcHazardCheck (ventana del SYNC_FULL en curso).
   u8 cmdTail = 0;
 
   // read-only introspection for telemetry / tracing

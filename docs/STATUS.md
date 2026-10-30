@@ -10558,3 +10558,15 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Pendiente para retirar parallel-RDP: x4 GPU-RDP 12,8-20 s contra 6,1 s (un vaciado sincrono
   por tramo con escalado). Mando `KESTREL_GPURDP_MINPX_HI` (apagado): tiempo real a cambio de
   tramos pequenos a 1x. Detalle `docs/GPU-RDP.md` Fase 7.
+
+## 2026-10-30 (d) — RDP: aviso de DPC_START/END durante SYNC_FULL (WIP c29c42b cerrado)
+
+- Riesgo de HW visto en consola por el SDK (capa compat tiny3d, `rdpq_detach_show` encolaba un
+  SYNC_FULL sin esperarlo y el siguiente DPC_START colgaba el RDP: STATUS 0x740, CURRENT a mitad
+  de triangulo). `Memory::dpcHazardCheck` lo detecta: escritura de START o END dentro del tramo
+  en curso que acaba en SYNC_FULL. Aviso una vez; `KESTREL_RDP_STRICT=1` congela como el HW.
+  Observado en HW solo con START; END se cubre por simetria (sin verificar).
+- Quitada la otra mitad del WIP (CMD_BUSY puesto en reposo tras comandos sin SYNC_FULL): era
+  una inferencia, y n64-systemtest "RDP STATUS: Flags during a run" (verificado en consola)
+  espera 0xa8 sin CMD_BUSY. systemtest 0/3721 en interp y jit; sm64 `b5521b24` en interp y
+  threaded-jit, sin avisos falsos.
