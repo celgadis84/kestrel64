@@ -219,3 +219,10 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
   su escalado interno a N mientras dura (el trozo propio se amplia a toda la ventana) y al
   volver a pantalla completa recupera el de arranque. paraLLEl-RDP no cambia en caliente: alli
   se pone a mano con `KESTREL_UPSCALE`.
+
+## Cabecera de homebrew (2026-10-30, `src/core/hbmeta.{hpp,cpp}`)
+
+- `KESTREL_HBPADS=0` — no aplicar los mandos y accesorios que pide la cabecera avanzada
+  ("ED", bytes 0x34-0x37). Por defecto mandan sobre el perfil en los puertos con dato.
+- `KESTREL_LANG=<xx>` — idioma (ISO 639-1) de los metadatos de homebrew (`[meta.xx]` encima
+  de `[meta]`). Por defecto el del sistema, si no `LANG`, si no `en`.

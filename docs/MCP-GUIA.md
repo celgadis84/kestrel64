@@ -131,6 +131,9 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   Videos\kestrel64.
 
 **Juego en red**
+- `emu_status` -> `game.homebrew` (solo ROMs con cabecera avanzada "ED": que va en cada
+  puerto, partida, rtc, regionFree, embeddedMeta) y `game.meta` (metadatos de n64brew del zip
+  final o del `<rom>.meta`: name, author, website..., `longDescText`, `source`).
 - `netplay_host(port)` / `netplay_join("ip:puerto")` / `netplay_stop()` / `netplay_status()`:
   lockstep de entradas, anfitrion + hasta 3 invitados (jugadores 2-4). `status`: synced, slot,
   players, field, epoch, desyncs/checks (hash de CPU cada 60 campos), waitMs, view.

@@ -4,6 +4,7 @@
 #include "../core/savestate.hpp"
 #include "../core/system.hpp"
 #include "../core/wrtag.hpp"
+#include "../core/hbmeta.hpp"
 #include "../core/movie.hpp"
 #include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
@@ -278,6 +279,32 @@ auto Server::cmdStatus(const json::Value&, json::Value& data) -> void {
                      st == ST::Flash1m   ? "flash1m"   : st == ST::Sram1m    ? "sram1m"    : "none";
     g.set("saveType", std::string(sv));
     g.set("saveBytes", (u64)system.memory.saveSize());
+    // Cabecera avanzada de homebrew + metadatos (n64brew). Los metadatos se leen del disco
+    // una vez por ROM: pueden pedir leer la ROM entera.
+    if(system.rom.data.size() >= 0x40) {
+      const hb::Header h = hb::parseHeader(system.rom.data.data());
+      if(h.ed) {
+        json::Value hbv = json::Value::object();
+        json::Value ports = json::Value::array();
+        for(int i = 0; i < 4; i++) ports.push(json::Value(std::string(hb::ctrlName(h.ctrl[i]))));
+        hbv.set("ports", ports);
+        hbv.set("saveType", std::string(hb::saveTypeName(h.saveType)));
+        hbv.set("rtc", h.rtc);
+        hbv.set("regionFree", h.regionFree);
+        hbv.set("embeddedMeta", h.hasMeta);
+        g.set("homebrew", hbv);
+      }
+      static std::string metaFor;
+      static hb::Meta meta;
+      if(metaFor != system.romPath) { metaFor = system.romPath; meta = hb::load(system.romPath); }
+      if(meta.ok) {
+        json::Value mv = json::Value::object();
+        mv.set("source", meta.source);
+        for(const auto& e : meta.kv) mv.set(e.first, e.second);
+        if(!meta.longDesc.empty()) mv.set("longDescText", meta.longDesc);
+        g.set("meta", mv);
+      }
+    }
     data.set("game", g);
   } else {
     data.set("game", json::Value{});

@@ -230,6 +230,7 @@ struct Memory {
   auto eepromTypeByte() const -> u8 { return saveType == SaveType::Eeprom4k ? 0x80 : 0xC0; }
   auto saveSize()  const -> u32;             // backing size in bytes for the current type
   auto resolveSaveType() -> void;            // pick type + size backing from the loaded ROM
+  auto applyHomebrewPads() -> void;          // mandos y accesorios de la cabecera ED (0x34-0x37)
 
   // On-disk persistence: a battery/flash save survives power-off on real hardware, so
   // the backing is mirrored to a file next to the ROM (.eep/.sra/.fla, the mupen/ares

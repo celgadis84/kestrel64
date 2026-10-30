@@ -2,6 +2,7 @@
 #include "profile.hpp"
 #include "gamecard.hpp"
 #include "../core/archive.hpp"
+#include "../core/hbmeta.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -691,7 +692,15 @@ auto ensureTex(Entry& e) -> void {
   Image im;
   std::vector<u8> buf;
   const std::string p = findCoverFile(e, g.dir);
-  if(!p.empty() && readFileAll(p, buf) && decodePng(buf.data(), buf.size(), im) && im.w > 0) {
+  bool ok = !p.empty() && readFileAll(p, buf) && decodePng(buf.data(), buf.size(), im) && im.w > 0;
+  // Sin portada al lado: la caja de los metadatos de homebrew (zip al final o <rom>.meta).
+  if(!ok) {
+    const hb::Meta m = hb::load(e.path);
+    for(const auto& b : m.boxart)
+      if(b.first == "front" && m.file(b.second, buf) && decodePng(buf.data(), buf.size(), im) &&
+         im.w > 0) { ok = true; break; }
+  }
+  if(ok) {
     fitCover(im, e.tex);
     e.state = 1;
   } else {

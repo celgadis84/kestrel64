@@ -10472,3 +10472,19 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   escalado es menor; al volver a completa, el de arranque.
 - Validado (SM64 en red, GPU-RDP, arranque a 1x): rows 1280x480, cols 640x960, full 320x240
   en los dos, x1->x4->x1 dos veces, 0 desincronias. paraLLEl-RDP: sin cambio en caliente.
+
+## 2026-10-30 — cabecera avanzada de homebrew y metadatos (n64brew)
+
+- `src/core/hbmeta.{hpp,cpp}`: cabecera "ED" (0x34-0x37 mandos, 0x38 bit 0 metadatos, 0x3E
+  region, 0x3F RTC/region libre/partida) y metadatos de "ROM Metadata": zip pegado al final de
+  la ROM (posiciones rebasadas con el directorio central) o `<rom>.meta` al lado, que manda;
+  `metadata.ini` con `[meta]`, `[meta.<idioma>]`, `[boxart]`, `[cartart]`, long-desc del .txt.
+  Rutas solo relativas sin `.`/`..`; zip guardado o deflate (`archive::inflate`), CRC comprobado.
+- `Memory::applyHomebrewPads` (tras `resolveSaveType`): conecta/quita puertos, raton, Rumble /
+  Controller / Transfer Pak segun la cabecera; manda sobre el perfil (`KESTREL_HBPADS=0` no).
+  Partida y RTC ya venian de `resolveSaveType`.
+- Ficha del juego: pestana "Homebrew" (cabecera + metadatos + boton "Abrir web", solo http/s).
+  Biblioteca: sin portada al lado usa la caja frontal (PNG) de los metadatos. MCP: `status`
+  -> `game.homebrew` (puertos, partida, rtc, regionFree, embeddedMeta) y `game.meta`.
+- Validado con una ROM de prueba (cabecera ED + zip pegado, solo en local): 3 lineas `[pad]`,
+  EEPROM 4K, RTC, region libre, metadatos embebidos, idioma `es` y long-desc: VEREDICTO OK.

@@ -1,4 +1,5 @@
 #include "archive.hpp"
+#include "hbmeta.hpp"
 #include "wrtag.hpp"
 #include "../telemetry/hostprof.hpp"
 #include "movie.hpp"
@@ -250,7 +251,34 @@ auto Memory::loadRom(std::vector<u8> image) -> void {
   // reinicio seria fingir un dato que no tenemos; con los registros a cero el modelo cuenta
   // de menos, que es exactamente lo que hacia antes de existir el plazo.
   resolveSaveType();
+  applyHomebrewPads();
   initMap();  // refresh so CART_ROM appears
+}
+
+// Cabecera avanzada de homebrew (ID "ED"): 0x34-0x37 dicen que va en cada puerto. El juego
+// sabe lo que necesita (un raton, un Transfer Pak...), asi que manda sobre la configuracion
+// general del perfil en los puertos con dato (0 = sin dato: se queda lo del usuario), como en
+// ares y Parallel Launcher. KESTREL_HBPADS=0 la ignora. El menu sigue cambiandolo en caliente.
+auto Memory::applyHomebrewPads() -> void {
+  if(rom.size() < 0x40) return;
+  const hb::Header h = hb::parseHeader(rom.data());
+  if(!h.ed) return;
+  if(const char* e = std::getenv("KESTREL_HBPADS"); e && e[0] == '0') return;
+  for(int i = 0; i < 4; i++) {
+    const u8 v = h.ctrl[i];
+    if(v == 0x00) continue;
+    PadPort& pp = padPort[i];
+    pp.connected = v != 0xFF;
+    rt::padOn[i].store(pp.connected, std::memory_order_relaxed);
+    pp.mouse = v == 0x80;
+    if(v < 0x80) {
+      const u8 ac = v == 0x01 ? 2 : v == 0x02 ? 1 : v == 0x03 ? 3 : 0;
+      pp.accessory = ac;
+      rt::padAcc[i].store(ac, std::memory_order_relaxed);
+      if(ac == 1 && pp.mempak.empty()) mempakFormat(pp.mempak);
+    }
+    std::fprintf(stderr, "[pad] cabecera ED: puerto %d = %s\n", i + 1, hb::ctrlName(v));
+  }
 }
 
 // Duracion de un DMA del PI en ciclos del RCP, con los tiempos que programan PI_BSD_DOM*.

@@ -38,6 +38,7 @@ add_executable(kestrel64
   src/core/memory.cpp
   src/core/rom.cpp
   src/core/archive.cpp
+  src/core/hbmeta.cpp
   src/core/savestate.cpp
   src/core/rewind.cpp
   src/core/cheats.cpp

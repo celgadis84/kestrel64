@@ -10,6 +10,7 @@
 // es como las maneja el resto del emulador.
 
 #include "gamecard.hpp"
+#include "../core/hbmeta.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -26,12 +27,13 @@ namespace kestrel::ui::card {
 namespace {
 
 enum : int {
-  kTab0 = 100,   // 100..103
+  kTab0 = 100,   // 100..104
   kPlay = 110, kClose,
   kInfoSave = 120, kFav,
   kManList = 130, kManOpen, kManAdd, kManDir, kManSrc, kManGet,
   kChtList = 140, kChtToggle, kChtDel, kChtAdd, kChtName, kChtCodes,
   kSavList = 150, kSavDir,
+  kHbWeb = 155,
   kEdit0 = 160,   // 160.. campos de Info
 };
 
@@ -39,6 +41,7 @@ const char* const kFields[] = {"year", "developer", "publisher", "genre", "playe
 const wchar_t* const kFieldLabels[] = {L"A\u00f1o", L"Desarrolla", L"Edita", L"G\u00e9nero",
                                        L"Jugadores"};
 constexpr int kNF = 5;
+constexpr int kPages = 5;
 
 struct Dlg {
   HWND win = nullptr;
@@ -47,11 +50,12 @@ struct Dlg {
   std::string key;
   bool canPlay = false, play = false;
   int tab = 0;
-  std::vector<HWND> page[4];
-  HWND tabBtn[4] = {};
+  std::vector<HWND> page[kPages];
+  HWND tabBtn[kPages] = {};
   HWND edit[kNF] = {}, notes = nullptr, fav = nullptr, stats = nullptr, infoMsg = nullptr;
   HWND manList = nullptr, manSrc = nullptr, manMsg = nullptr, chtList = nullptr, chtName = nullptr, chtCodes = nullptr,
-       chtMsg = nullptr, savList = nullptr;
+       chtMsg = nullptr, savList = nullptr, hbText = nullptr;
+  hb::Meta hbMeta;
   std::vector<std::string> man;
   HFONT font = nullptr, big = nullptr;
 };
@@ -115,7 +119,7 @@ auto fmtTime(long long t) -> std::string {
 
 auto showTab(int t) -> void {
   d.tab = t;
-  for(int p = 0; p < 4; p++) {
+  for(int p = 0; p < kPages; p++) {
     for(HWND c : d.page[p]) ShowWindow(c, p == t ? SW_SHOW : SW_HIDE);
     // La pestana activa se ve "pulsada": un boton de radio con aspecto de boton.
     SendMessageW(d.tabBtn[p], BM_SETCHECK, p == t ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -205,9 +209,67 @@ auto fillSaves() -> void {
     SendMessageW(d.savList, LB_ADDSTRING, 0, (LPARAM)L"(nada guardado todavia)");
 }
 
+// Todo en un texto: la cabecera avanzada (si la hay) y los metadatos (si los hay). Los
+// metadatos vienen en UTF-8; la cabecera, en ASCII.
+auto fillHomebrew() -> void {
+  std::string t;
+  hb::Header h;
+  if(hb::probe(d.rom, h) && h.ed) {
+    t += "Cabecera avanzada (codigo ED)\r\n";
+    t += std::string("  Partida: ") + hb::saveTypeName(h.saveType) + "\r\n";
+    t += std::string("  Reloj (RTC): ") + (h.rtc ? "si" : "no") + "\r\n";
+    t += std::string("  Region libre: ") + (h.regionFree ? "si" : "no") + "\r\n";
+    for(int i = 0; i < 4; i++) {
+      char b[96];
+      std::snprintf(b, sizeof b, "  Puerto %d: %s (0x%02X)\r\n", i + 1, hb::ctrlName(h.ctrl[i]),
+                    h.ctrl[i]);
+      t += b;
+    }
+    t += std::string("  Metadatos en la ROM: ") + (h.hasMeta ? "si" : "no") + "\r\n";
+  } else {
+    t += "Sin cabecera avanzada de homebrew (codigo de juego distinto de ED).\r\n";
+  }
+  t += "\r\n";
+  const hb::Meta& m = d.hbMeta;
+  if(m.ok) {
+    t += "Metadatos (" + m.source + ")\r\n";
+    static const char* const keys[][2] = {
+        {"name", "Nombre"}, {"author", "Autor"}, {"release-date", "Fecha"},
+        {"osi-license", "Licencia"}, {"website", "Web"}, {"age-rating", "Edad"},
+        {"num-players", "Jugadores"}, {"short-desc", "Resumen"}};
+    for(const auto& k : keys)
+      if(const std::string v = m.get(k[0]); !v.empty()) t += std::string("  ") + k[1] + ": " + v + "\r\n";
+    if(!m.screenshots.empty()) {
+      t += "  Capturas:";
+      for(const auto& s : m.screenshots) t += " " + s;
+      t += "\r\n";
+    }
+    for(const auto& b : m.boxart) t += "  Caja (" + b.first + "): " + b.second + "\r\n";
+    for(const auto& b : m.cartart) t += "  Cartucho (" + b.first + "): " + b.second + "\r\n";
+    if(!m.longDesc.empty()) {
+      t += "\r\n";
+      // El edit multilinea quiere CRLF.
+      for(char c : m.longDesc) {
+        if(c == '\r') continue;
+        if(c == '\n') t += "\r\n"; else t += c;
+      }
+    }
+  } else {
+    t += "Sin metadatos (ni zip al final de la ROM ni fichero .meta al lado).";
+  }
+  SetWindowTextW(d.hbText, u8w(t).c_str());
+}
+
 auto chtMsg(const std::string& s) -> void { SetWindowTextW(d.chtMsg, aw(s).c_str()); }
 
 // ---------------------------------------------------------------- acciones
+auto openWeb() -> void {
+  const std::string w = d.hbMeta.get("website");
+  // Solo enlaces web: el valor sale de la ROM y ShellExecute abriria cualquier cosa.
+  if(w.rfind("http://", 0) != 0 && w.rfind("https://", 0) != 0) return;
+  ShellExecuteW(d.win, L"open", u8w(w).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
 auto openFolder(const std::string& dir) -> void {
   ShellExecuteW(d.win, L"open", aw(dir.empty() ? std::string(".") : dir).c_str(), nullptr,
                 nullptr, SW_SHOWNORMAL);
@@ -368,7 +430,7 @@ LRESULT CALLBACK cardProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch(m) {
     case WM_COMMAND: {
       const int id = LOWORD(w), code = HIWORD(w);
-      if(id >= kTab0 && id < kTab0 + 4) { showTab(id - kTab0); return 0; }
+      if(id >= kTab0 && id < kTab0 + kPages) { showTab(id - kTab0); return 0; }
       switch(id) {
         case kPlay: d.play = true; DestroyWindow(h); return 0;
         case kClose: case IDCANCEL: DestroyWindow(h); return 0;
@@ -383,6 +445,7 @@ LRESULT CALLBACK cardProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case kChtDel: deleteCheat(); return 0;
         case kChtAdd: addCheatUi(); return 0;
         case kSavDir: openFolder(romDir()); return 0;
+        case kHbWeb: openWeb(); return 0;
         default: break;
       }
       break;
@@ -448,8 +511,9 @@ auto build(HWND owner) -> bool {
     line += "    (cabecera sin leer)";
   mk(L"STATIC", aw(line), SS_ENDELLIPSIS, 12, 36, cw - 24, 18, 0, -1);
 
-  static const wchar_t* kTabs[4] = {L"Info", L"Manual", L"Trucos", L"Partidas"};
-  for(int i = 0; i < 4; i++)
+  static const wchar_t* kTabs[kPages] = {L"Info", L"Manual", L"Trucos", L"Partidas",
+                                        L"Homebrew"};
+  for(int i = 0; i < kPages; i++)
     d.tabBtn[i] = mk(L"BUTTON", kTabs[i], WS_TABSTOP | BS_AUTORADIOBUTTON | BS_PUSHLIKE |
                                               (i == 0 ? WS_GROUP : 0),
                      12 + i * 96, 60, 92, 26, kTab0 + i, -1);
@@ -508,6 +572,13 @@ auto build(HWND owner) -> bool {
   SendMessageW(d.savList, WM_SETFONT, (WPARAM)GetStockObject(ANSI_FIXED_FONT), TRUE);
   mk(L"BUTTON", L"Abrir carpeta", WS_TABSTOP, 12, y0 + 250, 110, 26, kSavDir, 3);
 
+  // ---- Homebrew (cabecera avanzada "ED" y metadatos de n64brew)
+  d.hbText = mk(L"EDIT", L"", WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+                                  WS_VSCROLL,
+                12, y0, cw - 24, 240, 0, 4);
+  HWND web = mk(L"BUTTON", L"Abrir web", WS_TABSTOP, 12, y0 + 250, 110, 26, kHbWeb, 4);
+  EnableWindow(web, !d.hbMeta.get("website").empty());
+
   // ---- botones de abajo
   if(d.canPlay) mk(L"BUTTON", L"Jugar", WS_TABSTOP | BS_DEFPUSHBUTTON, cw - 232, ch - 38, 110, 28,
                    kPlay, -1);
@@ -517,6 +588,7 @@ auto build(HWND owner) -> bool {
   fillManuals();
   fillCheats(0);
   fillSaves();
+  fillHomebrew();
   showTab(0);
   return true;
 }
@@ -534,6 +606,7 @@ auto showCard(const std::string& rom, void* owner, bool canPlay) -> bool {
   d.rom = rom;
   d.hdr = readHeader(rom);
   d.key = metaKey(rom, d.hdr);
+  d.hbMeta = hb::load(rom);
   d.canPlay = canPlay;
   HWND own = (HWND)owner;
   bool played = false;
