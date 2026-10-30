@@ -231,8 +231,8 @@ CATEGORIES = [
            "Real-ESRGAN y poniendo la carpeta resultante como pack). Solo SoftRDP."),
     O("upscale", "KESTREL_UPSCALE", "Escalado interno (GPU)", "choice", "1",
       values=[["1", "1x - resolucion nativa"], ["2", "2x"], ["4", "4x"], ["8", "8x"]],
-      help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. GPU-RDP hasta 4x "
-           "(8 se queda en 4), paraLLEl-RDP hasta 8x; el SoftRDP va siempre a 1x. Lo que el juego lee de su propio "
+      help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. GPU-RDP y paraLLEl-RDP hasta 8x "
+           "(8x pide ~768 MB; si no hay, sigue a 1x); el SoftRDP va siempre a 1x. Lo que el juego lee de su propio "
            "framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen."),
     O("ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", "bool", False, adv=True,
       help="Con escalado interno, al devolver la imagen ampliada al framebuffer del juego "

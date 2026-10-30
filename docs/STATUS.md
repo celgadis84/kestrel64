@@ -10550,3 +10550,11 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Verificado: 59/59 ROMs locales casan con la tabla n64brew; SM64, DK64 y testrom de
   libdragon arrancan igual (20 swaps). `pif_test` 23/23 (vector de oro sintetico de una
   transcripcion independiente).
+
+## 2026-10-30 (c) — GPU-RDP: escalado x8 (GAPS #15, retirada aun no)
+
+- `KESTREL_UPSCALE=8` ya escala en GPU-RDP (antes se quedaba en x4): SM64 a 2560x1920, 1x
+  intacto (md5 `b5521b24`). x8 GPU-RDP 17,3 s contra 52,5 s de parallel-RDP (100 intercambios).
+- Pendiente para retirar parallel-RDP: x4 GPU-RDP 12,8-20 s contra 6,1 s (un vaciado sincrono
+  por tramo con escalado). Mando `KESTREL_GPURDP_MINPX_HI` (apagado): tiempo real a cambio de
+  tramos pequenos a 1x. Detalle `docs/GPU-RDP.md` Fase 7.

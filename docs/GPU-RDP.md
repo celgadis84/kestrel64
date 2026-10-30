@@ -385,7 +385,7 @@ mismo md5 `b338947b` (37 k triangulos texturizados en la GPU, ningun vaciado por
   `KESTREL_PRDP` explicito (`=1` parallel-RDP, `=0` SoftRDP). Sin Vulkan cae a SoftRDP como antes
   (`vrdpFailed`). Probado el exe con las cuatro combinaciones (nada / PRDP=1 / PRDP=0 /
   GPURDP=0) y con `KESTREL_UPSCALE=2` (la opcion general del lanzador ahora vale tambien aqui;
-  8 se queda en 4).
+  8 se quedaba en 4 hasta 2026-10-30, ver Fase 7).
 - Menu nativo y lanzador (`options.py`, `profile.cpp`, `kestrel_launcher.py`, `app.js`): cuarta
   opcion "GPU-RDP" que sale del mismo .exe que parallel-RDP; "Automatico" la prefiere.
   parallel-RDP marcado "se retirara". Texturas HD/realce ya no fuerzan SoftRDP en automatico.
@@ -513,3 +513,27 @@ mediana 643 -> 622).
   GPU-RDP la hereda; no es un objetivo de este gap.
 - **Licencias**: parallel-RDP es MIT, se puede leer y citar, pero el codigo es propio y
   sin pegar trozos; si se adapta algo concreto, atribucion en `THIRD-PARTY.txt`.
+
+### Fase 7 -- escalado x8 y estado de la retirada 2026-10-30
+
+- **x8 en GPU-RDP**: `KESTREL_UPSCALE=8` / `KESTREL_GPURDP_UPSCALE=8`. Copias de alta de 512 MB
+  (`hram`) + 256 MB (`hhid`) en memoria del anfitrion; el direccionamiento de 32 bits del shader
+  llega justo (2^23 << 6). `makeBuf` rechaza un buffer mayor que `maxStorageBufferRange`, y sin
+  memoria sigue a 1x como antes. `scanoutHi` recibe el tope del presentador (2560x2048) y, si
+  w*S no cabe (x8 de 640x480), baja el factor de SALIDA tomando una de cada S/O submuestras.
+- Verificado (RX 570, `KESTREL_VIDEO_DUMP`): SM64 320x240 -> 2560x1920 a x8 y 1280x960 a x4,
+  con detalle real dentro de cada bloque; a 1x nada cambia (sm64 `gpurdp-jit` md5 `b5521b24`).
+- **Rendimiento con escalado** (SM64, 100 intercambios desde arranque, ventana, ~5,7 s de
+  invitado): 1x 6,0 s los dos; **x4 GPU-RDP 12,8-20 s contra parallel-RDP 6,1 s**; **x8
+  GPU-RDP 17,3 s contra parallel-RDP 52,5 s**. Causa en x4: con escalado no hay reparto
+  CPU/GPU (`MINPX`), asi que todo tramo va a la GPU con su vaciado sincrono (SM64: 24 980
+  tramos contra 418 a 1x; espera de fence 17,8 s).
+- `KESTREL_GPURDP_MINPX_HI=N` (apagado): reparto tambien con escalado. A 1024 SM64 x4 va a
+  tiempo real (6,0 s) pero lo pintado por el CPU sale a 1x replicado (bloques con detalle
+  0,262 -> 0,168; letras del titulo con escalera visible). 64: 0,244 y 5,5 s. Queda como mando,
+  no de fabrica.
+- **Retirar parallel-RDP: AUN NO.** A 1x la brecha es ruido (SM64 ~0-3 %, DK64 ~1-1,5 %,
+  `validate.py bench` min de 3) y x8 ya es mejor en GPU-RDP, pero x2/x4 con todo el detalle va
+  a la mitad de velocidad. Lo que falta: vaciados por lotes con escalado (varios tramos por
+  fence; la decision de 2026-10-24 de no hacer lotes en vuelo era a 1x, donde la espera de
+  fence es pequena; con escalado es el cuello entero).

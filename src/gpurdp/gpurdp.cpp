@@ -93,6 +93,7 @@ struct Ctx {
   // Fase 6: copia de alta resolucion (S = 1 << up) de la RDRAM y de sus bits ocultos, y el set
   // que la pone en los enlaces 0/1 (el resto, los mismos).
   u32 up = 0, baseUp = 0, hiShift = 0;   // en uso, el de arranque, el de hram/hhid
+  VkDeviceSize maxRange = ~VkDeviceSize(0);  // maxStorageBufferRange (x8 = 512 MB de hram)
   Buf hram, hhid;
   VkDescriptorSet setHi = VK_NULL_HANDLE;
   std::vector<FillRect> q;
@@ -166,8 +167,12 @@ auto makeLocal(Ctx& c, Buf& b) -> bool {
   return true;
 }
 
+// Factor de escalado pedido (2/4/8; otro valor, el inmediato inferior) -> log2.
+auto upShift(int f) -> u32 { return f >= 8 ? 3u : f >= 4 ? 2u : f >= 2 ? 1u : 0u; }
+
 auto makeBuf(Ctx& c, Buf& b, VkDeviceSize size) -> bool {
   b.size = (size + 3) & ~VkDeviceSize(3);
+  if(b.size > c.maxRange) return false;   // el shader no podria direccionarlo entero
   VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bi.size = b.size;
   bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -297,13 +302,15 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
   // hdUpload lo agranda entonces a KESTREL_GPURDP_HDMB (64 MB por defecto).
   if(!makeBuf(c, c.hd, 4)) return false;
   c.hdEpoch = texpack::g_epoch;
-  // Escalado: KESTREL_GPURDP_UPSCALE, o la opcion general KESTREL_UPSCALE (la del lanzador;
-  // 8 se queda en 4, que es el tope de aqui).
+  // Escalado: KESTREL_GPURDP_UPSCALE, o la opcion general KESTREL_UPSCALE (la del lanzador).
+  // x8 son 512 + 256 MB de copias de alta; si no caben (memoria o rango del buffer) sigue a 1x.
+  { VkPhysicalDeviceProperties pp; vkGetPhysicalDeviceProperties(c.phys, &pp);
+    c.maxRange = pp.limits.maxStorageBufferRange; }
   const char* upE = std::getenv("KESTREL_GPURDP_UPSCALE");
   if(!upE || !upE[0]) upE = std::getenv("KESTREL_UPSCALE");
   if(const char* e = upE; e && e[0]) {
     const int f = std::atoi(e);
-    const u32 up = f >= 4 ? 2 : f >= 2 ? 1 : 0;
+    const u32 up = upShift(f);
     if(up) {
       if(makeBuf(c, c.hram, VkDeviceSize(rdramSize) << (2 * up))
          && makeBuf(c, c.hhid, VkDeviceSize(rdramSize / 2) << (2 * up))) c.up = c.baseUp = c.hiShift = up;
@@ -576,7 +583,7 @@ auto upscale() -> u32 { return active() ? 1u << g->up : 1u; }
 
 auto requestUpscale(u32 factor) -> void {
   if(!active()) return;
-  const int up = factor == 0 ? (int)g->baseUp : factor >= 4 ? 2 : factor >= 2 ? 1 : 0;
+  const int up = factor == 0 ? (int)g->baseUp : (int)upShift((int)factor);
   g_upReq.store(up, std::memory_order_release);
 }
 
@@ -591,11 +598,16 @@ auto stats() -> Stats {
 }
 
 auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, u32 type,
-               std::vector<u32>& out, u32& ow, u32& oh) -> bool {
+               std::vector<u32>& out, u32& ow, u32& oh, u32 maxW, u32 maxH) -> bool {
   if(!active() || !g->up || (type != 2 && type != 3) || !w || !h) return false;
   const Ctx& c = *g;
   const u32 bpp = type == 3 ? 4u : 2u, S = 1u << c.up, q2 = 2 * c.up;
-  ow = w * S; oh = h * S;
+  // Factor de salida O <= S que quepa en el presentador (x8 de 640x480 no cabe): se toma una
+  // de cada S/O submuestras del bloque, sin mezclar.
+  u32 O = S;
+  while(O > 1 && (w * O > maxW || h * O > maxH)) O >>= 1;
+  const u32 step = S / O;
+  ow = w * O; oh = h * O;
   out.assign((size_t)ow * oh, 0xff000000u);
   auto e5 = [](u32 v) -> u32 { return (v << 3) | (v >> 2); };
   auto rgba = [&](const u8* p) -> u32 {
@@ -608,16 +620,16 @@ auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, 
     if(row + w * bpp > size) break;
     // Fila que sigue siendo la del RDP: de la copia de alta; si no, la de 1x replicada.
     const bool hiOk = !std::memcmp(rdram + row, c.ram.map + row, w * bpp);
-    for(u32 j = 0; j < S; j++) {
-      u32* o = &out[(size_t)(y * S + j) * ow];
+    for(u32 j = 0; j < O; j++) {
+      u32* o = &out[(size_t)(y * O + j) * ow];
       for(u32 x = 0; x < w; x++) {
         const u32 a = row + x * bpp;
         if(hiOk) {
-          const u8* p = c.hram.map + ((size_t)a << q2) + (size_t)j * S * bpp;
-          for(u32 i = 0; i < S; i++) o[x * S + i] = rgba(p + i * bpp);
+          const u8* p = c.hram.map + ((size_t)a << q2) + (size_t)j * step * S * bpp;
+          for(u32 i = 0; i < O; i++) o[x * O + i] = rgba(p + i * step * bpp);
         } else {
           const u32 v = rgba(rdram + a);
-          for(u32 i = 0; i < S; i++) o[x * S + i] = v;
+          for(u32 i = 0; i < O; i++) o[x * O + i] = v;
         }
       }
     }

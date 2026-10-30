@@ -3057,14 +3057,21 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   // caminos dan los mismos bytes y la misma contabilidad, asi que es una decision del
   // anfitrion pura (md5 y estado del invitado no se mueven). Se estima el area de lo que trae
   // el tramo (caja de cada triangulo / rectangulo) y por debajo del umbral va al CPU. Con
-  // escalado interno todo a la GPU: lo pintado por el CPU no tendria copia de alta.
+  // escalado interno todo a la GPU (lo pintado por el CPU no tiene copia de alta: sale a 1x
+  // replicado), salvo KESTREL_GPURDP_MINPX_HI, que cambia ese detalle por velocidad.
   {
     static const u64 minPx = [] {
       const char* e = std::getenv("KESTREL_GPURDP_MINPX");
       return e && e[0] ? (u64)std::strtoull(e, nullptr, 0) : (u64)4096;
     }();
+    static const u64 minPxHi = [] {
+      const char* e = std::getenv("KESTREL_GPURDP_MINPX_HI");
+      return e && e[0] ? (u64)std::strtoull(e, nullptr, 0) : (u64)0;
+    }();
     gpuRun = true;
-    if(minPx && gpurdp::active() && gpurdp::upscale() <= 1) {
+    const u64 thr = gpurdp::upscale() <= 1 ? minPx : minPxHi;
+    if(thr && gpurdp::active()) {
+      const u64 minPx = thr;
       auto s14 = [](u64 v) -> s32 { return (s32)((u32)(v & 0x3fff) << 18) >> 18; };
       double px = 0;
       u32 a = cur, cyc = cycleType();

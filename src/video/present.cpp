@@ -53,7 +53,8 @@ static constexpr u32 kSrcH = 240;
 // y 576 lineas (PAL entrelazado); con el backend de GPU el scanout ya llega a esa
 // resolucion. Solo esta para que un VI_WIDTH basura (registro a medio escribir) no intente
 // reservar una imagen absurda.
-// Con el escalado interno del GPU-RDP (x4 de 640x480) el cuadro llega a 2560x1920.
+// Con el escalado interno del GPU-RDP (x4 de 640x480, x8 de 320x240) el cuadro llega a
+// 2560x1920; mas alla, scanoutHi baja el factor de salida.
 static constexpr u32 kMaxSrcW = 2560;
 static constexpr u32 kMaxSrcH = 2048;
 static constexpr int kScale = 2;   // window = 640x480
@@ -1360,8 +1361,8 @@ auto Presenter::pumpFrame() -> bool {
   // del VI (son de 1x; el detalle ya viene de la resolucion).
   if(!vrdpFrame && gpurdp::upscale() > 1) {
     std::vector<u32> hi; u32 hw = 0, hh = 0;
-    if(gpurdp::scanoutHi(ram.data(), (u32)ram.size(), origin, stride, width, height, type, hi, hw, hh)
-       && hw <= kMaxSrcW && hh <= kMaxSrcH) {
+    if(gpurdp::scanoutHi(ram.data(), (u32)ram.size(), origin, stride, width, height, type, hi, hw, hh,
+                         kMaxSrcW, kMaxSrcH)) {
       width = hw; height = hh;
       frame.swap(hi);
       vrdpFrame = true;

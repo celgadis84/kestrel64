@@ -91,7 +91,7 @@ inline auto queueTri(const TriRec&, const u8* = nullptr) -> bool { return false;
 inline auto flush(u8*, u32, u8*, std::vector<TriOut>* = nullptr) -> void {}
 inline auto upscale() -> u32 { return 1; }
 inline auto requestUpscale(u32) -> void {}
-inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&) -> bool { return false; }
+inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&, u32, u32) -> bool { return false; }
 inline auto hdUpload(const void*, double, double) -> u32 { return 0; }
 #else
 // KESTREL_GPURDP distinto de 0, o sin poner y sin KESTREL_PRDP explicito (de fabrica).
@@ -114,19 +114,20 @@ auto queueTri(const TriRec& t, const u8* tmem = nullptr) -> bool;
 // ocultos de los de 16bpp). Antes sube al espejo las zonas que leen los triangulos. En `outs`,
 // uno por triangulo y en orden, lo que devolvio cada uno.
 auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs = nullptr) -> void;
-// Fase 6, KESTREL_GPURDP_UPSCALE=2|4: factor de escalado interno (1 = apagado). Con escalado
+// Fase 6, KESTREL_GPURDP_UPSCALE=2|4|8: factor de escalado interno (1 = apagado). Con escalado
 // cada primitiva se pinta ademas en una copia de la RDRAM a S veces la resolucion (bloque SxS
 // por pixel de 1x); la RDRAM y todo lo que ve el invitado siguen siendo los de 1x.
 auto upscale() -> u32;
-// Cambia el escalado en caliente (1, 2 o 4; 0 = el de arranque). Se aplica al empezar el
+// Cambia el escalado en caliente (1, 2, 4 u 8; 0 = el de arranque). Se aplica al empezar el
 // siguiente vaciado; lo pintado antes se ve a 1x hasta que el RDP lo repinta.
 auto requestUpscale(u32 factor) -> void;
 // Barrido del VI desde la copia de alta: imagen de `type` (2 = 5551, 3 = 8888) en `origin`, paso
 // `stride` pixeles, w x h. Sale (w*S) x (h*S) en el formato del cuadro del presentador
 // (0xAABBGGRR). Fila cuya RDRAM ya no es la que dejo el RDP (la escribio el CPU o un DMA): se
-// replica la de 1x. false = sin escalado o formato no soportado.
+// replica la de 1x. Si (w*S) x (h*S) pasa de maxW x maxH sale al mayor factor que quepa.
+// false = sin escalado o formato no soportado.
 auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, u32 type,
-               std::vector<u32>& out, u32& ow, u32& oh) -> bool;
+               std::vector<u32>& out, u32& ow, u32& oh, u32 maxW, u32 maxH) -> bool;
 // Textura HD (texpack::Tex) con su escala sobre la original: la sube al buffer HD si no estaba
 // y da el valor de T_HD (cabecera + 1). 0 = no se puede (sin shaderFloat64, sin sitio con el
 // lote en curso): el primitivo va por el CPU.
