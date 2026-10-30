@@ -51,7 +51,7 @@ fine precisely because they cannot move a guest-visible date.
 worth about ±2 %, so a single before/after pair proves nothing. Interleave the two builds
 and take the minimum of at least three runs per game, and discard the first run of a freshly
 linked binary (cold page-in inflates it systematically). Negative results are valuable and
-get written down in `docs/STATUS.md` next to the positive ones.
+get written down in the log (`docs/history/STATUS-2026.md`) next to the positive ones.
 
 ## Before opening a pull request
 
@@ -59,7 +59,7 @@ Run the gates:
 
 ```bash
 sh scripts/gate_all.sh     # n64-systemtest (interpreter and JIT) + SM64 in six modes + krom suite
-sh scripts/gate_prdp.sh    # the same against the parallel-rdp backend
+sh scripts/gate_gpurdp.sh  # the same against GPU-RDP (Vulkan compute), the default backend
 ```
 
 and check that lockstep and threaded still agree on the state hash and framebuffer md5.
@@ -70,10 +70,12 @@ hang, and the fix is to bisect it, never to raise the timeout.
 
 ## Where the context lives
 
-- `docs/STATUS.md` — running log: what was tried, what it measured, what was reverted and why
+- `docs/STATUS.md` — current state per subsystem (short; updated in place)
+- `docs/history/STATUS-2026.md` — running log: what was tried, what it measured, what was
+  reverted and why (new entries are appended at the end)
 - `docs/baselines/timings.md` — wall-clock baselines for every gate and benchmark
 
-Reading the last few sections of `STATUS.md` before proposing a performance change will
+Searching the log for the subsystem before proposing a performance change will
 usually tell you whether the idea has already been measured.
 
 ## Style

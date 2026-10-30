@@ -31,7 +31,7 @@ ver `docs/PERF-CPU.md` §20.5) ·
 `KESTREL_CPI=<n>` (ciclos de CPU por instruccion retirada; **de fabrica 1,4**, que es la parte
 alta del rango real del VR4300. De el cuelgan el ritmo del reloj Count y el presupuesto de
 instrucciones por campo. `=2` = modelo historico bit a bit, un tick de Count por op; no se
-admite mas de 2 porque las guardas de borde de timer del JIT cuentan ops. Ver `docs/STATUS.md`) ·
+admite mas de 2 porque las guardas de borde de timer del JIT cuentan ops. Ver `docs/history/STATUS-2026.md`) ·
 `KESTREL_SIINSTANT=1` (la transaccion del SI/joybus vuelve a terminar en la misma instruccion
 que la arranco, como antes del 2026-09-08. De fabrica el SI factura el tiempo de la linea
 joybus -- 4 us por bit, parada de consola 3 us, parada del mando 4 us -- y remata el DMA en
@@ -43,7 +43,7 @@ de `2^(PGS+2)` bytes, `LAT+1` al entrar en la pagina, `(PWD+1)+(RLS+1)` por pala
 bits; con los valores de cabecera de un cartucho normal salen 5,375 MB/s -- y levanta
 `MI_PI` al vencer. `loadRom` programa ademas `PI_BSD_DOM1_*` desde los bytes 0x01..0x03 de
 la cabecera, que es lo que hace el IPL2 y aqui no hacia nadie por ser HLE el arranque; ver
-`docs/STATUS.md`) ·
+`docs/history/STATUS-2026.md`) ·
 `KESTREL_PRDP=1` (GPU RDP, needs `build-prdp`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` · `KESTREL_WAVDUMP=path` (WAV s16 estéreo de todo lo que emite el AI, también con `KESTREL_AUDIO=0`; cabecera reescrita en cada buffer, vale tras un timeout) ·
 `KESTREL_CPUIDLE=0` (apaga el cobro en bloque del hilo ocioso del invitado -- `beq $0,$0,-1`
 con NOP en la ranura de retardo; el salto usa el MISMO permiso que una cadena enlazada del JIT,
@@ -135,7 +135,7 @@ alterno. Solo se redirigen los COMANDOS: pixeles, texturas y TLUT siguen leyendo
 Sin esto Perfect Dark descarrila 3 de cada 4 tandas (ver `docs/PD-DERAIL.md`).
 Dos generaciones NO bastan: si el productor se adelanta dos buffers, la tercera copia
 reescribe comandos que el rasterizador aun no ha leido y el invitado acaba ejecutando datos
-(bug #2 de junkrunner64, ver `docs/STATUS.md` 2026-09-18). Al instalar un START fresco se
+(bug #2 de junkrunner64, ver `docs/history/STATUS-2026.md` 2026-09-18). Al instalar un START fresco se
 coge la generacion LIBRE mas baja; si no hubiera ninguna se drena (lento pero correcto) y
 `[dpgen]` cuenta esos drenados forzosos, que en junkrunner64 son 0-2 por corrida. `KESTREL_RDPDRAIN=1` recupera el drenado del RDP en cada START fresco, que fue
 la primera cura -- SOLO para bisecar: medido cuesta 13-15 % de pared y aleja la fidelidad del

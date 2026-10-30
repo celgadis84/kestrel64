@@ -96,7 +96,7 @@ No acelera todavía; monta la maquinaria verificable en aislado:
 
 ### Etapa 2a — HECHO (2026-08-09): ALU-solo-KSEG0, byte-exacto pero net-negativo
 Cableado + validado (systemtest 0/3721 nativo y diff, 2 bugs HW arreglados: SRA/SRAV 64b,
-guarda KSEG0 64b). Ver `STATUS.md`. **NO acelera PD** por dos causas MEDIDAS que redefinen
+guarda KSEG0 64b). Ver `docs/history/STATUS-2026.md`. **NO acelera PD** por dos causas MEDIDAS que redefinen
 la Etapa 2b:
 
 1. **PD corre desde TLB-map 0x0000000070xxxxxx, NO KSEG0.** `KESTREL_JIT_STATS` = cover

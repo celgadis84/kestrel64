@@ -130,7 +130,7 @@ Dos frentes medidos por separado.
 
 | Fase | Coste | Estado |
 |---|---|---|
-| 1 Limpieza | horas | pendiente |
+| 1 Limpieza | horas | en curso: 1.2 HECHO 2026-10-30 (`STATUS.md` corto + `docs/history/`) |
 | 2 Arquitectura en dos idiomas | ~1,5 días | pendiente |
 | 3 Verificación reproducible | horas | pendiente (solo documentar y enlazar) |
 | 4 Reestructuración | varios días | pendiente |

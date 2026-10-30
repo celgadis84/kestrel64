@@ -5,7 +5,9 @@ active project of this workspace. Built to run N64 games (esp. Perfect Dark) fas
 weak-single-thread / idle-GPU hosts, where cooperative-single-thread cycle-accurate
 emulators (ares, cen64) hit an architectural ceiling.
 
-Live status: `docs/STATUS.md`. Backlog de huecos y pendientes: `docs/GAPS.md` (lo que
+Estado actual por subsistema: `docs/STATUS.md` (corto, se actualiza EN SITIO). Diario
+cronologico: `docs/history/STATUS-2026.md` (las entradas nuevas con fecha van al FINAL de
+ese fichero, no a STATUS.md). Backlog de huecos y pendientes: `docs/GAPS.md` (lo que
 falta frente a ares/PJ64/mupen + pendientes propios, ordenado; se actualiza al cerrar
 cada punto). Peticiones de la optimizacion de Perfect Dark al emulador:
 `PD64_pending.md` (P1..P8, tachar al cerrar; **local, en .gitignore**: el repo es PUBLICO).
@@ -151,7 +153,8 @@ frames is a game state, and there all five modes agree byte for byte. See
 `docs/PERF-CPU.md`.
 
 Baselines live in `docs/baselines/` (may drift; the invariant is equality, not the
-literal hash): SM64 60 fields `466282775dbd0ac084946558a1c30771` (SoftRDP).
+literal hash): SM64 60 fields `b5521b24d8fc280fbf102df22d7d30cb` (`docs/baselines/sm64.txt`; SoftRDP,
+GPU-RDP y parallel-RDP dan el mismo).
 Read dump text with `tr -d '\0'` (NUL-padded).
 
 ## MCP
@@ -245,7 +248,7 @@ Referencia completa de `KESTREL_*`: `docs/ENV-VARS.md`. Las mas usadas: `KESTREL
 - Test the user's hypothesis FIRST (cheap experiment) before own theory. Never block/ask;
   pick best default and continue. Respond in Spanish, caveman style (code/commits normal).
 
-## Current frontier (see STATUS.md for live detail)
+## Current frontier (see docs/STATUS.md for live detail)
 
 systemtest 100%, SM64/PD/DK64 jugables, lockstep==threaded. Saves completos, PIF, dynarec con
 block-linking, RSP JIT, savestates/rewind. RDP: GPU-RDP propio (Vulkan compute) de fabrica,

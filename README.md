@@ -51,7 +51,7 @@ one recent example: the RSP thread was polling the CPU thread's retired-instruct
 counter on every spin turn while waiting for a rendezvous, stealing that cache line from
 the thread that is the actual bottleneck; sampling it once every 64 turns bought 12.8% on
 junkrunner64 and 9.2% on Perfect Dark with a bit-identical framebuffer. The log of what
-worked, what regressed and what was reverted lives in `docs/STATUS.md` and
+worked, what regressed and what was reverted lives in `docs/history/STATUS-2026.md` and
 `docs/baselines/timings.md`.
 
 ## What is implemented
@@ -69,7 +69,8 @@ worked, what regressed and what was reverted lives in `docs/STATUS.md` and
 | **Player features** | Save states, rewind, TAS movies (`.k64m`), GameShark cheats, overclock per clock domain, graphical launcher + installer |
 | **Introspection** | Telemetry/MCP server, host sampling profiler, guest hot-path profiler, event ring, write tags, corruption canaries |
 
-Docs: live status in `docs/STATUS.md`, remaining gaps in `docs/GAPS.md`, design notes in
+Docs: current status per subsystem in `docs/STATUS.md` (the chronological log is
+`docs/history/STATUS-2026.md`), remaining gaps in `docs/GAPS.md`, design notes in
 `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`, `docs/RDP-TIMING.md`, `docs/RSP-JIT.md`,
 `docs/VI-CLOCK.md`, `docs/parallel-rdp-integration.md`, and the rest of `docs/`.
 

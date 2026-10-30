@@ -2,7 +2,7 @@
 """Demo de las lianas de DK64: arranca, UNA pulsacion de START salta el rap, y saca capturas
 del framebuffer cada `--period` s mientras corre la demo de atraccion. Las PNG quedan en
 `--out` para mirarlas (DK cruzando por las lianas = bien; DK nadando = demo desincronizada).
-Puerto propio (defecto 9176). Ver docs/STATUS.md "Estado de la prueba de la liana de DK64".
+Puerto propio (defecto 9176). Ver docs/history/STATUS-2026.md "Estado de la prueba de la liana de DK64".
 
   python scripts/dk_vine_check.py --exe build/kestrel64.exe --out <dir> [--threads 1]
 """

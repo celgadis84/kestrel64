@@ -148,5 +148,5 @@ determinista y **sube**: 0.65 con `--maxsyncs 1`, 1.68 con 2, estable a partir d
 Sigue rota (<50%) en ambos casos.)
 
 Ninguna de las tres bajadas es una regresión del RDP: las tres son el mismo patrón ya identificado
-en `docs/STATUS.md` (las referencias de krom son un cuadro concreto de una
+en `docs/history/STATUS-2026.md` (las referencias de krom son un cuadro concreto de una
 animación; la precisión real se mide sobre las ROMs estáticas).

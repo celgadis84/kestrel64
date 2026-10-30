@@ -696,11 +696,11 @@ por ser pequeña; se ordena por impacto, no se filtra.*
        map, virtual index"). El modelo de aqui ya es de mapeo directo: coincide con el HW.
     3b. **Muestra de PD en nivel -- HECHA 2026-09-17.** Defeccion (warp por trucos): D$ 2,29 %,
        I$ 0,38 %, CPI 2,73 con base 1,0. El hueco era la muestra de titulo. Detalle y por que el
-       defecto no se mueve sin captura de HW: `docs/STATUS.md`, seccion del 2026-09-17.
+       defecto no se mueve sin captura de HW: `docs/history/STATUS-2026.md`, seccion del 2026-09-17.
     4. **Recalibrar la base y rehacer el barrido** de "Que falta para mover el defecto" de mas
        arriba, entero (mas juegos, `KESTREL_AUDIOSTAT`, y el numero con un argumento).
        **Modelo fisico completo 2026-09-17** (perillas por fuente: I$ 48, D$ 44, sin cache 38,
-       MULT/DIV tabla NEC, FPU `block`, enclavamientos LDI/DCB; ver `docs/STATUS.md`). Lockstep,
+       MULT/DIV tabla NEC, FPU `block`, enclavamientos LDI/DCB; ver `docs/history/STATUS-2026.md`). Lockstep,
        Threaded e interprete dan lo mismo con cada perilla. **El defecto sigue sin moverse**:
        ninguna fuente (ares, libdragon, n64brew, cen64, NEC, SGI) da verdad de consola de campos
        por intercambio; falta la captura de HW.
@@ -724,7 +724,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 > `rspPace` 2,3 % · `rdpPace` 1,6 %. `dpBarrierWait` ha DESAPARECIDO de la cabeza.
 > Las tres primeras son `spBarrierWait` y sus inlinees: ~44 % del hilo, la mitad aritmetica.
 > **Y esa aritmetica no se cobra** -- memoizarla entera salio en nada medible en dos tandas
-> (ver `docs/STATUS.md`, 2026-09-18). El hilo de CPU esta bloqueado esperando al RSP, asi que
+> (ver `docs/history/STATUS-2026.md`, 2026-09-18). El hilo de CPU esta bloqueado esperando al RSP, asi que
 > su trabajo local es gratis: en este hilo solo paga quitar TRAFICO DE COHERENCIA (que es lo
 > que hizo `KESTREL_PACEASK`, -2,5 % en PD) o quitar BLOQUEO. Las muestras, por si solas,
 > enganan.
@@ -792,7 +792,7 @@ Por ahi va el orden nuevo:
   `rsp.cyclesRun`, y esa ES la barrera, hay que mirarla. La vuelta ya era barata y la rama que
   se le anade cuesta mas. **No volver a adelgazar este bucle**: lo que se paga es la latencia
   de ida y vuelta entre los dos relojes de invitado, no el ancho de la vuelta. Tablas en
-  `docs/STATUS.md`. Queda sin probar solo el retroceso exponencial.
+  `docs/history/STATUS-2026.md`. Queda sin probar solo el retroceso exponencial.
 - **El RSP**, que es el palo largo medido (65,7 % ocupado). **Perfil propio del hilo del RSP,
   tomado el 2026-09-11** (`KESTREL_HOSTPROF_WHO=rsp`, build-prof-prdp con DWARF, SM64 /
   Parallel-RDP / threaded-jit / 400 intercambios, 926 muestras, `scripts/hostprof_sym.py`).
@@ -835,14 +835,14 @@ Por ahi va el orden nuevo:
   cuatro juegos, min de 6 rondas) y en JIT lockstep, que es donde la CPU si es el palo largo,
   PIERDE +0,7..+1,2 % de forma consistente. El rechazo rapido ya era mas barato que el memo: la
   sonda de I-cache y la tabla de 2 KB cuestan mas cargas que los dos `jitFetchWord` sobre una
-  linea que el despachador acaba de leer. Detalle y tablas en `docs/STATUS.md`.
+  linea que el despachador acaba de leer. Detalle y tablas en `docs/history/STATUS-2026.md`.
 - **`rspPace`/`rdpPace`** (7,0 % entre los dos): HECHO el reciproco exacto (`struct PaceDiv`,
   `m = ceil(2^79/d)` con su `maxX`, division de verdad por encima del limite), y **no era ahi**.
   A/B intercalado de dos rondas de 5: 4,95/4,96 s con reciproco contra 4,93/4,98 s con division.
   Ese 7 % es la lectura de `rspBusy` y `rsp.cyclesRun`, dos lineas que el worker del RSP
   reescribe sin parar -- fallo de cache compartida, inherente al acoplamiento CPU-RCP. `paceGrant`
   ya las lee una sola vez por vuelta y `kPaceGrain` ya evita la cola de permisos que encogen.
-  **PARTE COBRADA 2026-09-18**: no se puede abaratar la lectura, pero si hacerla menos veces. El camino del JIT preguntaba al freno tras CADA bloque mientras el del interprete lo hacia cada 64 instrucciones; con `KESTREL_PACEASK` puesto a 1024 (meseta medida) el barrido intercalado da PD -2,5 %, SM64 -1,4 %, jr -1,1 %, DK64 -0,3 %, mismo md5. Ver `docs/STATUS.md`.
+  **PARTE COBRADA 2026-09-18**: no se puede abaratar la lectura, pero si hacerla menos veces. El camino del JIT preguntaba al freno tras CADA bloque mientras el del interprete lo hacia cada 64 instrucciones; con `KESTREL_PACEASK` puesto a 1024 (meseta medida) el barrido intercalado da PD -2,5 %, SM64 -1,4 %, jr -1,1 %, DK64 -0,3 %, mismo md5. Ver `docs/history/STATUS-2026.md`.
 - **Coste de `rdpSubmit`, desglosado (2026-09-18).** Con `KESTREL_DPSUBPROF=1` el emulador saca
   `[dpsnap]`, que parte la llamada en sus piezas. SM64 300 campos, Parallel-RDP + threaded-jit:
   **519 603 envios para 518 473 comandos**, o sea el microcodigo escribe `DPC_END` una vez por
@@ -873,7 +873,7 @@ Por ahi va el orden nuevo:
   a la vez (el del RDP solo trabaja el 11,8 % del tiempo), asi que una particion fija le
   quita al hilo de CPU los hermanos que los otros dejan libres. Codigo retirado; los md5
   salieron identicos en las dos ramas, o sea que era ajuste de anfitrion puro. Detalle en
-  `docs/STATUS.md`.
+  `docs/history/STATUS-2026.md`.
 - **Memoizar `spBarrierAt()` en el hilo de CPU: MEDIDO Y DESCARTADO (2026-09-18).** Es funcion
   pura de `spKickEdge`/`spKickCycles` (que solo escribe el hilo de CPU) y de `rsp.cyclesRun`
   (que el worker publica cada pocos miles de instrucciones), y se pregunta en cada retiro: el
@@ -919,7 +919,7 @@ Por ahi va el orden nuevo:
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.
 - **Comparativa de velocidad kestrel64 contra ares, rehecha** (abierto 2026-10-24,
   **agendado martes 2026-10-27**). La unica medida de los dos lado a lado es de 2026-08-20
-  (`STATUS.md`, "Velocidad honesta": threaded-jit 37,5 % de tiempo real con SoftRDP frente a
+  (`docs/history/STATUS-2026.md`, "Velocidad honesta": threaded-jit 37,5 % de tiempo real con SoftRDP frente a
   ares 50-65 %). Desde entonces solo se ha medido kestrel (PD 1,12x en juego 2026-09-24, PGO
   -7..-8,6 %, JIT L2, GPU-RDP de fabrica); la fidelidad si esta comparada (2026-10-07,
   `docs/baselines/timings.md`). Metodo: mismo anfitrion (i7-870 + RX570), mismas tres ROMs
@@ -1068,7 +1068,7 @@ vencimiento contra `cpu.retired`, guarda del JIT (`ioDueIn()` = el minimo del SI
 foto de estado (version 13). Ademas `loadRom` programa `PI_BSD_DOM1_*` desde los bytes
 0x01..0x03 de la cabecera, que es lo que hace el IPL2 en la consola y aqui no hacia nadie
 porque el arranque es HLE. `KESTREL_PIINSTANT=1` recupera el final instantaneo para bisecar.
-Detalle y cuentas en `docs/STATUS.md`.
+Detalle y cuentas en `docs/history/STATUS-2026.md`.
 
 - (3) **CERRADO 2026-09-18.** Agenda de eventos por instante. Los plazos del VI (cruce de la
   linea de `VI_INTR` y cierre de campo) y del AI (fin de bufer del DAC) se arman igual que el
@@ -1076,7 +1076,7 @@ Detalle y cuentas en `docs/STATUS.md`.
   tres guardas de `jit.cpp`. `MI_VI` llegaba hasta ~1 ms tarde (caia en el borde del subtramo
   del bucle, no en el cruce) y `MI_AI` igual; ahora los dos caen en la instruccion exacta. La
   prueba es que `KESTREL_VITICKS` -- un ajuste de ANFITRION -- ya no mueve el `[statehash]`
-  del invitado, de 1 a 64, ni en Lockstep ni en Threaded. Detalle en `docs/STATUS.md`.
+  del invitado, de 1 a 64, ni en Lockstep ni en Threaded. Detalle en `docs/history/STATUS-2026.md`.
   Queda FUERA, y sigue suelto: el borde `Count`==`Compare` del COP0, que vive en la CPU y no
   en `Memory`, y los plazos del RCP (`rcpDueIn`), que se pliegan aparte en los mismos tres
   sitios. Meterlos en la misma llamada es cosmetica, no exactitud: los dos ya son exactos.
@@ -1179,7 +1179,7 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
 
 ## Cómo se mantiene esta lista
 
-Cuando un punto se cierra, se borra de aquí y se cuenta en `docs/STATUS.md` con la
+Cuando un punto se cierra, se borra de aquí y se cuenta en `docs/history/STATUS-2026.md` con la
 medición. Cuando aparece uno nuevo, entra aquí con su verificación de código (fichero y
 línea), nunca de memoria.
 
@@ -1192,7 +1192,7 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
 
 1. **HECHO -- plazo del SI.** Se armaba en `cartNow()` y se vencia contra `cpu.retired`.
    Colgaba SM64 entero (0 lecturas de mando). Arreglado vencindolo en `cartNow()`; ver
-   `docs/STATUS.md`, seccion "Dos relojes, un plazo".
+   `docs/history/STATUS-2026.md`, seccion "Dos relojes, un plazo".
 
 2. **HECHO 2026-09-10 -- interleave CPU:RSP de Lockstep** (`src/core/system.cpp`). Era
    `rspPhase += rspStepNum` una vez por instruccion retirada. El ratio de `Clocks` es RSP por
@@ -1365,7 +1365,7 @@ para el planificador de eventos con marca de tiempo que esta pendiente de escrib
 ## Medida de la FPU, ya con el coste de cache funcionando (2026-09-10)
 
 Hasta hoy no se podia medir: SM64 se colgaba con `KESTREL_CACHECOST` encendido (ver el fallo de
-los dos relojes en `docs/STATUS.md`). Arreglado eso, tanda de 600 campos de video con JIT,
+los dos relojes en `docs/history/STATUS-2026.md`). Arreglado eso, tanda de 600 campos de video con JIT,
 `CACHECOST=60`, `FPUCOST=stat` contra `block`:
 
 | Juego | modo | fallos D$ | ops FP / retiradas | ciclos parados / retiradas | CPI con base 1,0 |
@@ -1426,7 +1426,7 @@ ninguna (`KESTREL_RDPGENS`, `[dpgen]`). Ocho corridas identicas bit a bit contra
 divergian. **Cierre confirmado en el punto original de fallo** (2026-09-18):
 cuatro corridas de 3e9 instrucciones con `KESTREL_PRDP=1`, dos en Lockstep y dos en
 Threaded, dan el MISMO `[statehash] 17c2962b082d80b9` -- o sea Threaded ya da el valor del
-oraculo, no solo un valor estable. Detalle completo en `docs/STATUS.md` (2026-09-18). Se deja debajo el rastro de la
+oraculo, no solo un valor estable. Detalle completo en `docs/history/STATUS-2026.md` (2026-09-18). Se deja debajo el rastro de la
 investigacion porque los descartes siguen valiendo.
 
 
@@ -1502,7 +1502,7 @@ es eso.
 
 ### El fallo del centinela del JIT era UNA causa, no LA causa (2026-09-18)
 
-Arreglado el `kNoLink` (ver `docs/STATUS.md`), el corte de cuatro brazos a 1200 campos sale
+Arreglado el `kNoLink` (ver `docs/history/STATUS-2026.md`), el corte de cuatro brazos a 1200 campos sale
 **limpio en los cuatro**, tres corridas cada uno, rastro `[ft]` identico linea a linea:
 
 | brazo | corridas | 1 vs 2 | 1 vs 3 |
@@ -1593,7 +1593,7 @@ Las dos vias no son equivalentes para la CPU -- la cita para al RSP hasta que la
 diario no --, asi que el reparto modula el adelanto REAL. Con `KESTREL_SPLEAD > 0` eso se ve en
 el estado final: SM64 da DOS statehash en ocho corridas. Con `SPLEAD=0` u `DMALOG=0`, 8/8 igual.
 Barrido completo y descarte de los otros candidatos (diario de DPC, diario de SP_STATUS,
-`DPCFAST`/`DPCJUMP`, `DMARDV`/`DMASPAN`) en `docs/STATUS.md` 2026-09-24 (s).
+`DPCFAST`/`DPCJUMP`, `DMARDV`/`DMASPAN`) en `docs/history/STATUS-2026.md` 2026-09-24 (s).
 
 Cierre pendiente: que la eleccion diario/cita no mire nada en hora de anfitrion -- marcar las
 paginas y que el consumidor del FIFO consulte el diario, que es lo que ya hace `dmaSettle` en
