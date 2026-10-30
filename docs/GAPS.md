@@ -496,7 +496,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
       velocidad sino un cambio de unidad.
 
   **Y en Perfect Dark (PAL, secuencia de atraccion, sin salto de nivel -- el mapa de warp es
-  del build ntsc-final y esta ROM es PAL, ver `docs/PD-GAMEPLAY.md`).** Instrucciones por
+  del build ntsc-final y esta ROM es PAL, ver `docs/local/PD-GAMEPLAY.md` (local, no versionado)).** Instrucciones por
   campo 937 k con el defecto, 1 341 k con CPI 1,4 (= 937 488 x 2/1,4, la identidad cuadra).
 
   | tramo | CPI 2 campos/int | CPI 1,4 | CPI 2 ocio% | CPI 1,4 | CPI 2 trabajo/int | CPI 1,4 |

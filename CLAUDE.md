@@ -204,7 +204,7 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
 
 ### Perfect Dark: llegar a gameplay para medir
 
-Medir en el menu no vale. `docs/PD-GAMEPLAY.md` tiene los dos caminos: navegar el menu con
+Medir en el menu no vale. `docs/local/PD-GAMEPLAY.md` (local, no versionado) tiene los dos caminos: navegar el menu con
 `scripts/pad.py` (mando inyectado, pulsaciones contadas en lecturas del joybus) o escribir
 el nivel directo en RAM (`g_MissionConfig` 0x07dbd8 + `g_MainChangeToStageNum` 0x043c04;
 `g_StageNum` 0x043d60 vale 0x5A en el titulo y confirma que la ROM comparte mapa).

@@ -91,8 +91,6 @@ marked *(EN)* are in English.
 
 ## Juegos concretos / Specific games
 
-- [PD-GAMEPLAY.md](PD-GAMEPLAY.md) — llegar a gameplay en Perfect Dark para medir.
-  Reaching gameplay in Perfect Dark to measure.
 - [PD-DERAIL.md](PD-DERAIL.md) — Perfect Dark: descarrilamiento tardío (investigación).
   Perfect Dark: late derail (investigation).
 

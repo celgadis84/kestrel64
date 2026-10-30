@@ -181,7 +181,7 @@ Lista completa: `CLAUDE.md`, seccion "Env-var toggles".
 
 ## 6. Perfect Dark en concreto
 
-`docs/PD-GAMEPLAY.md` tiene los dos caminos para llegar a jugar un
+`docs/local/PD-GAMEPLAY.md` (local, no versionado) tiene los dos caminos para llegar a jugar un
 nivel sin tocar el menu a mano:
 1. Navegar el menu con el mando inyectado (`controller_set` o `scripts/pad.py`).
 2. Escribir el nivel en RAM: `g_MissionConfig`, y despues `g_MainChangeToStageNum`. Las
