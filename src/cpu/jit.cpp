@@ -3078,6 +3078,9 @@ auto CPU::jitReenterProceed(u32 K) -> u32 {
   if(u32 p = jitPending) {
     jitPending = 0;
     retired += p;
+    // prof.* bajo JIT: los eslabones commiteados aqui van al bloque cabeza de la cadena
+    // (profCurPhys, puesto al entrar en jitTryBlock); si no, el driver ya no los ve
+    if(__builtin_expect(profOn, 0)) { profBuckets[profCurPhys >> kProfShift] += p; profTotal += p; }
     if(countAdd(countTicks(p))) timerIntr = true;   // cruce, no igualdad (ver CPU::countAdd)
     cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], p);
     if(jitCache) jitCache->hits += p;
@@ -3331,6 +3334,9 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
   jit::g_idleWhy[7] += k;
 
   retired += k;
+  // prof.* bajo JIT: el bucle ocioso saltado cuenta como ejecutado en su PC (el interprete
+  // lo recorre de verdad y ahi lo cuenta)
+  if(__builtin_expect(profOn, 0)) { profBuckets[phys >> kProfShift] += k; profTotal += k; profCurPhys = phys; }
   if(countAdd(countTicks(k))) timerIntr = true;
   cop0[C0_Random] = randomAdvance((u32)cop0[C0_Random], (u32)cop0[C0_Wired], k);
   if(jitCache) jitCache->hits += k;
@@ -3948,6 +3954,9 @@ auto CPU::jitTryBlock() -> u32 {
   // bloque que no coja el camino directo (kernel de 64 bits: KX=1) traduce a fisico 0.
   memAbort = false;
   if(jit::g_jitDump) { blk.runs++; jit::g_dumpCache = cc; }
+  // prof.* dmiss/imiss bajo JIT: los fallos del bloque van a su PC fisica de entrada (sin
+  // esto caian en la ultima op interpretada, a veces muy lejos)
+  if(__builtin_expect(profOn, 0) && phys < (8u << 20)) profCurPhys = phys;
   u32 Rraw = blk.fn(gpr, this);
   if(g_jitStats) {
     if(Rraw & 0x80000000u)        jit::g_retBranch++;   // salio por un terminador de salto
@@ -4009,6 +4018,11 @@ auto CPU::jitTryBlock() -> u32 {
     inDelay = false; justBranched = false;
   }
   retired += R;
+  // prof.* bajo JIT: el bloque entero va al cubo de su PC fisica de entrada (las cadenas
+  // enlazadas, al bloque cabeza: KESTREL_JIT_NOLINK=1 para el reparto exacto por bloque)
+  if(__builtin_expect(profOn, 0) && phys < (8u << 20)) {
+    u32 nR = R + jitPending; profBuckets[phys >> kProfShift] += nR; profTotal += nR;
+  }
   // La guarda de arriba garantiza que no se cruza Compare aqui, pero el latch se hace igual:
   // countAdd lo comprueba gratis y asi no hay un solo camino que pueda perderse el borde.
   if(countAdd(countTicks(R))) timerIntr = true;   // antes: sin latch (garantizado: d>K≥R arriba)

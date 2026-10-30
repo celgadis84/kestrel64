@@ -1157,12 +1157,10 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   else if(metric == "imiss") { src = &c.profIMiss; mtotal = c.profIMissTotal; }
   else if(metric == "dline") { src = &c.profDLine; mtotal = c.profDMissTotal; dline = true; }
   else if(metric != "exec")  { data.set("warn", std::string("metric desconocida, uso exec")); }
-  // El muestreo vive en CPU::step(): lo que corre dentro de un bloque del JIT no se cuenta.
-  // Con JIT solo salen las rutas que el JIT declina (excepciones, ERET, modo usuario...), y el
-  // reparto engana: un trap muy frecuente parece el 40 % y el C de kernel no aparece.
+  // El interprete muestrea en CPU::step(); el JIT, por bloque en su driver (jit.cpp).
   if(envFlag("KESTREL_JIT", true))
     data.set("warn", std::string(metric == "exec"
-        ? "JIT activo: solo se muestrea lo que ejecuta el interprete; perfilar con KESTREL_JIT=0"
+        ? (envFlag("KESTREL_JIT_NOLINK", false) ? "JIT sin enlaces: cada bloque cuenta entero en su PC de entrada (16 B)" : "JIT activo: un bloque cuenta entero en su PC de entrada y una cadena enlazada en la del bloque cabeza; KESTREL_JIT_NOLINK=1 reparte por bloque")
         : "JIT activo: los fallos de cache solo se atribuyen con KESTREL_JIT=0"));
   std::vector<std::pair<u32, u32>> hot;   // (count, bucket)
   hot.reserve(4096);
