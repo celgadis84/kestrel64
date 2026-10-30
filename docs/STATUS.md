@@ -10428,3 +10428,35 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   Validado (SM64): 357 cuadros 59,94 fps 5,96 s, AAC 48 kHz 5,93 s, cuadro decodificado por
   Windows (WinRT MediaComposition) con colores correctos; MCP mp4/avi/"mkv" rechazado; a
   960x720 el MP4 sale ~6x menor que el AVI. AVI sin regresion.
+
+## 2026-10-30 — juego en red (lockstep de entradas) + pantalla partida
+
+`src/net/netplay.{hpp,cpp}`, `tcpConnect` y `listen(anyAddr)` en `src/net/tcp.*`.
+- **Modelo**: todas las maquinas corren la misma emulacion; solo viajan mandos. Estrella:
+  anfitrion (jugador 1) + hasta 3 invitados. Cada invitado manda su mando del campo f+D; el
+  anfitrion completa el campo cuando estan todos los conectores de la partida y lo reparte
+  ("in"). D = `KESTREL_NETPLAY_DELAY` (2). Campos 0..D-1 en reposo.
+- **Arranque comun**: al entrar alguien (o al detectar desincronia) `System::netSyncReq` ->
+  `serviceStateReq` con el RCP quieto -> `netplay::serviceSync`: el anfitrion fotografia el
+  estado (~12 MB con partida guardada y reloj), lo manda y lo **carga el tambien**, asi todos
+  parten del estado restaurado. Epocas descartan mensajes viejos.
+- **Determinismo en red**: `spLeadOps()` = 0 (SPLEAD=0), sin trucos, sin cargar estado ni
+  rebobinar; el invitado queda "tainted" y no escribe su fichero de partida. Mando del joybus
+  0x01 pisado por `netplay::pad` (antes de `movie::sample`).
+- **Desincronia**: cada 60 campos los invitados mandan hash FNV del estado de CPU; el
+  anfitrion compara (`checks`) y si difiere resincroniza (`desyncs`).
+- **Pantalla partida** (lo pidio el usuario: la activa el ANFITRION, porque los menus van a
+  pantalla completa y solo en juego se parte): byte `view` dentro de cada cuadro de entrada
+  (protocolo v2), fijado por el anfitrion al mandar su mando de f+D -> todas las maquinas
+  cambian en el mismo campo. El presentador (`present.cpp`) recorta el trozo del conector
+  propio (`netplay::viewCrop`: franjas arriba/abajo, columnas, cuadrantes) antes del HUD y
+  conserva la forma que tenia en la tele (media pantalla 4:3 -> 8:3). Fotos/video siguen
+  grabando el cuadro entero.
+- **Interfaz**: menu Red (Partida en red... = dialogo Crear/Unirse/Salir con estado vivo;
+  Pantalla partida F4; Salir). MCP `netplay_host/join/stop/status/view`. Env
+  `KESTREL_NETPLAY_HOST/JOIN/DELAY`.
+- **Validado** (SM64, dos procesos locales): sincronizados, 2 jugadores, 11 hashes 0
+  desincronias, espera media ~0 ms, campos a la par; vista rows/cols/full cambia en los dos y
+  el cuadro presentado sale 320x120 / 160x240 / 320x240; un invitado no puede cambiarla.
+- **Pendiente**: servidor publico de encuentro/NAT (no hay; hoy IP+puerto directos), rollback
+  (hoy espera si la red pasa del retardo), invitados que entran a mitad sin parar al resto.

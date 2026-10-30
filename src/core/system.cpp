@@ -13,6 +13,7 @@
 #include "../vrdp/vrdp.hpp"   // vrdp::built: si ESTE .exe lleva el backend de GPU
 #include "runtime.hpp"
 #include "../video/capture.hpp"
+#include "../net/netplay.hpp"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -618,10 +619,19 @@ auto System::serviceStateReq() -> void {
   int save = stateSaveReq.exchange(-1, std::memory_order_acq_rel);
   int load = stateLoadReq.exchange(-1, std::memory_order_acq_rel);
   u32 rew  = rewindReq.exchange(0, std::memory_order_acq_rel);
-  if(save < 0 && load < 0 && !rew) return;
+  const bool netSync = netSyncReq.exchange(false, std::memory_order_acq_rel);
+  // En red la maquina es de todos: cargar o rebobinar aqui la sacaria de la partida.
+  if(netplay::lockstep() && (load >= 0 || rew)) {
+    load = -1; rew = 0;
+    std::printf("[state] no se carga ni se rebobina durante el juego en red\n");
+    std::fflush(stdout);
+  }
+  if(save < 0 && load < 0 && !rew && !netSync) return;
 
   std::lock_guard<CoreMutex> lk(coreMutex);
   quiesceRcp();
+  if(netSync) netplay::serviceSync(*this);
+  if(save < 0 && load < 0 && !rew) return;
 
   std::string err, msg;
   if(save >= 0) {
@@ -1014,7 +1024,8 @@ auto System::run() -> void {
       // Trucos: el motor del GameShark colgaba de la interrupcion del VI, asi que el ritmo
       // es el campo de video y no el fotograma del juego. Va aqui dentro, con el nucleo
       // parado bajo coreMutex, para que las escrituras no crucen con la CPU ni con el RCP.
-      if(fieldClosed && cheats.enabled()) cheats.applyField(cpu);
+      // En red no: cada maquina tendria sus trucos y se desincronizarian.
+      if(fieldClosed && cheats.enabled() && !netplay::lockstep()) cheats.applyField(cpu);
       // Un campo cerrado gasta un paso del avance por fotogramas. El fetch_sub no puede
       // bajar de cero porque solo se resta lo que se vio distinto de cero en esta vuelta y
       // nadie mas resta: quien pide avance solo suma.
@@ -1076,6 +1087,10 @@ auto System::run() -> void {
     // Alguien (telemetria, depurador) espera el nucleo: dejarle pasar antes del
     // siguiente subtramo. Sin esto el candado volvia siempre a este hilo.
     while(coreMutex.waiting.load(std::memory_order_relaxed) > 0) std::this_thread::yield();
+
+    // Juego en red: mandar el mando de este campo y esperar las entradas del siguiente.
+    // Fuera de coreMutex: la espera a la red no debe bloquear la telemetria.
+    if(fieldClosed) netplay::afterField(*this);
 
     // Foto de rebobinado. Va FUERA del subtramo de arriba y con el RCP parado a proposito:
     // una foto con el RDP a medias de una lista no se puede volver a meter en la maquina.

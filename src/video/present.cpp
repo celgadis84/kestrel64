@@ -3,12 +3,14 @@
 #include "../vrdp/vrdp.hpp"
 #include "../core/runtime.hpp"
 #include "../ui/menu.hpp"
+#include "../net/netplay.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <cmath>
 #include <mutex>
+#include <numeric>
 #include <string>
 
 #ifdef KESTREL_PRDP
@@ -55,6 +57,20 @@ static constexpr u32 kSrcH = 240;
 static constexpr u32 kMaxSrcW = 2560;
 static constexpr u32 kMaxSrcH = 2048;
 static constexpr int kScale = 2;   // window = 640x480
+
+// Pantalla partida en red: el trozo de cada jugador se amplia a la ventana con la forma
+// que tenia en la tele (media pantalla de un 4:3 es 8:3, no 4:3). Lo fija pumpFrame.
+static u32 s_cropW = 1, s_cropH = 1, s_fullW = 1, s_fullH = 1;
+static auto effAspect(int& aw, int& ah) -> void {
+  aw = rt::aspectW.load(std::memory_order_relaxed);
+  ah = rt::aspectH.load(std::memory_order_relaxed);
+  if(aw <= 0 || ah <= 0 || (s_cropW == s_fullW && s_cropH == s_fullH)) return;
+  u64 a = (u64)aw * s_cropW * s_fullH, b = (u64)ah * s_cropH * s_fullW;
+  const u64 g = std::gcd(a, b);
+  a /= g; b /= g;
+  while(a > (1u << 20) || b > (1u << 20)) { a >>= 1; b >>= 1; }
+  aw = (int)(a ? a : 1); ah = (int)(b ? b : 1);
+}
 
 // All Vulkan state for the presenter lives here; torn down in reverse order.
 // Named (not anonymous) so present.hpp can hold an opaque Vk* pimpl.
@@ -550,8 +566,8 @@ auto presentFrame(Vk& v, const u32* px, u32 w, u32 h) -> void {
   // fabrica, 16:9 para los juegos que dibujan anamorfico en su modo panoramico, y 0:0 =
   // estirar a la ventana entera para quien lo prefiera asi.
   const u32 ew = v.extent.width, eh = v.extent.height;
-  const int aw = rt::aspectW.load(std::memory_order_relaxed);
-  const int ah = rt::aspectH.load(std::memory_order_relaxed);
+  int aw, ah;
+  effAspect(aw, ah);
   u32 dw = ew, dh = eh;
   if(aw > 0 && ah > 0) {
     dh = (u32)((u64)ew * (u32)ah / (u32)aw);
@@ -656,8 +672,8 @@ auto presentGdi(Vk& v, const u32* px, u32 w, u32 h) -> void {
   RECT rc; GetClientRect(hw, &rc);
   const u32 ew = (u32)(rc.right - rc.left), eh = (u32)(rc.bottom - rc.top);
   if(!ew || !eh) return;
-  const int aw = rt::aspectW.load(std::memory_order_relaxed);
-  const int ah = rt::aspectH.load(std::memory_order_relaxed);
+  int aw, ah;
+  effAspect(aw, ah);
   u32 dw = ew, dh = eh;
   if(aw > 0 && ah > 0) {
     dh = (u32)((u64)ew * (u32)ah / (u32)aw);
@@ -1392,6 +1408,18 @@ auto Presenter::pumpFrame() -> bool {
       frame[y * width + x] = 0xff000000u | ((u32)ram[p + 2] << 16) | ((u32)ram[p + 1] << 8) | ram[p];
     }
   }
+
+  // Pantalla partida en red: solo el trozo de este jugador (lo decide el anfitrion, campo a
+  // campo). Antes del HUD, para que el HUD caiga dentro de lo que se ve.
+  s_cropW = s_fullW = width; s_cropH = s_fullH = height;
+  { u32 cx, cy, cw, ch;
+    if(netplay::viewCrop(width, height, cx, cy, cw, ch)) {
+      std::vector<u32> sub((usize)cw * ch);
+      for(u32 y = 0; y < ch; y++)
+        std::memcpy(&sub[(usize)y * cw], &frame[(usize)(cy + y) * width + cx], (usize)cw * 4);
+      frame.swap(sub);
+      width = cw; height = ch; s_cropW = cw; s_cropH = ch;
+    } }
 
   // Speed-gauge footer (CPU / RSP / RDRAM % of realtime). On unless disabled.
   if(rt::hud.load(std::memory_order_relaxed)) {

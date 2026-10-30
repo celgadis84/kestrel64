@@ -5,6 +5,7 @@
 #include "gamecard.hpp"
 #include "../core/runtime.hpp"
 #include "../video/capture.hpp"
+#include "../net/netplay.hpp"
 #include "debugger.hpp"
 
 #ifdef _WIN32
@@ -35,6 +36,7 @@ bool     g_relaunch = false;    // un dialogo ha pedido relanzar
 std::mutex g_mu;
 HWND     g_optWin = nullptr;    // dialogo de opciones (una sola instancia)
 HWND     g_padWin = nullptr;    // dialogo de mando
+HWND     g_netWin = nullptr;    // dialogo de partida en red
 bool     g_menuHidden = false;  // barra retirada (pantalla completa)
 
 // Los dialogos corren en su hilo. Tocar la barra de menu (SetMenu/DrawMenuBar) desde el
@@ -48,6 +50,7 @@ enum : UINT {
   kFull, kHud,
   kAudioOn, kPadCfg, kAllOpts, kAbout, kDebugger, kGameCard, kCardDirect,
   kShot, kRecord,
+  kNetDlg, kNetView, kNetStop,
   kScale1  = 0x8140,              // +0..+6 (escala 1x..7x)
   kThrHw = 0x8160, kThrAuto, kThrOn, kThrOff,
   kSlot0   = 0x8170,              // +0..+9
@@ -259,6 +262,12 @@ auto buildMenu() -> void {
   addOptMenu(con, "mouse", "Rat&on N64");
   addSub(g_menu, con, "&Consola");
 
+  HMENU net = CreatePopupMenu();
+  addItem(net, kNetDlg, "&Partida en red...");
+  addItem(net, kNetView, "Pantalla &partida (anfitrion)\tF4");
+  addItem(net, kNetStop, "&Salir de la partida");
+  addSub(g_menu, net, "&Red");
+
   HMENU cfg = CreatePopupMenu();
   addItem(cfg, kPadCfg, "&Mando...");
   addItem(cfg, kAllOpts, "&Todas las opciones...\tF12");
@@ -300,6 +309,10 @@ auto syncMenu() -> void {
   CheckMenuItem(g_menu, kFull,
                 MF_BYCOMMAND | (g_prof.getBool("fullscreen") ? MF_CHECKED : MF_UNCHECKED));
   CheckMenuItem(g_menu, kRecord, MF_BYCOMMAND | (capture::recording() ? MF_CHECKED : MF_UNCHECKED));
+  { const netplay::Status ns = netplay::status();
+    CheckMenuItem(g_menu, kNetView, MF_BYCOMMAND | (ns.view ? MF_CHECKED : MF_UNCHECKED));
+    EnableMenuItem(g_menu, kNetView, MF_BYCOMMAND | (ns.active && ns.host ? MF_ENABLED : MF_GRAYED));
+    EnableMenuItem(g_menu, kNetStop, MF_BYCOMMAND | (ns.active ? MF_ENABLED : MF_GRAYED)); }
   CheckMenuItem(g_menu, kPause,
                 MF_BYCOMMAND | ((g_h.paused && g_h.paused->load()) ? MF_CHECKED : MF_UNCHECKED));
   CheckMenuItem(g_menu, kCardDirect,
@@ -394,6 +407,7 @@ auto relaunchNow() -> void {
 auto closeDialogs() -> void {
   if(g_optWin) PostMessageA(g_optWin, WM_CLOSE, 0, 0);
   if(g_padWin) PostMessageA(g_padWin, WM_CLOSE, 0, 0);
+  if(g_netWin) PostMessageA(g_netWin, WM_CLOSE, 0, 0);
 }
 
 auto askRelaunch(HWND owner, const char* why) -> void {
@@ -1508,6 +1522,141 @@ auto padDialogThread() -> void {
   }
 }
 
+// ---------------------------------------------------------------- dialogo de partida en red
+
+// Crear partida (escuchar en un puerto) o unirse a IP:puerto, y el estado de la sesion al
+// vuelo. Sin servidor intermedio: por internet el anfitrion abre o redirige el puerto TCP en
+// su router y pasa su IP publica a los demas.
+constexpr int kIdNetPort = 2400, kIdNetAddr = 2401, kIdNetHost = 2402, kIdNetJoin = 2403;
+constexpr int kIdNetStop = 2404, kIdNetView = 2405;
+struct NetDlg { HWND port = nullptr, addr = nullptr, state = nullptr, view = nullptr; };
+NetDlg g_net;
+std::string g_netAddr = "127.0.0.1:6464";   // ultima direccion tecleada (vive con el proceso)
+
+auto netRefresh() -> void {
+  if(!g_net.state) return;
+  const netplay::Status s = netplay::status();
+  std::string t;
+  if(!s.active) t = "Sin partida.";
+  else {
+    t = s.host ? "Anfitrion en el puerto " + s.peer : "Invitado de " + s.peer;
+    t += " - jugador " + std::to_string(s.slot + 1);
+    t += s.synced ? " - jugando (" + std::to_string(s.players) + " jugadores)" : " - esperando";
+    char b[96];
+    std::snprintf(b, sizeof b, "\r\nretardo %u campos, espera media %.1f ms, desincronias %u",
+                  s.delay, s.waitMs, s.desyncs);
+    t += b;
+  }
+  if(!s.msg.empty()) t += "\r\n" + s.msg;
+  char cur[1024] = {0};
+  GetWindowTextA(g_net.state, cur, sizeof cur);
+  if(t != cur) SetWindowTextA(g_net.state, t.c_str());
+  EnableWindow(g_net.view, s.active && s.host);
+  SendMessageA(g_net.view, BM_SETCHECK, s.view ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+LRESULT CALLBACK netProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  switch(m) {
+    case WM_COMMAND: {
+      std::string err;
+      bool ok = true;
+      switch(LOWORD(w)) {
+        case kIdNetHost: {
+          char b[16] = {0};
+          GetWindowTextA(g_net.port, b, sizeof b);
+          int p = std::atoi(b);
+          ok = netplay::host((u16)(p > 0 && p < 65536 ? p : netplay::kDefaultPort), err);
+          break;
+        }
+        case kIdNetJoin: {
+          char b[256] = {0};
+          GetWindowTextA(g_net.addr, b, sizeof b);
+          g_netAddr = b;
+          SetWindowTextA(g_net.state, "Conectando...");
+          ok = netplay::join(g_netAddr, err);
+          break;
+        }
+        case kIdNetStop: netplay::stop(); break;
+        case kIdNetView: ok = netplay::toggleView(err); break;
+        default: return DefWindowProcA(h, m, w, l);
+      }
+      if(!ok) MessageBoxA(h, err.c_str(), "Partida en red", MB_OK | MB_ICONWARNING);
+      netRefresh();
+      return 0;
+    }
+    case WM_TIMER:
+      netRefresh();
+      return 0;
+    case WM_CLOSE:
+      DestroyWindow(h);
+      return 0;
+    case WM_DESTROY:
+      KillTimer(h, 1);
+      g_net = NetDlg();
+      g_netWin = nullptr;
+      PostQuitMessage(0);
+      return 0;
+  }
+  return DefWindowProcA(h, m, w, l);
+}
+
+auto netDialogThread() -> void {
+  static bool cls = false;
+  if(!cls) {
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = netProc;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = "kestrel64_net";
+    RegisterClassA(&wc);
+    cls = true;
+  }
+  RECT want = {0, 0, 470, 268};
+  const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME;
+  AdjustWindowRect(&want, style, FALSE);
+  HWND h = CreateWindowExA(0, "kestrel64_net", "kestrel64 - partida en red", style,
+                           CW_USEDEFAULT, CW_USEDEFAULT, want.right - want.left,
+                           want.bottom - want.top, nullptr, nullptr, GetModuleHandleA(nullptr),
+                           nullptr);
+  if(!h) return;
+  g_netWin = h;
+  HFONT f = panelFont();
+  auto mk = [&](const char* cl, const char* txt, DWORD st, int x, int y, int w2, int h2, int id,
+                DWORD ex = 0) {
+    HWND c = CreateWindowExA(ex, cl, txt, WS_CHILD | WS_VISIBLE | st, x, y, w2, h2, h,
+                             (HMENU)(INT_PTR)id, nullptr, nullptr);
+    SendMessageA(c, WM_SETFONT, (WPARAM)f, TRUE);
+    return c;
+  };
+  mk("STATIC", "Crear partida en el puerto:", 0, 12, 16, 170, 18, 0);
+  g_net.port = mk("EDIT", std::to_string(netplay::kDefaultPort).c_str(),
+                  WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER, 186, 12, 70, 22, kIdNetPort, WS_EX_CLIENTEDGE);
+  mk("BUTTON", "Crear", WS_TABSTOP, 352, 10, 106, 26, kIdNetHost);
+  mk("STATIC", "Unirse a (IP:puerto):", 0, 12, 52, 170, 18, 0);
+  g_net.addr = mk("EDIT", g_netAddr.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, 186, 48, 160, 22,
+                  kIdNetAddr, WS_EX_CLIENTEDGE);
+  mk("BUTTON", "Unirse", WS_TABSTOP, 352, 46, 106, 26, kIdNetJoin);
+  g_net.view = mk("BUTTON", "Pantalla partida: cada uno ve solo lo suyo (anfitrion, F4)",
+                  WS_TABSTOP | BS_CHECKBOX, 12, 84, 446, 20, kIdNetView);
+  g_net.state = mk("STATIC", "", SS_LEFT, 12, 112, 446, 70, 0);
+  mk("STATIC", "Por internet: el anfitrion abre el puerto TCP en su router y da su IP publica.\r\n"
+               "Misma ROM y misma version de kestrel64 en todas las maquinas.",
+     SS_LEFT, 12, 188, 446, 36, 0);
+  mk("BUTTON", "Salir de la partida", WS_TABSTOP, 12, 232, 150, 26, kIdNetStop);
+  netRefresh();
+  SetTimer(h, 1, 500, nullptr);
+  ShowWindow(h, SW_SHOW);
+  SetForegroundWindow(h);
+  MSG msg;
+  while(GetMessageA(&msg, nullptr, 0, 0) > 0) {
+    if(!IsDialogMessageA(h, &msg)) {
+      TranslateMessage(&msg);
+      DispatchMessageA(&msg);
+    }
+  }
+}
+
 // ---------------------------------------------------------------- ordenes del menu
 
 auto pickRom(HWND owner) -> std::string {
@@ -1622,6 +1771,19 @@ auto onCommand(UINT id) -> void {
       if(g_optWin) { SetForegroundWindow(g_optWin); return; }
       std::thread(optionsDialogThread).detach();
       return;
+    case kNetDlg:
+      if(g_netWin) { SetForegroundWindow(g_netWin); return; }
+      std::thread(netDialogThread).detach();
+      return;
+    case kNetView: {
+      // Solo el anfitrion: en juego a pantalla partida, y de vuelta a completa en los menus.
+      std::string err;
+      if(!netplay::toggleView(err)) { std::printf("[netplay] %s\n", err.c_str()); std::fflush(stdout); }
+      return;
+    }
+    case kNetStop:
+      netplay::stop();
+      return;
     case kDebugger:
       dbgwin::open();   // hilo y ventana propios; si ya esta abierta, la trae delante
       return;
@@ -1646,7 +1808,8 @@ auto onCommand(UINT id) -> void {
                   "kestrel64 - emulador de Nintendo 64 escrito desde cero.\n\n"
                   "Teclado de fabrica: X=A, C=B, Espacio=Z, Enter=Start, Q/E=L/R,\n"
                   "flechas=cruceta, I/J/K/L=botones C, W/A/S/D=stick.\n"
-                  "F5 guarda estado, F7 carga, F6 cambia de ranura, F11 pantalla completa.",
+                  "F5 guarda estado, F7 carga, F6 cambia de ranura, F11 pantalla completa.\n"
+                  "F4 (anfitrion en red): pantalla partida, cada jugador ve solo lo suyo.",
                   "Acerca de kestrel64", MB_OK | MB_ICONINFORMATION);
       return;
     default: break;
@@ -1742,6 +1905,7 @@ LRESULT CALLBACK gameProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if(w == VK_F11) onCommand(kFull);
         else if(w == VK_F9) onCommand(kShot);
         else if(w == VK_F8) onCommand(kRecord);
+        else if(w == VK_F4 && !(GetKeyState(VK_MENU) & 0x8000)) onCommand(kNetView);
         else if(ctrl && w == 'O') onCommand(kOpenRom);
         else if(ctrl && w == 'P') onCommand(kPause);
         else if(ctrl && w == 'R') onCommand(kReset);

@@ -330,6 +330,46 @@ def video_status() -> dict:
     return data
 
 
+def netplay_host(port: int = 6464) -> dict:
+    """Open a netplay session on `port` (all interfaces; open/forward it for internet play).
+    Up to 3 guests join; each one's local pad 1 becomes player 2/3/4. Returns the session
+    status (see netplay_status)."""
+    data, _ = query("netplay.host", port=int(port))
+    return data
+
+
+def netplay_join(addr: str) -> dict:
+    """Join a netplay host at "host:port" (same ROM and kestrel64 version required). The
+    guest waits for the host's savestate, then runs in lockstep; its own save files are
+    never written for the rest of the process."""
+    data, _ = query("netplay.join", addr=addr, _wait_s=30.0)
+    return data
+
+
+def netplay_stop() -> dict:
+    """Leave/close the netplay session."""
+    data, _ = query("netplay.stop", _wait_s=30.0)
+    return data
+
+
+def netplay_status() -> dict:
+    """Netplay status: {active, host, synced, slot (0 = player 1), players, delay (fields),
+    field, epoch (syncs done), desyncs, checks (state hashes compared, host), waitMs (mean
+    wait for the network per field), peer, msg, view (0 full, 1 rows, 2 cols, 3 quad)}."""
+    data, _ = query("netplay.status")
+    return data
+
+
+def netplay_view(mode: str = "auto") -> dict:
+    """Host only: split-screen view for every peer. mode = full | rows (2 players, top/bottom)
+    | cols (2 players, left/right) | quad (3-4 players) | auto (rows with 2, quad with more).
+    Travels inside the input frames, so all machines switch on the same field (D+1 fields
+    from now). Each player then sees only their own part of the picture; turn it on in game
+    and back to full for the menus. Presentation only: emulation is unaffected."""
+    data, _ = query("netplay.view", mode=str(mode))
+    return data
+
+
 def capture_framebuffer(path: str = "kestrel_fb.png", height: int = 240, frame: int = 0) -> dict:
     """Grab the live VI framebuffer and write it as a PNG to `path`.
 
@@ -729,6 +769,11 @@ def _serve_mcp():
     mcp.tool()(video_start)
     mcp.tool()(video_stop)
     mcp.tool()(video_status)
+    mcp.tool()(netplay_host)
+    mcp.tool()(netplay_join)
+    mcp.tool()(netplay_stop)
+    mcp.tool()(netplay_status)
+    mcp.tool()(netplay_view)
     mcp.tool()(breakpoint_add)
     mcp.tool()(breakpoint_del)
     mcp.tool()(breakpoint_list)

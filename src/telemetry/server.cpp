@@ -8,6 +8,7 @@
 #include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
 #include "../video/capture.hpp"
+#include "../net/netplay.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -148,6 +149,8 @@ auto Server::dispatch(const json::Value& req, const std::vector<u8>& reqBlob, js
     if(cmdViCapture(args, data, blob)) done(); else fail("vi.capture: VI blanked or bad geometry");
   } else if(cmd.rfind("capture.", 0) == 0) {
     if(cmdCapture(cmd, args, data)) done(); else fail(cmd + ": " + data.get("msg").asString());
+  } else if(cmd.rfind("netplay.", 0) == 0) {
+    if(cmdNetplay(cmd, args, data)) done(); else fail(cmd + ": " + data.get("msg").asString());
   } else if(cmd == "cpu.bp.add") {
     cmdBpAdd(args, data); done();
   } else if(cmd == "cpu.bp.del") {
@@ -870,6 +873,37 @@ auto Server::cmdCapture(const std::string& cmd, const json::Value& args, json::V
   if(cmd == "capture.video.status") { stats(capture::videoStats()); return true; }
   data.set("msg", "comando desconocido");
   return false;
+}
+
+// netplay.host {port?} / netplay.join {addr} / netplay.stop / netplay.status. Juego en red por
+// sincronizacion de entradas (src/net/netplay.hpp). Todas devuelven el estado de la sesion.
+auto Server::cmdNetplay(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
+  std::string err;
+  if(cmd == "netplay.host") {
+    if(!netplay::host(system, (u16)args.get("port").asU32(netplay::kDefaultPort), err)) { data.set("msg", err); return false; }
+  } else if(cmd == "netplay.join") {
+    if(!netplay::join(system, args.get("addr").asString(), err)) { data.set("msg", err); return false; }
+  } else if(cmd == "netplay.stop") {
+    netplay::stop();
+  } else if(cmd == "netplay.view") {
+    // mode: full|rows|cols|quad|auto (o 0..4). Solo el anfitrion.
+    const std::string m = args.get("mode").asString();
+    static const char* kNames[5] = {"full", "rows", "cols", "quad", "auto"};
+    int mode = -1;
+    for(int i = 0; i < 5; i++) if(m == kNames[i]) mode = i;
+    if(mode < 0 && m.size() == 1 && m[0] >= '0' && m[0] <= '4') mode = m[0] - '0';
+    if(mode < 0) { data.set("msg", "mode: full|rows|cols|quad|auto"); return false; }
+    if(!netplay::setView(mode, err)) { data.set("msg", err); return false; }
+  } else if(cmd != "netplay.status") {
+    data.set("msg", "comando desconocido");
+    return false;
+  }
+  const netplay::Status s = netplay::status();
+  data.set("active", s.active).set("host", s.host).set("synced", s.synced)
+      .set("slot", (u64)s.slot).set("players", (u64)s.players).set("delay", s.delay)
+      .set("field", s.field).set("epoch", s.epoch).set("desyncs", s.desyncs).set("checks", s.checks)
+      .set("waitMs", s.waitMs).set("peer", s.peer).set("msg", s.msg).set("view", (u64)s.view);
+  return true;
 }
 
 auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool {

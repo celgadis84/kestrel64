@@ -204,3 +204,14 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
   sobre la extension). MP4 = H.264 + AAC 48 kHz por Media Foundation (Windows; sin ella cae a
   AVI), QUALITY = tasa de bits (0,08..0,40 bits/pixel). AVI = MJPEG + PCM, sin perdidas de
   audio y legible aunque el proceso muera; el MP4 solo es valido si se cierra bien.
+
+## Juego en red (2026-10-30, `src/net/netplay.{hpp,cpp}`)
+
+- `KESTREL_NETPLAY_HOST=<puerto>` — abre partida al arrancar, escuchando en todas las
+  interfaces (6464 si vale 0). Por internet el puerto TCP se abre/redirige en el router del
+  anfitrion; no hay servidor intermedio.
+- `KESTREL_NETPLAY_JOIN=<host:puerto>` — se une al arrancar. Misma ROM (hash) y misma version
+  de protocolo, si no el anfitrion rechaza.
+- `KESTREL_NETPLAY_DELAY=N` (2, max 30) — retardo de entrada en campos que fija el
+  anfitrion: margen de la red antes de que una maquina tenga que esperar. ~1 campo por cada
+  16 ms de ida y vuelta.

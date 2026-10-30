@@ -233,10 +233,14 @@ struct System {
   // cerrado y visible en el reloj actual. Solo ahi se puede fotografiar la maquina sin
   // cambiarla: quiesceRcp ya no tiene nada que adelantar. Ver serviceStateReq.
   auto rcpAtRest() -> bool;
+  // Juego en red: el anfitrion pide fotografiar y repartir la maquina (entra alguien o hay
+  // desincronia). Va por el mismo camino que el estado guardado: espera al reposo del RCP.
+  std::atomic<bool> netSyncReq{false};
   auto stateReqPending() const -> bool {
     return stateSaveReq.load(std::memory_order_relaxed) >= 0 ||
            stateLoadReq.load(std::memory_order_relaxed) >= 0 ||
-           rewindReq.load(std::memory_order_relaxed) != 0;
+           rewindReq.load(std::memory_order_relaxed) != 0 ||
+           netSyncReq.load(std::memory_order_relaxed);
   }
   u32  stateWaitSlices = 0;   // subtramos corridos esperando reposo para una peticion
   bool rewindDue = false;     // foto de rebobinado pedida por un cierre de campo y aun no hecha

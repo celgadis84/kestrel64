@@ -9,6 +9,8 @@
 #else
   #include <sys/socket.h>
   #include <netinet/in.h>
+  #include <netinet/tcp.h>
+  #include <netdb.h>
   #include <arpa/inet.h>
   #include <unistd.h>
   static auto closesock(long long s) -> void { ::close((int)s); }
@@ -26,7 +28,35 @@ static constexpr long long BADSOCK = (long long)INVALID_SOCKET;
 static constexpr long long BADSOCK = -1;
 #endif
 
-auto TcpServer::listen(u16 port) -> bool {
+auto tcpConnect(const std::string& host, u16 port, std::string& err) -> TcpConn {
+#if defined(_WIN32)
+  // WSAStartup cuenta referencias: esta no se libera nunca y no estorba a la del servidor.
+  static const bool wsaOk = []{ WSADATA wsa; return WSAStartup(MAKEWORD(2, 2), &wsa) == 0; }();
+  if(!wsaOk) { err = "WSAStartup fallo"; return TcpConn{}; }
+#endif
+  addrinfo hints{}, *res = nullptr;
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  const std::string ps = std::to_string(port);
+  if(::getaddrinfo(host.c_str(), ps.c_str(), &hints, &res) != 0 || !res) {
+    err = "no se resuelve " + host;
+    return TcpConn{};
+  }
+  long long s = BADSOCK;
+  for(addrinfo* a = res; a; a = a->ai_next) {
+    s = (long long)::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if(s == BADSOCK) continue;
+    if(::connect((int)s, a->ai_addr, (int)a->ai_addrlen) == 0) break;
+    closesock(s); s = BADSOCK;
+  }
+  ::freeaddrinfo(res);
+  if(s == BADSOCK) { err = "no conecta con " + host + ":" + ps; return TcpConn{}; }
+  int yes = 1;
+  ::setsockopt((int)s, IPPROTO_TCP, TCP_NODELAY, (const char*)&yes, sizeof yes);
+  return TcpConn{s};
+}
+
+auto TcpServer::listen(u16 port, bool anyAddr) -> bool {
 #if defined(_WIN32)
   if(!initialized) {
     WSADATA wsa;
@@ -43,7 +73,7 @@ auto TcpServer::listen(u16 port) -> bool {
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);  // 127.0.0.1 only
+  addr.sin_addr.s_addr = htonl(anyAddr ? INADDR_ANY : INADDR_LOOPBACK);
   if(::bind((int)sock, (sockaddr*)&addr, sizeof addr) != 0) { closesock(sock); sock = BADSOCK; return false; }
   // Cola de espera holgada: cada cliente aceptado se va a su propio hilo, pero entre el
   // accept y el arranque del hilo hay una ventana, y sin cola una conexion que caiga ahi

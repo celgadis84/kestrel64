@@ -82,6 +82,7 @@ private:
   // Decode the live VI framebuffer to RGBA8888 (blob) + geometry (data).
   auto cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool;
   auto cmdCapture(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
+  auto cmdNetplay(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;
   auto cmdBpAdd(const json::Value& args, json::Value& data) -> void;
   auto cmdBpDel(const json::Value& args, json::Value& data) -> void;
   auto cmdBpList(const json::Value& args, json::Value& data) -> void;

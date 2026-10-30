@@ -2,6 +2,7 @@
 // Usage: kestrel64 <rom.z64|.n64|.v64> [--port N]
 
 #include "core/system.hpp"
+#include "net/netplay.hpp"
 #include "cpu/jit.hpp"
 #include "rsp/rsp.hpp"
 #include "audio/audio.hpp"
@@ -313,6 +314,7 @@ int main(int argc, char** argv) {
   const bool batch = freeRun && !play;   // lote = corre sin ventana; jugar = corre CON ventana
   system.exitOnHalt = batch;      // lote headless: halt = fin de sesión, no punto de inspección
   system.startTelemetry(port);
+  kestrel::netplay::startFromEnv(system);   // KESTREL_NETPLAY_HOST / _JOIN
   kestrel::dbgwin::init(system);
   if(debugger) kestrel::dbgwin::open();
   system.startVideo(batch);     // --run = lote: sin ventana salvo KESTREL_VIDEO
@@ -326,6 +328,7 @@ int main(int argc, char** argv) {
 
   const std::time_t playT0 = std::time(nullptr);
   system.runLoop();
+  kestrel::netplay::stop();
   kestrel::dbgwin::close();   // antes de cerrar la telemetria: la ventana la usa
   kestrel::audio::shutdown();
   // Partida jugada para la ficha del juego (<estado>/games/<CRC>.json, la misma del

@@ -3,6 +3,7 @@
 #include "../telemetry/hostprof.hpp"
 #include "movie.hpp"
 #include "memory.hpp"
+#include "../net/netplay.hpp"
 #include "runtime.hpp"
 #include <chrono>
 #include <ctime>
@@ -477,6 +478,8 @@ auto Memory::attachSaveFile(const std::string& romPath) -> void {
 }
 
 auto Memory::flushSaveFile() const -> void {
+  // Invitado de una partida en red: lo que hay en memoria es la partida del anfitrion.
+  if(netplay::tainted()) return;
   for(const PadPort& pp : padPort) {
     if(pp.mempakDirty && !pp.mempakPath.empty()) storeFrom(pp.mempakPath, pp.mempak);
     pp.gb.flush();                   // RAM con bateria del cartucho GB del Transfer Pak
@@ -2625,6 +2628,8 @@ auto Memory::pifProcessJoybus() -> u32 {
           sx = (s8)(st & 0xff); sy = (s8)((st >> 8) & 0xff);
           if(left > 0) padRemotePolls[channel].store(left - 1, std::memory_order_release);
         }
+        // Juego en red: mandan las entradas repartidas para este campo, no las locales.
+        if(netplay::lockstep()) netplay::pad(channel, btn, sx, sy);
         // Grabacion/reproduccion de entradas: esta es la frontera que el juego percibe, con
         // el mando del anfitrion y el inyectado por telemetria ya resueltos.
         movie::sample(channel, btn, sx, sy);
@@ -5186,7 +5191,9 @@ auto Memory::spLeadOps() -> u64 {
     if(!e || !*e || !std::strcmp(e, "auto")) return rt::speedModeHw() ? 0ull : 512ull;
     return (u64)std::strtoull(e, nullptr, 0);
   }();
-  return v;
+  // Juego en red: el modo reproducible (SPLEAD=0), o dos maquinas divergen con las mismas
+  // entradas.
+  return netplay::lockstep() ? 0ull : v;
 }
 
 auto Memory::spBarThreshold(u64 now) const -> u64 {

@@ -46,9 +46,14 @@ private:
   auto sendAll(const u8* buf, u32 len) -> bool;
 };
 
+// Conexion saliente (juego en red). host = nombre o IPv4. TCP_NODELAY puesto. Invalida si
+// falla, con el motivo en err.
+auto tcpConnect(const std::string& host, u16 port, std::string& err) -> TcpConn;
+
 struct TcpServer {
-  // Bind + listen on 127.0.0.1:port. Returns false on failure.
-  auto listen(u16 port) -> bool;
+  // Bind + listen on 127.0.0.1:port (anyAddr = 0.0.0.0, para el juego en red; la
+  // telemetria se queda en loopback). Returns false on failure.
+  auto listen(u16 port, bool anyAddr = false) -> bool;
   auto close() -> void;
 
   // Block until a client connects. La conexion devuelta es invalida si el socket de

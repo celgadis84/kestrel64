@@ -130,16 +130,25 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   YouTube con scale=3/4) o "avi" (MJPEG + PCM); vacio = por extension, sin ruta = mp4 en
   Videos\kestrel64.
 
+**Juego en red**
+- `netplay_host(port)` / `netplay_join("ip:puerto")` / `netplay_stop()` / `netplay_status()`:
+  lockstep de entradas, anfitrion + hasta 3 invitados (jugadores 2-4). `status`: synced, slot,
+  players, field, epoch, desyncs/checks (hash de CPU cada 60 campos), waitMs, view.
+- `netplay_view(mode)` (solo anfitrion): `full|rows|cols|quad|auto`. Pantalla partida: cada
+  maquina presenta solo el trozo de su jugador; viaja en las entradas, asi que todas cambian
+  en el mismo campo. Encender en juego, apagar en los menus. Solo presentacion.
+
 **Perfilado**
 - `profile_start` → dejar correr la carga → `profile_cpu(top)` / `profile_rsp(top)` →
   `profile_stop`. `profile_reset` abre una ventana nueva sin parar.
 - `profile_cpu`: cubos de 16 B por direccion FISICA, con el desensamblado de la primera
   instruccion. Hay que cruzarlo con `cpu_disasm` y con el `.map` del juego para dar
   nombre a la funcion.
-  **LIMITE: solo muestrea lo que ejecuta el INTERPRETE.** Con el JIT puesto (de fabrica)
-  sale sesgado o casi vacio. Para un perfil de CPU de verdad, arrancar con `KESTREL_JIT=0`
-  (mas lento, pero el reparto es fiel), o bien arrancar con `KESTREL_GPCPROF=20`, que
-  muestrea bajo el JIT por tiempo y vuelca el top al cerrar por stderr.
+  Bajo el JIT (de fabrica, desde 2026-10-30) cuenta el 100 % de lo retirado, pero cada
+  bloque entero cae en su PC de ENTRADA y una cadena enlazada en su bloque de cabeza (el
+  `warn` lo recuerda). `KESTREL_JIT_NOLINK=1` da reparto por bloque (top-10 de regiones de
+  1 KB igual que el interprete); `KESTREL_JIT=0` da reparto por instruccion y es el unico
+  con `metric=dmiss|imiss|dline`.
 - `profile_rsp`: ranura de IMEM del microcodigo; el propio perfilado pasa el RSP al
   interprete, asi que sale fiel. Sirve para ver donde gasta el ucode grafico/audio. `word`
   = la palabra que hay AHORA en el hueco (la del ultimo microcodigo cargado).
