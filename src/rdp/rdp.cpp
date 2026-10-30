@@ -883,7 +883,11 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
   if(!pipeMode && x1 > x0 && y1 > y0 && gpuOn() && !g_rgHi && !wrtag::tag) {
     const u32 bpp = ci_size == 3 ? 4 : ci_size == 1 ? 1 : 2;
     const u64 last = u64(ci_addr) + (u64(y1 - 1) * ci_width + u64(x1)) * bpp;   // un byte detras
-    if(u32(x1) <= ci_width && ci_addr % bpp == 0 && last <= m.size()) {
+    if(gpuShadow && u32(x1) <= ci_width && ci_addr % bpp == 0 && last <= m.size()) {
+      // Modo sombra: a la copia de alta y lo pinta el bucle de abajo.
+      gpurdp::queueFillHi({ci_addr, ci_width, bpp, u32(x0), u32(y0), u32(x1), u32(y1), fill_color},
+                          mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem));
+    } else if(u32(x1) <= ci_width && ci_addr % bpp == 0 && last <= m.size()) {
       gpurdp::queueFill({ci_addr, ci_width, bpp, u32(x0), u32(y0), u32(x1), u32(y1), fill_color});
       gpuMark(ci_addr + (u32(y0) * ci_width + u32(x0)) * bpp, (u32)last);
       gpuQueued = true;
@@ -1131,6 +1135,11 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = lastX; r[T_LASTY] = lastY;
   t.lo[0] = lo[0]; t.hi[0] = hi[0]; t.lo[1] = lo[1]; t.hi[1] = hi[1];
   const u8* tm = textured ? tmem : nullptr;
+  if(gpuShadow) {
+    // Solo la copia de alta: la RDRAM la pinta el CPU (false), con la contabilidad de siempre.
+    gpurdp::queueTriHi(t, tm, mem.rdram.data(), (u32)size, hiddenBits(mem));
+    return false;
+  }
   if(!gpurdp::queueTri(t, tm)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tm); }
   gpuTris.push_back({acct, combProg && !fillMode});
   gpuMark(lo[0], hi[0]);
@@ -1263,7 +1272,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       pxShadeA = 0; lodFracV = 0xff;
       return;
     }
-    if(mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallTri.fetch_add(1, std::memory_order_relaxed);
+    if(!gpuShadow && mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallTri.fetch_add(1, std::memory_order_relaxed);
     if(gpuQueued) { gpuFlushStat(65); gpuFlush(mem); }   // va por el CPU: antes, lo encolado a la RDRAM
   }
   // Recorrido de bordes en ENTERO, como el rasterizador del RDP. Oraculo: parallel-rdp
@@ -2645,6 +2654,10 @@ auto SoftRdp::gpuTexRect(Memory& mem, const u64* w, bool flip, int X0, int X1, i
   r[T_LOD] = lodFracV; r[T_PLOD] = prim_lod_frac; r[T_PZ] = (s32)prim_z;
   r[T_PDZ] = pxDz; r[T_PDZC] = pxDzC; r[T_LASTX] = X1 - 1; r[T_LASTY] = Y1 - 1;
   t.lo[0] = lo; t.hi[0] = hi; t.lo[1] = zlo; t.hi[1] = zhi;
+  if(gpuShadow) {
+    gpurdp::queueTriHi(t, tmem, mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem));
+    return false;
+  }
   if(!gpurdp::queueTri(t, tmem)) { gpuFlushStat(67); gpuFlush(mem); gpurdp::queueTri(t, tmem); }
   gpuTris.push_back({acct, combProg});
   gpuMark(lo, hi);
@@ -2720,7 +2733,7 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
   if(gpuOn() && cycleType() == 2) {
     gpuHd = hdB;
     if(gpuTexRect(mem, w, flip, X0, X1, Y0, Y1, usesTex1)) { lodFracV = 0xff; return; }
-    if(mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallRect.fetch_add(1, std::memory_order_relaxed);
+    if(!gpuShadow && mem.rdpStats.on.load(std::memory_order_relaxed)) mem.rdpStats.gpuFallRect.fetch_add(1, std::memory_order_relaxed);
     if(gpuQueued) { gpuFlushStat(66); gpuFlush(mem); }
   }
   // El HW dibuja el rect como un triangulo plano (parallel-rdp op_texture_rectangle): borde
@@ -3057,21 +3070,21 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   // caminos dan los mismos bytes y la misma contabilidad, asi que es una decision del
   // anfitrion pura (md5 y estado del invitado no se mueven). Se estima el area de lo que trae
   // el tramo (caja de cada triangulo / rectangulo) y por debajo del umbral va al CPU. Con
-  // escalado interno todo a la GPU (lo pintado por el CPU no tiene copia de alta: sale a 1x
-  // replicado), salvo KESTREL_GPURDP_MINPX_HI, que cambia ese detalle por velocidad.
+  // escalado interno, modo sombra: el CPU pinta todo a 1x y la GPU solo la copia de alta, sin
+  // esperarla (KESTREL_GPURDP_HISYNC=1 = el camino de antes: todo a la GPU, vaciado sincrono
+  // por tramo, la mitad de rapido en SM64 x4).
   {
     static const u64 minPx = [] {
       const char* e = std::getenv("KESTREL_GPURDP_MINPX");
       return e && e[0] ? (u64)std::strtoull(e, nullptr, 0) : (u64)4096;
     }();
-    static const u64 minPxHi = [] {
-      const char* e = std::getenv("KESTREL_GPURDP_MINPX_HI");
-      return e && e[0] ? (u64)std::strtoull(e, nullptr, 0) : (u64)0;
+    static const bool hiSync = [] {
+      const char* e = std::getenv("KESTREL_GPURDP_HISYNC");
+      return e && e[0] && e[0] != '0';
     }();
     gpuRun = true;
-    const u64 thr = gpurdp::upscale() <= 1 ? minPx : minPxHi;
-    if(thr && gpurdp::active()) {
-      const u64 minPx = thr;
+    gpuShadow = gpurdp::active() && gpurdp::upscale() > 1 && !hiSync;
+    if(minPx && gpurdp::active() && gpurdp::upscale() <= 1) {
       auto s14 = [](u64 v) -> s32 { return (s32)((u32)(v & 0x3fff) << 18) >> 18; };
       double px = 0;
       u32 a = cur, cyc = cycleType();
@@ -3105,7 +3118,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
       }
       gpuRun = px >= (double)minPx;
     }
-    if(gpurdp::active() && mem.rdpStats.on.load(std::memory_order_relaxed))
+    if(gpurdp::active() && !gpuShadow && mem.rdpStats.on.load(std::memory_order_relaxed))
       (gpuRun ? mem.rdpStats.gpuTramos : mem.rdpStats.cpuTramos).fetch_add(1, std::memory_order_relaxed);
   }
   u64 words[24];
@@ -3429,6 +3442,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   }
   stopAt = cur;
   if(gpuQueued) { gpuFlushStat(64); gpuFlush(mem); }   // fuera de run() la RDRAM siempre esta al dia
+  if(gpuShadow) gpurdp::submitHi(mem.rdram.data(), (u32)mem.rdram.size(), hiddenBits(mem));
   if(ops) {
     // KESTREL_RDPOPS is the print interval in DP runs (default 512). Demos that
     // submit a single command buffer and then spin need =1, or the histogram

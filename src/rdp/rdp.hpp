@@ -113,6 +113,9 @@ struct SoftRdp {
   bool gpuQueued = false;
   // GPU-RDP para ESTE tramo (lo decide run() al empezar, por area estimada). Fuera de run(), si.
   bool gpuRun = true;
+  // GPU-RDP con escalado: el CPU pinta todo a 1x y la GPU solo la copia de alta (gpurdp
+  // queueTriHi/submitHi), sin vaciados sincronos. Se decide por tramo en run().
+  bool gpuShadow = false;
   auto gpuOn() const -> bool;
   auto gpuFlush(Memory& mem) -> void;
   // Bytes de RDRAM que lo encolado va a escribir, en hasta 8 intervalos [lo, hi). Una carga

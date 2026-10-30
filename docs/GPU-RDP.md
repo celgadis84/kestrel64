@@ -528,12 +528,48 @@ mediana 643 -> 622).
   GPU-RDP 17,3 s contra parallel-RDP 52,5 s**. Causa en x4: con escalado no hay reparto
   CPU/GPU (`MINPX`), asi que todo tramo va a la GPU con su vaciado sincrono (SM64: 24 980
   tramos contra 418 a 1x; espera de fence 17,8 s).
-- `KESTREL_GPURDP_MINPX_HI=N` (apagado): reparto tambien con escalado. A 1024 SM64 x4 va a
-  tiempo real (6,0 s) pero lo pintado por el CPU sale a 1x replicado (bloques con detalle
-  0,262 -> 0,168; letras del titulo con escalera visible). 64: 0,244 y 5,5 s. Queda como mando,
-  no de fabrica.
-- **Retirar parallel-RDP: AUN NO.** A 1x la brecha es ruido (SM64 ~0-3 %, DK64 ~1-1,5 %,
-  `validate.py bench` min de 3) y x8 ya es mejor en GPU-RDP, pero x2/x4 con todo el detalle va
-  a la mitad de velocidad. Lo que falta: vaciados por lotes con escalado (varios tramos por
-  fence; la decision de 2026-10-24 de no hacer lotes en vuelo era a 1x, donde la espera de
-  fence es pequena; con escalado es el cuello entero).
+- (Hubo un mando `KESTREL_GPURDP_MINPX_HI` que mandaba los tramos pequenos al CPU a costa de
+  sacarlos a 1x replicados; retirado por el modo sombra de abajo, que va igual de rapido con
+  todo el detalle.)
+
+### Fase 7 -- modo sombra: escalado asincrono 2026-10-30
+
+Con escalado (`upscale() > 1`) el reparto cambia de raiz: **el CPU (SoftRDP) pinta TODO a 1x**
+y es la autoridad de la RDRAM, de la contabilidad de ciclos y de lo que el juego relee; la GPU
+solo rellena la copia de alta (`hram`/`hhid`) y **nadie la espera**.
+
+- `SoftRdp::run()` decide por tramo `gpuShadow = active && upscale > 1 && !HISYNC`. En sombra,
+  relleno / triangulo / texrect llaman a `gpurdp::queueFillHi` / `queueTriHi` y siguen por el
+  camino del CPU de siempre (devuelven false). Al final de `run()`, `gpurdp::submitHi`.
+- `recordOps(c, lo)` es la grabacion que antes vivia en `flush()`; `lo = false` graba solo la
+  pasada de alta (la de alta no produce resultados ni lee la 1x: solo `hram`/`hhid`).
+- `submitHi` sube recs/TMEM, graba y envia con `c.fence` **sin esperar**; la espera
+  (`waitIdle`) va al principio del siguiente envio, de `flush()` y de los cambios de
+  descriptores de `hdUpload`. Una sola tanda por `run()` en vez de un vaciado por tramo.
+- Coherencia con lo que el invitado escribe por otras vias (CPU, DMA, tramos que la GPU no
+  puede): el espejo (`c.ram.map`/`c.hid.map`, que en sombra la GPU no lee) guarda lo que la
+  copia de alta ya refleja. Antes de encolar una primitiva se confirman en el espejo los
+  rectangulos de la anterior (`commitRect`) y se compara la caja de la nueva (+1 px, como
+  `boxOf`) contra la RDRAM (`diffRect`); los pixeles distintos son parches que `submitHi`
+  replica en bloques SxS de la copia de alta antes de grabar. Si salen parches con primitivas
+  ya encoladas, se envia primero (orden).
+- La presentacion no cambia: `scanoutHi` compara cada fila de la RDRAM con el espejo; si casa
+  toma la copia de alta, si no replica la 1x.
+- `KESTREL_GPURDP_HISYNC=1` vuelve al camino anterior (todo a la GPU, vaciado sincrono por
+  tramo) para A/B.
+
+Medido (SM64, 100 intercambios desde arranque, ventana, RX 570):
+
+| | antes | sombra | parallel-RDP |
+|---|---|---|---|
+| x2 | -- | 5,9 s | -- |
+| x4 | 12,8-20 s | **5,9-6,0 s** | 6,1 s |
+| x8 | 17,3 s | **7,2 s** | 52,5 s |
+
+- Detalle x4 a 60 intercambios (`KESTREL_VIDEO_DUMP`, fraccion de bloques SxS con detalle):
+  sombra 0,336 contra HISYNC 0,337; 0,12 % de pixeles distintos entre las dos imagenes.
+- 1x de la RDRAM intacto: sm64 `gpurdp-jit` md5 `b5521b24` con y sin `KESTREL_UPSCALE=4`.
+- 6/6 arranques x4 sin cuelgue (vigilar: un primer intento se paso de 60 s y no se repitio).
+- **Retirar parallel-RDP**: el bloqueo de rendimiento ya no existe (1x en ruido, x2/x4 a la
+  par, x8 7x mejor). Quedan dependencias de herramientas: `pdbench.py` fija prdp,
+  `gate_prdp.sh` y sus baselines, opcion de Rasterizador del menu/lanzador.

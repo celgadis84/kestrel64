@@ -10570,3 +10570,14 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   una inferencia, y n64-systemtest "RDP STATUS: Flags during a run" (verificado en consola)
   espera 0xa8 sin CMD_BUSY. systemtest 0/3721 en interp y jit; sm64 `b5521b24` en interp y
   threaded-jit, sin avisos falsos.
+
+## 2026-10-30 (e) — GPU-RDP: modo sombra, escalado asincrono (GAPS #15)
+
+- Con escalado el CPU (SoftRDP) pinta todo a 1x (autoridad) y la GPU solo la copia de alta, sin
+  esperarla: `queueTriHi`/`queueFillHi` por primitiva, `submitHi` al final de `run()`, fence
+  esperado en el siguiente envio. Parches por diferencia contra el espejo para lo que el
+  invitado escribe por otras vias.
+- SM64 100 intercambios: x4 12,8-20 -> 5,9-6,0 s (parallel-RDP 6,1), x8 17,3 -> 7,2 s
+  (parallel-RDP 52,5), x2 5,9 s. Detalle x4 igual que el camino sincrono (0,336 / 0,337); md5
+  1x `b5521b24` con y sin x4. `KESTREL_GPURDP_MINPX_HI` retirado; `KESTREL_GPURDP_HISYNC=1` =
+  camino anterior. Detalle `docs/GPU-RDP.md` Fase 7.

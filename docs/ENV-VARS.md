@@ -229,10 +229,10 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
   su escalado interno a N mientras dura (el trozo propio se amplia a toda la ventana) y al
   volver a pantalla completa recupera el de arranque. paraLLEl-RDP no cambia en caliente: alli
   se pone a mano con `KESTREL_UPSCALE`.
-- `KESTREL_GPURDP_MINPX_HI=N` (0 = todo a la GPU) — con escalado interno de GPU-RDP, los
-  tramos de menos de N pixeles (de 1x) los pinta el CPU, como `KESTREL_GPURDP_MINPX` a 1x. Va
-  mucho mas rapido (SM64 x4 100 intercambios 12,8 -> 6,0 s con 1024) pero esos tramos salen a
-  1x replicados: bordes en escalera visibles en objetos pequenos. Mismos bytes en la RDRAM.
+- `KESTREL_GPURDP_HISYNC=1` (apagado) — con escalado interno de GPU-RDP, desactiva el modo
+  sombra (CPU pinta la 1x, GPU solo la copia de alta, asincrona) y vuelve al camino anterior:
+  todo a la GPU con un vaciado sincrono por tramo (SM64 x4 100 intercambios ~6 s -> 13-20 s).
+  Solo para A/B. Mismos bytes en la RDRAM.
 
 ## Cabecera de homebrew (2026-10-30, `src/core/hbmeta.{hpp,cpp}`)
 

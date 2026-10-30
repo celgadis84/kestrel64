@@ -93,6 +93,9 @@ inline auto upscale() -> u32 { return 1; }
 inline auto requestUpscale(u32) -> void {}
 inline auto scanoutHi(const u8*, u32, u32, u32, u32, u32, u32, std::vector<u32>&, u32&, u32&, u32, u32) -> bool { return false; }
 inline auto hdUpload(const void*, double, double) -> u32 { return 0; }
+inline auto queueTriHi(const TriRec&, const u8*, const u8*, u32, const u8*) -> void {}
+inline auto queueFillHi(const FillRect&, const u8*, u32, const u8*) -> void {}
+inline auto submitHi(const u8*, u32, const u8*) -> void {}
 #else
 // KESTREL_GPURDP distinto de 0, o sin poner y sin KESTREL_PRDP explicito (de fabrica).
 auto wanted() -> bool;
@@ -132,6 +135,12 @@ auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, 
 // y da el valor de T_HD (cabecera + 1). 0 = no se puede (sin shaderFloat64, sin sitio con el
 // lote en curso): el primitivo va por el CPU.
 auto hdUpload(const void* tex, double scX, double scY) -> u32;
+// Modo sombra (con escalado): el CPU pinta la RDRAM a 1x y la primitiva se encola solo para la
+// copia de alta, con la RDRAM de antes de pintarla (compara su caja con el espejo: lo escrito
+// por otro se replica en alta). submitHi envia el lote sin esperarlo (fin de run() del RDP).
+auto queueTriHi(const TriRec& t, const u8* tmem, const u8* rdram, u32 size, const u8* hidden) -> void;
+auto queueFillHi(const FillRect& f, const u8* rdram, u32 size, const u8* hidden) -> void;
+auto submitHi(const u8* rdram, u32 size, const u8* hidden) -> void;
 auto stats() -> Stats;
 #endif
 

@@ -111,6 +111,16 @@ struct Ctx {
   double tsPeriod = 0;   // ns por tic
   u64 gUp = 0, gRun = 0, gDown = 0;   // ns de GPU
   vrdp::SharedVk shared{};
+  // Modo sombra (con escalado): el CPU pinta la RDRAM a 1x y la GPU solo la copia de alta, sin
+  // esperar ni devolver nada. inflight = lote enviado cuyo fence aun no se ha esperado.
+  bool inflight = false;
+  // Pixel que escribio otro (CPU, DMA, una primitiva que no paso por la cola): se replica en su
+  // bloque SxS de la copia de alta antes del lote. hid = bits ocultos (solo 16 bpp).
+  struct Patch { u32 a; u8 bpp, hasHid, hid; u8 v[4]; };
+  std::vector<Patch> patches;
+  // Caja de pixeles [x0,x1) x [y0,y1) de una imagen (base, paso de fila en bytes, bpp).
+  struct Rect { u32 base, row, bpp, x0, x1, y0, y1; };
+  std::vector<Rect> last;   // las de la ultima primitiva encolada: aun no pasadas al espejo
 };
 
 Ctx* g = nullptr;
@@ -499,6 +509,204 @@ auto footsMeet(const Foot& a, const Foot& b) -> bool {
   return true;   // otra imagen que se cruza en bytes: conservador
 }
 
+// Espera el lote del modo sombra en vuelo (antes de tocar lo que lee: registros, TMEM, la copia
+// de alta, el command buffer o los sets).
+auto waitIdle(Ctx& c) -> void {
+  if(!c.inflight) return;
+  c.inflight = false;
+  const auto t0 = std::chrono::steady_clock::now();
+  const VkResult r = vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
+  vkResetFences(c.dev, 1, &c.fence);
+  c.tWait += (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+  if(r != VK_SUCCESS) {
+    static bool said = false;
+    if(!said) { said = true; std::fprintf(stderr, "[gpurdp] espera del lote de alta fallo (%d)\n", (int)r); }
+  }
+}
+
+// Memoria no coherente: lo escrito desde el anfitrion se hace visible a mano.
+auto hostFlush(Ctx& c, Buf& b) -> void {
+  if(b.coherent || !b.mem) return;
+  VkMappedMemoryRange mr = {VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+  mr.memory = b.mem; mr.size = VK_WHOLE_SIZE;
+  vkFlushMappedMemoryRanges(c.dev, 1, &mr);
+}
+
+// Graba en c.cmd los despachos de la cola, en orden y con barreras solo entre huellas que se
+// cruzan. lo = pasada de 1x (la autoridad); con c.up, ademas la de alta de cada primitiva.
+// Modo sombra (lo = false): solo la de alta; la RDRAM ya la pinto el CPU.
+auto recordOps(Ctx& c, bool lo) -> void {
+  vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
+  VkPipeline bound = VK_NULL_HANDLE;
+  // Fase 5: barrera solo entre unidades cuyas huellas se cruzan (las disjuntas conmutan).
+  // KESTREL_GPURDP_ALLBAR=1 vuelve a la barrera entre todas (A/B).
+  static const bool allBar = [] { const char* e = std::getenv("KESTREL_GPURDP_ALLBAR"); return e && e[0] && e[0] != '0'; }();
+  // Tramos: triangulos consecutivos con la misma color image y z image van en UN despacho por
+  // teselas (tri.comp), que respeta el orden por pixel sin barreras. KESTREL_GPURDP_NOBATCH=1 =
+  // un despacho por primitiva (A/B).
+  static const bool noBatch = [] { const char* e = std::getenv("KESTREL_GPURDP_NOBATCH"); return e && e[0] && e[0] != '0'; }();
+  std::vector<Foot> live;   // huellas desde la ultima barrera
+  auto fence = [&](const Foot* f, int nf) {
+    bool need = allBar || live.size() >= 64;
+    for(int k = 0; k < nf && !need; k++)
+      for(const Foot& l : live) if(footsMeet(f[k], l)) { need = true; break; }
+    if(need && !live.empty()) {
+      barrier(c.cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+      live.clear();
+      c.nBar++;
+    }
+    for(int k = 0; k < nf; k++) live.push_back(f[k]);
+  };
+  // Huellas de un triangulo (color, z): su caja de pixeles cubiertos. La zona subida son filas
+  // enteras (lo que se sube y se baja), pero el shader solo lee y escribe dentro de la caja
+  // (main() descarta todo pixel de fuera), asi que la caja es la huella exacta.
+  auto triFeet = [&](const TriRec& t, Foot* f, int& nf) -> bool {
+    const s32* w = t.w;
+    const u32 bx = (u32)w[T_BX], by = (u32)w[T_BY], bw = (u32)w[T_BW], bh = (u32)w[T_BH];
+    const u32 cbpp = w[T_CISZ] == 3 ? 4u : w[T_CISZ] == 1 ? 1u : 2u;
+    const u32 ciw = (u32)w[T_CIW];
+    nf = 0;
+    if(!bw || !bh) return true;
+    int n = 0;
+    if(t.hi[0] > t.lo[0]) f[n++] = makeFoot((u32)w[T_CI], ciw * cbpp, cbpp, bx, bx + bw, by, by + bh);
+    if(t.hi[1] > t.lo[1]) f[n++] = makeFoot((u32)w[T_ZI], ciw * 2, 2, bx, bx + bw, by, by + bh);
+    nf = n;
+    return true;
+  };
+  size_t i = 0;
+  while(i < c.ops.size()) {
+    const Op& op = c.ops[i];
+    if(!op.tri) {
+      const FillRect& r = c.q[op.idx];
+      Foot f[1]; int nf = 0;
+      if(r.x1 > r.x0 && r.y1 > r.y0) f[nf++] = makeFoot(r.addr, r.width * r.bpp, r.bpp, r.x0, r.x1, r.y0, r.y1);
+      fence(f, nf);
+      if(bound != c.fill) { vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.fill); bound = c.fill; }
+      // Rango de bytes del rectangulo (filas consecutivas): de su primer byte al ultimo.
+      const u32 lo = r.addr + (r.y0 * r.width + r.x0) * r.bpp;
+      const u32 hi = r.addr + ((r.y1 - 1) * r.width + r.x1) * r.bpp - 1;
+      Push p = {r.addr, r.width, r.bpp, r.x0, r.y0, r.x1, r.y1, r.color, lo >> 2, (hi >> 2) - (lo >> 2) + 1, 0};
+      // Por filas (fill.comp pass 2/3) cuando el paso de fila es multiplo de palabra: hilos solo
+      // sobre el tramo [x0, x1) de cada fila y sin divisiones. Si no, un hilo por palabra del
+      // rango lineal entero (pass 0/1). KESTREL_GPURDP_FILLLIN=1 fuerza el lineal (A/B).
+      static const bool fillLin = [] { const char* e = std::getenv("KESTREL_GPURDP_FILLLIN"); return e && e[0] == '1'; }();
+      const u32 rowsN = r.y1 - r.y0;
+      const bool fillRows = !fillLin && rowsN > 0 && r.x1 > r.x0 && r.y1 > r.y0;
+      if(lo) {
+        if(fillRows && (r.width * r.bpp) % 4 == 0) {
+          const u32 l0 = r.addr + (r.y0 * r.width + r.x0) * r.bpp, h0 = r.addr + (r.y0 * r.width + r.x1) * r.bpp - 1;
+          p.base = l0 >> 2; p.count = (h0 >> 2) - p.base + 1; p.pass = 2;
+          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(c.cmd, (p.count + 63) / 64, rowsN, 1);
+        } else {
+          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+        }
+        if(r.bpp == 2) {
+          // Bits ocultos: entrada e = media palabra 2e; cuatro entradas por palabra del buffer.
+          if(fillRows && r.width % 4 == 0) {
+            const u32 e0 = (r.addr >> 1) + r.y0 * r.width + r.x0, e1 = (r.addr >> 1) + r.y0 * r.width + r.x1 - 1;
+            p.base = e0 >> 2; p.count = (e1 >> 2) - p.base + 1; p.pass = 3;
+            vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+            vkCmdDispatch(c.cmd, (p.count + 63) / 64, rowsN, 1);
+          } else {
+            p.base = (lo >> 1) >> 2; p.count = ((hi >> 1) >> 2) - p.base + 1; p.pass = 1;
+            vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+            vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+          }
+        }
+      }
+      if(c.up) {
+        // Lo mismo en la copia de alta: el rango [lo, hi] de 1x es [lo*S^2, (hi+1)*S^2) alli.
+        const u32 q2 = 2 * c.up;
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.setHi, 0, nullptr);
+        p.sh = c.up; p.pass = 0;
+        p.base = (lo << q2) >> 2; p.count = ((((hi + 1) << q2) - 1) >> 2) - p.base + 1;
+        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+        vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+        if(r.bpp == 2) {
+          p.pass = 1;
+          p.base = ((lo >> 1) << q2) >> 2; p.count = (((((hi >> 1) + 1) << q2) - 1) >> 2) - p.base + 1;
+          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+          vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
+        }
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
+      }
+      i++;
+      continue;
+    }
+    // Tramo: desde este triangulo, mientras sigan triangulos con las mismas imagenes, huellas
+    // exactas, y la union de color no se cruce con la union de z.
+    const TriRec& t0 = c.tris[op.idx];
+    Foot f[2]; int nf = 0;
+    const bool exact0 = triFeet(t0, f, nf);
+    const s32* w0 = t0.w;
+    s32 ux0 = w0[T_BX], uy0 = w0[T_BY], ux1 = w0[T_BX] + w0[T_BW], uy1 = w0[T_BY] + w0[T_BH];
+    bool hasC = t0.hi[0] > t0.lo[0], hasZ = t0.hi[1] > t0.lo[1];
+    size_t j = i + 1;
+    if(exact0 && !noBatch) {
+      const u32 cbpp = w0[T_CISZ] == 3 ? 4u : w0[T_CISZ] == 1 ? 1u : 2u;
+      const u32 ciw = (u32)w0[T_CIW];
+      for(; j < c.ops.size(); j++) {
+        const Op& o2 = c.ops[j];
+        if(!o2.tri || o2.idx != c.ops[j - 1].idx + 1) break;
+        const TriRec& t = c.tris[o2.idx];
+        const s32* w = t.w;
+        if(w[T_CI] != w0[T_CI] || w[T_CIW] != w0[T_CIW] || w[T_CISZ] != w0[T_CISZ] || w[T_ZI] != w0[T_ZI]) break;
+        Foot g2[2]; int ng = 0;
+        if(!triFeet(t, g2, ng)) break;
+        const s32 nx0 = std::min(ux0, w[T_BX]), ny0 = std::min(uy0, w[T_BY]);
+        const s32 nx1 = std::max(ux1, w[T_BX] + w[T_BW]), ny1 = std::max(uy1, w[T_BY] + w[T_BH]);
+        const bool nc = hasC || t.hi[0] > t.lo[0], nz = hasZ || t.hi[1] > t.lo[1];
+        if(nc && nz && nx1 > nx0 && ny1 > ny0) {
+          const Foot cf = makeFoot((u32)w0[T_CI], ciw * cbpp, cbpp, nx0, nx1, ny0, ny1);
+          const Foot zf = makeFoot((u32)w0[T_ZI], ciw * 2, 2, nx0, nx1, ny0, ny1);
+          if(footsMeet(cf, zf)) break;
+        }
+        ux0 = nx0; uy0 = ny0; ux1 = nx1; uy1 = ny1; hasC = nc; hasZ = nz;
+      }
+      if(j - i > 1) {
+        nf = 0;
+        if(ux1 > ux0 && uy1 > uy0) {
+          if(hasC) f[nf++] = makeFoot((u32)w0[T_CI], ciw * cbpp, cbpp, ux0, ux1, uy0, uy1);
+          if(hasZ) f[nf++] = makeFoot((u32)w0[T_ZI], ciw * 2, 2, ux0, ux1, uy0, uy1);
+        }
+      }
+    }
+    fence(f, nf);
+    VkPipeline want = c.tri;
+    if(c.triHd)
+      for(size_t k = i; k < j; k++) if(c.tris[c.ops[k].idx].w[T_HD]) { want = c.triHd; break; }
+    if(bound != want) { vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, want); bound = want; }
+    Push p = {};
+    p.addr = op.idx;                       // tri.comp: idx
+    p.width = (u32)(j - i);                // tri.comp: count
+    p.bpp = (u32)ux0; p.x0 = (u32)uy0;     // tri.comp: ux, uy
+    p.y0 = (u32)std::max(0, ux1 - ux0); p.x1 = (u32)std::max(0, uy1 - uy0);   // tri.comp: uw, uh
+    if(p.y0 && p.x1) {
+      if(lo) {
+        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
+        vkCmdDispatch(c.cmd, (p.y0 + 7) / 8, (p.x1 + 7) / 8, 1);
+        c.nDisp++;
+      }
+      if(c.up) {
+        // Pasada de alta: la union crecida un pixel de 1x por lado (tri.comp boxOf) y escalada.
+        // Las huellas de alta son las de 1x en bloques, asi que las barreras de 1x valen.
+        const s32 S = 1 << c.up;
+        Push h = p;
+        h.bpp = (u32)((ux0 - 1) * S); h.x0 = (u32)((uy0 - 1) * S);
+        h.y0 = (u32)((ux1 - ux0 + 2) * S); h.x1 = (u32)((uy1 - uy0 + 2) * S);
+        h.sh = c.up;
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.setHi, 0, nullptr);
+        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof h, &h);
+        vkCmdDispatch(c.cmd, (h.y0 + 7) / 8, (h.x1 + 7) / 8, 1);
+        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
+      }
+    }
+    i = j;
+  }
+}
+
 // Fase 6: lo que la RDRAM tiene distinto del espejo en las zonas que va a leer el lote lo
 // escribio otro (CPU, DMA): ese pixel se replica en su bloque SxS de la copia de alta antes de
 // pintar, para que el blender y la prueba de z de alta lean lo mismo que los de 1x. Lo que el
@@ -724,6 +932,7 @@ auto hdUpload(const void* tp, double scX, double scY) -> u32 {
     // Primera textura HD: el buffer de verdad. Con la cola vacia no hay command buffer en vuelo
     // que use los conjuntos de descriptores, asi que se pueden reescribir.
     if(!c.ops.empty()) return 0;
+    waitIdle(c);   // el lote de alta en vuelo aun usa los sets
     u32 mb = 64;
     if(const char* e = std::getenv("KESTREL_GPURDP_HDMB"); e && e[0]) mb = (u32)std::max(1, std::min(1024, std::atoi(e)));
     Buf nb;
@@ -750,6 +959,7 @@ auto hdUpload(const void* tp, double scX, double scY) -> u32 {
   auto reset = [&] { c.hdMap.clear(); c.hdUsed = 0; c.hdEpoch = texpack::g_epoch; };
   if(c.hdEpoch != texpack::g_epoch) {
     if(!c.ops.empty()) return 0;   // punteros de antes del reinicio: primero vaciar
+    waitIdle(c);
     reset();
   }
   u64 bx, by;
@@ -764,6 +974,7 @@ auto hdUpload(const void* tp, double scX, double scY) -> u32 {
   const u64 cap = c.hd.size / 4;
   if(c.hdUsed + need > cap) {
     if(!c.ops.empty() || need > cap) return 0;   // el lote en curso aun lee lo de dentro
+    waitIdle(c);
     reset();
   }
   u32* w = (u32*)c.hd.map + c.hdUsed;
@@ -789,6 +1000,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   if(outs) outs->clear();
   if(!g || g->ops.empty()) return;
   Ctx& c = *g;
+  waitIdle(c);
   if(const int r = g_upReq.exchange(-1, std::memory_order_acq_rel); r >= 0) applyUp(c, (u32)r);
   using clk = std::chrono::steady_clock;
   auto ns = [](clk::time_point a, clk::time_point b) { return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
@@ -880,171 +1092,7 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
             VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
   }
   if(c.qpool) vkCmdWriteTimestamp(c.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, c.qpool, 1);
-  vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
-  VkPipeline bound = VK_NULL_HANDLE;
-  // Fase 5: barrera solo entre unidades cuyas huellas se cruzan (las disjuntas conmutan).
-  // KESTREL_GPURDP_ALLBAR=1 vuelve a la barrera entre todas (A/B).
-  static const bool allBar = [] { const char* e = std::getenv("KESTREL_GPURDP_ALLBAR"); return e && e[0] && e[0] != '0'; }();
-  // Tramos: triangulos consecutivos con la misma color image y z image van en UN despacho por
-  // teselas (tri.comp), que respeta el orden por pixel sin barreras. KESTREL_GPURDP_NOBATCH=1 =
-  // un despacho por primitiva (A/B).
-  static const bool noBatch = [] { const char* e = std::getenv("KESTREL_GPURDP_NOBATCH"); return e && e[0] && e[0] != '0'; }();
-  std::vector<Foot> live;   // huellas desde la ultima barrera
-  auto fence = [&](const Foot* f, int nf) {
-    bool need = allBar || live.size() >= 64;
-    for(int k = 0; k < nf && !need; k++)
-      for(const Foot& l : live) if(footsMeet(f[k], l)) { need = true; break; }
-    if(need && !live.empty()) {
-      barrier(c.cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-      live.clear();
-      c.nBar++;
-    }
-    for(int k = 0; k < nf; k++) live.push_back(f[k]);
-  };
-  // Huellas de un triangulo (color, z): su caja de pixeles cubiertos. La zona subida son filas
-  // enteras (lo que se sube y se baja), pero el shader solo lee y escribe dentro de la caja
-  // (main() descarta todo pixel de fuera), asi que la caja es la huella exacta.
-  auto triFeet = [&](const TriRec& t, Foot* f, int& nf) -> bool {
-    const s32* w = t.w;
-    const u32 bx = (u32)w[T_BX], by = (u32)w[T_BY], bw = (u32)w[T_BW], bh = (u32)w[T_BH];
-    const u32 cbpp = w[T_CISZ] == 3 ? 4u : w[T_CISZ] == 1 ? 1u : 2u;
-    const u32 ciw = (u32)w[T_CIW];
-    nf = 0;
-    if(!bw || !bh) return true;
-    int n = 0;
-    if(t.hi[0] > t.lo[0]) f[n++] = makeFoot((u32)w[T_CI], ciw * cbpp, cbpp, bx, bx + bw, by, by + bh);
-    if(t.hi[1] > t.lo[1]) f[n++] = makeFoot((u32)w[T_ZI], ciw * 2, 2, bx, bx + bw, by, by + bh);
-    nf = n;
-    return true;
-  };
-  size_t i = 0;
-  while(i < c.ops.size()) {
-    const Op& op = c.ops[i];
-    if(!op.tri) {
-      const FillRect& r = c.q[op.idx];
-      Foot f[1]; int nf = 0;
-      if(r.x1 > r.x0 && r.y1 > r.y0) f[nf++] = makeFoot(r.addr, r.width * r.bpp, r.bpp, r.x0, r.x1, r.y0, r.y1);
-      fence(f, nf);
-      if(bound != c.fill) { vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.fill); bound = c.fill; }
-      // Rango de bytes del rectangulo (filas consecutivas): de su primer byte al ultimo.
-      const u32 lo = r.addr + (r.y0 * r.width + r.x0) * r.bpp;
-      const u32 hi = r.addr + ((r.y1 - 1) * r.width + r.x1) * r.bpp - 1;
-      Push p = {r.addr, r.width, r.bpp, r.x0, r.y0, r.x1, r.y1, r.color, lo >> 2, (hi >> 2) - (lo >> 2) + 1, 0};
-      // Por filas (fill.comp pass 2/3) cuando el paso de fila es multiplo de palabra: hilos solo
-      // sobre el tramo [x0, x1) de cada fila y sin divisiones. Si no, un hilo por palabra del
-      // rango lineal entero (pass 0/1). KESTREL_GPURDP_FILLLIN=1 fuerza el lineal (A/B).
-      static const bool fillLin = [] { const char* e = std::getenv("KESTREL_GPURDP_FILLLIN"); return e && e[0] == '1'; }();
-      const u32 rowsN = r.y1 - r.y0;
-      const bool fillRows = !fillLin && rowsN > 0 && r.x1 > r.x0 && r.y1 > r.y0;
-      if(fillRows && (r.width * r.bpp) % 4 == 0) {
-        const u32 l0 = r.addr + (r.y0 * r.width + r.x0) * r.bpp, h0 = r.addr + (r.y0 * r.width + r.x1) * r.bpp - 1;
-        p.base = l0 >> 2; p.count = (h0 >> 2) - p.base + 1; p.pass = 2;
-        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-        vkCmdDispatch(c.cmd, (p.count + 63) / 64, rowsN, 1);
-      } else {
-        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-        vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
-      }
-      if(r.bpp == 2) {
-        // Bits ocultos: entrada e = media palabra 2e; cuatro entradas por palabra del buffer.
-        if(fillRows && r.width % 4 == 0) {
-          const u32 e0 = (r.addr >> 1) + r.y0 * r.width + r.x0, e1 = (r.addr >> 1) + r.y0 * r.width + r.x1 - 1;
-          p.base = e0 >> 2; p.count = (e1 >> 2) - p.base + 1; p.pass = 3;
-          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-          vkCmdDispatch(c.cmd, (p.count + 63) / 64, rowsN, 1);
-        } else {
-          p.base = (lo >> 1) >> 2; p.count = ((hi >> 1) >> 2) - p.base + 1; p.pass = 1;
-          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-          vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
-        }
-      }
-      if(c.up) {
-        // Lo mismo en la copia de alta: el rango [lo, hi] de 1x es [lo*S^2, (hi+1)*S^2) alli.
-        const u32 q2 = 2 * c.up;
-        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.setHi, 0, nullptr);
-        p.sh = c.up; p.pass = 0;
-        p.base = (lo << q2) >> 2; p.count = ((((hi + 1) << q2) - 1) >> 2) - p.base + 1;
-        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-        vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
-        if(r.bpp == 2) {
-          p.pass = 1;
-          p.base = ((lo >> 1) << q2) >> 2; p.count = (((((hi >> 1) + 1) << q2) - 1) >> 2) - p.base + 1;
-          vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-          vkCmdDispatch(c.cmd, (p.count + 63) / 64, 1, 1);
-        }
-        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
-      }
-      i++;
-      continue;
-    }
-    // Tramo: desde este triangulo, mientras sigan triangulos con las mismas imagenes, huellas
-    // exactas, y la union de color no se cruce con la union de z.
-    const TriRec& t0 = c.tris[op.idx];
-    Foot f[2]; int nf = 0;
-    const bool exact0 = triFeet(t0, f, nf);
-    const s32* w0 = t0.w;
-    s32 ux0 = w0[T_BX], uy0 = w0[T_BY], ux1 = w0[T_BX] + w0[T_BW], uy1 = w0[T_BY] + w0[T_BH];
-    bool hasC = t0.hi[0] > t0.lo[0], hasZ = t0.hi[1] > t0.lo[1];
-    size_t j = i + 1;
-    if(exact0 && !noBatch) {
-      const u32 cbpp = w0[T_CISZ] == 3 ? 4u : w0[T_CISZ] == 1 ? 1u : 2u;
-      const u32 ciw = (u32)w0[T_CIW];
-      for(; j < c.ops.size(); j++) {
-        const Op& o2 = c.ops[j];
-        if(!o2.tri || o2.idx != c.ops[j - 1].idx + 1) break;
-        const TriRec& t = c.tris[o2.idx];
-        const s32* w = t.w;
-        if(w[T_CI] != w0[T_CI] || w[T_CIW] != w0[T_CIW] || w[T_CISZ] != w0[T_CISZ] || w[T_ZI] != w0[T_ZI]) break;
-        Foot g2[2]; int ng = 0;
-        if(!triFeet(t, g2, ng)) break;
-        const s32 nx0 = std::min(ux0, w[T_BX]), ny0 = std::min(uy0, w[T_BY]);
-        const s32 nx1 = std::max(ux1, w[T_BX] + w[T_BW]), ny1 = std::max(uy1, w[T_BY] + w[T_BH]);
-        const bool nc = hasC || t.hi[0] > t.lo[0], nz = hasZ || t.hi[1] > t.lo[1];
-        if(nc && nz && nx1 > nx0 && ny1 > ny0) {
-          const Foot cf = makeFoot((u32)w0[T_CI], ciw * cbpp, cbpp, nx0, nx1, ny0, ny1);
-          const Foot zf = makeFoot((u32)w0[T_ZI], ciw * 2, 2, nx0, nx1, ny0, ny1);
-          if(footsMeet(cf, zf)) break;
-        }
-        ux0 = nx0; uy0 = ny0; ux1 = nx1; uy1 = ny1; hasC = nc; hasZ = nz;
-      }
-      if(j - i > 1) {
-        nf = 0;
-        if(ux1 > ux0 && uy1 > uy0) {
-          if(hasC) f[nf++] = makeFoot((u32)w0[T_CI], ciw * cbpp, cbpp, ux0, ux1, uy0, uy1);
-          if(hasZ) f[nf++] = makeFoot((u32)w0[T_ZI], ciw * 2, 2, ux0, ux1, uy0, uy1);
-        }
-      }
-    }
-    fence(f, nf);
-    VkPipeline want = c.tri;
-    if(c.triHd)
-      for(size_t k = i; k < j; k++) if(c.tris[c.ops[k].idx].w[T_HD]) { want = c.triHd; break; }
-    if(bound != want) { vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, want); bound = want; }
-    Push p = {};
-    p.addr = op.idx;                       // tri.comp: idx
-    p.width = (u32)(j - i);                // tri.comp: count
-    p.bpp = (u32)ux0; p.x0 = (u32)uy0;     // tri.comp: ux, uy
-    p.y0 = (u32)std::max(0, ux1 - ux0); p.x1 = (u32)std::max(0, uy1 - uy0);   // tri.comp: uw, uh
-    if(p.y0 && p.x1) {
-      vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof p, &p);
-      vkCmdDispatch(c.cmd, (p.y0 + 7) / 8, (p.x1 + 7) / 8, 1);
-      c.nDisp++;
-      if(c.up) {
-        // Pasada de alta: la union crecida un pixel de 1x por lado (tri.comp boxOf) y escalada.
-        // Las huellas de alta son las de 1x en bloques, asi que las barreras de 1x valen.
-        const s32 S = 1 << c.up;
-        Push h = p;
-        h.bpp = (u32)((ux0 - 1) * S); h.x0 = (u32)((uy0 - 1) * S);
-        h.y0 = (u32)((ux1 - ux0 + 2) * S); h.x1 = (u32)((uy1 - uy0 + 2) * S);
-        h.sh = c.up;
-        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.setHi, 0, nullptr);
-        vkCmdPushConstants(c.cmd, c.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof h, &h);
-        vkCmdDispatch(c.cmd, (h.y0 + 7) / 8, (h.x1 + 7) / 8, 1);
-        vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, c.pl, 0, 1, &c.set, 0, nullptr);
-      }
-    }
-    i = j;
-  }
+  recordOps(c, true);
   if(c.qpool) vkCmdWriteTimestamp(c.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, c.qpool, 2);
   if(c.local) {
     // Bajada por DMA al intermediario, a los mismos desplazamientos.
@@ -1131,6 +1179,172 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   c.nFlush++;
   const auto t4 = clk::now();
   c.tUp += ns(t0, t1); c.tRec += ns(t1, t2); c.tWait += ns(t2, t3); c.tDown += ns(t3, t4);
+}
+
+
+// ---- Modo sombra (con escalado) ----
+// El CPU (SoftRdp) pinta la RDRAM a 1x, bit a bit como siempre, y cada primitiva que la GPU
+// sabe pintar se encola ademas aqui solo para la copia de alta. El lote se envia al final de
+// cada run() del RDP y NO se espera: nada vuelve a la RDRAM, asi que no hay ida y vuelta por
+// tramo (con escalado eran todos sincronos: SM64 x4 iba a la mitad de velocidad). Se espera su
+// fence al enviar el siguiente, cuando el CPU ya ha pintado el tramo de despues.
+// Espejo (c.ram/c.hid, que en este modo la GPU no lee) = lo que dejo el RDP. Antes de encolar
+// una primitiva se compara su caja (con el pixel de margen de boxOf) con la RDRAM: lo distinto
+// lo escribio otro y va en un parche que replica el pixel en su bloque de alta. Despues de
+// pintarla el CPU (al encolar la siguiente o al enviar), su caja pasa al espejo.
+namespace {
+
+auto triRects(const TriRec& t, std::vector<Ctx::Rect>& out) -> void {
+  const s32* w = t.w;
+  if(w[T_BW] <= 0 || w[T_BH] <= 0) return;
+  const u32 ciw = (u32)w[T_CIW];
+  const u32 cbpp = w[T_CISZ] == 3 ? 4u : w[T_CISZ] == 1 ? 1u : 2u;
+  const s32 x0 = std::max(w[T_BX] - 1, 0), x1 = std::min(w[T_BX] + w[T_BW] + 1, (s32)ciw);
+  const s32 y0 = std::max(w[T_BY] - 1, 0), y1 = w[T_BY] + w[T_BH] + 1;
+  if(x1 <= x0 || y1 <= y0) return;
+  if(t.hi[0] > t.lo[0]) out.push_back({(u32)w[T_CI], ciw * cbpp, cbpp, (u32)x0, (u32)x1, (u32)y0, (u32)y1});
+  if(t.hi[1] > t.lo[1]) out.push_back({(u32)w[T_ZI], ciw * 2, 2u, (u32)x0, (u32)x1, (u32)y0, (u32)y1});
+}
+
+// Recorre las filas de la caja dentro de la RDRAM: f(direccion, bytes).
+template<class F> auto eachRow(const Ctx::Rect& r, u32 size, F&& f) -> void {
+  const u64 n = (u64)(r.x1 - r.x0) * r.bpp;
+  for(u32 y = r.y0; y < r.y1; y++) {
+    const u64 a = (u64)r.base + (u64)y * r.row + (u64)r.x0 * r.bpp;
+    if(a + n > size) break;
+    f((u32)a, (u32)n);
+  }
+}
+
+auto commitRect(Ctx& c, const u8* rdram, u32 size, const u8* hidden, const Ctx::Rect& r) -> void {
+  const bool hidOk = hidden && r.bpp == 2;
+  eachRow(r, size, [&](u32 a, u32 n) {
+    std::memcpy(c.ram.map + a, rdram + a, n);
+    if(hidOk) std::memcpy(c.hid.map + (a >> 1), hidden + (a >> 1), n >> 1);
+  });
+}
+
+auto diffRect(Ctx& c, const u8* rdram, u32 size, const u8* hidden, const Ctx::Rect& r,
+              std::vector<Ctx::Patch>& out) -> void {
+  const bool hidOk = hidden && r.bpp == 2;
+  eachRow(r, size, [&](u32 a0, u32 n) {
+    if(!std::memcmp(rdram + a0, c.ram.map + a0, n)
+       && (!hidOk || !std::memcmp(hidden + (a0 >> 1), c.hid.map + (a0 >> 1), n >> 1))) return;
+    for(u32 a = a0; a + r.bpp <= a0 + n; a += r.bpp) {
+      const bool dc = std::memcmp(rdram + a, c.ram.map + a, r.bpp) != 0;
+      const bool dh = hidOk && hidden[a >> 1] != c.hid.map[a >> 1];
+      if(!dc && !dh) continue;
+      Ctx::Patch p{a, (u8)r.bpp, (u8)hidOk, hidOk ? hidden[a >> 1] : (u8)0, {}};
+      std::memcpy(p.v, rdram + a, r.bpp);
+      out.push_back(p);
+      std::memcpy(c.ram.map + a, rdram + a, r.bpp);   // el parche ya lleva el valor
+      if(hidOk) c.hid.map[a >> 1] = hidden[a >> 1];
+    }
+  });
+}
+
+// Antes de encolar: la primitiva anterior al espejo, sitio en la cola, y los parches de lo que
+// otro escribio en la caja de esta. Un parche detras de primitivas ya encoladas va en el lote
+// siguiente (si no, se aplicaria antes que ellas).
+auto shadowPre(Ctx& c, const u8* rdram, u32 size, const u8* hidden, const std::vector<Ctx::Rect>& rs,
+               bool tex) -> void {
+  for(const Ctx::Rect& r : c.last) commitRect(c, rdram, size, hidden, r);
+  c.last.clear();
+  if(c.tris.size() >= kMaxTri || (tex && c.tslots.size() / kTmemBytes >= kMaxTmem))
+    submitHi(rdram, size, hidden);
+  static thread_local std::vector<Ctx::Patch> np;
+  np.clear();
+  for(const Ctx::Rect& r : rs) diffRect(c, rdram, size, hidden, r, np);
+  if(!np.empty() && !c.ops.empty()) submitHi(rdram, size, hidden);
+  c.patches.insert(c.patches.end(), np.begin(), np.end());
+  c.last = rs;
+}
+
+}  // namespace
+
+auto queueTriHi(const TriRec& t, const u8* tmem, const u8* rdram, u32 size, const u8* hidden) -> void {
+  if(!g) return;
+  Ctx& c = *g;
+  static thread_local std::vector<Ctx::Rect> rs;
+  rs.clear();
+  triRects(t, rs);
+  shadowPre(c, rdram, size, hidden, rs, tmem != nullptr);
+  if(!queueTri(t, tmem)) { submitHi(rdram, size, hidden); queueTri(t, tmem); }
+}
+
+auto queueFillHi(const FillRect& f, const u8* rdram, u32 size, const u8* hidden) -> void {
+  if(!g) return;
+  Ctx& c = *g;
+  std::vector<Ctx::Rect> rs = {{f.addr, f.width * f.bpp, f.bpp, f.x0, f.x1, f.y0, f.y1}};
+  shadowPre(c, rdram, size, hidden, rs, false);
+  queueFill(f);
+}
+
+auto submitHi(const u8* rdram, u32 size, const u8* hidden) -> void {
+  if(!g) return;
+  Ctx& c = *g;
+  for(const Ctx::Rect& r : c.last) commitRect(c, rdram, size, hidden, r);
+  c.last.clear();
+  if(c.ops.empty() && c.patches.empty()) return;
+  using clk = std::chrono::steady_clock;
+  auto ns = [](clk::time_point a, clk::time_point b) { return (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count(); };
+  waitIdle(c);
+  const auto t0 = clk::now();
+  if(const int r = g_upReq.exchange(-1, std::memory_order_acq_rel); r >= 0) applyUp(c, (u32)r);
+  auto drop = [&] { c.q.clear(); c.tris.clear(); c.ops.clear(); c.tslots.clear(); c.patches.clear(); };
+  if(!c.up) { drop(); return; }   // escalado apagado: la RDRAM ya la pinto el CPU
+  const u32 q2 = 2 * c.up, nb = 1u << q2;
+  for(const Ctx::Patch& p : c.patches) {
+    u8* d = c.hram.map + ((size_t)p.a << q2);
+    for(u32 j = 0; j < nb; j++) std::memcpy(d + j * p.bpp, p.v, p.bpp);
+    if(p.hasHid) std::memset(c.hhid.map + ((size_t)(p.a >> 1) << q2), p.hid, nb);
+  }
+  if(!c.patches.empty()) { hostFlush(c, c.hram); hostFlush(c, c.hhid); }
+  c.patches.clear();
+  if(c.ops.empty()) return;
+  if(!c.tris.empty()) {
+    for(size_t i = 0; i < c.tris.size(); i++) std::memcpy(c.recs.map + i * T_SIZE * 4, c.tris[i].w, T_SIZE * 4);
+    hostFlush(c, c.recs);
+  }
+  if(!c.tslots.empty()) { std::memcpy(c.tmem.map, c.tslots.data(), c.tslots.size()); hostFlush(c, c.tmem); }
+  if(c.hdDirty) { hostFlush(c, c.hd); c.hdDirty = false; }
+  const auto t1 = clk::now();
+  vkResetCommandBuffer(c.cmd, 0);
+  VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  vkBeginCommandBuffer(c.cmd, &bi);
+  if(c.local && (!c.tris.empty() || !c.tslots.empty())) {
+    if(!c.tris.empty()) {
+      VkBufferCopy cp = {0, 0, c.tris.size() * T_SIZE * 4};
+      vkCmdCopyBuffer(c.cmd, c.recs.buf, c.recs.dbuf, 1, &cp);
+    }
+    if(!c.tslots.empty()) {
+      VkBufferCopy cp = {0, 0, c.tslots.size()};
+      vkCmdCopyBuffer(c.cmd, c.tmem.buf, c.tmem.dbuf, 1, &cp);
+    }
+    barrier(c.cmd, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+  }
+  recordOps(c, false);
+  // Lo que lee el presentador (scanoutHi, por el puntero del anfitrion) visible al acabar.
+  barrier(c.cmd, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+  vkEndCommandBuffer(c.cmd);
+  VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1; si.pCommandBuffers = &c.cmd;
+  const auto t2 = clk::now();
+  vrdp::queueLock();
+  const VkResult sr = vkQueueSubmit(c.queue, 1, &si, c.fence);
+  vrdp::queueUnlock();
+  if(sr != VK_SUCCESS) {
+    static bool said = false;
+    if(!said) { said = true; std::fprintf(stderr, "[gpurdp] vkQueueSubmit del lote de alta fallo (%d)\n", (int)sr); }
+  } else {
+    c.inflight = true;
+  }
+  c.nOps += c.ops.size();
+  c.nFlush++;
+  drop();
+  c.tUp += ns(t0, t1); c.tRec += ns(t1, t2);
 }
 
 }  // namespace kestrel::gpurdp
