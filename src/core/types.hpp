@@ -11,6 +11,16 @@
 #include <malloc.h>
 #endif
 
+// Convencion de llamada del codigo emitido por los JIT (CPU y RSP). Los emisores se
+// escribieron contra la ABI Win64 (argumentos en rcx/rdx/r8/r9, rsi/rdi/xmm6-15 a salvo);
+// fuera de Windows se pide esa misma ABI al compilador para los bloques y los ayudantes
+// que llaman, en vez de duplicar el emisor para SysV.
+#if defined(__x86_64__) && !defined(_WIN32)
+#define KJIT_ABI __attribute__((ms_abi))
+#else
+#define KJIT_ABI
+#endif
+
 namespace kestrel {
 
 using u8  = std::uint8_t;

@@ -23,12 +23,12 @@
 #include <string_view>
 #ifdef _WIN32
 #include <windows.h>
+#endif
 
 // Quien esta corriendo AHORA. Cada chip sella los eventos con SU propio reloj de invitado:
 // el RSP escribe DPC_END desde su hilo y el instante correcto es el suyo, no el numero de
 // instrucciones que la CPU lleve retiradas en ese momento de tiempo de pared.
 static thread_local bool tlIsRspThread = false;
-#endif
 // Aplicando una entrada del diario DPC del RSP (ver Memory::dpLogApply): la escritura es del
 // RSP y se sella con SU instante, aunque la ejecute otro hilo.
 static thread_local bool tlDpLogApply = false;

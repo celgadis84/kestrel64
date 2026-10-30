@@ -60,7 +60,7 @@ auto CodeBuffer::finalize(u8* from) -> void {
 }
 
 // Signature of the emitted self-test thunk: takes a pointer to a u64[3] slot array.
-using SmokeFn = u64 (*)(u64*);
+using SmokeFn = u64 (KJIT_ABI *)(u64*);
 
 auto smokeTest() -> bool {
   CodeBuffer buf;
@@ -94,12 +94,12 @@ auto smokeTest() -> bool {
 
 // Helper de prueba para callBailSelfTest: registra el arg y devuelve fault/ok según ctx.
 // ctx[0] = flag "queremos fault" (in), ctx[1] = arg recibido (out).
-extern "C" u8 jitTestHelper(u64* ctx, u32 arg) {
+extern "C" KJIT_ABI u8 jitTestHelper(u64* ctx, u32 arg) {
   ctx[1] = arg;
   return ctx[0] ? 0u : 1u;   // 0 = faulted (bail), 1 = ok (sigue)
 }
 
-using CallBailFn = u32 (*)(u64* gpr, u64* ctx);
+using CallBailFn = u32 (KJIT_ABI *)(u64* gpr, u64* ctx);
 
 static auto buildCallBail(CodeBuffer& buf) -> CallBailFn {
   Emitter e(buf);
@@ -395,36 +395,36 @@ struct RegCache {
 
 // Trampolín C para loads/stores desde el código emitido (Win64: cpu en RCX, op en EDX).
 // Ejecuta la op espejando el intérprete; devuelve 1=ok / 0=faultaría (bail).
-extern "C" u8 jitMemThunk(void* cpu, u32 op) {
+extern "C" KJIT_ABI u8 jitMemThunk(void* cpu, u32 op) {
   return reinterpret_cast<kestrel::CPU*>(cpu)->jitMem(op);
 }
 
 // Trampolines especializados por opcode (definidos en cpu.cpp). El bloque llama al suyo con
 // la direccion y el dato YA calculados, en vez de pasar la op cruda para que el helper la
 // decodifique y relea cpu->gpr.
-extern "C" u8 kestrel_jitLB (void*, u64, u32, u64); extern "C" u8 kestrel_jitLH (void*, u64, u32, u64);
-extern "C" u8 kestrel_jitLW (void*, u64, u32, u64); extern "C" u8 kestrel_jitLBU(void*, u64, u32, u64);
-extern "C" u8 kestrel_jitLHU(void*, u64, u32, u64); extern "C" u8 kestrel_jitLWU(void*, u64, u32, u64);
-extern "C" u8 kestrel_jitLD (void*, u64, u32, u64); extern "C" u8 kestrel_jitSB (void*, u64, u32, u64);
-extern "C" u8 kestrel_jitSH (void*, u64, u32, u64); extern "C" u8 kestrel_jitSW (void*, u64, u32, u64);
-extern "C" u8 kestrel_jitSD (void*, u64, u32, u64);
-extern "C" u8 kestrel_jitLWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitLDC1(void*, u64, u32, u64);
-extern "C" u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" u8 kestrel_jitSDC1(void*, u64, u32, u64);
-extern "C" u8 kestrel_jitMFC1 (void*, u32, u32); extern "C" u8 kestrel_jitDMFC1(void*, u32, u32);
-extern "C" u8 kestrel_jitCTC1(void*, u32, u32);
-extern "C" u8 kestrel_jitCVTWS(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWS(void*, u32, u32);
-extern "C" u8 kestrel_jitCVTWD(void*, u32, u32);   extern "C" u8 kestrel_jitTRUNCWD(void*, u32, u32);
-extern "C" u8 kestrel_jitCVTDS(void*, u32, u32);   extern "C" u8 kestrel_jitCVTSD(void*, u32, u32);
-extern "C" u8 kestrel_jitCMPS (void*, u32, u32);   extern "C" u8 kestrel_jitCMPD  (void*, u32, u32);
-extern "C" u8 kestrel_jitCVTSW(void*, u32, u32);   extern "C" u8 kestrel_jitCVTDW(void*, u32, u32);
-extern "C" u8 kestrel_jitDIVS (void*, u32, u32);   extern "C" u8 kestrel_jitDIVD (void*, u32, u32);
-extern "C" u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" u8 kestrel_jitMTC1 (void*, u32, u32);
-extern "C" u8 kestrel_jitDMTC1(void*, u32, u32);
-extern "C" u8 kestrel_jitInterpDelay(void*, u32, u32); extern "C" u8 kestrel_jitCACHE(void*, u32, u32);
-extern "C" u8 kestrel_jitMTC0S(void*, u32, u32);
-extern "C" u8 kestrel_jitADDS(void*, u32, u32); extern "C" u8 kestrel_jitSUBS(void*, u32, u32);
-extern "C" u8 kestrel_jitMULS(void*, u32, u32); extern "C" u8 kestrel_jitADDD(void*, u32, u32);
-extern "C" u8 kestrel_jitSUBD(void*, u32, u32); extern "C" u8 kestrel_jitMULD(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitLB (void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitLH (void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitLW (void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitLBU(void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitLHU(void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitLWU(void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitLD (void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitSB (void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitSH (void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitSW (void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitSD (void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitLWC1(void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitLDC1(void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitSWC1(void*, u64, u32, u64); extern "C" KJIT_ABI u8 kestrel_jitSDC1(void*, u64, u32, u64);
+extern "C" KJIT_ABI u8 kestrel_jitMFC1 (void*, u32, u32); extern "C" KJIT_ABI u8 kestrel_jitDMFC1(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCTC1(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCVTWS(void*, u32, u32);   extern "C" KJIT_ABI u8 kestrel_jitTRUNCWS(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCVTWD(void*, u32, u32);   extern "C" KJIT_ABI u8 kestrel_jitTRUNCWD(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCVTDS(void*, u32, u32);   extern "C" KJIT_ABI u8 kestrel_jitCVTSD(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCMPS (void*, u32, u32);   extern "C" KJIT_ABI u8 kestrel_jitCMPD  (void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCVTSW(void*, u32, u32);   extern "C" KJIT_ABI u8 kestrel_jitCVTDW(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitDIVS (void*, u32, u32);   extern "C" KJIT_ABI u8 kestrel_jitDIVD (void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitCFC1 (void*, u32, u32); extern "C" KJIT_ABI u8 kestrel_jitMTC1 (void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitDMTC1(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitInterpDelay(void*, u32, u32); extern "C" KJIT_ABI u8 kestrel_jitCACHE(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitMTC0S(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitADDS(void*, u32, u32); extern "C" KJIT_ABI u8 kestrel_jitSUBS(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitMULS(void*, u32, u32); extern "C" KJIT_ABI u8 kestrel_jitADDD(void*, u32, u32);
+extern "C" KJIT_ABI u8 kestrel_jitSUBD(void*, u32, u32); extern "C" KJIT_ABI u8 kestrel_jitMULD(void*, u32, u32);
 
 // Emite un load/store soportado como call jitMemThunk(cpu,op) + test al,al + je(placeholder).
 // Convención del bloque 2b: r12=cpu, rbx=gpr. *bailSite = offset del disp32 del je (a parchear
@@ -932,7 +932,7 @@ static auto emitCop0(Emitter& e, RegCache& rc, u32 op, usize& bailSite, RcSnap& 
 
 // Trampolín C para ops NO compilables ejecutadas por el intérprete dentro del bloque.
 // `off` = desplazamiento en bytes de la op respecto a la entrada del bloque.
-extern "C" u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
   return reinterpret_cast<kestrel::CPU*>(cpu)->jitInterpOp(op, off);
 }
 
@@ -1903,8 +1903,8 @@ static const int g_jitDiffAny = (std::getenv("KESTREL_JIT_DIFF") || std::getenv(
 // rechaza el eslabón encadenado cuando K no cabe en la ventana o roza el borde de
 // timer — más viajes al driver, más código emitido, peor I-cache del host.
 static const int g_jitTrace = (std::getenv("KESTREL_JIT_TRACE") && !g_jitDiffAny) ? 1 : 0;
-extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K);
-extern "C" u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base);
+extern "C" KJIT_ABI u32 kestrel_jitProceedTramp(void* cpu, u32 K);
+extern "C" KJIT_ABI u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base);
 
 extern const char* g_jitDump;   // KESTREL_JIT_DUMP (definido mas abajo)
 static auto compileBlock(CPU& c, u32 phys) -> Block {
@@ -3224,11 +3224,11 @@ auto CPU::jitIcRefill(u32 entry, u32 base) -> u8 {
   if(li < sizeof(b.lineSeq) / sizeof(b.lineSeq[0])) b.lineSeq[li] = l.seq;
   return 1;
 }
-extern "C" u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base) {
+extern "C" KJIT_ABI u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base) {
   return reinterpret_cast<CPU*>(cpu)->jitIcRefill(entry, base);
 }
 
-extern "C" u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
+extern "C" KJIT_ABI u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
   CPU* c = reinterpret_cast<CPU*>(cpu);
   if(g_jitStats) {
     if(c->jitGuard < K)                                          g_trampWhy[0]++;

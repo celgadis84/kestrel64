@@ -13,11 +13,11 @@ namespace kestrel::rspjit {
 // entera pura llama a la MISMA funcion que ejecutaria el interprete. Por eso el JIT no
 // puede divergir del oraculo -- comparte el cuerpo con el.
 extern "C" {
-  void kestrel_rspjit_cop2 (Rsp* r, u32 op) { r->jitCop2(op); }
-  void kestrel_rspjit_load (Rsp* r, u32 op) { r->jitLoad(op); }
-  void kestrel_rspjit_store(Rsp* r, u32 op) { r->jitStore(op); }
-  void kestrel_rspjit_exec (Rsp* r, u32 op) { r->jitExec(op); }
-  bool kestrel_rspjit_cop0 (Rsp* r, u32 op, u32 rem, u32 nextPc) { return r->jitCop0(op, rem, nextPc); }
+  KJIT_ABI void kestrel_rspjit_cop2 (Rsp* r, u32 op) { r->jitCop2(op); }
+  KJIT_ABI void kestrel_rspjit_load (Rsp* r, u32 op) { r->jitLoad(op); }
+  KJIT_ABI void kestrel_rspjit_store(Rsp* r, u32 op) { r->jitStore(op); }
+  KJIT_ABI void kestrel_rspjit_exec (Rsp* r, u32 op) { r->jitExec(op); }
+  KJIT_ABI bool kestrel_rspjit_cop0 (Rsp* r, u32 op, u32 rem, u32 nextPc) { return r->jitCop0(op, rem, nextPc); }
 }
 
 auto Cache::syncImem(const u8* imem) -> void {

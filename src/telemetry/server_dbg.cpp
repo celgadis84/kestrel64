@@ -234,7 +234,7 @@ auto Server::dispatchDbg(const std::string& cmd, const json::Value& args, const 
       e.set("mask", t.mask); e.set("global", t.global);
       // Pagina = (mask|0x1fff)+1 por par; vpn2 y asid sacados de EntryHi.
       e.set("pageSize", (u64)((t.mask | 0x1fffull) + 1) >> 1);
-      e.set("vpn2", t.hi & ~0x1fffull); e.set("asid", (u32)(t.hi & 0xff));
+      e.set("vpn2", (u64)(t.hi & ~0x1fffull)); e.set("asid", (u32)(t.hi & 0xff));
       e.set("pfn0", (u64)((t.lo0 >> 6) & 0xfffff) << 12); e.set("v0", (bool)(t.lo0 & 2)); e.set("d0", (bool)(t.lo0 & 4));
       e.set("pfn1", (u64)((t.lo1 >> 6) & 0xfffff) << 12); e.set("v1", (bool)(t.lo1 & 2)); e.set("d1", (bool)(t.lo1 & 4));
       list.push(std::move(e));

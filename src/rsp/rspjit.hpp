@@ -98,7 +98,7 @@ namespace rspjit {
 
 // Un bloque compilado. No devuelve nada: no hay fallo parcial posible (ver cabecera), asi
 // que el numero de instrucciones que consume es siempre `nOps` y lo sabe el llamante.
-using BlockFn = void (*)(Rsp*);
+using BlockFn = void (KJIT_ABI *)(Rsp*);
 
 enum class State : u8 { Unknown = 0, Compiled = 1, NoComp = 2 };
 

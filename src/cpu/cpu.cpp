@@ -2336,7 +2336,7 @@ auto CPU::jitCTC1w(u32 op, u32 off) -> u8 {
   fcr31 = v;
   return 1;
 }
-extern "C" u8 kestrel_jitCTC1(void* c, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 kestrel_jitCTC1(void* c, u32 op, u32 off) {
   return reinterpret_cast<kestrel::CPU*>(c)->jitCTC1w(op, off); }
 
 // Conversiones COP1 emitidas por el JIT como CALL directo. Tras CTC1 son lo siguiente en la
@@ -2469,7 +2469,7 @@ auto CPU::jitCop1CvtChk(u32 op, u32 off) -> u8 {
 }
 
 #define KC1C(name, kind) \
-  extern "C" u8 name(void* c, u32 op, u32 off) { \
+  extern "C" KJIT_ABI u8 name(void* c, u32 op, u32 off) { \
     auto* p = reinterpret_cast<kestrel::CPU*>(c); \
     kestrel::CPU::FpuCharge g(p, op); \
     return p->jitCop1CvtChk<kind>(op, off); }
@@ -2540,11 +2540,11 @@ auto CPU::jitCop1CmpChk(u32 op, u32 off) -> u8 {
   }
   return slow;
 }
-extern "C" u8 kestrel_jitCMPS(void* c, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 kestrel_jitCMPS(void* c, u32 op, u32 off) {
   auto* p = reinterpret_cast<kestrel::CPU*>(c);
   kestrel::CPU::FpuCharge g(p, op);
   return p->jitCop1CmpChk<0x10>(op, off); }
-extern "C" u8 kestrel_jitCMPD(void* c, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 kestrel_jitCMPD(void* c, u32 op, u32 off) {
   auto* p = reinterpret_cast<kestrel::CPU*>(c);
   kestrel::CPU::FpuCharge g(p, op);
   return p->jitCop1CmpChk<0x11>(op, off); }
@@ -2580,7 +2580,7 @@ auto CPU::jitCop1AluChk(u32 op, u32 off) -> u8 {
 }
 
 #define KC1A(name, fn, fmt) \
-  extern "C" u8 name(void* c, u32 op, u32 off) { \
+  extern "C" KJIT_ABI u8 name(void* c, u32 op, u32 off) { \
     auto* p = reinterpret_cast<kestrel::CPU*>(c); \
     kestrel::CPU::FpuCharge g(p, op); \
     return p->jitCop1AluChk<fn, fmt>(op, off); }
@@ -2607,7 +2607,7 @@ auto CPU::jitCop1Move(u32 op, u32 off) -> u8 {
   else                        fprSet64(rd, gpr[rt]);                               // DMTC1
   return 1;
 }
-#define KC1(name, rs)   extern "C" u8 name(void* c, u32 op, u32 off) {     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Move<rs>(op, off); }
+#define KC1(name, rs)   extern "C" KJIT_ABI u8 name(void* c, u32 op, u32 off) {     return reinterpret_cast<kestrel::CPU*>(c)->jitCop1Move<rs>(op, off); }
 KC1(kestrel_jitMFC1, 0) KC1(kestrel_jitDMFC1, 1) KC1(kestrel_jitCFC1, 2)
 KC1(kestrel_jitMTC1, 4) KC1(kestrel_jitDMTC1, 5)
 #undef KC1
@@ -2616,7 +2616,7 @@ KC1(kestrel_jitMTC1, 4) KC1(kestrel_jitDMTC1, 5)
 // congele EPC = direccion del SALTO y Cause.BD = 1, como el VR4300. Sin esto un LWC1 o un
 // ADD.S en la ranura que faltara dejaria EPC en la ranura y el ERET del kernel volveria
 // SALTANDOSE el salto.
-extern "C" u8 kestrel_jitInterpDelay(void* cpu, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 kestrel_jitInterpDelay(void* cpu, u32 op, u32 off) {
   auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
   c->jitDelaySlot = true;
   u8 r = c->jitInterpOp(op, off);
@@ -2647,7 +2647,7 @@ auto CPU::jitCacheFast(u32 op, u32 off) -> bool {
   jitPending -= off >> 2;
   return true;
 }
-extern "C" u8 kestrel_jitCACHE(void* cpu, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 kestrel_jitCACHE(void* cpu, u32 op, u32 off) {
   auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
   u8 r = c->jitCacheFast(op, off) ? 1 : c->jitInterpOp(op, off);
   if(!r) return 0;                 // vectorizo (TLB sobre la direccion): estado ya correcto
@@ -2661,7 +2661,7 @@ extern "C" u8 kestrel_jitCACHE(void* cpu, u32 op, u32 off) {
 // MTC0 Status que el dynarec no pudo hacer en linea (puede dejar una interrupcion lista, o
 // cambia modo/EXL/CU/FR): la op entera por el interprete y salida de control detras de ella,
 // para que el conductor re-muestree interrupciones antes de la siguiente.
-extern "C" u8 kestrel_jitMTC0S(void* cpu, u32 op, u32 off) {
+extern "C" KJIT_ABI u8 kestrel_jitMTC0S(void* cpu, u32 op, u32 off) {
   auto* c = reinterpret_cast<kestrel::CPU*>(cpu);
   if(!c->jitInterpOp(op, off)) return 0;   // vectorizo (COP0 inutilizable): estado ya correcto
   u64 va = c->pc + off;
@@ -2861,7 +2861,7 @@ auto CPU::jitMemOp(u64 a, u32 rt, u64 rtVal) -> u8 {
 // Trampolines C, uno por opcode: el bloque emite un CALL directo al suyo. Win64 pasa
 // (cpu, direccion, rt, dato) en RCX/RDX/R8/R9.
 #define KJM(name, opc) \
-  extern "C" u8 name(void* c, u64 a, u32 rt, u64 v) { \
+  extern "C" KJIT_ABI u8 name(void* c, u64 a, u32 rt, u64 v) { \
     return reinterpret_cast<kestrel::CPU*>(c)->jitMemOp<opc>(a, rt, v); }
 KJM(kestrel_jitLB,  0x20) KJM(kestrel_jitLH,  0x21) KJM(kestrel_jitLW,  0x23)
 KJM(kestrel_jitLBU, 0x24) KJM(kestrel_jitLHU, 0x25) KJM(kestrel_jitLWU, 0x27)

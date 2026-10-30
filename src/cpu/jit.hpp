@@ -427,7 +427,7 @@ auto callBailSelfTest() -> bool;
 // nOps en éxito total, o el índice de la op de memoria que haría fault (bail limpio, sin
 // vectorizar). El driver avanza pc/Count/retired por ese valor; el intérprete re-ejecuta
 // la op faultante para vectorizar la excepción exacta. Los bloques solo-ALU devuelven nOps.
-using BlockFn = u32 (*)(u64* gpr, void* cpu);
+using BlockFn = u32 (KJIT_ABI *)(u64* gpr, void* cpu);
 
 // Un bloque compilado = run secuencial de ops ALU/lógica/shift + loads/stores alineados
 // simples (LB/LH/LW/LBU/LHU/LWU/LD/SB/SH/SW/SD) desde una PC física. Termina en la primera

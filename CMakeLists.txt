@@ -67,6 +67,7 @@ add_executable(kestrel64
   src/ui/library_win32.cpp
   src/ui/gamecard.cpp
   src/ui/gamecard_win32.cpp
+  src/ui/debugger_win32.cpp   # fuera de Windows solo trae funciones vacias
   src/debug/dbg.cpp
 )
 
@@ -340,7 +341,13 @@ endif()
 
 # Video presenter: cross-platform Vulkan + GLFW.
 find_package(Vulkan REQUIRED)
-target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw3)
+if(WIN32)
+  target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw3)
+else()
+  # Linux/macOS: el paquete de GLFW trae su config de CMake (objetivo `glfw`).
+  find_package(glfw3 3.3 REQUIRED)
+  target_link_libraries(kestrel64 PRIVATE Vulkan::Vulkan glfw)
+endif()
 
 if(WIN32)
   # comdlg32: el dialogo de "elige una ROM" cuando se abre el .exe desde el Explorador.
@@ -349,7 +356,6 @@ if(WIN32)
   # Ventana del depurador (docs/DEBUGGER.md): Dear ImGui (MIT, third_party/imgui) sobre D3D11,
   # en su propio hilo. d3dcompiler compila en tiempo de ejecucion los dos shaders del backend.
   target_sources(kestrel64 PRIVATE
-    src/ui/debugger_win32.cpp
     third_party/imgui/imgui.cpp
     third_party/imgui/imgui_draw.cpp
     third_party/imgui/imgui_tables.cpp

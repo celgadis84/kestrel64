@@ -28,6 +28,20 @@
 
 namespace kestrel {
 
+// E/S de 64 bits portable: las tarjetas pasan de 2 GB, que es donde `long` de 32 bits (Win64)
+// deja de servir. En POSIX off_t ya es de 64 bits en x86-64.
+namespace sdio {
+#ifdef _WIN32
+inline auto seek(FILE* f, long long off) -> int { return _fseeki64(f, off, SEEK_SET); }
+inline auto tell(FILE* f) -> long long { return _ftelli64(f); }
+inline auto openRead(const std::filesystem::path& p) -> FILE* { return _wfopen(p.c_str(), L"rb"); }
+#else
+inline auto seek(FILE* f, long long off) -> int { return fseeko(f, (off_t)off, SEEK_SET); }
+inline auto tell(FILE* f) -> long long { return (long long)ftello(f); }
+inline auto openRead(const std::filesystem::path& p) -> FILE* { return std::fopen(p.c_str(), "rb"); }
+#endif
+}  // namespace sdio
+
 class SdCard {
 public:
   ~SdCard() { close(); }
@@ -40,7 +54,7 @@ public:
     if(!img) img = std::fopen(path.c_str(), "rb");
     if(!img) return false;
     std::fseek(img, 0, SEEK_END);
-    const long long sz = _ftelli64(img);
+    const long long sz = sdio::tell(img);
     total = sz > 0 ? (u64)sz / 512 : 0;
     return total > 0;
   }
@@ -56,7 +70,7 @@ public:
   auto read(u64 lba, u8* dst) -> bool {
     if(lba >= total) return false;
     if(img) {
-      if(_fseeki64(img, (long long)(lba * 512), SEEK_SET)) return false;
+      if(sdio::seek(img, (long long)(lba * 512))) return false;
       const usize got = std::fread(dst, 1, 512, img);
       if(got < 512) std::memset(dst + got, 0, 512 - got);
       return true;
@@ -68,7 +82,7 @@ public:
   auto write(u64 lba, const u8* src) -> bool {
     if(lba >= total) return false;
     if(img) {
-      if(_fseeki64(img, (long long)(lba * 512), SEEK_SET)) return false;
+      if(sdio::seek(img, (long long)(lba * 512))) return false;
       return std::fwrite(src, 1, 512, img) == 512;
     }
     std::memcpy(overlay[lba].data(), src, 512);
@@ -326,8 +340,8 @@ private:
     const u64 off = (u64)(clus - x->first) * kClus + (rel % kSecPerClus) * 512;
     if(n.dir) { std::memcpy(d, n.bytes.data() + off, 512); return; }
     if(off >= n.size) return;
-    if(!n.fp) n.fp = _wfopen(n.host.c_str(), L"rb");
-    if(!n.fp || _fseeki64(n.fp, (long long)off, SEEK_SET)) return;
+    if(!n.fp) n.fp = sdio::openRead(n.host);
+    if(!n.fp || sdio::seek(n.fp, (long long)off)) return;
     std::fread(d, 1, (usize)std::min<u64>(512, n.size - off), n.fp);
   }
 };

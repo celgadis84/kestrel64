@@ -40,8 +40,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <GLFW/glfw3native.h>
-#include "vifilter.hpp"
 #endif
+#include "vifilter.hpp"
 #include "postfx.hpp"
 
 namespace kestrel {
