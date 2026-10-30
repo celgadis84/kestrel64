@@ -826,12 +826,12 @@ auto Server::cmdRcpRegs(const json::Value&, json::Value& data) -> void {
 // then expands the pixels the same way the DAC does: 5/5/5/1 for 16bpp, direct
 // 8/8/8/8 for 32bpp. Height is not a hardware register — it falls out of the active
 // scan window, so we accept an optional `height` arg and default to what the VI scans.
-// capture.screenshot {path?} / capture.video.start {path?,every?,quality?,scale?,audio?} /
-// capture.video.stop / capture.video.status. Los ficheros los escribe el emulador (PNG y AVI
+// capture.screenshot {path?} / capture.video.start {path?,format?,every?,quality?,scale?,audio?} /
+// capture.video.stop / capture.video.status. Los ficheros los escribe el emulador (PNG, MP4 y AVI
 // MJPEG+PCM, ver src/video/capture.hpp); aqui solo se encargan y se espera el parte.
 auto Server::cmdCapture(const std::string& cmd, const json::Value& args, json::Value& data) -> bool {
   auto stats = [&](const capture::VideoStats& s) {
-    data.set("recording", s.recording).set("path", s.path)
+    data.set("recording", s.recording).set("path", s.path).set("format", s.format)
         .set("width", s.width).set("height", s.height)
         .set("frames", s.frames).set("audioFrames", s.audioFrames).set("audioRate", s.audioRate)
         .set("fps", s.fps).set("seconds", s.seconds).set("bytes", s.bytes)
@@ -854,6 +854,7 @@ auto Server::cmdCapture(const std::string& cmd, const json::Value& args, json::V
     o.every = args.get("every").asU32(1);
     o.quality = args.get("quality").asU32(90);
     o.scale = args.get("scale").asU32(1);
+    o.format = args.get("format").asString();
     const json::Value& a = args.get("audio");
     if(a.type == json::Value::Type::Bool) o.audio = a.b;
     std::string err;

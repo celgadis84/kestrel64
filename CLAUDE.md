@@ -164,7 +164,7 @@ Kestrel's OWN telemetry server — this is THE MCP for the whole workspace (ares
   fixed variable and `mem.write` on the pad word is overwritten by the window loop),
   `read_memory`/`write_memory` (`coherent=1` reads via CPU D-cache =
   no STALE kernel state), `capture_framebuffer` (VI→RGBA→PNG+histogram), `screenshot` /
-  `video_start`/`video_stop`/`video_status` (PNG / AVI MJPEG+PCM written by the emulator in
+  `video_start`/`video_stop`/`video_status` (PNG / MP4 H.264+AAC via Media Foundation / AVI MJPEG+PCM written by the emulator in
   guest time; hotkeys F9/F8, `KESTREL_RECORD`, `src/video/capture.hpp`), hotpath profiler
   (`profile_start/stop/reset`, `profile_cpu` PC-bucket 16B -- `metric=dmiss|imiss|dline` = fallos
   de D$/I$ por PC o por linea de datos, solo con `KESTREL_JIT=0` --, `profile_rsp` IMEM-slot; con `KESTREL_RSP_TIMING=1`

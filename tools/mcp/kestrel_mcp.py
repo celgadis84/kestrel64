@@ -297,30 +297,33 @@ def screenshot(path: str = "", timeout_ms: int = 5000) -> dict:
     return data
 
 
-def video_start(path: str = "", every: int = 1, quality: int = 90, scale: int = 1,
-                audio: bool = True) -> dict:
-    """Start recording video to an AVI (MJPEG + PCM s16 stereo), same as the F8 hotkey.
+def video_start(path: str = "", format: str = "", every: int = 1, quality: int = 90,
+                scale: int = 1, audio: bool = True) -> dict:
+    """Start recording video, same as the F8 hotkey.
 
+    `format`: "mp4" = H.264 + AAC 48 kHz via Windows Media Foundation (small, upload-ready;
+    for YouTube use scale=3 or 4) or "avi" = MJPEG + PCM s16 stereo (lossless audio, survives
+    a crash). Empty = from the `path` extension; no path = mp4.
     One frame per emulated VI field (59.94/50 fps; `every`=2 keeps one of every two) and
     the audio the AI played in that same guest time, so A/V stay in sync at any emulation
-    speed. `quality` = JPEG 1..100, `scale` = integer upscale 1..4. `path` empty = default
-    videos folder (KESTREL_CAPTURE_DIR, else the user's Videos\\kestrel64). Files over
-    1 GiB continue in <name>_002.avi, ... Starts at the next field close.
-    Returns the recording status (see video_status)."""
-    data, _ = query("capture.video.start", path=path, every=int(every), quality=int(quality),
-                    scale=int(scale), audio=bool(audio))
+    speed. `quality` 1..100 = JPEG quality (avi) or bitrate (mp4), `scale` = integer
+    upscale 1..4. `path` empty = default videos folder (KESTREL_CAPTURE_DIR, else the
+    user's Videos\\kestrel64). AVI files over 1 GiB continue in <name>_002.avi, ...
+    Starts at the next field close. Returns the recording status (see video_status)."""
+    data, _ = query("capture.video.start", path=path, format=format, every=int(every),
+                    quality=int(quality), scale=int(scale), audio=bool(audio))
     return data
 
 
 def video_stop() -> dict:
-    """Stop the recording and finalize the AVI (waits for the encoder to drain).
+    """Stop the recording and finalize the file (waits for the encoder to drain).
     Returns {path, width, height, frames, audioFrames, audioRate, fps, seconds, bytes, segments}."""
     data, _ = query("capture.video.stop", _wait_s=120.0)
     return data
 
 
 def video_status() -> dict:
-    """Recording status: {recording, path, width, height, frames, audioFrames, audioRate,
+    """Recording status: {recording, path, format, width, height, frames, audioFrames, audioRate,
     fps, seconds (guest time), bytes, segments, queued (frames waiting for the encoder)}.
     When idle, the stats of the last finished recording."""
     data, _ = query("capture.video.status")

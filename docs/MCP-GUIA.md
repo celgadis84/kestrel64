@@ -125,8 +125,10 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   color. Para comprobar que se ve lo esperado. Leer el PNG con la herramienta Read.
 - `screenshot(path)`: PNG escrito por el propio emulador (como F9), sin pasar pixeles por el
   socket. Ruta vacia = `KESTREL_CAPTURE_DIR` o Imagenes\kestrel64. Funciona en pausa.
-- `video_start(path, every, quality, scale, audio)` / `video_stop()` / `video_status()`:
-  AVI MJPEG + PCM en tiempo de invitado (como F8). Ruta vacia = Videos\kestrel64.
+- `video_start(path, format, every, quality, scale, audio)` / `video_stop()` / `video_status()`:
+  video en tiempo de invitado (como F8). `format` "mp4" (H.264 + AAC, Media Foundation; para
+  YouTube con scale=3/4) o "avi" (MJPEG + PCM); vacio = por extension, sin ruta = mp4 en
+  Videos\kestrel64.
 
 **Perfilado**
 - `profile_start` → dejar correr la carga → `profile_cpu(top)` / `profile_rsp(top)` →

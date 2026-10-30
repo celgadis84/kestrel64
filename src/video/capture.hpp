@@ -51,12 +51,16 @@ struct VideoOpts {
   u32 quality = 90;      // calidad JPEG 1..100
   u32 scale = 1;         // ampliacion entera (vecino mas proximo) 1..4
   bool audio = true;     // pista de audio PCM con lo que emite el AI
+  // "mp4" (H.264 + AAC 48 kHz por Media Foundation, solo Windows) o "avi" (MJPEG + PCM,
+  // sin perdidas en el audio). Vacio = por la extension de path; sin path, mp4.
+  std::string format;
 };
 // Arma la grabacion: empieza en el siguiente cierre de campo. false si ya hay una en marcha.
 auto startVideo(const VideoOpts& o, std::string& err) -> bool;
 struct VideoStats {
   bool recording = false;
   std::string path;      // primer fichero (los trozos siguientes llevan _002, _003...)
+  std::string format;    // "mp4" / "avi"
   u32 width = 0, height = 0;
   u64 frames = 0;        // cuadros escritos
   u64 audioFrames = 0;   // muestras estereo escritas

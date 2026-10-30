@@ -61,8 +61,8 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   cheats.loadForRom(romPath);      // KESTREL_CHEATS, o el .cht que haya al lado de la ROM
   texpack::init(rom.header.name); // KESTREL_TEXDUMP / KESTREL_TEXPACK / KESTREL_TEXFX
   capture::setRomName(rom.header.name);
-  // KESTREL_RECORD=<fichero.avi> (vacio o "1" = carpeta por defecto): graba video desde el
-  // primer campo, para ejecuciones sin ventana. KESTREL_RECORD_EVERY/_QUALITY/_SCALE.
+  // KESTREL_RECORD=<fichero.mp4|.avi> (vacio o "1" = carpeta por defecto, MP4): graba video desde el
+  // primer campo, para ejecuciones sin ventana. KESTREL_RECORD_EVERY/_QUALITY/_SCALE/_FORMAT.
   if(const char* rec = std::getenv("KESTREL_RECORD")) {
     capture::VideoOpts vo;
     if(*rec && std::strcmp(rec, "1")) vo.path = rec;
@@ -70,6 +70,7 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
     vo.every = envU("KESTREL_RECORD_EVERY", 1);
     vo.quality = envU("KESTREL_RECORD_QUALITY", 90);
     vo.scale = envU("KESTREL_RECORD_SCALE", 1);
+    if(const char* f = std::getenv("KESTREL_RECORD_FORMAT")) vo.format = f;
     std::string err;
     if(!capture::startVideo(vo, err)) std::printf("[captura] %s\n", err.c_str());
   }

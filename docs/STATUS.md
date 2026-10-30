@@ -10395,7 +10395,7 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   seccion "Estado de la prueba de la liana de DK64" mas arriba. Ninguna correccion de hoy la
   toca.
 
-## 2026-10-30 — capturas: foto PNG y video AVI (teclas, menu, MCP)
+## 2026-10-30 — capturas: foto PNG y video MP4/AVI (teclas, menu, MCP)
 
 `src/video/capture.{hpp,cpp}`, sin dependencias nuevas (encoders propios):
 - **Foto**: PNG (deflate Huffman fijo + LZ77, filtro por fila). F9, Video > Captura de
@@ -10416,3 +10416,15 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Validado (SM64, build/): AVI 357 cuadros 59,94 fps 5,96 s, audio 32006 Hz 5,92 s, JPEG
   decodifican (PIL); MCP: foto corriendo/en pausa, video every=2 scale=2 640x480 29,97 fps;
   PNG = `capture_framebuffer` pixel a pixel.
+- **MP4** (mismo dia): H.264 + AAC por Media Foundation (`Mp4Writer`, IMFSinkWriter).
+  Las funciones de mfplat/mfreadwrite/ole32 se cargan con LoadLibrary y los GUID salen de
+  `initguid.h` en capture.cpp: cero librerias nuevas (los 8 tests que compilan capture.cpp
+  no cambian) y un Windows N sin MF cae a AVI con aviso. Formato: `format` pedido, si no la
+  extension; sin ruta (F8, `KESTREL_RECORD=1`) = MP4. Video convertido a NV12 a mano (BT.709
+  rango limitado, etiquetado en el tipo; lados pares repitiendo borde), tiempos de muestra =
+  cuadro*scale/rate (tiempo de invitado). Audio remuestreado lineal a 48 kHz en el hilo del
+  codificador: el AAC de Windows no admite 32006 Hz y asi las pistas se declaran antes del
+  primer buffer. Sin trozos; si el proceso muere el MP4 no vale (el AVI si).
+  Validado (SM64): 357 cuadros 59,94 fps 5,96 s, AAC 48 kHz 5,93 s, cuadro decodificado por
+  Windows (WinRT MediaComposition) con colores correctos; MCP mp4/avi/"mkv" rechazado; a
+  960x720 el MP4 sale ~6x menor que el AVI. AVI sin regresion.

@@ -195,9 +195,12 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 ## Capturas (2026-10-30, `src/video/capture.{hpp,cpp}`)
 
 - `KESTREL_CAPTURE_DIR=<carpeta>` — destino de fotos y videos sin ruta. Por defecto
-  `%USERPROFILE%\Pictures\kestrel64` (PNG) y `%USERPROFILE%\Videos\kestrel64` (AVI), nombre
-  `<rom>_<AAAAMMDD>_<HHMMSS>.png/.avi`.
-- `KESTREL_RECORD=<fichero.avi>` (vacio o `1` = carpeta por defecto) — graba video desde el
+  `%USERPROFILE%\Pictures\kestrel64` (PNG) y `%USERPROFILE%\Videos\kestrel64` (MP4/AVI), nombre
+  `<rom>_<AAAAMMDD>_<HHMMSS>.png/.mp4/.avi`.
+- `KESTREL_RECORD=<fichero.mp4|.avi>` (vacio o `1` = carpeta por defecto, MP4) — graba video desde el
   primer campo, para ejecuciones sin ventana; se cierra al salir. `KESTREL_RECORD_EVERY=N`
   (un cuadro de cada N campos), `KESTREL_RECORD_QUALITY=1..100` (JPEG, 90),
-  `KESTREL_RECORD_SCALE=1..4` (ampliacion entera).
+  `KESTREL_RECORD_SCALE=1..4` (ampliacion entera), `KESTREL_RECORD_FORMAT=mp4|avi` (manda
+  sobre la extension). MP4 = H.264 + AAC 48 kHz por Media Foundation (Windows; sin ella cae a
+  AVI), QUALITY = tasa de bits (0,08..0,40 bits/pixel). AVI = MJPEG + PCM, sin perdidas de
+  audio y legible aunque el proceso muera; el MP4 solo es valido si se cierra bien.

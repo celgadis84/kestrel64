@@ -1,4 +1,5 @@
-// kestrel64 -- captura de pantalla (PNG) y de video (AVI MJPEG + PCM). Ver capture.hpp.
+// kestrel64 -- captura de pantalla (PNG) y de video (AVI MJPEG + PCM, o MP4 H.264 + AAC por
+// Media Foundation en Windows). Ver capture.hpp.
 //
 // Sin dependencias: PNG con deflate propio (Huffman fijo + LZ77 con cadena de hash), JPEG
 // base (4:2:0, tablas del anexo K) y el contenedor AVI 1.0 con idx1. Un AVI 1.0 no pasa de
@@ -23,8 +24,17 @@
 #include <mutex>
 #include <thread>
 
+#include <type_traits>
+
 #ifdef _WIN32
 #include <windows.h>
+// Los GUID de Media Foundation (MF_MT_*, MFVideoFormat_*...) se definen aqui mismo
+// (selectany) en vez de enlazar mfuuid: asi capture.cpp no arrastra librerias a los tests.
+#include <initguid.h>
+#include <codecapi.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #endif
 
 namespace kestrel::capture {
@@ -81,7 +91,8 @@ auto defaultDir(bool video) -> std::string {
   return "captures";
 }
 
-auto defaultPath(bool video) -> std::string {
+auto defaultPath(const char* ext) -> std::string {
+  const bool video = std::strcmp(ext, ".png") != 0;
   std::string rom;
   { std::lock_guard<std::mutex> lk(g_nameMu); rom = g_rom; }
   std::string clean;
@@ -98,8 +109,11 @@ auto defaultPath(bool video) -> std::string {
 #endif
   char stamp[32];
   std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tmv);
+#ifdef _WIN32
+  std::string base = defaultDir(video) + "\\" + clean + "_" + stamp;
+#else
   std::string base = defaultDir(video) + "/" + clean + "_" + stamp;
-  const char* ext = video ? ".avi" : ".png";
+#endif
   std::string p = base + ext;
   for(int n = 2; n < 1000; n++) {               // dos fotos en el mismo segundo
     if(FILE* f = std::fopen(p.c_str(), "rb")) { std::fclose(f); p = base + "_" + std::to_string(n) + ext; }
@@ -390,6 +404,229 @@ struct AviWriter {
   }
 };
 
+// ============================================================ MP4 (Media Foundation)
+//
+// H.264 + AAC con los codificadores que trae Windows: nada de codigo ni licencias de terceros
+// en el repo. Las funciones de mfplat/mfreadwrite se cargan en tiempo de ejecucion, asi que no
+// hay librerias nuevas que enlazar y en un Windows "N" sin Media Foundation solo falla el MP4
+// (startVideo cae a AVI). El audio sale siempre a 48 kHz: el AAC de Windows no admite la tasa
+// del DAC del AI (32006, 22047...), y asi la pista se configura antes de que suene nada.
+
+#ifdef _WIN32
+constexpr u32 kMp4AudioRate = 48000;
+
+struct MfApi {
+  HRESULT (WINAPI* coInit)(LPVOID, DWORD) = nullptr;
+  void (WINAPI* coUninit)() = nullptr;
+  HRESULT (WINAPI* startup)(ULONG, DWORD) = nullptr;
+  HRESULT (WINAPI* shutdown)() = nullptr;
+  HRESULT (WINAPI* createMediaType)(IMFMediaType**) = nullptr;
+  HRESULT (WINAPI* createMemoryBuffer)(DWORD, IMFMediaBuffer**) = nullptr;
+  HRESULT (WINAPI* createSample)(IMFSample**) = nullptr;
+  HRESULT (WINAPI* createAttributes)(IMFAttributes**, UINT32) = nullptr;
+  HRESULT (WINAPI* createSinkWriter)(LPCWSTR, IMFByteStream*, IMFAttributes*, IMFSinkWriter**) = nullptr;
+  bool ok = false;
+};
+
+auto mfApi() -> const MfApi& {
+  static const MfApi api = [] {
+    MfApi m;
+    HMODULE ole = LoadLibraryA("ole32.dll"), plat = LoadLibraryA("mfplat.dll"), rw = LoadLibraryA("mfreadwrite.dll");
+    if(!ole || !plat || !rw) return m;
+    auto load = [](HMODULE h, const char* n, auto& fn) {
+      fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(reinterpret_cast<void (*)()>(GetProcAddress(h, n)));
+      return fn != nullptr;
+    };
+    m.ok = load(ole, "CoInitializeEx", m.coInit) && load(ole, "CoUninitialize", m.coUninit) &&
+           load(plat, "MFStartup", m.startup) && load(plat, "MFShutdown", m.shutdown) &&
+           load(plat, "MFCreateMediaType", m.createMediaType) &&
+           load(plat, "MFCreateMemoryBuffer", m.createMemoryBuffer) &&
+           load(plat, "MFCreateSample", m.createSample) && load(plat, "MFCreateAttributes", m.createAttributes) &&
+           load(rw, "MFCreateSinkWriterFromURL", m.createSinkWriter);
+    return m;
+  }();
+  return api;
+}
+
+template<typename T> auto release(T*& p) -> void { if(p) { p->Release(); p = nullptr; } }
+
+struct Mp4Writer {
+  IMFSinkWriter* sw = nullptr;
+  DWORD vs = 0, as = 0;
+  u32 w = 0, h = 0, encW = 0, encH = 0, rate = 0, scale = 1, quality = 90;
+  bool audio = true, com = false, mf = false;
+  u64 frames = 0, aOut = 0;            // cuadros y muestras (48 kHz) escritos
+  double aPos = 0;                     // remuestreo: posicion en [ultima muestra previa, buffer...]
+  s16 aPrev[2] = {0, 0};
+  std::vector<u8> nv12;
+  std::vector<s16> rs;
+  std::string err;
+
+  auto fail(const char* what, HRESULT hr) -> bool {
+    char b[96]; std::snprintf(b, sizeof b, "mp4: %s (hr=0x%08lx)", what, (unsigned long)hr);
+    err = b;
+    return false;
+  }
+
+  static auto ratio(u32 a, u32 b) -> UINT64 { return ((UINT64)a << 32) | b; }
+
+  // Tipo de video comun a la entrada (NV12) y la salida (H.264): mismo tamano, ritmo y color.
+  auto videoType(IMFMediaType* t, const GUID& sub) -> void {
+    t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    t->SetGUID(MF_MT_SUBTYPE, sub);
+    t->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    t->SetUINT64(MF_MT_FRAME_SIZE, ratio(encW, encH));
+    t->SetUINT64(MF_MT_FRAME_RATE, ratio(rate, scale));
+    t->SetUINT64(MF_MT_PIXEL_ASPECT_RATIO, ratio(1, 1));
+    t->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+    t->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+    t->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+    t->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+  }
+
+  auto audioType(IMFMediaType* t, const GUID& sub, u32 bytesPerSec) -> void {
+    t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+    t->SetGUID(MF_MT_SUBTYPE, sub);
+    t->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    t->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, kMp4AudioRate);
+    t->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, 2);
+    t->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSec);
+  }
+
+  auto open(const std::string& path) -> bool {
+    const MfApi& api = mfApi();
+    if(!api.ok) { err = "mp4: Media Foundation no disponible (Windows N sin Media Feature Pack?)"; return false; }
+    HRESULT hr = api.coInit(nullptr, COINIT_MULTITHREADED);
+    com = SUCCEEDED(hr);
+    if(FAILED(hr = api.startup(MF_VERSION, MFSTARTUP_LITE))) return fail("MFStartup", hr);
+    mf = true;
+    // H.264 4:2:0 pide lados pares: se repite la ultima fila/columna.
+    encW = (w + 1) & ~1u; encH = (h + 1) & ~1u;
+    std::wstring wpath(path.size() + 1, L'\0');
+    wpath.resize((usize)std::max(0, MultiByteToWideChar(CP_ACP, 0, path.c_str(), -1, wpath.data(), (int)wpath.size()) - 1));
+    IMFAttributes* at = nullptr;
+    IMFMediaType *out = nullptr, *in = nullptr;
+    bool ok = false;
+    do {
+      if(FAILED(hr = api.createAttributes(&at, 2))) { fail("atributos", hr); break; }
+      at->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
+      at->SetUINT32(MF_SINK_WRITER_DISABLE_THROTTLING, TRUE);   // no hay reloj: va a lo que de el codificador
+      if(FAILED(hr = api.createSinkWriter(wpath.c_str(), nullptr, at, &sw))) { fail("no se puede crear el fichero", hr); break; }
+      // Pixel art: mucho borde duro, asi que bits de sobra. 0.08..0.40 bits por pixel.
+      const double fps = (double)rate / scale;
+      const u32 bps = (u32)std::min(100e6, encW * encH * fps * (0.08 + 0.32 * quality / 100.0));
+      if(FAILED(hr = api.createMediaType(&out))) { fail("tipo", hr); break; }
+      videoType(out, MFVideoFormat_H264);
+      out->SetUINT32(MF_MT_AVG_BITRATE, bps);
+      out->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+      if(FAILED(hr = sw->AddStream(out, &vs))) { fail("pista H.264", hr); break; }
+      release(out);
+      if(FAILED(hr = api.createMediaType(&in))) { fail("tipo", hr); break; }
+      videoType(in, MFVideoFormat_NV12);
+      if(FAILED(hr = sw->SetInputMediaType(vs, in, nullptr))) { fail("entrada NV12 del H.264", hr); break; }
+      release(in);
+      if(audio) {
+        if(FAILED(hr = api.createMediaType(&out))) { fail("tipo", hr); break; }
+        audioType(out, MFAudioFormat_AAC, 24000);              // 192 kbit/s
+        if(FAILED(hr = sw->AddStream(out, &as))) { fail("pista AAC", hr); break; }
+        release(out);
+        if(FAILED(hr = api.createMediaType(&in))) { fail("tipo", hr); break; }
+        audioType(in, MFAudioFormat_PCM, kMp4AudioRate * 4);
+        in->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, 4);
+        if(FAILED(hr = sw->SetInputMediaType(as, in, nullptr))) { fail("entrada PCM del AAC", hr); break; }
+        release(in);
+      }
+      if(FAILED(hr = sw->BeginWriting())) { fail("BeginWriting", hr); break; }
+      ok = true;
+    } while(false);
+    release(at); release(out); release(in);
+    if(!ok) { release(sw); teardown(); }
+    return ok;
+  }
+
+  auto sample(DWORD stream, const void* data, u32 len, u64 t, u64 dur) -> bool {
+    const MfApi& api = mfApi();
+    IMFMediaBuffer* b = nullptr;
+    IMFSample* s = nullptr;
+    HRESULT hr = api.createMemoryBuffer(len, &b);
+    if(SUCCEEDED(hr)) {
+      BYTE* p = nullptr;
+      if(SUCCEEDED(hr = b->Lock(&p, nullptr, nullptr))) { std::memcpy(p, data, len); b->Unlock(); b->SetCurrentLength(len); }
+    }
+    if(SUCCEEDED(hr)) hr = api.createSample(&s);
+    if(SUCCEEDED(hr)) hr = s->AddBuffer(b);
+    if(SUCCEEDED(hr)) { s->SetSampleTime((LONGLONG)t); s->SetSampleDuration((LONGLONG)dur); hr = sw->WriteSample(stream, s); }
+    release(s); release(b);
+    return SUCCEEDED(hr) || fail(stream == vs ? "WriteSample video" : "WriteSample audio", hr);
+  }
+
+  // RGB24 w*h -> NV12 encW*encH, BT.709 rango limitado, croma promedio de 2x2.
+  auto video(const u8* rgb) -> bool {
+    nv12.resize((usize)encW * encH * 3 / 2);
+    auto px = [&](u32 x, u32 y) { return rgb + ((usize)std::min(y, h - 1) * w + std::min(x, w - 1)) * 3; };
+    for(u32 y = 0; y < encH; y++)
+      for(u32 x = 0; x < encW; x++) {
+        const u8* p = px(x, y);
+        nv12[(usize)y * encW + x] = (u8)(16 + ((47 * p[0] + 157 * p[1] + 16 * p[2] + 128) >> 8));
+      }
+    u8* uv = nv12.data() + (usize)encW * encH;
+    for(u32 y = 0; y < encH; y += 2)
+      for(u32 x = 0; x < encW; x += 2) {
+        int r = 0, g = 0, b = 0;
+        for(u32 k = 0; k < 4; k++) { const u8* p = px(x + (k & 1), y + (k >> 1)); r += p[0]; g += p[1]; b += p[2]; }
+        const int cb = 128 + ((-26 * r - 86 * g + 112 * b + 512) >> 10);
+        const int cr = 128 + ((112 * r - 102 * g - 10 * b + 512) >> 10);
+        uv[(usize)(y / 2) * encW + x]     = (u8)std::clamp(cb, 16, 240);
+        uv[(usize)(y / 2) * encW + x + 1] = (u8)std::clamp(cr, 16, 240);
+      }
+    // Tiempos en unidades de 100 ns desde el cuadro: el cuadro k es el campo k*every.
+    const u64 t0 = frames * 10000000ull * scale / rate, t1 = (frames + 1) * 10000000ull * scale / rate;
+    frames++;
+    return sample(vs, nv12.data(), (u32)nv12.size(), t0, t1 - t0);
+  }
+
+  // PCM s16le estereo a inRate -> 48 kHz, lineal y continuo entre buffers.
+  auto pcm(const std::vector<u8>& d, u32 inRate) -> bool {
+    if(!audio || !inRate) return true;
+    const s16* in = (const s16*)d.data();
+    const u32 n = (u32)(d.size() / 4);
+    if(!n) return true;
+    rs.clear();
+    if(inRate == kMp4AudioRate) rs.assign(in, in + 2 * n);
+    else {
+      const double step = (double)inRate / kMp4AudioRate;
+      auto at = [&](u32 i, int c) -> int { return i == 0 ? aPrev[c] : in[2 * (i - 1) + c]; };   // 0 = la previa
+      for(; aPos < n; aPos += step) {
+        const u32 i = (u32)aPos; const double fr = aPos - i;
+        for(int c = 0; c < 2; c++) rs.push_back((s16)std::lround(at(i, c) * (1 - fr) + at(i + 1, c) * fr));
+      }
+      aPos -= n;
+      aPrev[0] = in[2 * (n - 1)]; aPrev[1] = in[2 * (n - 1) + 1];
+    }
+    const u32 m = (u32)(rs.size() / 2);
+    if(!m) return true;
+    const u64 t0 = aOut * 10000000ull / kMp4AudioRate, t1 = (aOut + m) * 10000000ull / kMp4AudioRate;
+    aOut += m;
+    return sample(as, rs.data(), m * 4, t0, t1 - t0);
+  }
+
+  auto teardown() -> void {
+    const MfApi& api = mfApi();
+    if(mf) { api.shutdown(); mf = false; }
+    if(com) { api.coUninit(); com = false; }
+  }
+
+  auto close() -> void {
+    if(sw) {
+      HRESULT hr = sw->Finalize();
+      if(FAILED(hr)) fail("Finalize", hr);
+      release(sw);
+    }
+    teardown();
+  }
+};
+#endif
+
 // ============================================================ grabacion
 
 struct Item {
@@ -417,7 +654,11 @@ struct Recorder {
   std::thread th;
 
   // del hilo del codificador
+  bool mp4 = false;
   AviWriter avi;
+#ifdef _WIN32
+  Mp4Writer mp4w;
+#endif
   u32 segments = 0;
   u64 frames = 0, aFrames = 0, closedBytes = 0;
   std::atomic<u64> statFrames{0}, statAFrames{0}, statBytes{0};
@@ -441,7 +682,17 @@ struct Recorder {
 
   auto run() -> void {
     std::vector<u8> scaled, jpg;
-    bool ok = openSeg();
+    bool ok;
+#ifdef _WIN32
+    if(mp4) {
+      segments = 1;
+      mp4w.w = outW; mp4w.h = outH; mp4w.rate = rate; mp4w.scale = scale;
+      mp4w.quality = opt.quality; mp4w.audio = opt.audio;
+      ok = mp4w.open(basePath);
+      if(!ok) err = mp4w.err;
+    } else
+#endif
+    ok = openSeg();
     for(;;) {
       Item it;
       {
@@ -465,6 +716,18 @@ struct Recorder {
           }
           src = scaled.data();
         }
+#ifdef _WIN32
+        if(mp4) {
+          if(!mp4w.video(src)) { ok = false; err = mp4w.err; continue; }
+          statFrames.fetch_add(1, std::memory_order_relaxed);
+          if(mp4w.frames % 30 == 1) {        // el sink escribe por su cuenta: tamano del fichero
+            WIN32_FILE_ATTRIBUTE_DATA fa;
+            if(GetFileAttributesExA(basePath.c_str(), GetFileExInfoStandard, &fa))
+              statBytes.store(((u64)fa.nFileSizeHigh << 32) | fa.nFileSizeLow, std::memory_order_relaxed);
+          }
+          continue;
+        }
+#endif
         jpg.clear();
         encodeJpeg(src, outW, outH, opt.quality, jpg);
         if(avi.bytes() + jpg.size() + 64 > kSegmentBytes) {
@@ -474,6 +737,13 @@ struct Recorder {
         avi.video(jpg);
         statFrames.fetch_add(1, std::memory_order_relaxed);
       } else {
+#ifdef _WIN32
+        if(mp4) {
+          if(!mp4w.pcm(it.data, aRate)) { ok = false; err = mp4w.err; }
+          else statAFrames.store(mp4w.aOut, std::memory_order_relaxed);
+          continue;
+        }
+#endif
         if(avi.aRate == 0) avi.aRate = aRate;
         avi.pcm(it.data);
         statAFrames.fetch_add(it.data.size() / 4, std::memory_order_relaxed);
@@ -481,6 +751,9 @@ struct Recorder {
       statBytes.store(closedBytes + avi.bytes(), std::memory_order_relaxed);
     }
     if(avi.f) { avi.aRate = aRate; avi.close(); }
+#ifdef _WIN32
+    if(mp4) { mp4w.close(); if(err.empty()) err = mp4w.err; }
+#endif
   }
 
   auto push(Item&& it) -> void {
@@ -529,7 +802,7 @@ auto serviceShots(Memory* mem) -> void {
   std::vector<u8> png;
   if(grabbed) encodePng(g.rgb.data(), g.w, g.h, png);
   for(auto& r : reqs) {
-    ShotRes res{r.id, false, r.path.empty() ? defaultPath(false) : r.path, {}, g.w, g.h};
+    ShotRes res{r.id, false, r.path.empty() ? defaultPath(".png") : r.path, {}, g.w, g.h};
     if(!grabbed) res.err = "sin framebuffer";
     else {
       mkdirs(dirOf(res.path));
@@ -548,10 +821,11 @@ auto statsOf(Recorder& r) -> VideoStats {
   VideoStats s;
   s.recording = true;
   s.path = r.basePath;
+  s.format = r.mp4 ? "mp4" : "avi";
   s.width = r.outW; s.height = r.outH;
   s.frames = r.statFrames.load();
   s.audioFrames = r.statAFrames.load();
-  s.audioRate = r.aRate;
+  s.audioRate = r.mp4 && r.aRate ? 48000 : r.aRate.load();   // el MP4 sale remuestreado a 48 kHz
   s.fps = r.rate ? (double)r.rate / r.scale : 0;
   s.seconds = s.fps > 0 ? s.frames / s.fps : 0;
   s.bytes = r.statBytes.load();
@@ -593,7 +867,29 @@ auto startVideo(const VideoOpts& o, std::string& err) -> bool {
   if(g_armOpts.scale < 1) g_armOpts.scale = 1;
   if(g_armOpts.scale > 4) g_armOpts.scale = 4;
   if(g_armOpts.quality < 1 || g_armOpts.quality > 100) g_armOpts.quality = 90;
-  if(g_armOpts.path.empty()) g_armOpts.path = defaultPath(true);
+  // Formato: el pedido; si no, la extension de la ruta; sin ruta, MP4 (el que se sube).
+  std::string& fmt = g_armOpts.format;
+  for(char& c : fmt) c = (char)std::tolower((unsigned char)c);
+  auto ext = [&] {
+    std::string p = g_armOpts.path;
+    usize dot = p.find_last_of('.'), sl = p.find_last_of("/\\");
+    std::string e = dot == std::string::npos || (sl != std::string::npos && dot < sl) ? "" : p.substr(dot + 1);
+    for(char& c : e) c = (char)std::tolower((unsigned char)c);
+    return e;
+  };
+  if(fmt.empty()) fmt = g_armOpts.path.empty() || ext() == "mp4" ? "mp4" : "avi";
+  if(fmt != "mp4" && fmt != "avi") { err = "formato de video desconocido: " + fmt + " (mp4 o avi)"; return false; }
+#ifdef _WIN32
+  const bool mfOk = mfApi().ok;
+#else
+  const bool mfOk = false;
+#endif
+  if(fmt == "mp4" && !mfOk) {
+    std::printf("[captura] MP4 no disponible (sin Media Foundation): se graba AVI\n");
+    fmt = "avi";
+    if(ext() == "mp4") g_armOpts.path.replace(g_armOpts.path.size() - 3, 3, "avi");
+  }
+  if(g_armOpts.path.empty()) g_armOpts.path = defaultPath(fmt == "mp4" ? ".mp4" : ".avi");
   mkdirs(dirOf(g_armOpts.path));
   g_armed = true;
   g_recording.store(true);
@@ -615,7 +911,6 @@ auto stopVideo() -> VideoStats {
   VideoStats s = statsOf(*r);
   s.recording = false;
   s.queued = 0;
-  s.audioRate = r->aRate;
   if(r->avi.f == nullptr) s.bytes = r->closedBytes;   // (el ultimo trozo ya cerrado)
   { FILE* f = std::fopen(r->segPath(r->segments).c_str(), "rb");
     if(f) { std::fseek(f, 0, SEEK_END); s.bytes = r->closedBytes + (u64)std::ftell(f); std::fclose(f); } }
@@ -635,7 +930,7 @@ auto stopVideo() -> VideoStats {
 auto videoStats() -> VideoStats {
   std::lock_guard<std::mutex> lk(g_recMu);
   if(g_rec) return statsOf(*g_rec);
-  if(g_armed) { VideoStats s; s.recording = true; s.path = g_armOpts.path; return s; }
+  if(g_armed) { VideoStats s; s.recording = true; s.path = g_armOpts.path; s.format = g_armOpts.format; return s; }
   return g_last;
 }
 
@@ -657,6 +952,7 @@ auto onField(Memory* mem) -> void {
     auto r = std::make_unique<Recorder>();
     r->opt = g_armOpts;
     r->basePath = g_armOpts.path;
+    r->mp4 = g_armOpts.format == "mp4";
     r->rate = mem->viFieldHzMilli;           // mismo reloj de invitado que el drenaje del AI
     r->scale = 1000 * g_armOpts.every;
     g_rec = std::move(r);
