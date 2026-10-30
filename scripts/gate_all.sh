@@ -20,6 +20,7 @@ done
 out=$($PY scripts/rewind_e2e.py --exe build/kestrel64.exe --port 9131 2>&1 | tail -1)
 case "$out" in
   PASS) echo "rewind_e2e: PASS" ;;
+  SKIP*) echo "rewind_e2e: $out" ;;
   *) echo "rewind_e2e: FALLO -> $out"; exit 1 ;;
 esac
 for m in interp jit jit-nolink threaded threaded-jit rspinterp rspnolink rewind-rtt phys phys-threaded; do

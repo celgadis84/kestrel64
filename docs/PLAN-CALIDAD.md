@@ -132,7 +132,7 @@ Dos frentes medidos por separado.
 |---|---|---|
 | 1 Limpieza | horas | HECHA 2026-10-30: `docs/wip/` fuera (nota a `docs/history/SUBSCHED-2026-09.md`, copias solo en git), `STATUS.md` corto + `docs/history/`, `GAPS.md` a 100 col con `scripts/rewrap_md.py` (tablas sin tocar), índice `docs/README.md` |
 | 2 Arquitectura en dos idiomas | ~1,5 días | HECHA 2026-10-30: `ARCHITECTURE.md`/`ARQUITECTURA.md` (11 secciones, `Synced with:`), `scripts/check_docs_sync.py` + workflow `docs.yml`, resumen inglés en los 7 documentos clave, enlaces en README/CONTRIBUTING. Falta la cifra ares del README: la comparativa agendada el 2026-10-27 no se llegó a hacer |
-| 3 Verificación reproducible | horas | pendiente (solo documentar y enlazar) |
+| 3 Verificación reproducible | horas | HECHA 2026-10-30: `TESTING.md`/`PRUEBAS.md` (pareja comprobada por `check_docs_sync.py`), enlaces en README/CONTRIBUTING; la CI corre los 9 tests unitarios sin ROM; `rewind_e2e.py` se salta sin `ROM_SM64`, así que `gate_all.sh` corre sin ROMs comerciales; `gate_quick.sh` ya no usa parallel-RDP |
 | 4 Reestructuración | varios días | pendiente |
 | 5 Optimización | ~1 semana | pendiente |
 | 6 Interfaces en inglés | 1–2 días | pendiente |

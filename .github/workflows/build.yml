@@ -43,11 +43,12 @@ jobs:
       - name: build
         run: cmake --build build-ci -j4
 
-      # Estas seis no cargan ninguna ROM: devuelven != 0 si falla algo.
+      # Estas nueve no cargan ninguna ROM (las mismas que corre gate_all.sh): devuelven != 0
+      # si falla algo.
       - name: unit tests
         run: |
-          cmake --build build-ci -j4 --target rsp_test save_test wildmem_test cheat_test archive_test rewind_test
-          for t in rsp_test save_test wildmem_test cheat_test archive_test rewind_test; do
+          cmake --build build-ci -j4 --target rsp_test save_test wildmem_test cheat_test archive_test rewind_test watch_test pif_test tpak_test
+          for t in rsp_test save_test wildmem_test cheat_test archive_test rewind_test watch_test pif_test tpak_test; do
             echo "== $t =="
             ./build-ci/$t.exe || exit 1
           done

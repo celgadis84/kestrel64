@@ -55,10 +55,12 @@ get written down in the log (`docs/history/STATUS-2026.md`) next to the positive
 
 ## Before opening a pull request
 
-Run the gates:
+Run the gates. `docs/TESTING.md` explains how to get the public test suites they use and
+what runs without any ROM; commercial ROMs are optional, and their checks print `SKIP` when
+not configured.
 
 ```bash
-sh scripts/gate_all.sh     # n64-systemtest (interpreter and JIT) + SM64 in six modes + krom suite
+sh scripts/gate_all.sh     # unit tests + n64-systemtest and SM64 in every mode + krom suite
 sh scripts/gate_gpurdp.sh  # the same against GPU-RDP (Vulkan compute), the default backend
 ```
 
@@ -73,6 +75,8 @@ hang, and the fix is to bisect it, never to raise the timeout.
 - `docs/ARCHITECTURE.md` / `docs/ARQUITECTURA.md` — architecture overview in English and
   Spanish. Change both in the same commit and bump their `Synced with:` line together;
   `scripts/check_docs_sync.py` (run in CI) fails if their section structure diverges
+- `docs/TESTING.md` / `docs/PRUEBAS.md` — how to reproduce the verification; same pairing
+  rule as the architecture overview
 - `docs/STATUS.md` — current state per subsystem (short; updated in place)
 - `docs/history/STATUS-2026.md` — running log: what was tried, what it measured, what was
   reverted and why (new entries are appended at the end)

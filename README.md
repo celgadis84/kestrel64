@@ -120,9 +120,12 @@ Every change has to survive the gates before it counts:
 
 ```bash
 sh scripts/gate_all.sh      # systemtest (interp/JIT/threaded), krom RDP suite, game hashes
-sh scripts/gate_prdp.sh     # the same material against the parallel-rdp build
+sh scripts/gate_gpurdp.sh   # the same material against GPU-RDP (Vulkan compute)
 ```
 
+The repository ships no ROMs: [`docs/TESTING.md`](docs/TESTING.md) (Spanish:
+[`docs/PRUEBAS.md`](docs/PRUEBAS.md)) lists where to get each public test suite, where to put
+it and what checks it; commercial games are optional local checks only.
 `scripts/validate.py` is the engine underneath; `docs/baselines/timings.md` records the
 wall-clock baseline of each battery, because a gate that normally takes 17 s and is still
 running at 300 s is a deadlock, not slowness.

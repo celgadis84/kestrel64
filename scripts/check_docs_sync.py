@@ -14,7 +14,8 @@ import re
 import sys
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-PAIRS = [("docs/ARCHITECTURE.md", "docs/ARQUITECTURA.md")]
+PAIRS = [("docs/ARCHITECTURE.md", "docs/ARQUITECTURA.md"),
+         ("docs/TESTING.md", "docs/PRUEBAS.md")]
 
 HEAD = re.compile(r"^(#{1,6})\s+(\d+(?:\.\d+)*\.?)?")
 SYNC = re.compile(r"^Synced with:\s*(\S+)")
@@ -39,8 +40,9 @@ def skeleton(path):
 
 
 def main():
-    bad = 0
+    total = 0
     for en, es in PAIRS:
+        bad = 0
         s1, h1 = skeleton(en)
         s2, h2 = skeleton(es)
         if s1 is None or s2 is None:
@@ -60,7 +62,8 @@ def main():
                     break
         if not bad:
             print(f"{en} / {es}: OK ({len(h1)} headings, synced with {s1})")
-    sys.exit(1 if bad else 0)
+        total += bad
+    sys.exit(1 if total else 0)
 
 
 if __name__ == "__main__":

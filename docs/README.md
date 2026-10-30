@@ -79,6 +79,9 @@ marked *(EN)* are in English.
 
 ## Herramientas y uso / Tools and usage
 
+- [PRUEBAS.md](PRUEBAS.md) / [TESTING.md](TESTING.md) — cómo reproducir la verificación: suites
+  públicas, puertas, baselines. How to reproduce the verification: public suites, gates,
+  baselines.
 - [ENV-VARS.md](ENV-VARS.md) — referencia de las variables `KESTREL_*`.
   Reference of the `KESTREL_*` variables.
 - [DEBUGGER.md](DEBUGGER.md) — depurador: capas, ventana y MCP.

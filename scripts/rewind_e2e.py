@@ -41,7 +41,12 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=9131)
     ap.add_argument("--env", action="append", default=[])
     a = ap.parse_args()
-    a.rom = str(romcfg.need(a.rom, "ROM_SM64"))
+    # Sin ROM configurada se salta (como la puerta sm64 de validate.py): las ROMs
+    # comerciales son puertas locales, nunca obligatorias.
+    if not a.rom or not Path(a.rom).exists():
+        print(f"SKIP (missing ROM_SM64: {a.rom})")
+        return 0
+    a.rom = str(a.rom)
     a.exe = str(Path(a.exe).resolve())
     if a.b % a.fields:
         print("--b tiene que ser multiplo de --fields"); return 2
