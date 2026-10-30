@@ -130,7 +130,7 @@ Dos frentes medidos por separado.
 
 | Fase | Coste | Estado |
 |---|---|---|
-| 1 Limpieza | horas | en curso: 1.2 HECHO 2026-10-30 (`STATUS.md` corto + `docs/history/`) |
+| 1 Limpieza | horas | HECHA 2026-10-30: `docs/wip/` fuera (nota a `docs/history/SUBSCHED-2026-09.md`, copias solo en git), `STATUS.md` corto + `docs/history/`, `GAPS.md` a 100 col con `scripts/rewrap_md.py` (tablas sin tocar), índice `docs/README.md` |
 | 2 Arquitectura en dos idiomas | ~1,5 días | pendiente |
 | 3 Verificación reproducible | horas | pendiente (solo documentar y enlazar) |
 | 4 Reestructuración | varios días | pendiente |

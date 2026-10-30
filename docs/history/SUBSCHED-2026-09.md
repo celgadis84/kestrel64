@@ -1,8 +1,9 @@
 # Submit-time RDP scheduling + exact RSP clock (in `src/`, 2026-09-11)
 
-`memory.{cpp,hpp}.subsched` are the snapshot of the refactor as it was when it got parked.
-It is now BACK in `src/`, together with the exact RSP guest clock, and the hang that caused
-the parking is understood and fixed. Keep the snapshots until the combo ships.
+This note used to live in `docs/wip/` next to `memory.{cpp,hpp}.subsched`, the snapshot of the
+refactor as it was when it got parked. The refactor is BACK in `src/`, together with the exact
+RSP guest clock, and the hang that caused the parking is understood and fixed. The snapshots
+were removed on 2026-10-30; they remain in git history (last present in commit `6d3a5b9`).
 
 ## What the refactor does
 

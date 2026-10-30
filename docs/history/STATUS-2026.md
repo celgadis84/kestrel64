@@ -5246,7 +5246,7 @@ improve=2 (los dos Cube animados de siempre, desfase de cuadro), nodump=0.
 Lo de arriba (2026-09-10) dejaba clavadas todas las columnas que el invitado puede ver, pero
 quedaba una que no: `rsp=` (los ciclos del RSP). Derivaba sobre 104-115 M y las columnas de
 invitado de DK64 solo cuadraban hasta el campo 206. Cerrado hoy. Detalle completo en
-`docs/wip/README.md`; resumen:
+`docs/history/SUBSCHED-2026-09.md`; resumen:
 
 - **Horario del RDP en tiempo de envio.** `rdpSubmit` corre el modelo de coste bajo `rdpMx` y
   archiva el tramo entero (`dpScheduleSpan`) con instante de arranque y de cierre en un anillo

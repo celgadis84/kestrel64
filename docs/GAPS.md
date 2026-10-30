@@ -62,9 +62,52 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 ### Robustez
 
-- ~~**Endurecer el camino `fastmem` del JIT**~~ **CERRADO 2026-09-04**: una direccion de invitado salvaje debe dar excepcion de invitado, no una violacion de acceso del anfitrion. El camino rapido del JIT (`src/cpu/jit.cpp`) ya llevaba las guardas -- canonica de ckseg0, alineacion, modo kernel, `jitRdramSz`, guardia de escritura y etiqueta+valido de la linea de D-cache -- y los caminos lentos (`dcFill`/`dcFlush`/`dcMiss`, `spDma`) ya acotaban contra `rdram.size()`; lo que faltaba era la PRUEBA de que cada guarda se dispara y de que el dynarec no se separa del interprete al hacerlo. Nuevo `test/wildmem_test.cpp` (objetivo `wildmem_test`, dentro de `gate_all.sh`): 27 programas de invitado con direcciones imposibles -- desalineadas (`lw`/`lh`/`sw`/`ld`/`sd`/`lwc1`/`swc1`), pasadas del final de la RDRAM (incluida una `ld` a caballo del limite y la cima de ckseg0), kuseg y ksseg sin TLB, huecos de MMIO en kseg1, punteros de 64 bits NO canonicos (`0x12345678_80000000`, y ckseg0 sin extender signo) y los mismos limites con RDRAM de 4 MB. Cada caso corre dos veces sobre CPUs recien reseteadas, una a pasos del interprete y otra despachada por `jitTryBlock()`, y se comparan ExcCode, EPC, BadVAddr y el registro destino; ademas se exige el valor absoluto donde la semantica del VR4300 no admite discusion (AdEL=4 / AdES=5 con la VA salvaje entera en BadVAddr, TLBL=2 / TLBS=3 en los segmentos mapeados). Resultado: el dynarec corrio en los 27 (ninguno declinado) y coincide con el interprete en todos; ningun acceso salvaje toca al anfitrion.
-- ~~**Excepcion Watch de COP0 (ExcCode 23) sin implementar**~~ **CERRADA 2026-09-18** -- WatchLo(18)/WatchHi(19) se escribian y se leian pero no vigilaban nada: un invitado que armara el vigia no recibia jamas la excepcion. Ahora `CPU::watchTrip` compara la FISICA por doblepalabra (PAddr0 en WatchLo[31:3], R en el bit 1, W en el bit 0; PAddr1 en WatchHi[3:0], que en N64 solo puede ser 0 porque no hay nada por encima de 4 GB), es PRECISA (se toma ANTES de completar el acceso: ni el store llega a memoria ni el load al registro) y se DIFIERE con Status.EXL o ERL puestos, que es lo que evita que el propio vector se cuelgue sobre si mismo. Ganchos en los ocho `read*`/`write*` y tambien en los caminos que estan INLINE en el decodificador y no pasan por ellos (SB/SH/SW/SD, LL/LLD) -- ese fue el fallo que caza el test nuevo. SWL/SWR/SDL/SDR se implementan como lectura-modificacion-escritura pero en el bus son SOLO un store, asi que su lectura interna no dispara el vigia de lectura (`readNoWatch32/64`). Mientras el vigia esta armado el driver manda al interprete: el codigo emitido no compara cada direccion contra WatchLo, y es un booleano por bloque (`cpu.watchArmed`), que un juego normal nunca pone. De regalo, el test destapo que en CUALQUIER acceso abortado (AdE, TLB o Watch) el registro destino se escribia con el cero que devuelve `read*()`; en el hardware la instruccion no se completa y el registro se queda como estaba, asi que `set()` ahora respeta `memAbort`. Test nuevo `test/watch_test.cpp` (objetivo `watch_test`, dentro de `gate_all.sh`): 15 casos -- direccion, granularidad de doblepalabra, R contra W, cacheado y sin cachear, WatchHi imposible, diferido por EXL/ERL, mascaras de lectura de los dos registros y paridad con el dynarec.
-- ~~**`rspAwaitIdle()`** sin tope de espera~~ **CERRADO 2026-09-04**: las tres esperas del hilo de CPU sobre los workers (`rspAwaitIdle`, la de `rspSubmitKick` y `rdpDrain`) iban a `cv.wait` pelado, asi que un worker que dejara de publicar congelaba el emulador para siempre y **sin decir nada** -- ventana viva, juego quieto, indistinguible de lentitud. No se puede abandonar la espera (seguir sin el resultado corrompe el estado del invitado, y el hardware tampoco se cansa), asi que el tope no la rompe sino que la PARTE: `awaitReporting` espera en rondas de `KESTREL_RCPWAIT` ms (2000 por defecto, `=0` vuelve a la espera muda) y en cada vuelta imprime el estado del dominio -- del RSP ocupado/kick/corriendo, `sp_status`, `sp_pc`, PC de IMEM, ciclos publicados y tipo de OSTask; del RDP cola, ocupado y `dpc start/cur/end/status`. Con eso un cuelgue se lee de un vistazo: si PC y ciclos avanzan es una tarea larga, si estan clavados es el cuelgue de verdad.
+- ~~**Endurecer el camino `fastmem` del JIT**~~ **CERRADO 2026-09-04**: una direccion de invitado
+  salvaje debe dar excepcion de invitado, no una violacion de acceso del anfitrion. El camino rapido
+  del JIT (`src/cpu/jit.cpp`) ya llevaba las guardas -- canonica de ckseg0, alineacion, modo kernel,
+  `jitRdramSz`, guardia de escritura y etiqueta+valido de la linea de D-cache -- y los caminos
+  lentos (`dcFill`/`dcFlush`/`dcMiss`, `spDma`) ya acotaban contra `rdram.size()`; lo que faltaba
+  era la PRUEBA de que cada guarda se dispara y de que el dynarec no se separa del interprete al
+  hacerlo. Nuevo `test/wildmem_test.cpp` (objetivo `wildmem_test`, dentro de `gate_all.sh`): 27
+  programas de invitado con direcciones imposibles -- desalineadas
+  (`lw`/`lh`/`sw`/`ld`/`sd`/`lwc1`/`swc1`), pasadas del final de la RDRAM (incluida una `ld` a
+  caballo del limite y la cima de ckseg0), kuseg y ksseg sin TLB, huecos de MMIO en kseg1, punteros
+  de 64 bits NO canonicos (`0x12345678_80000000`, y ckseg0 sin extender signo) y los mismos limites
+  con RDRAM de 4 MB. Cada caso corre dos veces sobre CPUs recien reseteadas, una a pasos del
+  interprete y otra despachada por `jitTryBlock()`, y se comparan ExcCode, EPC, BadVAddr y el
+  registro destino; ademas se exige el valor absoluto donde la semantica del VR4300 no admite
+  discusion (AdEL=4 / AdES=5 con la VA salvaje entera en BadVAddr, TLBL=2 / TLBS=3 en los segmentos
+  mapeados). Resultado: el dynarec corrio en los 27 (ninguno declinado) y coincide con el interprete
+  en todos; ningun acceso salvaje toca al anfitrion.
+- ~~**Excepcion Watch de COP0 (ExcCode 23) sin implementar**~~ **CERRADA 2026-09-18** --
+  WatchLo(18)/WatchHi(19) se escribian y se leian pero no vigilaban nada: un invitado que armara el
+  vigia no recibia jamas la excepcion. Ahora `CPU::watchTrip` compara la FISICA por doblepalabra
+  (PAddr0 en WatchLo[31:3], R en el bit 1, W en el bit 0; PAddr1 en WatchHi[3:0], que en N64 solo
+  puede ser 0 porque no hay nada por encima de 4 GB), es PRECISA (se toma ANTES de completar el
+  acceso: ni el store llega a memoria ni el load al registro) y se DIFIERE con Status.EXL o ERL
+  puestos, que es lo que evita que el propio vector se cuelgue sobre si mismo. Ganchos en los ocho
+  `read*`/`write*` y tambien en los caminos que estan INLINE en el decodificador y no pasan por
+  ellos (SB/SH/SW/SD, LL/LLD) -- ese fue el fallo que caza el test nuevo. SWL/SWR/SDL/SDR se
+  implementan como lectura-modificacion-escritura pero en el bus son SOLO un store, asi que su
+  lectura interna no dispara el vigia de lectura (`readNoWatch32/64`). Mientras el vigia esta armado
+  el driver manda al interprete: el codigo emitido no compara cada direccion contra WatchLo, y es un
+  booleano por bloque (`cpu.watchArmed`), que un juego normal nunca pone. De regalo, el test destapo
+  que en CUALQUIER acceso abortado (AdE, TLB o Watch) el registro destino se escribia con el cero
+  que devuelve `read*()`; en el hardware la instruccion no se completa y el registro se queda como
+  estaba, asi que `set()` ahora respeta `memAbort`. Test nuevo `test/watch_test.cpp` (objetivo
+  `watch_test`, dentro de `gate_all.sh`): 15 casos -- direccion, granularidad de doblepalabra, R
+  contra W, cacheado y sin cachear, WatchHi imposible, diferido por EXL/ERL, mascaras de lectura de
+  los dos registros y paridad con el dynarec.
+- ~~**`rspAwaitIdle()`** sin tope de espera~~ **CERRADO 2026-09-04**: las tres esperas del hilo de
+  CPU sobre los workers (`rspAwaitIdle`, la de `rspSubmitKick` y `rdpDrain`) iban a `cv.wait`
+  pelado, asi que un worker que dejara de publicar congelaba el emulador para siempre y **sin decir
+  nada** -- ventana viva, juego quieto, indistinguible de lentitud. No se puede abandonar la espera
+  (seguir sin el resultado corrompe el estado del invitado, y el hardware tampoco se cansa), asi que
+  el tope no la rompe sino que la PARTE: `awaitReporting` espera en rondas de `KESTREL_RCPWAIT` ms
+  (2000 por defecto, `=0` vuelve a la espera muda) y en cada vuelta imprime el estado del dominio --
+  del RSP ocupado/kick/corriendo, `sp_status`, `sp_pc`, PC de IMEM, ciclos publicados y tipo de
+  OSTask; del RDP cola, ocupado y `dpc start/cur/end/status`. Con eso un cuelgue se lee de un
+  vistazo: si PC y ciclos avanzan es una tarea larga, si estan clavados es el cuelgue de verdad.
 - ~~`test/rsp_test.cpp:71` no compila~~ **CERRADO 2026-09-04**: era `sp_status` convertido en
   `std::atomic` cuando el RSP paso a hilo propio (copia implicita borrada) mas que el test
   esperaba que escribir CLEAR_HALT ejecutara el microcodigo, cuando en Lockstep esa escritura
@@ -700,7 +743,8 @@ por ser pequeña; se ordena por impacto, no se filtra.*
     4. **Recalibrar la base y rehacer el barrido** de "Que falta para mover el defecto" de mas
        arriba, entero (mas juegos, `KESTREL_AUDIOSTAT`, y el numero con un argumento).
        **Modelo fisico completo 2026-09-17** (perillas por fuente: I$ 48, D$ 44, sin cache 38,
-       MULT/DIV tabla NEC, FPU `block`, enclavamientos LDI/DCB; ver `docs/history/STATUS-2026.md`). Lockstep,
+       MULT/DIV tabla NEC, FPU `block`, enclavamientos LDI/DCB; ver `docs/history/STATUS-2026.md`).
+       Lockstep,
        Threaded e interprete dan lo mismo con cada perilla. **El defecto sigue sin moverse**:
        ninguna fuente (ares, libdragon, n64brew, cen64, NEC, SGI) da verdad de consola de campos
        por intercambio; falta la captura de HW.
@@ -724,15 +768,20 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 > `rspPace` 2,3 % · `rdpPace` 1,6 %. `dpBarrierWait` ha DESAPARECIDO de la cabeza.
 > Las tres primeras son `spBarrierWait` y sus inlinees: ~44 % del hilo, la mitad aritmetica.
 > **Y esa aritmetica no se cobra** -- memoizarla entera salio en nada medible en dos tandas
-> (ver `docs/history/STATUS-2026.md`, 2026-09-18). El hilo de CPU esta bloqueado esperando al RSP, asi que
+> (ver `docs/history/STATUS-2026.md`, 2026-09-18). El hilo de CPU esta bloqueado esperando al RSP,
+> asi que
 > su trabajo local es gratis: en este hilo solo paga quitar TRAFICO DE COHERENCIA (que es lo
 > que hizo `KESTREL_PACEASK`, -2,5 % en PD) o quitar BLOQUEO. Las muestras, por si solas,
 > enganan.
-> **Y EL PALO LARGO NO ES ESE HILO.** Perfilado el mismo dia el hilo del RSP (`KESTREL_HOSTPROF_WHO=rsp`,
-> Perfect Dark, 600 campos): esta ocupado el 63,4 % del tiempo, contra un `cpuWait` del 7,5 %. De sus
+> **Y EL PALO LARGO NO ES ESE HILO.** Perfilado el mismo dia el hilo del RSP
+> (`KESTREL_HOSTPROF_WHO=rsp`,
+> Perfect Dark, 600 campos): esta ocupado el 63,4 % del tiempo, contra un `cpuWait` del 7,5 %. De
+> sus
 > muestras ~38 % caen en `dpLogWait` (17,9 % dentro de imagen + 20,3 % FUERA, que es
-> `std::this_thread::yield()`) y ~15,6 % en `spReadSync`. Las `1 807 544 esperas` del `[dplog]` son las
-> ~1,81 M lecturas de DPC que hace el microcodigo, y cada una es una cita de orden de invitado con la CPU
+> `std::this_thread::yield()`) y ~15,6 % en `spReadSync`. Las `1 807 544 esperas` del `[dplog]` son
+> las
+> ~1,81 M lecturas de DPC que hace el microcodigo, y cada una es una cita de orden de invitado con
+> la CPU
 > (`Rsp::mfc0`): la cita es SEMANTICA, no se puede quitar. Lo que si se puede es abaratarla -- ver
 > `KESTREL_RDVYIELD` abajo.
 
@@ -842,7 +891,10 @@ Por ahi va el orden nuevo:
   Ese 7 % es la lectura de `rspBusy` y `rsp.cyclesRun`, dos lineas que el worker del RSP
   reescribe sin parar -- fallo de cache compartida, inherente al acoplamiento CPU-RCP. `paceGrant`
   ya las lee una sola vez por vuelta y `kPaceGrain` ya evita la cola de permisos que encogen.
-  **PARTE COBRADA 2026-09-18**: no se puede abaratar la lectura, pero si hacerla menos veces. El camino del JIT preguntaba al freno tras CADA bloque mientras el del interprete lo hacia cada 64 instrucciones; con `KESTREL_PACEASK` puesto a 1024 (meseta medida) el barrido intercalado da PD -2,5 %, SM64 -1,4 %, jr -1,1 %, DK64 -0,3 %, mismo md5. Ver `docs/history/STATUS-2026.md`.
+  **PARTE COBRADA 2026-09-18**: no se puede abaratar la lectura, pero si hacerla menos veces. El
+  camino del JIT preguntaba al freno tras CADA bloque mientras el del interprete lo hacia cada 64
+  instrucciones; con `KESTREL_PACEASK` puesto a 1024 (meseta medida) el barrido intercalado da PD
+  -2,5 %, SM64 -1,4 %, jr -1,1 %, DK64 -0,3 %, mismo md5. Ver `docs/history/STATUS-2026.md`.
 - **Coste de `rdpSubmit`, desglosado (2026-09-18).** Con `KESTREL_DPSUBPROF=1` el emulador saca
   `[dpsnap]`, que parte la llamada en sus piezas. SM64 300 campos, Parallel-RDP + threaded-jit:
   **519 603 envios para 518 473 comandos**, o sea el microcodigo escribe `DPC_END` una vez por
@@ -919,7 +971,8 @@ Por ahi va el orden nuevo:
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.
 - **Comparativa de velocidad kestrel64 contra ares, rehecha** (abierto 2026-10-24,
   **agendado martes 2026-10-27**). La unica medida de los dos lado a lado es de 2026-08-20
-  (`docs/history/STATUS-2026.md`, "Velocidad honesta": threaded-jit 37,5 % de tiempo real con SoftRDP frente a
+  (`docs/history/STATUS-2026.md`, "Velocidad honesta": threaded-jit 37,5 % de tiempo real con
+  SoftRDP frente a
   ares 50-65 %). Desde entonces solo se ha medido kestrel (PD 1,12x en juego 2026-09-24, PGO
   -7..-8,6 %, JIT L2, GPU-RDP de fabrica); la fidelidad si esta comparada (2026-10-07,
   `docs/baselines/timings.md`). Metodo: mismo anfitrion (i7-870 + RX570), mismas tres ROMs
@@ -1156,7 +1209,8 @@ vuelve en la 56 con los cinco primeros bytes. Las mascaras de byte que aparecen 
 `0xFF`, `0xF8`, `0x80` y `0x01` sobre palabras de 64 bits. Ningun juego dibuja triangulos en
 FILL (usan rectangulos), asi que esto es curiosidad de precision, no funcionalidad.
 
-Como se reproduce en el emulador: `KESTREL_NOVIDEO=1 KESTREL_PADS=1`, arrancar con `--run`, y por telemetria
+Como se reproduce en el emulador: `KESTREL_NOVIDEO=1 KESTREL_PADS=1`, arrancar con `--run`, y por
+telemetria
 escribir en el `ctx` global de snapper64 (se localiza barriendo la RDRAM fisica buscando
 `SAVE_DATA_MAGIC = 0xABCD02` en big-endian): `ctx.nextTest = <grupo>` entra directo a ese
 grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode` 0..5 recorre
@@ -1166,14 +1220,34 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
 ### Interfaz / herramientas
 
 - Modelo de mando 3D (el analógico como plano de mando, no como par de ejes).
-- Huecos del lanzador: puntos de ruptura del RSP: **CERRADO 2026-10-23**, MCP `rsp.bp.add/del/list` (ver `docs/DEBUGGER.md`; prueba `scripts/rspbp_smoke.py`). (Puntos de observación: **CERRADO 2026-10-23**, MCP `mem.watch` + panel Memoria del depurador.)
-- **Depurador (2026-10-23)**: capas estilo ares reimplementadas (grabadora RDP/RSP, línea de tiempo, TMEM, TLB, eventos RCP, USB SC64) por MCP y ventana ImGui; ver `docs/DEBUGGER.md`.
-- Recarga en caliente fase 2: `code.load`/`rsp.load`/`rom.load` hechos; falta parchear funciones sin reiniciar (protocolo deployer SC64 por USB + invalidación del JIT por rango, `jitInvalidate`).
-- **Retirar el lanzador (`kestrel64-gui.exe`): llevar al exe lo que solo tiene él** (anotado 2026-10-24). Objetivo: el paquete con un solo programa, sin Python congelado. Inventario por grep de `src/ui/` (a confirmar al empezar):
-  - YA en el exe: barra de menú con el MISMO catálogo de opciones (`options.py` -> `optdefs.cpp`, mismo `profile.json`), biblioteca con carátulas y carrusel 3D (`library_win32.cpp`), editor del mapa de mando (diálogo de captura de teclas), depurador ImGui (cubre las pestañas CPU/RCP/RSP/perfilador de la ventana de telemetría).
-  - ~~FALTA en el exe: ficha de juego, pestaña Estado, `select_action`~~ **CERRADO 2026-10-24**: `src/ui/gamecard.{hpp,cpp}` + `gamecard_win32.cpp` (Info/Manual/Trucos/Partidas, mismos ficheros que el lanzador, prueba `test/gamecard_test.cpp`), partidas jugadas apuntadas por `main.cpp`, `select_action` en biblioteca y menú, resumen de Estado en el panel Control del depurador. Extra solo del exe: fuente de manuales configurable por el usuario (índice CSV estilo MiSTer, sin fuente de fábrica). Detalle en `docs/LAUNCHER.md` "Ficha de juego en el exe".
-  - NO se porta (solo lanzador web): **temas** CSS y el mando/caja/cartucho **3D en WebGL** (`scene3d.js`/`models.js`); el exe dibuja el mando en 2D (GDI) y el carrusel es de carátulas planas.
-  - ~~Pendientes heredados de `docs/LAUNCHER.md` "Qué falta": mandos 2-4 y cambiar opciones en caliente sin reiniciar.~~ **CERRADO 2026-10-30**: los mandos 2-4 ya estaban (GAPS #1, 2026-09-04); en caliente pasan ademas trucos, rebobinado y texturas HD/realce/volcado (STATUS 2026-10-30). Siguen pidiendo relanzar las que montan la maquina (CPU/JIT, RCP, RDRAM, tipo de guardado, rasterizador, escalado interno, overclock).
+- Huecos del lanzador: puntos de ruptura del RSP: **CERRADO 2026-10-23**, MCP `rsp.bp.add/del/list`
+  (ver `docs/DEBUGGER.md`; prueba `scripts/rspbp_smoke.py`). (Puntos de observación: **CERRADO
+  2026-10-23**, MCP `mem.watch` + panel Memoria del depurador.)
+- **Depurador (2026-10-23)**: capas estilo ares reimplementadas (grabadora RDP/RSP, línea de tiempo,
+  TMEM, TLB, eventos RCP, USB SC64) por MCP y ventana ImGui; ver `docs/DEBUGGER.md`.
+- Recarga en caliente fase 2: `code.load`/`rsp.load`/`rom.load` hechos; falta parchear funciones sin
+  reiniciar (protocolo deployer SC64 por USB + invalidación del JIT por rango, `jitInvalidate`).
+- **Retirar el lanzador (`kestrel64-gui.exe`): llevar al exe lo que solo tiene él** (anotado
+  2026-10-24). Objetivo: el paquete con un solo programa, sin Python congelado. Inventario por grep
+  de `src/ui/` (a confirmar al empezar):
+  - YA en el exe: barra de menú con el MISMO catálogo de opciones (`options.py` -> `optdefs.cpp`,
+    mismo `profile.json`), biblioteca con carátulas y carrusel 3D (`library_win32.cpp`), editor del
+    mapa de mando (diálogo de captura de teclas), depurador ImGui (cubre las pestañas
+    CPU/RCP/RSP/perfilador de la ventana de telemetría).
+  - ~~FALTA en el exe: ficha de juego, pestaña Estado, `select_action`~~ **CERRADO 2026-10-24**:
+    `src/ui/gamecard.{hpp,cpp}` + `gamecard_win32.cpp` (Info/Manual/Trucos/Partidas, mismos ficheros
+    que el lanzador, prueba `test/gamecard_test.cpp`), partidas jugadas apuntadas por `main.cpp`,
+    `select_action` en biblioteca y menú, resumen de Estado en el panel Control del depurador. Extra
+    solo del exe: fuente de manuales configurable por el usuario (índice CSV estilo MiSTer, sin
+    fuente de fábrica). Detalle en `docs/LAUNCHER.md` "Ficha de juego en el exe".
+  - NO se porta (solo lanzador web): **temas** CSS y el mando/caja/cartucho **3D en WebGL**
+    (`scene3d.js`/`models.js`); el exe dibuja el mando en 2D (GDI) y el carrusel es de carátulas
+    planas.
+  - ~~Pendientes heredados de `docs/LAUNCHER.md` "Qué falta": mandos 2-4 y cambiar opciones en
+    caliente sin reiniciar.~~ **CERRADO 2026-10-30**: los mandos 2-4 ya estaban (GAPS #1,
+    2026-09-04); en caliente pasan ademas trucos, rebobinado y texturas HD/realce/volcado (STATUS
+    2026-10-30). Siguen pidiendo relanzar las que montan la maquina (CPU/JIT, RCP, RDRAM, tipo de
+    guardado, rasterizador, escalado interno, overclock).
 
 ---
 
@@ -1230,7 +1304,8 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
    corridas identicas sin coste (74 intercambios / 56 syncs / 402M) y 3 de 3 con `CACHECOST=60`
    (76 / 31 / 320M; antes del cambio 74 / 31 / 316M, tambien 3 de 3 -- el RSP recibe ahora los
    pasos que le tocan durante las paradas). Threaded no se puede comparar corrida a corrida
-   porque no era determinista de base: ver 3b (resuelto el 2026-09-10). Puertas verdes: `gate_all` rc=0 y `gate_prdp`
+   porque no era determinista de base: ver 3b (resuelto el 2026-09-10). Puertas verdes: `gate_all`
+   rc=0 y `gate_prdp`
    rc=0, siete modos `Base 0/3721 Timing 0/2 Cycle 0/6`, md5 de sm64 sin cambio en interp y en
    parallel-RDP.
 
@@ -1324,7 +1399,7 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
      el bucle de espera de F3DEX2 no tiene efecto lateral y con el motor drenado `DPC_CURRENT`
      es constante, el RSP se aparca (`Rsp::idleSkip` + `Memory::rspParkWait`), la CPU corre
      libre, y lo despierta el `kick` del tramo siguiente -- instante de invitado -- cobrandole
-     las iteraciones enteras que caben. Detalle completo en `docs/wip/README.md`.
+     las iteraciones enteras que caben. Detalle completo en `docs/history/SUBSCHED-2026-09.md`.
 
    Medida final, DK64 PAL 300 campos, traza por campo entera: `build-prdp/` Threaded **6/6**
    byte-identico (md5 `d3bee5263f26e4dca3519e277220e090`, columna `rsp=` incluida), `build/`
@@ -1365,7 +1440,8 @@ para el planificador de eventos con marca de tiempo que esta pendiente de escrib
 ## Medida de la FPU, ya con el coste de cache funcionando (2026-09-10)
 
 Hasta hoy no se podia medir: SM64 se colgaba con `KESTREL_CACHECOST` encendido (ver el fallo de
-los dos relojes en `docs/history/STATUS-2026.md`). Arreglado eso, tanda de 600 campos de video con JIT,
+los dos relojes en `docs/history/STATUS-2026.md`). Arreglado eso, tanda de 600 campos de video con
+JIT,
 `CACHECOST=60`, `FPUCOST=stat` contra `block`:
 
 | Juego | modo | fallos D$ | ops FP / retiradas | ciclos parados / retiradas | CPI con base 1,0 |
@@ -1426,7 +1502,8 @@ ninguna (`KESTREL_RDPGENS`, `[dpgen]`). Ocho corridas identicas bit a bit contra
 divergian. **Cierre confirmado en el punto original de fallo** (2026-09-18):
 cuatro corridas de 3e9 instrucciones con `KESTREL_PRDP=1`, dos en Lockstep y dos en
 Threaded, dan el MISMO `[statehash] 17c2962b082d80b9` -- o sea Threaded ya da el valor del
-oraculo, no solo un valor estable. Detalle completo en `docs/history/STATUS-2026.md` (2026-09-18). Se deja debajo el rastro de la
+oraculo, no solo un valor estable. Detalle completo en `docs/history/STATUS-2026.md` (2026-09-18).
+Se deja debajo el rastro de la
 investigacion porque los descartes siguen valiendo.
 
 
@@ -1502,7 +1579,8 @@ es eso.
 
 ### El fallo del centinela del JIT era UNA causa, no LA causa (2026-09-18)
 
-Arreglado el `kNoLink` (ver `docs/history/STATUS-2026.md`), el corte de cuatro brazos a 1200 campos sale
+Arreglado el `kNoLink` (ver `docs/history/STATUS-2026.md`), el corte de cuatro brazos a 1200 campos
+sale
 **limpio en los cuatro**, tres corridas cada uno, rastro `[ft]` identico linea a linea:
 
 | brazo | corridas | 1 vs 2 | 1 vs 3 |
@@ -1564,7 +1642,8 @@ coste y oraculo de diagnostico. Se arregla cuando toque la fase de precision del
 
 ## El estado guardado del banco de Perfect Dark en juego ya no carga (2026-09-24)
 
-La medida "PD en juego" de STATUS sale de cargar la ranura 0 de `Perfect Dark (Europe) (En,Fr,De,It).st0`
+La medida "PD en juego" de STATUS sale de cargar la ranura 0 de `Perfect Dark (Europe)
+(En,Fr,De,It).st0`
 (`KESTREL_LOADSTATE=0` + `KESTREL_MAXFLIPS=1793`). Hoy esa corrida imprime `[state] estado
 cargado de ranura 0` y acto seguido descarrila:
 
