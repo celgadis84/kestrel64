@@ -178,7 +178,8 @@ KSEG0/KSEG1, así que en cuanto uno deja de serlo el error *acaba* de ocurrir).
   acumulador de 48 bits, banderas VCO/VCC/VCE, los recíprocos VRCP/VRSQ con su tabla, y todos
   los modos de elemento (broadcast) con máscaras `pshufb`.
   La semántica de decodificación sale de la referencia de opcodes de n64brew
-  (`docs/wiki/n64brew`); los casos límite de acumulador, saturación y banderas están
+  (https://n64brew.dev/wiki/Reality_Signal_Processor/CPU_Core; copia local con
+  `scripts/fetch_wikis.py`); los casos límite de acumulador, saturación y banderas están
   transcritos de la referencia SISD validada contra hardware, no reinventados.
 - **Camino SSE** para COP2 (`KESTREL_NORSPSSE`, `KESTREL_NOVECFAST` lo apagan).
 - DMA (SP_RD_LEN/SP_WR_LEN) con su grano y su registro (`KESTREL_DMAGRAIN`, `KESTREL_DMALOG`).

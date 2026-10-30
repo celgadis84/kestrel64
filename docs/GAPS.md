@@ -1640,26 +1640,6 @@ No bloquea: el backend por defecto es parallel-rdp por orden expresa del usuario
 ("NO quiero nada de SoftRDP, la idea es Parallel-RDP"). SoftRDP se queda como modelo de
 coste y oraculo de diagnostico. Se arregla cuando toque la fase de precision del RDP propio.
 
-## El estado guardado del banco de Perfect Dark en juego ya no carga (2026-09-24)
-
-La medida "PD en juego" de STATUS sale de cargar la ranura 0 de `Perfect Dark (Europe)
-(En,Fr,De,It).st0`
-(`KESTREL_LOADSTATE=0` + `KESTREL_MAXFLIPS=1793`). Hoy esa corrida imprime `[state] estado
-cargado de ranura 0` y acto seguido descarrila:
-
-```
-[RI] op cfffcfff (op.33) @ pc=70015de4 -> Reserved Instruction
-```
-
-y se queda dando vueltas sin llegar nunca al tope de intercambios (una corrida se comio 330 s).
-**Pasa igual con el binario de HEAD sin ningun cambio encima**, o sea que es la foto la que ya
-no casa con el formato/semantica de hoy, no una regresion de un cambio reciente. Mientras no se
-vuelva a capturar, la cifra de "PD en juego" no se puede reproducir; las comparaciones de pared
-de esta tanda se hicieron con PD desde el arranque (300 intercambios) y con SM64/DK64 en `bench`.
-
-Pendiente: recapturar la foto con el binario actual (o llegar al nivel con `scripts/pad.py` /
-escritura directa de `g_MissionConfig`, ver `docs/PD-GAMEPLAY.md`) y anotar la ranura nueva.
-
 ## El reparto diario/cita del DMA del SP depende del anfitrion (2026-09-24)
 
 `Memory::spDmaLogPush` decide si un DMA SP->RDRAM se apunta en el diario o se resuelve con la

@@ -12,7 +12,8 @@
 // the HLE "instant task completion" stub produced zero RDP commands. This core
 // replaces that stub so real pixels flow.
 //
-// Semantics follow the n64brew wiki opcode reference (docs/wiki/n64brew) for the
+// Semantics follow the n64brew wiki opcode reference
+// (https://n64brew.dev/wiki/Reality_Signal_Processor/CPU_Core) for the
 // decode/encoding and the fixed-point definitions; the exact accumulator /
 // clamp / flag corner cases match the hardware-validated ares SISD reference.
 // The vector math IS the hardware behaviour, transcribed rather than reinvented.

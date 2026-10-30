@@ -100,5 +100,10 @@ marked *(EN)* are in English.
 
 - [baselines/](baselines/) — hashes y tiempos de referencia de las puertas (`timings.md`,
   `sm64.txt`, `krom-*.tsv`, `pd-opt.md`). Gate reference hashes and timings.
-- [wiki/](wiki/) *(EN)* — copias de páginas de wikis de la comunidad N64 (libdragon, n64brew)
-  usadas como referencia. Copies of N64 community wiki pages used as reference.
+- Wikis de la comunidad N64 usadas como referencia *(EN)*: [libdragon](https://github.com/DragonMinded/libdragon/wiki)
+  y [n64brew](https://n64brew.dev/wiki/) (sobre todo
+  [RSP](https://n64brew.dev/wiki/Reality_Signal_Processor) y
+  [RDP](https://n64brew.dev/wiki/Reality_Display_Processor)). No se versionan copias;
+  `python scripts/fetch_wikis.py` las baja a `docs/wiki/` (ignorado).
+  N64 community wikis used as reference. No copies are versioned; `scripts/fetch_wikis.py`
+  downloads them into `docs/wiki/` (git-ignored).

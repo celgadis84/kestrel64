@@ -5,6 +5,11 @@ out/
 CMakeFiles/
 CMakeCache.txt
 
+# Copias locales de wikis publicas (scripts/fetch_wikis.py) y notas locales que nombran
+# ficheros de juegos comerciales
+docs/wiki/
+docs/local/
+
 # ROMs and dumps (never commit copyrighted images)
 *.z64
 *.n64
