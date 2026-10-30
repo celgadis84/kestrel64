@@ -66,6 +66,24 @@ que seas duenno.
    Licencia MIT (SPDX: MIT). Texto completo en la seccion A y en
    third_party/imgui/LICENSE.txt.
 
+9. ares -- solo la funcion de la suma de arranque IPL2 del PIF/CIC (ipl2Checksum),
+   transcrita en src/core/cic.hpp desde mia/medium/nintendo-64.cpp.
+   Copyright (c) 2004-2025 ares team, Near et al
+   https://github.com/ares-emulator/ares
+   Licencia ISC (SPDX: ISC):
+
+   Permission to use, copy, modify, and/or distribute this software for any
+   purpose with or without fee is hereby granted, provided that the above
+   copyright notice and this permission notice appear in all copies.
+
+   THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+   WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+   MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+   OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 
 Nota sobre las FUENTES de documentacion. El emulador esta escrito contra la
 documentacion publica de hardware de n64brew, n64.dev, la wiki de libdragon y el
@@ -75,7 +93,7 @@ como otros emuladores (ares, cen64, angrylion, Project64) documentan un detalle
 concreto -- un numero de ciclos, la expansion de 5 a 8 bits de un canal, la tabla
 de longitudes de comando del RDP. Son CITAS de comportamiento de hardware, que es
 un hecho y no una obra: no se ha copiado codigo de esos proyectos, y ninguno de
-ellos entra en el binario.
+ellos entra en el binario, salvo la suma IPL2 de ares de la entrada 9.
 
 Nota sobre los MODELOS 3D del lanzador (mando y cartucho). La geometria se genera en
 codigo (tools/launcher/web/models.js); sus medidas (contorno, alturas de las caras,
