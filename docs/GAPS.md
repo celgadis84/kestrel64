@@ -1248,6 +1248,15 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
     2026-09-04); en caliente pasan ademas trucos, rebobinado y texturas HD/realce/volcado (STATUS
     2026-10-30). Siguen pidiendo relanzar las que montan la maquina (CPU/JIT, RCP, RDRAM, tipo de
     guardado, rasterizador, escalado interno, overclock).
+- **Contador de ciclos del RSP por tipo de tarea** (anotado 2026-11-01, peticion de la sesion
+  SDK). Hoy `prof.rsp` y `KESTREL_RSP_TIMING` reparten por ranura de IMEM, sin saber de que tarea
+  viene cada ciclo; solo `reportRspStall` (`memory.cpp`) lee el tipo de OSTask en DMEM 0xFC0
+  (1 = grafica, 2 = audio). Falta: al arrancar cada tarea (SP_STATUS halt -> run) leer ese tipo y
+  acumular ciclos (y paradas con el modelo de tiempo) en un cubo por tipo, expuesto por MCP
+  (`rsp.taskstats` o campo en `rsp_registers`) y reiniciable con `profile_reset`. Uso: comparar
+  el tiempo de RSP del audio mezclado dentro del microcodigo grafico propio del SDK frente al
+  microcodigo de audio estandar (aspMain) en tareas separadas. Prueba minima: una ROM con ambas
+  clases de tarea, suma de cubos == ciclos totales del RSP.
 
 ---
 
