@@ -129,7 +129,6 @@ auto Memory::mmioRead32(u32 a) -> u32 {
       // rapido que el campo y la deriva se acumulaba entre campos: a los ~100 campos MI_VI
       // subia al cruzar V_INTR = 2 y V_CURRENT, leido 93 ops despues, ya valia 11 (libdragon:
       // "VI WARNING: __vblank_interrupt outside of vblank period: 12").
-      u32 total = rcp.viHalflines();
       u64 field = viFieldInsns ? viFieldInsns : 1;
       u64 cyc = cartNow();   // mismo reloj de invitado que viTick (incluye paradas de cache)
       return rcp.viCurrentAt(cyc, field);

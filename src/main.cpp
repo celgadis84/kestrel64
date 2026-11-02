@@ -37,7 +37,7 @@ extern "C" void __llvm_profile_reset_counters(void);
 
 // Nombre corto de la ROM, sin carpeta ni extension: con el se nombra el .profraw para que una
 // carpeta de capturas diga de un vistazo de que juego salio cada una.
-static auto romStem(const std::string& path) -> std::string {
+[[maybe_unused]] static auto romStem(const std::string& path) -> std::string {
   std::string::size_type a = path.find_last_of("/\\");
   std::string s = (a == std::string::npos) ? path : path.substr(a + 1);
   std::string::size_type d = s.find_last_of('.');

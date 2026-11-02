@@ -72,7 +72,6 @@ struct VuStat {
   ~VuStat() {
     if(!on || !total) return;
     std::fprintf(stderr, "[vustat] %llu instrucciones de RSP\n", (unsigned long long)total);
-    static const char* majName[64] = {0};
     for(int i = 0; i < 64; i++) if(maj[i])
       std::fprintf(stderr, "[vustat] op mayor %02x  %6.2f%%  %llu\n", i,
                    100.0 * maj[i] / total, (unsigned long long)maj[i]);
