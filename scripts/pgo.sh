@@ -25,6 +25,11 @@
 # Cuando rehacerlo: tras un cambio grande de codigo caliente. Un perfil viejo NO rompe nada
 # -- clang avisa con -Wno-profile-instr-out-of-date y sigue -- solo rinde menos.
 #
+# Generarlo SIEMPRE en el checkout que compila la release, no en un worktree: las funciones
+# de enlace interno (static, espacio anonimo, lambdas) entran en el perfil con la RUTA
+# ABSOLUTA del fuente, y desde otra ruta no casan y se compilan sin perfil sin avisar
+# (-Wno-profile-instr-unprofiled). Comprobar: llvm-profdata show --all-functions | grep <ruta>.
+#
 # El binario instrumentado va un 24 % mas lento (PD en juego: 7377 ms contra 5951 ms), o sea
 # 0,90x tiempo real en el juego mas apretado y de sobra en los demas. Se juega bien para
 # capturar; NO es el binario que se distribuye.

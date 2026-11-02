@@ -484,3 +484,11 @@ else()
   find_package(Threads REQUIRED)
   target_link_libraries(kestrel64 PRIVATE Threads::Threads)
 endif()
+
+# PGO: el perfil se aplica al COMPILAR cada objeto, pero ninja no sabe que dependen de el:
+# sin esto, cambiar el .profdata solo recompilaba los fuentes tocados y el resto seguia con
+# el perfil viejo (mismo exe, mismo md5). Va al final para ver todas las target_sources.
+if(NOT MSVC AND KESTREL_PGO STREQUAL "use")
+  get_target_property(_k64src kestrel64 SOURCES)
+  set_source_files_properties(${_k64src} PROPERTIES OBJECT_DEPENDS "${KESTREL_PGO_DATA}")
+endif()
