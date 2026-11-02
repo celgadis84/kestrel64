@@ -72,7 +72,7 @@ auto Memory::rdpPublishCurrent(u32 fallback) -> void {
 
 // Cobrar el trabajo del RDP cuando quien rasteriza es la GPU.
 //
-// parallel-rdp dibuja en la tarjeta grafica y no tiene forma de decirle al invitado lo que
+// GPU-RDP dibuja en la tarjeta grafica y no tiene forma de decirle al invitado lo que
 // aquello habria costado en la consola: el reloj de coste (rcp.rdpGclk) y DPC_CLOCK solo los
 // alimenta SoftRdp::accountPixels. Sin esto, con la GPU activa el RDP le sale GRATIS al
 // juego: DPC_CLOCK clavado a cero -- que es un registro que los juegos LEEN para medirse --

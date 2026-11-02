@@ -82,8 +82,7 @@ empeora. Medido sobre las 371 ROM con el filtro puesto en el volcado:
 
 El de-dither es el que mas se nota (RSPGradient es un degradado con dithering: el filtro
 hace justo lo que dice y la referencia no lo lleva). `KESTREL_VIFILTER=1` lo mete en el
-volcado para poder repetir esta comparacion. Con `KESTREL_PRDP=1` tampoco entra por otro
-motivo: parallel-rdp trae su propio VI.
+volcado para poder repetir esta comparacion.
 
 **Desviacion consciente del oraculo**: parallel-rdp expande RGBA5551 a 8 bits con
 `(v << 3) & 0xf8` (bits bajos a cero) y arregla el brillo mas tarde con la gamma; kestrel

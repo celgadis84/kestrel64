@@ -3,7 +3,7 @@
 Lanza una ROM con ventana (--play) y la redimensiona varias veces por Win32 (y la minimiza y
 restaura). Veredicto: el proceso sigue vivo, hay lineas "[video] swapchain recreado ... ok=1"
 y ninguna ok=0 tras la ultima restauracion.
-Uso: python scripts/swapchain_smoke.py [--exe build-prdp/kestrel64.exe] [--port 9173]
+Uso: python scripts/swapchain_smoke.py [--exe build-gpu/kestrel64.exe] [--port 9173]
 """
 import romcfg  # configuracion local: scripts/local.env
 import argparse, ctypes, os, subprocess, sys, time
@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ap = argparse.ArgumentParser()
-ap.add_argument("--exe", default=str(ROOT / "build-prdp" / "kestrel64.exe"))
+ap.add_argument("--exe", default=str(ROOT / "build-gpu" / "kestrel64.exe"))
 ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
 ap.add_argument("--port", type=int, default=9173)
 ap.add_argument("--log", default="swapchain_smoke.log")
@@ -50,7 +50,7 @@ def find_hwnd(pid):
 ok = False
 try:
     h = None
-    for _ in range(150):   # hasta 30 s: build-prdp tarda en crear el dispositivo Vulkan
+    for _ in range(150):   # hasta 30 s: build-gpu tarda en crear el dispositivo Vulkan
         h = find_hwnd(p.pid)
         if h: break
         time.sleep(0.2)

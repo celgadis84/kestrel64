@@ -89,13 +89,13 @@ def main():
     ap.add_argument("--runs", type=int, default=6)
     ap.add_argument("--minutes", type=float, default=5.0)
     ap.add_argument("--period", type=float, default=3.0)
-    ap.add_argument("--exe", default=os.path.join(ROOT, "build-prdp", "kestrel64.exe"))
-    ap.add_argument("--prdp", type=int, default=1)
+    ap.add_argument("--exe", default=os.path.join(ROOT, "build-gpu", "kestrel64.exe"))
+    ap.add_argument("--gpurdp", type=int, default=1)
     ap.add_argument("--intro", type=float, default=10.0,
                     help="segundos antes de pulsar START para saltar la intro rapeada")
     args = ap.parse_args()
     env = dict(os.environ)
-    if args.prdp: env["KESTREL_PRDP"] = "1"
+    env["KESTREL_GPURDP"] = "1" if args.gpurdp else "0"
     # El .exe de GPU carga DLL del toolchain: sin este PATH arranca y muere sin decir nada.
     env["PATH"] = r"C:\msys64\clang64\bin;" + env.get("PATH", "")
     for i in range(args.runs):

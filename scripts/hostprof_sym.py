@@ -2,7 +2,7 @@
 """Agrega un volcado crudo de hostprof por funcion.
 
     KESTREL_HOSTPROF=1 KESTREL_HOSTPROF_WHO=cpu KESTREL_HOSTPROF_OUT=prof.txt ./kestrel64.exe ...
-    python scripts/hostprof_sym.py prof.txt build-prof-prdp/kestrel64.exe
+    python scripts/hostprof_sym.py prof.txt build-prof-gpu/kestrel64.exe
 
 El perfilador solo sabe de cubos de 16 bytes dentro de la imagen; una funcion caliente sale
 repartida en veinte lineas del 1%. Aqui se simboliza el histograma entero con

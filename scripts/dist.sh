@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 
 BUILD="${1:-}"
 if [ -z "$BUILD" ]; then
-  for b in build-prdp-static build-static build-prdp build; do
+  for b in build-gpu-static build-static build-gpu build; do
     [ -x "$b/kestrel64.exe" ] && { BUILD=$b; break; }
   done
 fi
@@ -41,10 +41,10 @@ cp THIRD-PARTY.txt "$OUT/"
 rm -f "$OUT/kestrel64-soft.exe" "$OUT/kestrel64-soft.build"
 
 # Que backend grafico lleva dentro el .exe se decidio con cmake y desde fuera no se ve.
-# El lanzador lo necesita para saber si tiene sentido pasarle KESTREL_PRDP, asi que se
+# El lanzador lo necesita para saber si tiene sentido pasarle KESTREL_GPURDP, asi que se
 # deja anotado aqui, que es el unico sitio que conoce el dir de build de origen.
 case "$BUILD" in
-  *prdp*) echo prdp > "$OUT/kestrel64.build" ;;
+  *gpu*)  echo gpu > "$OUT/kestrel64.build" ;;
   *)      echo soft > "$OUT/kestrel64.build" ;;
 esac
 

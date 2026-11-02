@@ -848,7 +848,7 @@ auto panelTmem() -> void {
   static Ticker tk;
   if(!ImGui::Begin("TMEM", &showTmem)) { ImGui::End(); return; }
   bool reload = ImGui::Button("Leer");
-  ImGui::SameLine(); ImGui::TextDisabled("Copia de SoftRDP: con parallel-RDP puede estar vieja.");
+  ImGui::SameLine(); ImGui::TextDisabled("Copia de SoftRDP (GPU-RDP la decodifica igual).");
   if(reload || tk.due(1.0) || g_dirty) r = Q("dbg.tmem");
   if(!r.ok) { ImGui::TextColored(ImVec4(1, .4f, .4f, 1), "%s", r.err.c_str()); ImGui::End(); return; }
   const auto& tiles = arr(r.data.get("tiles"));

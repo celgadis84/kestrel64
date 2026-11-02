@@ -29,7 +29,7 @@ Medido en SM64, 200 intercambios de buffer, SoftRDP, sin video ni audio, dos tan
 | cada 6 campos | 5526 / 5420 ms | **+24 %** |
 
 **Actualizado 2026-09-30 (diferencia en caliente, ver abajo)**, SM64 400 intercambios,
-Parallel-RDP, Threaded+JIT, tres tandas intercaladas:
+Threaded+JIT (con el rasterizador Parallel-RDP, ya retirado), tres tandas intercaladas:
 
 | Rebobinado (cada 2 campos) | Pared | Frente a apagado | Por foto |
 |---|---|---|---|
@@ -88,7 +88,7 @@ del estado vivo, una de la foto, y solo se escribe lo que cambio. **4,8 ms por f
   pasos).
 - `KESTREL_REWIND_RTT=1` sigue por el camino viejo: necesita la foto entera para recargarla.
 - `KESTREL_REWIND_NOSINK=1` vuelve al camino viejo para A/B. Las dos dan el MISMO estado
-  byte a byte (comprobado con `scripts/rewind_e2e.py` en SoftRDP y Parallel-RDP).
+  byte a byte (comprobado con `scripts/rewind_e2e.py` en SoftRDP).
 
 Lo que queda es ancho de banda de memoria (~16 MB comparados por foto). Bajarlo mas pide el
 mapa de paginas sucias de `docs/GAPS.md`, con el riesgo que se explica alli.

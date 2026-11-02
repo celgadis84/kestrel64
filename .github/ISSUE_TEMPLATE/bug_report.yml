@@ -20,7 +20,7 @@ body:
       label: How to reproduce
       description: Game, where in the game, and the exact command line you ran.
       placeholder: |
-        KESTREL_PRDP=0 ./kestrel64.exe "game.z64" --run
+        KESTREL_GPURDP=0 ./kestrel64.exe "game.z64" --run
     validations:
       required: true
   - type: input
@@ -28,7 +28,7 @@ body:
     attributes:
       label: KESTREL_* environment variables
       description: Paste the whole set you had exported. Most behaviour here is knob-dependent.
-      placeholder: KESTREL_THREADS=1 KESTREL_JIT=1 KESTREL_PRDP=0
+      placeholder: KESTREL_THREADS=1 KESTREL_JIT=1 KESTREL_GPURDP=0
   - type: dropdown
     id: lockstep
     attributes:

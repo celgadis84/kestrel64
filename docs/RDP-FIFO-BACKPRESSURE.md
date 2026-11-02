@@ -5,7 +5,7 @@ threading-model invariant, not a one-off patch.
 
 ## Symptom
 
-With `KESTREL_PRDP=1` **and** the threaded RDP worker, SM64 deadlocked in the
+With the (since removed) parallel-RDP backend **and** the threaded RDP worker, SM64 deadlocked in the
 *guest* after ~90 VI fields. Not reproducible with SoftRDP (any mode), with
 lockstep (`KESTREL_THREADS=0`), or with `KESTREL_RDPINLINE=1`.
 

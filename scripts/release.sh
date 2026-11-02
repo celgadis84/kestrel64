@@ -9,9 +9,9 @@
 #
 # Que sale:
 #   build/                     exe SoftRDP  (oraculo determinista de las puertas)
-#   build-prdp/                exe GPU-RDP (puerta de GPU)
+#   build-gpu/                exe GPU-RDP (puerta de GPU)
 #   (desde 2026-09-30 TODOS estaticos: arrancan sin clang64 en el PATH; ver CMakeLists)
-#   build-prdp-static/         exe GPU-RDP ESTATICO = el que se distribuye
+#   build-gpu-static/         exe GPU-RDP ESTATICO = el que se distribuye
 #   build-static/              exe SoftRDP ESTATICO      = puertas (gate_quick); no viaja
 #   dist/                      kestrel64.exe (GPU+SoftRDP, plugin elegible dentro)
 #                              + kestrel64-gui.exe + LEEME.txt + VERSION.txt
@@ -67,9 +67,9 @@ if [ -z "$QUICK" ]; then
   echo "== build/ (SoftRDP, oraculo) =="
   conf build -DKESTREL_GPU=OFF
   cmake --build build -j8
-  echo "== build-prdp/ (GPU-RDP) =="
-  conf build-prdp -DKESTREL_GPU=ON
-  cmake --build build-prdp -j8
+  echo "== build-gpu/ (GPU-RDP) =="
+  conf build-gpu -DKESTREL_GPU=ON
+  cmake --build build-gpu -j8
 fi
 
 if [ -n "$GATES" ]; then
@@ -78,9 +78,9 @@ if [ -n "$GATES" ]; then
   kill_exes
 fi
 
-echo "== build-prdp-static/ (lo que se distribuye) =="
-conf build-prdp-static -DKESTREL_GPU=ON -DKESTREL_STATIC=ON
-cmake --build build-prdp-static -j8
+echo "== build-gpu-static/ (lo que se distribuye) =="
+conf build-gpu-static -DKESTREL_GPU=ON -DKESTREL_STATIC=ON
+cmake --build build-gpu-static -j8
 if [ -n "$GATES" ]; then
   sh scripts/gate_gpurdp.sh
   kill_exes
@@ -95,7 +95,7 @@ cmake --build build-static -j8
 # dist.sh ya congela el lanzador (scripts/gui.sh), copia lo que haga falta, escribe el LEEME
 # el VERSION.txt y genera el zip; pack.sh anade el instalador. No se duplica nada aqui.
 echo "== paquete + instalador =="
-BUILD=build-prdp-static sh scripts/pack.sh
+BUILD=build-gpu-static sh scripts/pack.sh
 
 # El manifiesto (version, commit, md5) lo escribe dist.sh, que es quien cierra el zip y la
 # carpeta del instalador: escrito aqui llegaba tarde y el portable salia sin el.

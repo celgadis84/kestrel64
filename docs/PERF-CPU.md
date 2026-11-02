@@ -394,23 +394,21 @@ La métrica sana es la **pared por un número fijo de intercambios de buffer**, 
 fotogramas de juego que ve el jugador. Con ella, el barrido (SM64, 300 intercambios, min
 de 3 pasadas) sale así:
 
-| holgura | prdp-jit | int/s | threaded-jit (SoftRDP) |
-|---------|----------|-------|------------------------|
-| 256 K   | 4,40 s   | 68,2  | 8,06 s |
-| 384 K   | 4,09 s   | 73,3  | — |
-| 512 K   | 3,89 s   | 77,1  | 8,03 s |
-| 768 K   | 3,85 s   | 77,9  | — |
-| 1 M     | 3,80 s   | 78,9  | 7,93 s |
-| 2 M     | —        | —     | 7,86 s |
+| holgura | threaded-jit (SoftRDP) |
+|---------|------------------------|
+| 256 K   | 8,06 s |
+| 512 K   | 8,03 s |
+| 1 M     | 7,93 s |
+| 2 M     | 7,86 s |
 
-O sea: **el codo está en 512 K y la ganancia es de parallel-rdp (+16 % de fotogramas de
-juego por segundo), no de SoftRDP**, que sale plano. El despeñadero de 512 K que motivó
+O sea: SoftRDP sale plano. Con el backend parallel-rdp de entonces (retirado el 2026-11-02)
+el codo estaba en 512 K, con +16 % de fotogramas de juego por segundo. El despeñadero de 512 K que motivó
 bajar el default a 256 K el 2026-08-26 ha desaparecido; entonces el hilo de CPU corriendo
 por delante se comía el núcleo del worker, y desde que `rdpSubmit` dejó de despertar al
 RDP 38 K veces por segundo (`PERF-RCP-SYNC.md`) ya no compiten por él.
 
 Segundo eje, y es el que decide: **fidelidad**, medida como campos VI por intercambio con
-**lockstep de oráculo** (4,09; determinista y con md5 idéntico). prdp-jit da 2,73 / 2,80 /
+**lockstep de oráculo** (4,09; determinista y con md5 idéntico). el backend parallel-rdp de entonces daba 2,73 / 2,80 /
 3,12 / 3,20 / 3,24 en la misma serie: todos por *debajo* del oráculo, y la holgura larga
 es la que más se le acerca. No hay canje — 1 M es a la vez lo más rápido y lo más parecido
 al oráculo. (SoftRDP en hilos se va al otro lado, ~9-10 campos por intercambio, pero esa
@@ -517,7 +515,7 @@ los extremos (24 M de pares, los cuatro modos de redondeo) da **0 discrepancias*
 bandera, con el 62 % de los casos yéndose al intérprete precisamente por ese sesgo; con
 operandos de juego (exponentes normales) el camino rápido se toma siempre.
 
-Gates 14/14 + prdp 3/3, regress=0, md5 sin cambio.
+Gates 14/14, regress=0, md5 sin cambio.
 
 
 ## 15. Cobertura del JIT de CPU: matar al "líder no compilable" (2026-09-01)
@@ -597,7 +595,7 @@ n64-systemtest a 1500 M de instrucciones baja de 8,95–9,04 s a 8,83–8,94 s (
 dos bisectores. El valor de fondo no es ese 2 %: es que el intérprete deja de comerse 590 k
 entradas por ventana, que es exactamente lo que estrangula a un juego CPU-bound como PD.
 
-Gates 14/14 + prdp 3/3, regress=0, md5 sin cambio.
+Gates 14/14, regress=0, md5 sin cambio.
 
 ---
 
@@ -735,8 +733,8 @@ Tres detalles que son de corrección, no de velocidad:
 | 4 — invariantes de primitiva fuera del bucle | 6,20 s |
 | 5 — plan del combinador | **5,68 s** |
 
-**−28 % acumulado**, sin una sola concesión de exactitud: 14/14 modos + prdp 3/3, `regress=0`,
-krom `mean_exact` 88,71 (interp) / 89,26 (prdp) idénticos al baseline, md5 de SM64 sin cambio.
+**−28 % acumulado**, sin una sola concesión de exactitud: 14/14 modos, `regress=0`,
+krom `mean_exact` 88,71 (interp) idéntico al baseline, md5 de SM64 sin cambio.
 
 ### Dónde queda el perfil ahora
 
@@ -1046,8 +1044,8 @@ El 14,4 % del trampolín es exactamente lo que se llevaría el enlace directo de
 
 Por tamaño esperado, no por facilidad:
 
-1. **`parallel-rdp` por defecto** (`-DKESTREL_PRDP=ON`). Se lleva los 1,35 s de rasterizado de
-   golpe. Es decisión de política de build (exige Vulkan en el anfitrión), no una optimización.
+1. **Rasterizador en GPU por defecto** (hoy GPU-RDP, `-DKESTREL_GPU=ON`). Se lleva los 1,35 s de
+   rasterizado de golpe. Es decisión de política de build (exige Vulkan en el anfitrión), no una optimización.
 2. **Enlace directo de bloques del JIT de CPU** — 14,4 % del hilo de CPU, invisible hoy.
 3. **FPU del JIT en línea** — 13 % del hilo de CPU, invisible hoy.
 

@@ -184,9 +184,7 @@ Tres rasterizadores comparten esa entrada:
   a 1x y sigue siendo la autoridad sobre la RDRAM, mientras la GPU produce la copia de alta
   resolución de forma asíncrona; las escrituras que llegan a las imágenes por otros caminos se
   detectan comparando el espejo y se parchean.
-- **parallel-RDP**: retirado. Fuera de menús y puertas el 2026-10-30, código borrado el
-  2026-11-02. `KESTREL_PRDP=0` sigue eligiendo SoftRDP; `KESTREL_PRDP=1` ahora significa GPU-RDP
-  (y avisa). El presentador y GPU-RDP comparten un único contexto Vulkan (`gpurdp::sharedVk()` +
+- El presentador y GPU-RDP comparten un único contexto Vulkan (`gpurdp::sharedVk()` +
   `gpurdp::queueLock`).
 
 Los paquetes de texturas HD (formato Rice/GLideN64) funcionan en SoftRDP y GPU-RDP

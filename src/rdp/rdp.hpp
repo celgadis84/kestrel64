@@ -5,7 +5,7 @@
 // (DPC_START..DPC_END, 64-bit commands living in RDRAM) and rasterizes into the
 // RDRAM color/z images the game set up. This is the "first light" renderer: no
 // Vulkan, output goes straight into RDRAM where the VI presenter reads it, so it
-// is directly inspectable via a BMP dump. parallel-rdp (GPU) is the later
+// is directly inspectable via a BMP dump. GPU-RDP (Vulkan compute) is the later
 // accuracy/perf path; this exists to get real pixels on screen and to be
 // debuggable command-by-command.
 //
@@ -92,7 +92,7 @@ struct SoftRdp {
   const u8* cmdSrc = nullptr;
   // Modo SOLO-COSTE: decodifica el FIFO y cobra los contadores del RDP (DPC_CLOCK y el
   // reloj de coste que frena a la CPU) SIN escribir un solo pixel. Existe porque con
-  // parallel-RDP quien rasteriza es la GPU, y la GPU no puede decirle al invitado lo que
+  // GPU-RDP quien rasteriza es la GPU, y la GPU no puede decirle al invitado lo que
   // costo: sin esto el RDP le sale GRATIS al juego -- DPC_CLOCK clavado a cero y ninguna
   // espera -- y el emulador corre mas suelto de lo que jamas corrio la consola. En este
   // modo el bucle por pixel no se ejecuta: cada tramo aporta su ANCHURA de una vez, que es

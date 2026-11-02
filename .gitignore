@@ -36,7 +36,7 @@ desktop.ini
 !requirements*.txt
 !THIRD-PARTY.txt
 build-prof/
-build-prof-prdp/
+build-prof-gpu/
 
 # lanzador: estado local del usuario, no del repo
 tools/launcher/cache/

@@ -109,7 +109,7 @@ CATEGORIES = [
     O("rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", "int", 131072, adv=True,
       min=0, max=10000000,
       help="Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. "
-      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo (medido con parallel-RDP). "
+      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo. "
       "De fabrica 131072 desde el re-barrido del 2026-09-18."),
     O("rspspin", "KESTREL_RSPSPIN", "Vueltas del RSP ocioso", "int", 0, adv=True,
       min=0, max=10000000,
@@ -536,12 +536,10 @@ def to_env(profile):
     # nada y deja el defecto del binario, que es la GPU cuando el backend esta compilado;
     # "soft" tiene que decir "0" EXPLICITO, porque quitar la variable ya no apaga nada.
     plug = str(p.get("plugin", "auto"))
-    # "prdp" (paraLLEl-RDP, retirado del menu 2026-10-30) en una config vieja = GPU-RDP.
-    if plug in ("gpurdp", "prdp"):
+    if plug == "gpurdp":
         env["KESTREL_GPURDP"] = "1"
     elif plug == "soft":
         env["KESTREL_GPURDP"] = "0"
-        env["KESTREL_PRDP"] = "0"
 
     # KESTREL_VIDEO / --run: sin --run el emulador arranca en pausa esperando al MCP.
     if not p.get("paused", False):

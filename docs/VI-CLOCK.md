@@ -16,8 +16,8 @@ Había **dos** relojes de video que no se hablaban:
 Consecuencias medidas:
 
 - `viFields` contaba **2** campos en 421M instrucciones (deberían ser ~538).
-- `vrdp::frameBegin()` cuelga del cierre de campo, así que el contexto por-cuadro de
-  parallel-rdp casi nunca rotaba → los WARN de "Exhausted LinkedDeviceHost memory".
+- `vrdp::frameBegin()` cuelga del cierre de campo, así que el contexto por-cuadro del
+  rasterizador (entonces parallel-rdp) casi nunca rotaba → los WARN de "Exhausted LinkedDeviceHost memory".
 - La interrupción del VI se levantaba con la regla de NIVEL (`vi_current >= vi_intr`),
   que con ticks de sub-campo dispara en casi todas las llamadas.
 - El bench medía "tiempo real" con intercambios de buffer / 60. SM64 en atracción no va a

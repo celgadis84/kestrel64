@@ -317,7 +317,7 @@ auto initVulkan(Vk& v) -> bool {
   // Con GPU-RDP activo hay que COMPARTIR su contexto Vulkan en vez de crear uno propio:
   // volk resuelve todos los vk* en UNA tabla global de punteros, asi que el segundo contexto
   // que se carga pisa las entradas del primero y la siguiente llamada del otro salta a un
-  // puntero nulo. La caida al abrir la ventana con PRDP era exactamente eso (host RIP 0).
+  // puntero nulo. La caida al abrir la ventana con el RDP en GPU era exactamente eso (host RIP 0).
   // De paso ahorra un dispositivo logico entero en la GPU.
   const gpurdp::SharedVk* sh = gpurdp::sharedVk();
   if(sh) {

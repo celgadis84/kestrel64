@@ -11,8 +11,7 @@
 // palabras de 32 bits del anfitrion (byte b del anfitrion = byte b^3 del invitado), que es
 // donde nacieron esos packs; asi un pack hecho con GLideN64 casa aqui sin convertir nada.
 //
-// Solo lo usa SoftRDP (KESTREL_PRDP=0): parallel-rdp muestrea TMEM en la GPU y no tiene
-// por donde meter una textura de otro tamano. Apagado (sin variables) no hace nada.
+// Lo usan SoftRDP y GPU-RDP (el decodificador es el mismo). Apagado (sin variables) no hace nada.
 #include "../core/types.hpp"
 
 #include <string>

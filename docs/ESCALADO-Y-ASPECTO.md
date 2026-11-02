@@ -5,40 +5,18 @@ texturas HD, que es otra cosa: un canal de sustitucion de texturas, no una opcio
 
 Dos ajustes independientes, uno de rasterizado y otro de presentacion.
 
-> **Aviso (2026-11-02):** este capitulo se escribio para parallel-RDP, que se borro el
-> 2026-11-02. El escalado interno lo hace hoy **GPU-RDP** en modo sombra (ver
-> `docs/GPU-RDP.md`); las menciones a parallel-RDP, `KESTREL_PRDP=1`, `[vrdp] scanout` y
-> `gate_prdp` de abajo describen esa implementacion historica.
-
 ## Escalado interno — `KESTREL_UPSCALE=1|2|4|8`
 
-Solo con **GPU-RDP** (ejecutable de `build-prdp`; antes paraLLEl-RDP). El SoftRDP
-rasteriza siempre a resolucion nativa y ahi no hay nada que decidir.
+Solo con **GPU-RDP** (ejecutable de `build-gpu`). El SoftRDP rasteriza siempre a
+resolucion nativa y ahi no hay nada que decidir.
 
-parallel-rdp mantiene un **dominio de RDRAM ampliado** en la GPU: los mismos comandos del
-RDP se rasterizan a NxN muestras por pixel del N64, y el VI escanea ese dominio. Lo que el
-juego ve en SU RDRAM sigue siendo 1x, asi que los efectos que releen el framebuffer (blur,
-capturas, transiciones) siguen funcionando igual.
+GPU-RDP mantiene copias de alta resolucion (xN) del color y la profundidad en la GPU (modo
+sombra, ver `docs/GPU-RDP.md`): el RDP se rasteriza tambien a NxN muestras por pixel del N64
+y la presentacion usa esa copia. Lo que el juego ve en SU RDRAM sigue siendo 1x, asi que los
+efectos que releen el framebuffer (blur, capturas, transiciones) siguen funcionando igual.
 
-| `KESTREL_UPSCALE` | scanout de SM64 |
-|---|---|
-| 1 (defecto) | 640x240 |
-| 2 | 1280x480 |
-| 4 | 2560x960 |
-| 8 | 5120x1920 |
-
-(El 640x240 de partida no es un error: es el VI, que saca dos muestras por pixel en
-horizontal.)
-
-Es una bandera del `CommandProcessor`, no del scanout: el factor decide el tamano de los
-buffers que se crean al construirlo, o sea que **cambiarlo exige relanzar** — por eso vive
-en el entorno y no en `src/core/runtime.hpp`, y el menu lo marca con `(*)`.
-
-`KESTREL_SSAA=1` (avanzada) cambia como se resuelve ese dominio ampliado cuando hay que
-volcarlo al framebuffer de 1x del juego: promedia las NxN muestras en vez de coger una, con
-tramado. Es antialiasing por supermuestreo para lo que el juego relee. No encoge la imagen
-del scanout. parallel-rdp rechaza la combinacion con factor 1, asi que solo se manda cuando
-hay escalado.
+El factor decide el tamano de esas copias, o sea que **cambiarlo exige relanzar** — por eso
+vive en el entorno y no en `src/core/runtime.hpp`, y el menu lo marca con `(*)`.
 
 ## Relacion de aspecto — `KESTREL_ASPECT=4:3|16:9|estirar`
 
@@ -65,9 +43,7 @@ ya compuesta: ver `docs/FILTROS-IMAGEN.md` (`KESTREL_FILTER`).
 
 ## Verificacion
 
-- Las cuatro escalas comprobadas en SM64 leyendo el tamano real del scanout que publica
-  `[vrdp] scanout WxH` (linea que se emite al cambiar de tamano, precisamente porque el
-  volcado de framebuffer lee la RDRAM del invitado y ahi el escalado no se ve).
-- Con los valores de fabrica (`UPSCALE=1`, `ASPECT=4:3`) las banderas que se le pasan a
-  parallel-rdp son **0** y el rectangulo destino es el de siempre: `gate_all` y `gate_prdp`
-  siguen dando los mismos md5.
+- El volcado de framebuffer lee la RDRAM del invitado y ahi el escalado no se ve: la
+  comprobacion del tamano real va por la imagen presentada (ver `docs/GPU-RDP.md`).
+- Con los valores de fabrica (`UPSCALE=1`, `ASPECT=4:3`) el rectangulo destino es el de
+  siempre: `gate_all` y `gate_gpurdp` siguen dando los mismos md5.

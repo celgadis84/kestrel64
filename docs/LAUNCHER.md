@@ -120,7 +120,7 @@ al emulador = anadir una fila; el frontend dibuja el control solo y el backend l
 |---|---|
 | `GET /api/schema` | esquema de opciones + mando |
 | `GET/POST /api/config` | perfil guardado |
-| `GET /api/builds` | compilaciones presentes (`build/`, `build-prdp/`) |
+| `GET /api/builds` | compilaciones presentes (`build/`, `build-gpu/`) |
 | `GET /api/browse?dir=` | navegador de carpetas (el navegador web no puede) |
 | `GET /api/roms?dir=` | lista de ROMs con la cabecera leida |
 | `GET /api/boxart?id=&name=` | caratula de la caja, cache local + descarga |
@@ -137,7 +137,7 @@ que se querian apagar**:
   ENCENDERIA. Para estas, apagado = no exportar nada.
 - Unas pocas leen el **VALOR** (`envFlag()` o `v[0] == '0'`): `KESTREL_JIT`,
   `KESTREL_THREADS`, `KESTREL_RSPJIT`, `KESTREL_AUDIO`, `KESTREL_FULLSCREEN`,
-  `KESTREL_PRDP`, `KESTREL_THROTTLE`. Estas se escriben explicitas en los dos sentidos, y
+  `KESTREL_GPURDP`, `KESTREL_THROTTLE`. Estas se escriben explicitas en los dos sentidos, y
   asi el perfil manda aunque cambie el valor por defecto del emulador. Van marcadas
   `tri=True` en el esquema.
 - Las negativas (`KESTREL_NOxxx`) se muestran en positivo y se exportan cuando el control
@@ -187,17 +187,16 @@ El framebuffer del guest sigue siendo 320x240: esto solo decide a que resolucion
 **presenta**, el blit de la cadena de intercambio escala. La pantalla completa **no cambia
 el modo del monitor**: toma el que ya hay. Cambiarlo de verdad deja el escritorio roto si
 el emulador se cae, y no compra nada porque la imagen se escala igual en la presentacion.
-(El escalado interno de verdad lo hace GPU-RDP, ver `GPU-RDP.md`; parallel-RDP, que no lo
-soportaba, se borro el 2026-11-02.)
+(El escalado interno de verdad lo hace GPU-RDP, ver `GPU-RDP.md`.)
 
 ## Rasterizador
 
 El rasterizador compilado depende de `cmake -DKESTREL_GPU=ON|OFF` (defecto ON), no de una
 dll cargable como en la arquitectura de plugins de Zilmar. El lanzador elige **ejecutable**:
-`build/kestrel64.exe` para SoftRDP puro y `build-prdp/kestrel64.exe` para GPU-RDP (propio,
+`build/kestrel64.exe` para SoftRDP puro y `build-gpu/kestrel64.exe` para GPU-RDP (propio,
 Vulkan compute, mismo exe con ambos rasterizadores). Si una compilacion no existe, su tarjeta
 sale apagada con la linea de cmake que hace falta. GPU-RDP es la que elige "Automatico"
-(desde 2026-10-06). parallel-RDP, que fue la tercera tarjeta, se borro el 2026-11-02.
+(desde 2026-10-06).
 
 ## Mando configurable
 

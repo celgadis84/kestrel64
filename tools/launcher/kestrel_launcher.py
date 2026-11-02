@@ -164,8 +164,7 @@ def builds():
     for d, pid, label, desc in (
         ("build", "soft", "SoftRDP",
          "Rasterizador propio en CPU. Determinista, no necesita GPU. Es el oraculo."),
-        ("build-prdp", "prdp", "GPU-RDP",
-         "RDP a bajo nivel sobre Vulkan, en la GPU. Mas rapido y mas exacto en subpixel."),
+        ("build-gpu", "gpurdp", "GPU-RDP", GPURDP_DESC),
     ):
         exe = os.path.join(KESTREL, d, "kestrel64.exe")
         if os.path.isfile(exe):
@@ -177,7 +176,7 @@ def builds():
         # por si queda de una instalacion vieja.
         DESC = {
             "soft": "Rasterizador propio en CPU. Determinista, no necesita GPU. Es el oraculo.",
-            "prdp": "RDP a bajo nivel sobre Vulkan, en la GPU. Mas rapido y mas exacto en subpixel.",
+            "gpurdp": GPURDP_DESC,
         }
         for fname in ("kestrel64.exe", "kestrel64-soft.exe"):
             exe = os.path.join(APPDIR, fname)
@@ -192,22 +191,15 @@ def builds():
                     tag = f.read().strip()
             except OSError:
                 tag = ""
-            if tag.startswith("prdp"):
-                pid, label = "prdp", "GPU-RDP"
-            # Un .exe con GPU-RDP lleva tambien SoftRDP (KESTREL_PRDP=0 lo elige), y desde
+            if tag.startswith("gpu"):
+                pid, label = "gpurdp", "GPU-RDP"
+            # Un .exe con GPU-RDP lleva tambien SoftRDP (KESTREL_GPURDP=0 lo elige), y desde
             # 2026-10-05 el paquete trae solo ese: los dos plugins salen del mismo fichero.
-            for p2, l2 in ((pid, label),) + ((("soft", "SoftRDP"),) if pid == "prdp" else ()):
+            for p2, l2 in ((pid, label),) + ((("soft", "SoftRDP"),) if pid == "gpurdp" else ()):
                 if any(x["id"] == p2 for x in out):
                     continue
                 out.append(dict(id=p2, label=l2, dir=".", exe=exe,
                                 desc=DESC[p2], mtime=int(os.path.getmtime(exe))))
-    # GPU-RDP (propio, Vulkan compute) va dentro del mismo .exe que parallel-RDP y es su
-    # defecto desde la fase 7 (2026-10-06, docs/GPU-RDP.md). parallel-RDP ya no se ofrece
-    # (2026-10-30): el exe que lo lleva se presenta como GPU-RDP.
-    for i, x in enumerate(out):
-        if x["id"] == "prdp":
-            out[i] = dict(x, id="gpurdp", label="GPU-RDP", desc=GPURDP_DESC)
-            break
     out.sort(key=lambda x: x["id"] != "gpurdp")
     return out
 
@@ -216,8 +208,6 @@ def pick_exe(plugin):
     b = builds()
     if not b:
         return None
-    if plugin == "prdp":          # config de antes de retirarlo del menu
-        plugin = "gpurdp"
     if plugin in ("gpurdp", "soft"):
         for x in b:
             if x["id"] == plugin:
@@ -855,7 +845,6 @@ class H(BaseHTTPRequestHandler):
             return dict(ok=False, error="no hay ningun kestrel64.exe compilado")
         if bl["id"] == "soft":
             env["KESTREL_GPURDP"] = "0"
-            env["KESTREL_PRDP"] = "0"   # ese exe no lleva backend GPU; que quede dicho
         # El mapeo del mando va en fichero, no en variables: son 18 asignaciones por
         # conector. El mando 1 se guarda bajo la clave "pad" (la de siempre) y los otros
         # tres bajo "pad2".."pad4"; el dialogo del emulador escribe las cuatro.

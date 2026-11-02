@@ -28,7 +28,7 @@ versionados. Design docs: `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`,
 - **HLE-capable RSP** — LLE interpreter for correctness + custom microcode (PD ships
   custom ucode); HLE fast paths for standard microcodes as the perf win.
 - **Own RDP, bit-exact**: RDP = **GPU-RDP** (own, Vulkan compute, bit for bit SoftRDP) +
-  **SoftRDP** (CPU, the oracle); parallel-rdp (Themaister) was removed 2026-11-02. VU = shared
+  **SoftRDP** (CPU, the oracle). VU = shared
   SSE4.1 reference (same math ares/cen64 use, systemtest-verified).
 
 ## Build
@@ -42,7 +42,7 @@ sh scripts/release.sh          # <-- ESTE. Regenera los CUATRO arboles + lanzado
 ```
 
 **`cmake --build <arbol> -j` a secas NO vale como "he compilado"**: deja los otros arboles
-con el .exe de hace semanas, y el que el usuario ejecuta (`build-prdp-static/`) es
+con el .exe de hace semanas, y el que el usuario ejecuta (`build-gpu-static/`) es
 justamente uno de los que se queda atras. Compilar un arbol suelto solo es legitimo como
 paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release.sh`.
 
@@ -51,9 +51,8 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
   `release.sh`/`pack.sh`/`pgo.sh`). A mano: por PID o con `timeout`, y puerto propio (`--port`).
 - cmake binary lives in `/c/msys64/clang64/bin`.
 - `build/` y `build-static/` = `-DKESTREL_GPU=OFF` (SoftRDP puro, el nucleo determinista no
-  depende de GPU). `build-prdp/` y `build-prdp-static/` = `-DKESTREL_GPU=ON` (GPU-RDP; nombres
-  de carpeta conservados). Opcion cmake `KESTREL_GPU` (defecto ON); `KESTREL_PRDP` se acepta
-  como alias viejo (migra una vez).
+  depende de GPU). `build-gpu/` y `build-gpu-static/` = `-DKESTREL_GPU=ON` (GPU-RDP). Opcion
+  cmake `KESTREL_GPU` (defecto ON).
 - **TODOS los arboles enlazan estatico (desde 2026-09-30)**: libc++/GLFW dentro, solo
   vulkan-1.dll del sistema. Un exe dinamico moria rc=127 sin clang64 en PATH (Explorador,
   lanzador, python) -- paso repetidas veces. `cmake/check_static.cmake` (POST_BUILD) FALLA el
@@ -63,22 +62,19 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
 - **REGLA: cada generacion de .exe genera TODO** — los cuatro arboles, el lanzador grafico
   congelado, el zip portable y el instalador. Un solo comando, `sh scripts/release.sh`
   (`--gates` para pasar `gate_all` + `gate_gpurdp`, `--quick` para saltarse `build/` y
-  `build-prdp/` e iterar solo sobre los estaticos, `NOISS=1` para omitir el instalador). Deja
+  `build-gpu/` e iterar solo sobre los estaticos, `NOISS=1` para omitir el instalador). Deja
   `dist/VERSION.txt` con version, commit y md5 para que un zip suelto diga de donde salio.
-- Desde 2026-10-06 ese exe arranca con **GPU-RDP** (propio) de fabrica. **parallel-RDP retirado
-  del menu, del lanzador y de las puertas el 2026-10-30 (fase 1) y BORRADO el 2026-11-02
-  (fase 2: `third_party/parallel-rdp`, `src/vrdp/`, `gate_prdp.sh`).** `-DKESTREL_GPU=ON` es la
-  opcion de cmake que compila GPU-RDP. Variable de entorno: `KESTREL_PRDP=0` sigue eligiendo
-  SoftRDP (las puertas la fijan); `KESTREL_PRDP=1` ahora significa GPU-RDP y avisa;
-  `KESTREL_GPURDP=0/1` manda si esta puesta.
-- El paquete lleva **un** ejecutable (desde 2026-10-05): `kestrel64.exe` (`build-prdp-static`)
-  trae GPU-RDP y SoftRDP, elegibles en Video > Rasterizador (`KESTREL_PRDP=0`), y sin
+- Desde 2026-10-06 ese exe arranca con **GPU-RDP** (propio) de fabrica.
+  `-DKESTREL_GPU=ON` es la opcion de cmake que compila GPU-RDP. Variable de entorno:
+  `KESTREL_GPURDP=0` elige SoftRDP (las puertas la fijan); `1`/defecto = GPU-RDP.
+- El paquete lleva **un** ejecutable (desde 2026-10-05): `kestrel64.exe` (`build-gpu-static`)
+  trae GPU-RDP y SoftRDP, elegibles en Video > Rasterizador (`KESTREL_GPURDP=0`), y sin
   Vulkan cae a SoftRDP con la ventana pintada por GDI (`KESTREL_FORCEGDI=1` lo fuerza).
   `build-static` sigue existiendo para las puertas pero no viaja. Ver `docs/distribucion.md`.
 - La carpeta de ROMs se recorre **recursiva** (biblioteca del exe y lanzador), tope 8 niveles,
   sin seguir enlaces/uniones ni carpetas ocultas o de sistema.
-- Las puertas por si solas recompilan `build/` y `build-prdp/` y **nunca**
-  `build-prdp-static/`, que es el exe que viajan lanzador e instalador: por eso existe
+- Las puertas por si solas recompilan `build/` y `build-gpu/` y **nunca**
+  `build-gpu-static/`, que es el exe que viajan lanzador e instalador: por eso existe
   `release.sh`. Sus piezas sueltas siguen ahi si hace falta una a mano: `scripts/pack.sh`
   (estatico -> `dist/` -> zip -> Inno Setup), `scripts/dist.sh` (empaquetar un build ya
   hecho), `scripts/gui.sh` (congelar solo el lanzador).
@@ -86,7 +82,7 @@ paso intermedio de una prueba A/B; en cuanto el cambio se da por bueno, `release
   arboles con `-fprofile-use=pgo/kestrel.profdata` **si ese fichero existe** (esta commiteado,
   445 KB); si falta, todo compila como siempre. MEDIDO 2026-09-24 (min de 4, intercalado,
   i7-870): **PD -7,1 % (6409 -> 5956 ms), SM64 -8,6 % (7318 -> 6688), DK64 -4,2 % (4981 ->
-  4774)**, y las propias puertas `gate_all` 760 -> 720 s y `gate_prdp` 378 -> 362 s. **No toca
+  4774)**, y la propia puerta `gate_all` 760 -> 720 s. **No toca
   la semantica del invitado** -- es colocacion de codigo del ANFITRION --: el statehash sale
   identico en los tres juegos, y las dos puertas pasan RC=0 con regress=0. El perfil no hace
   falta por juego: uno de PD ya mejora DK64, porque lo caliente es el codigo COMPARTIDO
@@ -120,7 +116,7 @@ python scripts/validate.py sm64       --mode <mode>   # framebuffer md5
 python scripts/validate.py krom                       # 371-ROM RDP accuracy vs baseline
 python scripts/validate.py bench      --mode <mode>   # wall clock for N VI fields (speed)
 sh scripts/gate_all.sh                                # las cinco modalidades + krom, un log
-sh scripts/gate_gpurdp.sh                             # backend GPU-RDP, exe de build-prdp
+sh scripts/gate_gpurdp.sh                             # backend GPU-RDP, exe de build-gpu
 sh scripts/gate_quick.sh [krom] [lock] [phys] [thar0] # puerta RAPIDA por cambio (~1,5 min)
 ```
 
@@ -132,9 +128,9 @@ la prueba minima: `thar0` si toca coste RDP, una ROM krom afectada si toca raste
 si toca citas RCP. Lo de abajo describe que cubre cada puerta, no cuando lanzarla.
 
 `gate_all.sh` es el oraculo determinista y corre sobre SoftRDP, que no depende de que
-haya GPU. `gate_gpurdp.sh` corre el material RDP contra el exe de `build-prdp/` (GPU-RDP,
-bit a bit SoftRDP). La puerta `gate_prdp.sh` y los modos `prdp`/`prdp-jit` de validate.py
-se borraron el 2026-11-02 con parallel-RDP (historia en `docs/parallel-rdp-integration.md`).
+haya GPU. `gate_gpurdp.sh` corre el material RDP contra el exe de `build-gpu/` (GPU-RDP,
+bit a bit SoftRDP). parallel-RDP (Themaister) se borro el 2026-11-02; su historia esta en git
+(commits anteriores a esa fecha).
 
 **Speed is measured with `bench`, never with Mips.** In threaded mode a faster CPU
 thread just burns more spin-wait instructions, so Mips can rise while the emulator
@@ -229,7 +225,7 @@ SIEMPRE el `.map` de cada ROM (`rom=map`).
 
 `core/` (memory, system, rom, bus, DMA, MMIO, scheduler) · `cpu/` (R4300i interp + `jit.*`
 dynarec) · `rsp/` (LLE + HLE) · `rdp/` (SoftRDP)
-· `gpurdp/` (GPU-RDP propio en Vulkan compute, bit a bit SoftRDP; **rasterizador de fabrica desde 2026-10-06** -- `KESTREL_GPURDP=0` o `KESTREL_PRDP=0` lo apagan; contexto Vulkan compartido con el presentador: `gpurdp::sharedVk()` + `gpurdp::queueLock`; `KESTREL_GPURDP_MINPX` reparto CPU/GPU por tramo, defecto 4096; `docs/GPU-RDP.md`, puerta `scripts/gate_gpurdp.sh`)
+· `gpurdp/` (GPU-RDP propio en Vulkan compute, bit a bit SoftRDP; **rasterizador de fabrica desde 2026-10-06** -- `KESTREL_GPURDP=0` lo apaga; contexto Vulkan compartido con el presentador: `gpurdp::sharedVk()` + `gpurdp::queueLock`; `KESTREL_GPURDP_MINPX` reparto CPU/GPU por tramo, defecto 4096; `docs/GPU-RDP.md`, puerta `scripts/gate_gpurdp.sh`)
 · `audio/` · `video/` (`present.cpp`, VI, GLFW/Vulkan WSI) · `telemetry/` · `net/` · `main.cpp`.
 
 ## Env-var toggles
@@ -253,7 +249,7 @@ Referencia completa de `KESTREL_*`: `docs/ENV-VARS.md`. Las mas usadas: `KESTREL
 
 systemtest 100%, SM64/PD/DK64 jugables, lockstep==threaded. Saves completos, PIF, dynarec con
 block-linking, RSP JIT, savestates/rewind. RDP: GPU-RDP propio (Vulkan compute) de fabrica,
-SoftRDP y GPU-RDP a la par en la suite krom RDP/ (2026-10-08); parallel-rdp borrado 2026-11-02. Ultimo: SummerCart64
+SoftRDP y GPU-RDP a la par en la suite krom RDP/ (2026-10-08). Ultimo: SummerCart64
 + SD (carpeta de ROMs como FAT32 virtual, 6f76432). Peticiones de otros proyectos: `PD64_pending.md`
 (PD, local) y mensajes de las sesiones SDK/PSX. Huecos conocidos: `docs/GAPS.md`.
 

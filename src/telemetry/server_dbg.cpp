@@ -206,9 +206,9 @@ auto Server::dispatchDbg(const std::string& cmd, const json::Value& args, const 
   } else if(cmd == "dbg.fb") {
     dbgFb(args, data, blob, err);
   } else if(cmd == "dbg.tmem") {
-    // TMEM de SoftRDP (4 KiB) y los 8 descriptores de tile. Con GPU-RDP o parallel-RDP de
-    // rasterizador la TMEM viva esta en la GPU; SoftRDP sigue decodificando el FIFO (GPU-RDP
-    // usa su decodificador), pero con parallel-RDP puede estar vieja: ver docs/DEBUGGER.md.
+    // TMEM de SoftRDP (4 KiB) y los 8 descriptores de tile. Con GPU-RDP de rasterizador la
+    // TMEM viva esta en la GPU, pero SoftRDP sigue decodificando el FIFO (GPU-RDP usa su
+    // decodificador), asi que la copia vale: ver docs/DEBUGGER.md.
     std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     const SoftRdp& r = m.softRdp;
     blob.assign(r.tmem, r.tmem + sizeof r.tmem);

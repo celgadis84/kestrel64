@@ -174,9 +174,7 @@ Three rasterizers share that front end:
   upscaling x2, x4 and x8 runs in **shadow mode**: SoftRDP paints at 1x and stays the authority
   on RDRAM, while the GPU produces the high-resolution copy asynchronously; writes that reach the
   images by other paths are found by diffing the mirror and patched in.
-- **parallel-RDP**: removed. Off the menus and gates on 2026-10-30, code deleted on 2026-11-02.
-  `KESTREL_PRDP=0` still selects SoftRDP; `KESTREL_PRDP=1` now means GPU-RDP (and warns). The
-  presenter and GPU-RDP share one Vulkan context (`gpurdp::sharedVk()` + `gpurdp::queueLock`).
+- The presenter and GPU-RDP share one Vulkan context (`gpurdp::sharedVk()` + `gpurdp::queueLock`).
 
 HD texture packs (Rice/GLideN64 format) work in SoftRDP and GPU-RDP (`src/rdp/texpack.cpp`).
 

@@ -48,10 +48,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 ROMS = romcfg.testroms()
-KESTREL = Path(os.environ.get("KESTREL_EXE", ROOT / "build-prdp-static" / "kestrel64.exe"))
+KESTREL = Path(os.environ.get("KESTREL_EXE", ROOT / "build-gpu-static" / "kestrel64.exe"))
 FAITHFUL = {"KESTREL_SPLEAD": "0", "KESTREL_SPSIGQ": "0", "KESTREL_DPLOGLEAD": "0"}
 # RDP backend, fixed explicitly: the shipped exe starts on GPU-RDP, which is not complete yet.
-RDP_ENV = {"gpu": {"KESTREL_GPURDP": "1"}, "soft": {"KESTREL_PRDP": "0"}}
+RDP_ENV = {"gpu": {"KESTREL_GPURDP": "1"}, "soft": {"KESTREL_GPURDP": "0"}}
 ARES = Path(romcfg.get("ARES_EXE", "ares.exe"))
 OUT = ROOT / "out" / "fidelity"
 KPORT = 9133
@@ -77,7 +77,6 @@ class Emu:
             env["KESTREL_AUDIO"] = "0"
             if ARGS.kmode == "faithful":
                 env.update(FAITHFUL)
-            env.pop("KESTREL_PRDP", None)          # an explicit KESTREL_PRDP turns GPU-RDP off
             env.update(RDP_ENV[ARGS.rdp])
             cmd = [str(KESTREL), str(rom), "--run", "--port", str(self.port)]
         else:

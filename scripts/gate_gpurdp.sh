@@ -1,13 +1,13 @@
 #!/bin/sh
 # Puerta del GPU-RDP propio (docs/GPU-RDP.md), KESTREL_GPURDP=1 sobre el exe de
-# build-prdp-static (el que viaja). Aqui NO hay referencias
+# build-gpu-static (el que viaja). Aqui NO hay referencias
 # propias: el GPU-RDP tiene que ser SoftRDP bit a bit, asi que sm64 se compara con sm64.txt
 # y krom con la referencia de interp. Necesita GPU con Vulkan.
 # pd: intro de Perfect Dark PAL contra pd.txt (SoftRDP).
 # Uso: sh scripts/gate_gpurdp.sh   (~7,5 min; release.sh --quick antes)
 . "$(dirname "$0")/localenv.sh"
 cd "$(dirname "$0")/.."
-KESTREL_EXE="$(pwd)/build-prdp-static/kestrel64.exe"; export KESTREL_EXE
+KESTREL_EXE="$(pwd)/build-gpu-static/kestrel64.exe"; export KESTREL_EXE
 [ -f "$KESTREL_EXE" ] || { echo "gate_gpurdp: falta $KESTREL_EXE (sh scripts/release.sh --quick)"; exit 1; }
 # Todo a la GPU (KESTREL_GPURDP_MINPX=0): sin el reparto por area los tramos pequenos irian
 # al SoftRDP y la puerta dejaria de probar el camino de la GPU. Solo sm64 gpurdp-jit corre con

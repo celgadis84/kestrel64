@@ -13,7 +13,7 @@
 # La ROM se copia a un directorio temporal: la ranura 9 cae al lado de la ROM y no se pisa
 # la del usuario.
 #
-#   python scripts/rewind_e2e.py [--exe build-prdp-static/kestrel64.exe] [--rom ...]
+#   python scripts/rewind_e2e.py [--exe build-gpu-static/kestrel64.exe] [--rom ...]
 #                                [--a 200] [--b 40] [--port 9131] [--env K=V ...]
 
 import romcfg  # configuracion local: scripts/local.env
@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT / "tools" / "mcp"))
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exe", default=str(ROOT / "build-prdp-static" / "kestrel64.exe"))
+    ap.add_argument("--exe", default=str(ROOT / "build-gpu-static" / "kestrel64.exe"))
     ap.add_argument("--rom", default=romcfg.rom("ROM_SM64"))
     ap.add_argument("--a", type=int, default=200)
     ap.add_argument("--b", type=int, default=40)

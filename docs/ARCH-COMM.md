@@ -17,7 +17,7 @@ interrupciones MI. El microcódigo del RSP se ejecuta instrucción a instrucció
 | **main** | `System::runLoop` | GLFW: ventana, `pumpFrame`, muestreo de los 4 mandos, presentación Vulkan | — |
 | **cpu** | `System::runLoop` (`std::thread cpuThread`) | `System::run` → `stepCpu(n)`. Ejecuta el R4300i y **todo el MMIO** | núcleo físico 0 |
 | **rsp** | `Memory::startRcpThreads` | `rspWorkerLoop`: ejecuta microcódigo hasta BREAK | núcleo físico 2 |
-| **rdp** | `Memory::startRcpThreads` | `rdpWorkerLoop`: rasteriza tramos del FIFO (Parallel-RDP o SoftRDP) | núcleo físico 1 |
+| **rdp** | `Memory::startRcpThreads` | `rdpWorkerLoop`: rasteriza tramos del FIFO (GPU-RDP o SoftRDP) | núcleo físico 1 |
 | **audio feeder** | `audio::openDevice` | waveOut: saca del anillo al DAC del anfitrión | — |
 | **telemetría** | `System` (opcional) | servidor TCP/JSON (MCP), toma `coreMutex` | — |
 | **hostprof** | opcional | muestreador de perfil del anfitrión | — |
@@ -145,12 +145,12 @@ byte-idéntica y el md5 del framebuffer idéntico. No es un reloj.
 
 ### 4.3 RDP (`src/rdp/`, `src/gpurdp/`)
 
-- Dos rasterizadores: **GPU-RDP** (propio, Vulkan compute, de fábrica) y SoftRDP (CPU). Parallel-RDP se borró el 2026-11-02.
+- Dos rasterizadores: **GPU-RDP** (propio, Vulkan compute, de fábrica) y SoftRDP (CPU).
 - **Arranque**: escritura a DPC_END (de la CPU o del RSP) -> `rdpSubmit` empuja un tramo
   `{current, end, xbus}` a una cola SPSC y pone GCLK|PIPE_BUSY.
 - **Ejecución**: el worker saca el tramo y lo rasteriza. Antes de dormirse gira
-  `KESTREL_RDPSPIN` vueltas (131072 de fábrica) sobre `dpPending`: con Parallel-RDP los
-  tramos llegan a decenas de miles por segundo y la llamada al kernel del `notify_all`
+  `KESTREL_RDPSPIN` vueltas (131072 de fábrica) sobre `dpPending`: los tramos llegan a
+  decenas de miles por segundo y la llamada al kernel del `notify_all`
   dominaba el perfil.
 - **Fin**: en SYNC_FULL se limpian los bits de ocupado y sube MI_DP, otra vez fechado
   (`dpEndArm` -> `rcpRetire`), no en el instante de pared.
@@ -268,7 +268,7 @@ Detalles de coste que hacen falta para leer el perfil:
 - **Salvavidas**: si la CPU no avanza (parada, o esperando algo del RSP), la cita se
   renuncia por tiempo de pared y se cuenta (`spRdvWaives`). En una corrida sana es 0.
 
-### Ocupación medida (Perfect Dark PAL, 5.70 s de pared, Threaded + JIT + Parallel-RDP)
+### Ocupación medida (Perfect Dark PAL, 5.70 s de pared, Threaded + JIT; medido en su día con el rasterizador Parallel-RDP, ya retirado)
 
 ```
 cpuWait 15.0%  (freno 0.0%  barSP 0.6%  barDP 13.3%)

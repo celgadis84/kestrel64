@@ -19,20 +19,12 @@ set(KESTREL_LTO "thin" CACHE STRING "thin | full | off")
 #
 # El arbol `build/` de los gates se configura con -DKESTREL_GPU=OFF: gate_all es el oraculo
 # DETERMINISTA (systemtest / md5 en lockstep) y no puede depender de que haya GPU.
-# KESTREL_PRDP es el nombre viejo de la opcion (del backend parallel-RDP, retirado 2026-11-02);
-# se sigue aceptando para no romper arboles ya configurados ni scripts.
 option(KESTREL_GPU "Build the Vulkan GPU-RDP rasterizer and Vulkan presenter" ON)
-# Migracion de un solo uso: el valor viejo pasa a KESTREL_GPU y se borra de la cache, para que
-# un -DKESTREL_GPU posterior mande.
-if(DEFINED KESTREL_PRDP)
-  set(KESTREL_GPU ${KESTREL_PRDP} CACHE BOOL "" FORCE)
-  unset(KESTREL_PRDP CACHE)
-endif()
 
 # Enlazado autocontenido (ver docs/distribucion.md). SIEMPRE estatico en Windows salvo que se
 # pida lo contrario con KESTREL_DYNAMIC=ON: un .exe dinamico necesita libc++.dll/glfw3.dll de
 # C:/msys64/clang64/bin en el PATH y, lanzado desde el Explorador o el lanzador, muere con
-# rc=127 (0xC0000135) sin decir nada. Paso varias veces con build/ y build-prdp/; enlazar un
+# rc=127 (0xC0000135) sin decir nada. Paso varias veces con build/ y build-gpu/; enlazar un
 # poco mas lento sale mas barato. KESTREL_STATIC queda solo por compatibilidad con scripts.
 option(KESTREL_STATIC "Link libc++/GLFW statically (self-contained .exe)" ON)
 option(KESTREL_DYNAMIC "Opt out: link libc++/GLFW as DLLs (needs clang64/bin in PATH)" OFF)

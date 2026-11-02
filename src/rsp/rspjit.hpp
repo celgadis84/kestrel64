@@ -11,7 +11,7 @@
 // de las instrucciones: la parte vectorial rendia POR ENCIMA de su peso y lo que sobraba
 // estaba en el bucle de despacho. Ese era el objetivo.
 //
-// MEDIDO OTRA VEZ (2026-09-11, build-prof-prdp con DWARF, SM64 / Parallel-RDP / threaded /
+// MEDIDO OTRA VEZ (2026-09-11, build-prof-gpu con DWARF, SM64 / Parallel-RDP / threaded /
 // 400 intercambios, 926 muestras, `scripts/hostprof_sym.py`) el bucle de despacho YA NO
 // APARECE, que es justo lo que tenia que pasar:
 //

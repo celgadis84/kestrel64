@@ -24,8 +24,9 @@ SOFTWARE.
 
 Third-party components bundled in this repository keep their own licenses:
 
-  third_party/parallel-rdp/   Copyright (c) 2020 Themaister, MIT license.
-                              See third_party/parallel-rdp/LICENSE.
+  third_party/rdp-luts/       Blender divider table taken from paraLLEl-RDP,
+                              Copyright (c) 2020 Themaister, MIT license.
+                              See third_party/rdp-luts/LICENSE.
 
 This repository contains no Nintendo 64 ROM images, BIOS images or other
 copyrighted game data, and none are required to build it. Running a game

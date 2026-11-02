@@ -4,7 +4,7 @@
 // swapchain. This is the "eyes" of the emulator: it shows whatever the RDP has
 // left in RDRAM at VI_ORIGIN, independent of how those pixels got there (RDP
 // LLE, a software rasterizer, or a CPU test pattern). The Vulkan instance/device
-// set up here is the same stack parallel-rdp will render into at M3.2.
+// set up here is shared with GPU-RDP (gpurdp::sharedVk).
 // Enabled by KESTREL_VIDEO. If Vulkan or the window can't come up, presentation
 // silently disables and the emulator keeps running headless.
 

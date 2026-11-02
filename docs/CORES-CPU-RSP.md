@@ -228,7 +228,7 @@ simplificaciones que el dynarec de CPU no puede permitirse:
 - **Etapa 2b — COP0 en bloque.** MFC0/MTC0 por el puente `Rsp::jitCop0` con el reloj exacto
   de la instrucción. Si el MTC0 para el núcleo (SET_HALT) o lanza un DMA que reescribe IMEM,
   el bloque corta justo detrás y vuelve al bucle en C sin enlazar. Medido en SM64
-  (prdp-jit, 400 intercambios): instrucciones interpretadas 8,26 M -> 0,70 M, entradas
+  (400 intercambios): instrucciones interpretadas 8,26 M -> 0,70 M, entradas
   8,52 M -> 0,71 M; pared neutra (3,41-3,42 s), md5 iguales en todos los modos.
 - **Etapa 3 — enlace de bloques** (`KESTREL_RSPJIT_LINK`). El epílogo mira la tabla él mismo
   y, si en el PC de salida hay un bloque vivo que cabe en lo que queda de tanda, salta con

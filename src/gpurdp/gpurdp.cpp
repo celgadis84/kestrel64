@@ -31,7 +31,7 @@
 #include <map>
 #include <tuple>
 
-// Tabla del divisor del blender (third_party/rdp-luts, de parallel-rdp; la misma que usa SoftRDP).
+// Tabla del divisor del blender (third_party/rdp-luts, medida en hardware; la misma que usa SoftRDP).
 #include "../../third_party/rdp-luts/luts.hpp"
 
 namespace kestrel::gpurdp {
@@ -846,12 +846,9 @@ auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, 
 }
 
 auto wanted() -> bool {
-  // Fase 7: rasterizador de fabrica. KESTREL_GPURDP manda si esta puesto; si no, KESTREL_PRDP=0
-  // (el interruptor de SoftRDP de siempre, que fijan todas las puertas) lo apaga. KESTREL_PRDP=1
-  // pedia parallel-RDP, ya retirado: ahora es GPU-RDP (System::runLoop avisa).
-  if(const char* e = std::getenv("KESTREL_GPURDP"); e && e[0]) return e[0] != '0';
-  const char* p = std::getenv("KESTREL_PRDP");
-  return !p || p[0] != '0';
+  // Rasterizador de fabrica; KESTREL_GPURDP=0 (lo que fijan las puertas) deja SoftRDP.
+  const char* e = std::getenv("KESTREL_GPURDP");
+  return !(e && e[0] == '0');
 }
 
 auto init(u32 rdramSize) -> bool {

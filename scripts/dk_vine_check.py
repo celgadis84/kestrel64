@@ -29,7 +29,7 @@ args.rom = str(romcfg.need(args.rom, "ROM_DK64"))
 os.makedirs(args.out, exist_ok=True)
 k.PORT = args.port
 
-env = dict(os.environ, KESTREL_AUDIO="0", KESTREL_THREADS=args.threads, KESTREL_PRDP="0",
+env = dict(os.environ, KESTREL_AUDIO="0", KESTREL_THREADS=args.threads, KESTREL_GPURDP="0",
            KESTREL_GPURDP="0", KESTREL_MAXINSN="200000000000")
 p = subprocess.Popen([args.exe, args.rom, "--run", "--port", str(args.port)], env=env,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

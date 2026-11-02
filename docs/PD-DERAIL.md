@@ -1,6 +1,10 @@
 # Perfect Dark: descarrilamiento tardio (investigacion en curso)
 
-Sintoma: con `KESTREL_PRDP=1` y trabajo fijo (`KESTREL_MAXINSN=8000000000`), PD se
+> Nota (2026-11-02): esta investigacion es historica. El backend parallel-rdp con el que se
+> hicieron varias tandas se borro (queda en git); los flags y puertas que cita (`KESTREL_PRDP*`,
+> `gate_prdp`) ya no existen. El rasterizador de hoy es GPU-RDP / SoftRDP.
+
+Sintoma: con el backend parallel-rdp y trabajo fijo (`KESTREL_MAXINSN=8000000000`), PD se
 descarrila en un 40-100 % de los arranques entre **retired ~1.9e9 y ~3.1e9**. El emulador
 no se cuelga: el *guest* empieza a tomar excepciones. Reproduccion con
 `scripts/`-externo (ver "banco de pruebas" abajo).
@@ -166,7 +170,6 @@ del mismo destrozo: memoria de codigo y memoria de pila/heap.
   equivocada se veria codigo ajeno sin que nadie haya escrito nada.
 - `KESTREL_SYNCRDP=1` / `KESTREL_SYNCRSP=1`: dejan el RCP en modo threaded pero obligan a
   la CPU a esperar al worker correspondiente. Biseccion de cual de los dos hilos destroza.
-- `KESTREL_PRDP_SYNCALL=1`: fence de GPU tras CADA primitiva (solo backend parallel-rdp).
 - `KESTREL_RDPGUARD=<lo>:<hi>`: chiva cualquier escritura de SoftRDP a RDRAM en ese rango.
 - `watchHit` cubre ahora tambien **el volcado de lineas sucias de la D-cache** (sin eso
   `KESTREL_WATCH` no veia ningun store cacheado, o sea casi ninguno) y **PI DMA**.
@@ -242,8 +245,8 @@ Medido en PD (SoftRDP threaded, 8e9 instrucciones, SIN instrumentar):
 | con drenado por defecto | **0 de 3** |
 
 Se creyo gratis ("solo se espera UNA vez por buffer instalado"). Falso: medido con `bench`
-cuesta **13-15 % de pared** (SM64, 200 intercambios: threaded-jit 3,57 -> 4,10 s;
-prdp-jit 3,56 -> 4,09 s), porque serializa RSP y RDP. Y ademas ALEJA la fidelidad del
+cuesta **13-15 % de pared** (SM64, 200 intercambios: threaded-jit 3,57 -> 4,10 s),
+porque serializa RSP y RDP. Y ademas ALEJA la fidelidad del
 oraculo: campos VI por intercambio 4,05 -> 3,31, cuando el lockstep da 4,09. Por eso se
 sustituyo por el Vuelco 5.
 
@@ -251,7 +254,7 @@ Salud de una tanda de 8e9 en este build: pared ~90 s y `[wdog] exc: Int(0)` ~ 69
 sana; 30-61 s con `Int(0)` ~ 34k-37k = descarrilada.
 
 Puertas con el arreglo dentro: `gate_all` 15/15 verde (376 s, krom regress=0, sm64 md5
-sin cambio) y `gate_prdp` 3/3 verde (krom prdp mean_exact 89,26, regress=0).
+sin cambio).
 
 ## Vuelco 5: la cura de verdad -- instantanea del tramo al encolar (arreglado, sin coste)
 
@@ -289,9 +292,8 @@ Medido (PD, SoftRDP threaded, 8e9 instrucciones, SIN instrumentar):
 O sea: cura completa, velocidad intacta y fidelidad temporal MAS cerca del oraculo lockstep
 (4,09) que ninguno de los otros dos brazos.
 
-Puertas: `gate_all` ALL OK (krom interp mean_exact 88,71, regress=0, sm64 md5
-`466282775dbd0ac084946558a1c30771`) y `gate_prdp` ALL OK (krom prdp mean_exact 89,26,
-regress=0, sm64 md5 `b5521b24d8fc280fbf102df22d7d30cb`).
+Puerta: `gate_all` ALL OK (krom interp mean_exact 88,71, regress=0, sm64 md5
+`466282775dbd0ac084946558a1c30771`).
 
 **Aviso metodologico**: instrumentar (`KESTREL_WRTAG=1`) ralentiza la CPU respecto al RDP y
 por tanto ESCONDE la carrera. Cualquier A/B de esto se corre sin instrumentar.

@@ -176,7 +176,7 @@ carga de microcodigo.
 
 ## Tercera tanda (2026-08-26): getenv en el hilo de CPU
 
-El perfilador de host sobre el hilo de CPU (build `build-prof-prdp`, parallel-rdp) daba
+El perfilador de host sobre el hilo de CPU (build `build-prof-gpu`, parallel-rdp) daba
 `ucrtbase` al 7.17% del hilo, alcanzado desde dos sitios de `src/cpu/cpu.cpp`:
 
 | Sitio | % hilo CPU | Frecuencia |
@@ -237,7 +237,7 @@ El helper especializado ademas quita el `writeback` de `rs`/`rt` antes del CALL:
 `cpu->gpr`, la unica coherencia que hace falta es en el camino de fallo, y de eso se encarga el
 `RcSnap` del stub de bail.
 
-**Medida** (SM64, `KESTREL_PRDP=1 KESTREL_MAXFLIPS=400 KESTREL_THREADS=1`, consola = 30 fps):
+**Medida** (SM64, backend parallel-rdp de entonces, `KESTREL_MAXFLIPS=400 KESTREL_THREADS=1`, consola = 30 fps):
 
 | Punto | fps | % consola |
 |---|---|---|
@@ -248,8 +248,7 @@ El helper especializado ademas quita el `writeback` de `rs`/`rt` antes del CALL:
 
 CPU N64 en el heartbeat: 153.4% -> **163.9%**. RSP 97.9%, ocupacion RDP 19%, RSP 58%.
 
-Puertas: `gate_all` regress=0, seis modos MATCH `466282775dbd0ac084946558a1c30771`;
-`gate_prdp` regress=0, ambos modos MATCH `b5521b24d8fc280fbf102df22d7d30cb`.
+Puertas: `gate_all` regress=0, seis modos MATCH `466282775dbd0ac084946558a1c30771`.
 
 ### Palancas que quedan, por tamano medido en el hilo de CPU
 
@@ -302,7 +301,7 @@ tambien el `switch` de `cop1op`. El unico caso que si puede desviar, CU1=0, dele
 mismo, con un quirk de pipeline en `Cause.CE`; ese camino tiene que seguir siendo el del
 interprete.
 
-**Banco de precision.** El banco de fps (PRDP, threaded) tiene ~±1 fps de ruido de host, que
+**Banco de precision.** El banco de fps (parallel-rdp de entonces, threaded) tiene ~±1 fps de ruido de host, que
 tapa mejoras de esta talla. Para decidir se usa lockstep con tope de instrucciones
 (`KESTREL_THREADS=0 KESTREL_MAXINSN=300000000`), que es reproducible al ~0.5%:
 
@@ -312,7 +311,7 @@ tapa mejoras de esta talla. Para decidir se usa lockstep con tope de instruccion
 | con | 8.602 / 8.581 / 8.609 | 8.581 |
 
 Lockstep diluye una mejora de CPU (serializa RSP y RDP en el mismo hilo), asi que ese -0.55%
-del total es una mejora mayor en el hilo de CPU. fps PRDP: sin cambio medible fuera del ruido
+del total es una mejora mayor en el hilo de CPU. fps parallel-rdp: sin cambio medible fuera del ruido
 (~47).
 
 ### Descartado por medida: testigo de generacion para la validacion SMC
@@ -344,7 +343,7 @@ forma barata de validar las siguientes (DIV, SQRT, CVT, C.cond).
 
 ### 2. El regulador de ritmo estaba calibrado para un emulador más lento
 
-Al medir el cambio anterior en PRDP+threaded salió una regresión brutal y reproducible:
+Al medir el cambio anterior en parallel-rdp+threaded salió una regresión brutal y reproducible:
 **46.7 → 34 fps**, con A/B intercalado de dos binarios para descartar deriva del host. Pero en
 lockstep el mismo cambio medía ligeramente *mejor*. Contradicción real, no ruido.
 
@@ -416,7 +415,7 @@ Detalles que importan:
 - **Armado solo con ventana** (`videoOn`). Gates, bench y krom corren headless y deben seguir a
   tope: si no, todo mediria 30 fps. `KESTREL_THROTTLE=0/1` fuerza cualquiera de los dos.
 
-Medido (SM64, PRDP, threaded, 200 flips): `N64 speed: CPU 95.4-98.0%` con el limitador armado,
+Medido (SM64, parallel-rdp, threaded, 200 flips): `N64 speed: CPU 95.4-98.0%` con el limitador armado,
 frente a 157-250% sin el. El 2-4% que falta es el coste de despertar y no se oye.
 
 ### 3. Conversiones de COP1 con camino rapido

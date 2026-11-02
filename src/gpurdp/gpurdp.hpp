@@ -1,8 +1,7 @@
 #pragma once
 // kestrel64 -- GPU-RDP propio (docs/GPU-RDP.md). Rasterizador del RDP en compute de Vulkan con
-// la semantica de SoftRDP bit a bit. De fabrica desde la fase 7 (KESTREL_GPURDP=0 o
-// KESTREL_PRDP=0 lo apagan y queda SoftRDP); sustituyo a parallel-RDP, retirado 2026-11-02. El
-// presentador comparte su contexto Vulkan: volk tiene UNA tabla global de punteros.
+// la semantica de SoftRDP bit a bit. De fabrica desde la fase 7 (KESTREL_GPURDP=0 lo apaga y
+// queda SoftRDP). El presentador comparte su contexto Vulkan: volk tiene UNA tabla global de punteros.
 //
 // Fase 0: SoftRDP sigue decodificando el FIFO entero y el GPU-RDP le "roba" primitivas una a
 // una. De momento solo FILL_RECTANGLE en ciclo FILL/COPY (escritura pura, no lee RDRAM).
@@ -108,7 +107,7 @@ inline auto queueTriHi(const TriRec&, const u8*, const u8*, u32, const u8*) -> v
 inline auto queueFillHi(const FillRect&, const u8*, u32, const u8*) -> void {}
 inline auto submitHi(const u8*, u32, const u8*) -> void {}
 #else
-// De fabrica; no lo quieren KESTREL_GPURDP=0 ni KESTREL_PRDP=0 (SoftRDP).
+// De fabrica; KESTREL_GPURDP=0 pide SoftRDP.
 auto wanted() -> bool;
 // Levanta Vulkan (instancia, dispositivo, pipelines, espejo de RDRAM). Desde el hilo que corre
 // el RDP. false = sin Vulkan util: SoftRDP sigue solo.

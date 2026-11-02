@@ -17,10 +17,10 @@
 >   experiments are kept in detail.
 > The rest of this document is in Spanish.
 
-Objetivo a largo plazo: un rasterizador RDP en GPU escrito en kestrel, que sustituya a
-parallel-RDP (`third_party/parallel-rdp`, Themaister, MIT) y quite esa dependencia.
-Hoy hay dos backends: SoftRDP (`src/rdp/rdp.cpp`, ~2,5 k lineas, CPU, oraculo de las
-puertas) y parallel-RDP (~59 k lineas con Granite, Vulkan compute, el exe recomendado).
+Objetivo: un rasterizador RDP en GPU escrito en kestrel que sustituyera a parallel-RDP
+(Themaister, MIT) y quitara esa dependencia. **Cumplido el 2026-11-02**: hoy hay dos
+rasterizadores, SoftRDP (`src/rdp/rdp.cpp`, CPU, oraculo de las puertas) y GPU-RDP (propio,
+Vulkan compute, de fabrica). El texto de abajo conserva el plan original y su historial.
 
 ## Por que
 
@@ -29,7 +29,8 @@ puertas) y parallel-RDP (~59 k lineas con Granite, Vulkan compute, el exe recome
   las dos ramas divergen (krom: baseline propia `krom-prdp.tsv`, md5 de SM64 por backend).
 - **Ya hubo que parchearlo**: orden de bytes de RDRAM (kestrel guarda el invitado en
   big-endian, parallel-RDP asume el swizzle de ares) y banco SPIR-V regenerado con
-  `tools/slangmosh_lite.py`. Ver `docs/parallel-rdp-integration.md`.
+  `tools/slangmosh_lite.py`. La historia de esa
+  integracion esta en git (commits anteriores al 2026-11-02).
 - **Cosas que no admite y queremos**: texturas HD (`docs/TEXTURAS-HD.md`, hoy solo SoftRDP),
   escalado interno combinado con ellas, contornos de cel por profundidad, telemetria por
   primitiva (coste por triangulo, quien escribio cada pixel) al estilo del resto de kestrel.
@@ -102,7 +103,7 @@ SoftRDP, **no** contra la de parallel-RDP).
 | 4 | COPY/texrect, framebuffers de 8 bits, YUV | krom Copy, PD menus |
 | 5 | coherencia fina (lecturas de framebuffer por CPU, efectos de PD), rendimiento | PD en juego, `pdbench` |
 | 6 | escalado interno + texturas HD en GPU | visual |
-| 7 | default ON en `kestrel64.exe`; parallel-RDP queda un ciclo como alternativa y luego se retira de `third_party` | `gate_all` + `gate_prdp` sustituida |
+| 7 | default ON en `kestrel64.exe`; parallel-RDP queda un ciclo como alternativa y luego se retira de `third_party` | `gate_all` + `gate_gpurdp` |
 
 ## Estado
 
@@ -111,7 +112,7 @@ SoftRDP, **no** contra la de parallel-RDP).
 Codigo: `src/gpurdp/` (`gpurdp.hpp/.cpp`, `shaders/fill.comp`, SPIR-V embebido en
 `gpurdp_spv.inc` por `tools/gen_gpurdp_shaders.py`). Vulkan a pelo sobre volk, nada de
 Granite. Se compila con `-DKESTREL_GPU=ON` (volk va vendorizado en `third_party/volk`) y se apaga con
-`KESTREL_GPURDP=0` o `KESTREL_PRDP=0`. (Historico: antes convivia con parallel-RDP.)
+`KESTREL_GPURDP=0`. (Historico: antes convivia con parallel-RDP.)
 
 Forma elegida para ir migrando sin romper nada: **SoftRDP sigue decodificando el FIFO entero
 y el GPU-RDP le roba primitivas una a una**, no la interfaz de `vrdp.hpp` desde el dia uno.
@@ -310,26 +311,27 @@ Barrido SM64 200 intercambios (una corrida): 0 = 9075 ms / 16782 vaciados, 2048 
 8192 = 4352 / 626, 32768 = 4978 / 337, todo CPU = 7032. Intercalado 4096 vs 8192 empata con
 ligera ventaja de 4096 (SM64 3,97 contra 3,99-4,23 s; PD 3,65 contra 3,67).
 
-**Bench final** (`validate.py bench`, min de 3 SM64 / 2 PD, intercalado prdp/gpurdp dos rondas):
+**Bench final** (`validate.py bench`, min de 3 SM64 / 2 PD, dos rondas):
 
-| | parallel-RDP (prdp-jit) | GPU-RDP (gpurdp-jit) | SoftRDP (threaded-jit) |
-|---|---|---|---|
-| SM64 200 intercambios | 3,58 s (286 %) | 3,94 s (260 %) | 6,66 s (154 %) |
-| PD intro 300 intercambios | 3,52 s (350 %) | 3,58 s (344 %) | 7,01 s (176 %) |
+| | GPU-RDP (gpurdp-jit) | SoftRDP (threaded-jit) |
+|---|---|---|
+| SM64 200 intercambios | 3,94 s (260 %) | 6,66 s (154 %) |
+| PD intro 300 intercambios | 3,58 s (344 %) | 7,01 s (176 %) |
 
-Antes del reparto GPU-RDP daba 7,63 s en SM64 y 4,76 s en PD. Queda +10 % en SM64 y +1,5 % en PD
-contra parallel-RDP, que encola sin esperar porque NO devuelve contabilidad por primitiva.
+Antes del reparto GPU-RDP daba 7,63 s en SM64 y 4,76 s en PD. (El backend parallel-RDP de
+entonces iba un 10 % por delante en SM64 porque encolaba sin esperar: NO devolvia
+contabilidad por primitiva.)
 
-**Re-bench 2026-10-08** (tras FILL de tramo entero, YUV y TEXEL1 canalizado; exe `build-prdp-static`,
+**Re-bench 2026-10-08** (tras FILL de tramo entero, YUV y TEXEL1 canalizado; exe `build-gpu-static`,
 peer ocioso, intercalado dos rondas, min de 3 SM64 / 2 PD; la ROM de PD es la PAL, 300 intercambios = 413 campos):
 
-| | parallel-RDP (prdp-jit) | GPU-RDP (gpurdp-jit) |
-|---|---|---|
-| SM64 200 intercambios | 4,13 / 4,16 s | 4,56 / 4,50 s (+9 %) |
-| PD intro 300 intercambios | 1,57 / 1,55 s | 1,49 / 1,48 s (-4,5 %) |
+| | GPU-RDP (gpurdp-jit) |
+|---|---|
+| SM64 200 intercambios | 4,56 / 4,50 s |
+| PD intro 300 intercambios | 1,49 / 1,48 s |
 
-Misma foto que antes: en SM64 GPU-RDP sigue ~10 % detras (espera de fence por vaciado), en PD va
-por delante. Los cambios de fidelidad de hoy no movieron el coste de forma visible.
+Misma foto que antes: en SM64 GPU-RDP iba ~10 % por detras del backend retirado (espera de
+fence por vaciado), en PD por delante. Los cambios de fidelidad de hoy no movieron el coste de forma visible.
 
 **Bug latente encontrado al validar**: con todo a la GPU, SM64 a 200 intercambios divergia del
 SoftRDP en "PRESS START" (805 pixeles, un paso de 5 bits por canal en patron de dither). El
@@ -337,11 +339,10 @@ texrect en COPY con `IM_RD` puesto entraba en `blendPixel` del shader y le aplic
 SoftRDP COPY/FILL son `BlendPlan.passthru` (sin blender ni dither). Arreglado en `tri.comp`
 (ciclo >= 2 = escritura directa). La puerta de 60 intercambios no lo veia.
 
-**Telemetria (ventaja sobre parallel-RDP).** `rdp.stats` (MCP `rdp_stats`) dice ahora `backend`
-(soft/gpurdp/prdp) y `exactPixels`: con SoftRDP y GPU-RDP `pixels.written`/`zUpd` salen del
-resultado real de cada pixel (prueba de z, alpha compare, devuelto por la GPU en `TriOut`); con
-parallel-RDP la cuenta es el paseo de solo-coste y todo pixel rasterizado cuenta como escrito
-(cota superior). Ademas, solo con GPU-RDP, bloque `gpurdp`: vaciados, primitivas, tris/texTris/
+**Telemetria.** `rdp.stats` (MCP `rdp_stats`) dice ahora `backend`
+(soft/gpurdp) y `exactPixels`: `pixels.written`/`zUpd` salen del
+resultado real de cada pixel (prueba de z, alpha compare, devuelto por la GPU en `TriOut`).
+Ademas, solo con GPU-RDP, bloque `gpurdp`: vaciados, primitivas, tris/texTris/
 fills, despachos, `tramosGpu`/`tramosCpu`, `fallbackTri`/`fallbackRect` (primitivas que la GPU no
 admite y pinto SoftRDP), `hostMs` (subir/grabar/esperar/bajar), `usPerFlush`, `flushesPerFlip`.
 Ejemplo SM64 titulo 137 intercambios: 805 vaciados (5,9/intercambio), 543 us cada uno, 353 ms de
@@ -398,24 +399,21 @@ mismo md5 `b338947b` (37 k triangulos texturizados en la GPU, ningun vaciado por
 
 ### Fase 7 -- GPU-RDP de fabrica HECHA 2026-10-06
 
-- `gpurdp::wanted()`: `KESTREL_GPURDP` manda si esta puesto; si no, GPU-RDP salvo que haya un
-  `KESTREL_PRDP` explicito (`=1` parallel-RDP, `=0` SoftRDP). Sin Vulkan cae a SoftRDP como antes
-  (`vrdpFailed`). Probado el exe con las cuatro combinaciones (nada / PRDP=1 / PRDP=0 /
-  GPURDP=0) y con `KESTREL_UPSCALE=2` (la opcion general del lanzador ahora vale tambien aqui;
+- `gpurdp::wanted()`: `KESTREL_GPURDP` manda si esta puesto; si no, GPU-RDP.
+  Sin Vulkan cae a SoftRDP como antes (`vrdpFailed`). Probado el exe con y sin
+  `KESTREL_GPURDP=0` y con `KESTREL_UPSCALE=2` (la opcion general del lanzador ahora vale tambien aqui;
   8 se quedaba en 4 hasta 2026-10-30, ver Fase 7).
 - Menu nativo y lanzador (`options.py`, `profile.cpp`, `kestrel_launcher.py`, `app.js`): cuarta
-  opcion "GPU-RDP" que sale del mismo .exe que parallel-RDP; "Automatico" la prefiere.
-  parallel-RDP marcado "se retirara". Texturas HD/realce ya no fuerzan SoftRDP en automatico.
-- Puertas: todo modo de `validate.py` fija `KESTREL_PRDP`, asi que `gate_all`/`gate_prdp` no
-  cambian de rasterizador. `pdbench.py` (sesion PD-opt) fija parallel-RDP para que su tabla
-  siga comparable salvo `KESTREL_GPURDP=1` en el entorno.
+  opcion "GPU-RDP" que sale del mismo .exe; "Automatico" la prefiere. Texturas HD/realce ya no fuerzan SoftRDP en automatico.
+- Puertas: todo modo de `validate.py` fija su rasterizador, asi que las puertas no cambian de
+  rasterizador.
 - (Historico, hecho 2026-11-02) Retirar parallel-RDP de `third_party/`: pendiente de un ciclo de uso. Lo que aun solo tiene
   el: escalado x8 (GPU-RDP llega a x4) y su ventaja de ~10 % en SM64 (sin contabilidad por
   primitiva no espera a la GPU).
 
 ### Revision de rendimiento contra parallel-RDP 2026-10-23 (sin cambio de codigo)
 
-Medido en `build-prdp` (RX 570, THREADS=1, JIT, min de 6, intercalado, con otra sesion cargando
+Medido en `build-gpu` (RX 570, THREADS=1, JIT, min de 6, intercalado, con otra sesion cargando
 el anfitrion): SM64 200 intercambios GPU-RDP 4,19 s contra prdp 3,72 s; DK64 400 intercambios
 3,32 contra 2,68 s (mediana 3,6 contra 2,95). La brecha es real: +12 % SM64, +20 % DK64.
 
@@ -577,26 +575,18 @@ solo rellena la copia de alta (`hram`/`hhid`) y **nadie la espera**.
 
 Medido (SM64, 100 intercambios desde arranque, ventana, RX 570):
 
-| | antes | sombra | parallel-RDP |
-|---|---|---|---|
-| x2 | -- | 5,9 s | -- |
-| x4 | 12,8-20 s | **5,9-6,0 s** | 6,1 s |
-| x8 | 17,3 s | **7,2 s** | 52,5 s |
+| | antes | sombra |
+|---|---|---|
+| x2 | -- | 5,9 s |
+| x4 | 12,8-20 s | **5,9-6,0 s** |
+| x8 | 17,3 s | **7,2 s** |
 
 - Detalle x4 a 60 intercambios (`KESTREL_VIDEO_DUMP`, fraccion de bloques SxS con detalle):
   sombra 0,336 contra HISYNC 0,337; 0,12 % de pixeles distintos entre las dos imagenes.
 - 1x de la RDRAM intacto: sm64 `gpurdp-jit` md5 `b5521b24` con y sin `KESTREL_UPSCALE=4`.
 - 6/6 arranques x4 sin cuelgue (vigilar: un primer intento se paso de 60 s y no se repitio).
-- **Retirar parallel-RDP**: el bloqueo de rendimiento ya no existe (1x en ruido, x2/x4 a la
-  par, x8 7x mejor).
-  - **Fase 1 HECHA 2026-10-30**: fuera de la opcion Rasterizador (menu del exe y lanzador; un
-    `prdp` guardado = GPU-RDP), fuera de `release.sh --gates` (ahora `gate_all` +
-    `gate_gpurdp` sobre el exe estatico), `pdbench.py` mide con GPU-RDP (las filas viejas de
-    `docs/baselines/pd-opt.md` eran parallel-RDP), `fidelity.py --rdp gpu` por defecto.
-    `KESTREL_PRDP=1` a mano sigue funcionando y avisa por stderr.
-  - **Fase 2 HECHA 2026-11-02** (commit 792beea): borrado `third_party/parallel-rdp*`, la parte Granite de
-    `src/vrdp/` (lo que comparten presentador y GPU-RDP, como `vrdp::queueLock` y el contexto
-    Vulkan compartido, se queda), `gate_prdp.sh` y sus baselines (`krom-prdp.tsv`,
-    `sm64-prdp.txt`), los modos `prdp*` de `validate.py`, `KESTREL_PRDP_STATS`; la
-    opcion de cmake pasa a `KESTREL_GPU` (`KESTREL_PRDP` vale como alias); las carpetas
-    `build-prdp*` conservan el nombre (`-DKESTREL_GPU=ON`). `KESTREL_PRDP=1` ahora = GPU-RDP y avisa.
+- **Retirar parallel-RDP**: el bloqueo de rendimiento ya no existia (1x en ruido, x2/x4 a la
+  par, x8 7x mejor), asi que se borro el 2026-11-02 (fase 1 el 2026-10-30: fuera de menu,
+  lanzador y puertas; fase 2: fuera su codigo, sus puertas y sus baselines). Historia en git,
+  commits anteriores a esa fecha. El contexto Vulkan compartido entre presentador y GPU-RDP
+  se queda. La opcion de cmake es `KESTREL_GPU` y las carpetas `build-gpu*`.

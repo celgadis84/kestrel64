@@ -2,7 +2,7 @@
 # Deja listo lo que se le da a alguien que no compila: el .exe estatico, el zip portable
 # y el instalador de Windows.
 #
-# Existe porque las baterias (gate_all.sh / gate_gpurdp.sh) recompilan build/ y build-prdp/,
+# Existe porque las baterias (gate_all.sh / gate_gpurdp.sh) recompilan build/ y build-gpu/,
 # pero NO el arbol estatico, que es el unico que arranca fuera de MSYS2. Sin este paso el
 # dist/ se queda con el .exe de hace semanas y lo que se prueba desde el lanzador no es
 # el codigo actual. Un solo comando para que no vuelva a desincronizarse.
@@ -10,13 +10,13 @@
 # Va UN ejecutable (desde 2026-10-05): kestrel64.exe lleva GPU-RDP y SoftRDP y el
 # rasterizador se elige dentro; sin Vulkan cae solo a SoftRDP con ventana GDI.
 #
-# Uso:  sh scripts/pack.sh            (build-prdp-static)
+# Uso:  sh scripts/pack.sh            (build-gpu-static)
 #       NOISS=1 sh scripts/pack.sh    (sin instalador, solo dist/ + zip)
 set -e
 cd "$(dirname "$0")/.."
 export PATH=/c/msys64/clang64/bin:$PATH
 
-BUILD=${BUILD:-build-prdp-static}
+BUILD=${BUILD:-build-gpu-static}
 
 # El .exe no se puede reenlazar mientras una copia corre: Windows tiene el fichero abierto.
 sh "$(dirname "$0")/killown.sh"   # solo exes de este repo, no los de otra sesion

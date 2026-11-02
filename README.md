@@ -36,7 +36,7 @@ kestrel64's bet is architectural:
 
 ## Performance
 
-Same host (i7-870, 2009; RX570), parallel-rdp backend (since removed, 2026-11-02), threaded RCP + both dynarecs,
+Same host (i7-870, 2009; RX570), GPU rasterizer of the time (a third-party Vulkan backend, since replaced by GPU-RDP), threaded RCP + both dynarecs,
 measured 2026-09-17 as wall clock for a fixed amount of guest work:
 
 | Benchmark | Wall clock |
@@ -90,8 +90,8 @@ Individual trees, when a single A/B build is enough:
 
 ```bash
 cmake -B build      -G Ninja -DKESTREL_GPU=OFF      # SoftRDP only (no GPU needed)
-cmake -B build-prdp -G Ninja -DKESTREL_GPU=ON       # GPU-RDP (Vulkan) backend
-cmake --build build-prdp -j8
+cmake -B build-gpu -G Ninja -DKESTREL_GPU=ON       # GPU-RDP (Vulkan) backend
+cmake --build build-gpu -j8
 ```
 
 `-DKESTREL_STATIC=ON` produces a self-contained `.exe` (libc++/GLFW linked in).
@@ -99,7 +99,7 @@ cmake --build build-prdp -j8
 ## Run
 
 ```bash
-build-prdp/kestrel64.exe game.z64 --run       # free-run; without --run it starts paused
+build-gpu/kestrel64.exe game.z64 --run       # free-run; without --run it starts paused
 ```
 
 Behaviour is driven by `KESTREL_*` environment variables — the full, annotated list lives
@@ -107,7 +107,7 @@ in `CLAUDE.md`. The ones worth knowing first:
 
 | Variable | Meaning |
 |----------|---------|
-| `KESTREL_GPURDP=0` / `KESTREL_PRDP=0` | use SoftRDP instead of the default GPU-RDP |
+| `KESTREL_GPURDP=0` | use SoftRDP instead of the default GPU-RDP |
 | `KESTREL_THREADS=0` | Lockstep RCP — the determinism oracle |
 | `KESTREL_JIT=0` / `KESTREL_RSPJIT=0` | fall back to the interpreters |
 | `KESTREL_MAXINSN`, `KESTREL_MAXFLIPS` | stop caps (always use one in scripted runs) |

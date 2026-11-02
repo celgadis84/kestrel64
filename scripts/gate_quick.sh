@@ -15,7 +15,7 @@
 . "$(dirname "$0")/localenv.sh"
 cd "$(dirname "$0")/.."
 SOFT="$(pwd)/build-static/kestrel64.exe"
-PRDP="$(pwd)/build-prdp-static/kestrel64.exe"
+PRDP="$(pwd)/build-gpu-static/kestrel64.exe"
 rc=0
 KESTREL_EXE="$SOFT" $PY scripts/validate.py systemtest --mode threaded-jit || rc=1
 KESTREL_EXE="$SOFT" $PY scripts/validate.py sm64 --mode interp || rc=1

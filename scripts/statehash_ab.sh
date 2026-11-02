@@ -18,7 +18,7 @@ A=$1; B=$2; shift 2
 rc=0
 hash() { # hash <exe> <rom> <maxinsn> <threads>
   env KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 KESTREL_SPLEAD=0 KESTREL_DPLOGLEAD=0 \
-      KESTREL_PRDP=0 KESTREL_THREADS=$4 KESTREL_MAXINSN=$3 \
+      KESTREL_GPURDP=0 KESTREL_THREADS=$4 KESTREL_MAXINSN=$3 \
       timeout 120 "$1" --run "$2" 2>&1 | tr -d '\0' \
     | grep -oE "\[statehash\] [0-9a-f]+" | tail -1 | cut -d' ' -f2
 }

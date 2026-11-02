@@ -3,7 +3,7 @@
 > **English summary.** Guide for a Claude session working on ANOTHER project (e.g. optimizing a game
 > decomp) that uses kestrel64 as a test bench through its built-in telemetry server and MCP bridge.
 > - Rules: only USE kestrel64, never edit it; the ares MCP is dead, use `mcp__kestrel64__*` only.
-> - Executable: `build-prdp-static\kestrel64.exe` is the normal one; `build-static` uses SoftRDP.
+> - Executable: `build-gpu-static\kestrel64.exe` is the normal one; `build-static` uses SoftRDP.
 > - Launch: telemetry on port 9128 (`--port N`). No flag = paused with a black window (use
 >   `run_control('resume')`); `--play` = running with window; `--run` = running without window.
 > - Always use `timeout` plus `KESTREL_MAXFLIPS` or `KESTREL_MAXINSN`; no VI field progress in ~5 s
@@ -31,9 +31,9 @@ y perfilar. Todo por el servidor de telemetria del propio emulador.
 
 | exe | para que |
 |---|---|
-| `build-prdp-static\kestrel64.exe` | **el normal**: RDP por GPU (parallel-rdp), JIT de CPU y de RSP, hilos |
+| `build-gpu-static\kestrel64.exe` | **el normal**: RDP por GPU (GPU-RDP), JIT de CPU y de RSP, hilos |
 | `build-static\kestrel64.exe` | igual con SoftRDP (rasterizador de referencia por software, sin Vulkan) |
-| `dist\kestrel64.exe` | la copia del paquete publicado (= build-prdp-static) |
+| `dist\kestrel64.exe` | la copia del paquete publicado (= build-gpu-static) |
 
 No compilar kestrel64 desde la otra sesion: `sh scripts/release.sh` es de su dueno.
 
@@ -42,7 +42,7 @@ No compilar kestrel64 desde la otra sesion: `sh scripts/release.sh` es de su due
 El servidor de telemetria arranca SIEMPRE, en el puerto 9128 (`--port N` para cambiarlo).
 
 ```sh
-EXE=<workspace>/kestrel64/build-prdp-static/kestrel64.exe
+EXE=<workspace>/kestrel64/build-gpu-static/kestrel64.exe
 "$EXE" "<rom>"            # PAUSADO con ventana: espera run_control('resume'). Ventana negra = normal.
 "$EXE" "<rom>" --play     # corriendo y con ventana (lo normal para mirar)
 "$EXE" "<rom>" --run      # corriendo SIN ventana (lotes, medidas)

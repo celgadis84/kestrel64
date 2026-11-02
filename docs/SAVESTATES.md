@@ -65,7 +65,7 @@ la nueva y el juego veria un fichero de guardado del futuro.
 
 ## Lo que NO se guarda
 
-- Estado interno de **parallel-rdp** (su cola de comandos en GPU). No hace falta: lo que ve
+- Estado interno de **GPU-RDP** (su cola de comandos en GPU). No hace falta: lo que ve
   el juego son los pixeles en RDRAM, y eso si va. El estado se toma con el RDP drenado, asi
   que no hay trabajo en vuelo que perder. Los tiles/TMEM del RDP por software si se guardan,
   y ademas los juegos los reprograman al principio de cada lista.

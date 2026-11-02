@@ -1,9 +1,8 @@
 # Fidelity score (community HW test suites)
 
 `scripts/fidelity.py` runs krom / Dillon / n64-systemtest / libdragon on kestrel64 and on
-ares and writes `out/fidelity.md`. It is NOT a gate: run on demand. `--rdp prdp|gpu|soft`
-picks kestrel's RDP backend (default `gpu`; `prdp` is gone, parallel-rdp was removed 2026-11-02;
-the shipped exe starts on GPU-RDP, so the backend is always fixed explicitly). The sections
+ares and writes `out/fidelity.md`. It is NOT a gate: run on demand. `--rdp gpu|soft`
+picks kestrel's RDP backend (default `gpu`; the shipped exe starts on GPU-RDP, so the backend is always fixed explicitly). The sections
 below are dated 2026-10 and compare against parallel-rdp as the reference of that time.
 
 ## libdragon `testrom_emu.z64` on parallel-rdp (2026-10-08)
@@ -63,25 +62,25 @@ differing pixels). RDP/ subset: 0 regressions on interp and gpurdp; SM64 md5 unc
 `FillTriangle 16/32BPP`: 98.89 -> 98.94 on SoftRDP and GPU-RDP, framebuffer identical to
 parallel-rdp pixel for pixel. `RDP/` subset 133: 0 regress over the gate threshold. SM64 md5
 unchanged. `FillLine 16/32BPP` goes 99.26 -> 99.18 against the krom PNG, but its framebuffer is now
-also identical to parallel-rdp (which scores 99.18): the extra edge pixels are what prdp draws.
+also identical to parallel-rdp (which scores 99.18): the extra edge pixels are what parallel-rdp draws.
 
 - In FILL cycle the RDP does not look at coverage: every pixel between the span's start and
   end (`min(xleft) >> 3` .. `max(xright) >> 3`, both inclusive) is written, like COPY
-  (prdp `shading.h`, `fill_en`). We required sample 0 to be covered, so the right edge lost
+  (parallel-rdp `shading.h`, `fill_en`). We required sample 0 to be covered, so the right edge lost
   one pixel per row on slanted edges.
 
 ## YUV textures (2026-10-08)
 
 `Cycle1TextureRectangle/Triangle 16/32BPP YUV16B`: 97.37/96.98/98.92/98.49 -> 99.74/99.74/99.73/99.73
-on SoftRDP and GPU-RDP (= parallel-rdp; rect16 framebuffer identical to prdp pixel for pixel).
+on SoftRDP and GPU-RDP (= parallel-rdp; rect16 framebuffer identical to parallel-rdp pixel for pixel).
 `RDP/` subset: 133 ROMs, 0 regress, both backends identical. SM64 md5 unchanged on both.
 
 - Load: a YUV 16bpp load uploads each pixel pair U Y0 V Y1 as one 32bpp texel, U,V in the low
-  TMEM half and Y0,Y1 in the high half (prdp `update_tmem_32` with yuv); LOAD_TILE width
+  TMEM half and Y0,Y1 in the high half (parallel-rdp `update_tmem_32` with yuv); LOAD_TILE width
   rounded up to 4 pixels.
 - Sample: luma from the high half at pixel s, chroma from the low half at column s>>1. The
   filter takes chroma at columns `s0>>1` and `(2*s1-s0)>>1` with its own fraction
-  `(s0&1)<<4 | fx>>1`; luma uses the normal one (prdp `sample_texture`).
+  `(s0&1)<<4 | fx>>1`; luma uses the normal one (parallel-rdp `sample_texture`).
 - Convert (TX): without BI_LERP for the cycle the texel is converted with factors `2K+1`,
   `>>8` with `+0x80` rounding, U/V signed, alpha = Y; with BI_LERP it passes raw.
   CONVERT_ONE without BI_LERP_1 makes TEXEL1 = convert(TEXEL0).
@@ -102,7 +101,7 @@ identical on all 133. SM64 md5 unchanged on both.
   (axes crossed with FLIP). SoftRDP feeds it to `drawTriangle`, so the rect inherits the
   integer row anchor, the XH fraction discount (none in COPY), coverage (AA-on rects with a
   fractional edge get partial coverage) and COPY's 4-pixel word grouping.
-  No perspective on rects (prdp does apply it; W = 0 here).
+  No perspective on rects (parallel-rdp does apply it; W = 0 here).
 - COPY to an 8-bit framebuffer (raw indices) keeps the old loop.
 - GPU-RDP: 1/2-cycle rects go through `gpuTriangle`; COPY 16bpp rects keep the rect record
   with the triangle's box (columns [XH>>2, XL>>2], rows with a sub-scanline in [YH, YL|3))
@@ -151,7 +150,7 @@ all 14. `RDP/` subset: 0 regress, both backends identical on all 133. SM64 md5 u
   words get written and from which texel (16b->4b tile = contiguous quadrupled entries;
   same size = first 8 bytes of every 32; etc.). A LOAD_BLOCK/TILE into the upper half now
   overwrites the palette, as on HW.
-- Not modelled (parallel-rdp neither): 4-bit image, 32-bit tile (`*_b32` stay at prdp's
+- Not modelled (parallel-rdp neither): 4-bit image, 32-bit tile (`*_b32` stay at parallel-rdp's
   score), height > 1.
 - GPU-RDP TMEM slot shrinks to 4 KB (palette included). Savestate v22; v14-v21 states are
   converted on load.

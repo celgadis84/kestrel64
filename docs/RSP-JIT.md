@@ -643,8 +643,8 @@ armada en tiempo de ejecucion.
 
 **Verificado** con `--rspjitfuzz 300000` (oraculo = interprete, compara el banco
 vectorial, el escalar y los 4 KB de DMEM enteros; el fuzz ya sorteaba los doce
-subcodigos, incluidos estos) y `--rspldfuzz 300000`: 0 diferencias. Gates 14/14 +
-prdp 3/3, regress=0, md5 sin cambio.
+subcodigos, incluidos estos) y `--rspldfuzz 300000`: 0 diferencias. Gates 14/14,
+regress=0, md5 sin cambio.
 
 **Medido**: en SM64 no se nota (`rsp Mips busy` 188,0 -> 187,7, dentro del ruido;
 bench 537 % -> 542 % de tiempo real, tambien ruido). Es lo esperable con 1,55 % de
@@ -655,7 +655,7 @@ que empaquetan normales) el CALL si se paga. A/B: `KESTREL_RSPJIT_NOVECPACK=1`.
 
 ## El dynarec del RSP NO es el cuello en libdragon (2026-09-17)
 
-hostprof del hilo del RSP en junkrunner64 (200 intercambios, prdp threaded-jit): el codigo
+hostprof del hilo del RSP en junkrunner64 (200 intercambios, threaded-jit): el codigo
 emitido es ~9 % del hilo; el grueso son las citas con la CPU (`spReadSync`, `dpLogWait`)
 alrededor de los DMA del SP que lanza rspq. Mejorar el codegen aqui no mueve la pared; lo que la
 mueve es quitar citas sin perder semantica (ver STATUS 2026-09-17, DMA SP->RDRAM en el diario).

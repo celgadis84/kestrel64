@@ -61,7 +61,7 @@ def main():
     ap.add_argument("--mode", default="lockstep", choices=["lockstep", "threaded"])
     ap.add_argument("--skip", type=int, default=720)
     ap.add_argument("--measure", type=int, default=2400)
-    ap.add_argument("--exe", default=os.path.join(ROOT, "build-prdp-static", "kestrel64.exe"))
+    ap.add_argument("--exe", default=os.path.join(ROOT, "build-gpu-static", "kestrel64.exe"))
     ap.add_argument("--port", type=int, default=9131)
     ap.add_argument("--intro", default="skip", choices=["skip", "keep"],
                     help="skip = START salta la cutscena de intro y se mide jugando (defecto)")
@@ -93,8 +93,7 @@ def main():
                 "KESTREL_THROTTLE": "0"})   # con ventana el modo fiel limita a 59,94 Hz
     # Rasterizador: GPU-RDP (defecto del exe; pixeles escritos y de z EXACTOS en rdp.stats).
     # Hasta 2026-10-30 se fijaba parallel-RDP: las filas de docs/baselines/pd-opt.md
-    # anteriores se midieron con el y no son comparables 1:1. KESTREL_PRDP=1 lo sigue
-    # eligiendo mientras el codigo exista.
+    # anteriores se midieron con el y no son comparables 1:1.
     env.setdefault("KESTREL_GPURDP", "1")
     if a.mode == "lockstep":
         env.update({"KESTREL_THREADS": "0", "KESTREL_JIT": "1"})

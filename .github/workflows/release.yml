@@ -81,9 +81,9 @@ jobs:
       # el SoftRDP puro queda como oraculo determinista.
       - name: build (GPU-RDP, estatico)
         run: |
-          cmake -S . -B build-prdp-static -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          cmake -S . -B build-gpu-static -G Ninja -DCMAKE_BUILD_TYPE=Release \
                 -DKESTREL_GPU=ON -DKESTREL_STATIC=ON
-          cmake --build build-prdp-static -j4
+          cmake --build build-gpu-static -j4
 
       - name: build (SoftRDP, estatico)
         run: |
@@ -94,10 +94,10 @@ jobs:
       # Lo unico que el runner PUEDE validar: las seis pruebas que no cargan ninguna ROM.
       - name: unit tests
         run: |
-          cmake --build build-prdp-static -j4 --target rsp_test save_test wildmem_test cheat_test archive_test rewind_test
+          cmake --build build-gpu-static -j4 --target rsp_test save_test wildmem_test cheat_test archive_test rewind_test
           for t in rsp_test save_test wildmem_test cheat_test archive_test rewind_test; do
             echo "== $t =="
-            ./build-prdp-static/$t.exe || exit 1
+            ./build-gpu-static/$t.exe || exit 1
           done
 
       # Mismo empaquetador que en desarrollo, para que el zip tenga la misma forma.
@@ -106,7 +106,7 @@ jobs:
           PY_WIN: ${{ steps.py.outputs.python-path }}
         run: |
           export PY="$(cygpath -u "$PY_WIN")"
-          sh scripts/dist.sh build-prdp-static dist
+          sh scripts/dist.sh build-gpu-static dist
           # Aviso honesto DENTRO del paquete: esto no ha pasado las puertas.
           {
             echo ""
