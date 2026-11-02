@@ -22,6 +22,9 @@ namespace kestrel {
 // la comprobacion de la guarda de inicializacion del static. Al subirlos a ambito de
 // fichero se inicializan una vez al arrancar el proceso y el punto caliente lee una
 // constante ya materializada.
+// Extiende el signo de los `bits` bajos de v.
+static inline auto sext(u32 v, int bits) -> s32 { return (s32)(v << (32 - bits)) >> (32 - bits); }
+
 static const bool g_noBlend  = std::getenv("KESTREL_NOBLEND")  != nullptr;
 static const bool g_noAA     = std::getenv("KESTREL_NOAA")     != nullptr;
 static const bool g_noFilter = std::getenv("KESTREL_NOFILTER") != nullptr;
@@ -1064,7 +1067,6 @@ auto SoftRdp::gpuTriangle(Memory& mem, const u64* w, bool leftMajor, bool fillMo
     const u8* s0 = combPlan.sel[combPlan.two ? 0 : 1];
     for(int k = 0; k < 8; k++) if(s0[k] == CR_CIN || s0[k] == CR_CINA) return false;
   }
-  auto sext = [](u32 v, int bits) -> s32 { return (s32)(v << (32 - bits)) >> (32 - bits); };
   const u64 w0 = w[0];
   const s32 iYl = sext((u32)(w0 >> 32) & 0x3fff, 14), iYm = sext((u32)(w0 >> 16) & 0x3fff, 14),
             iYh = sext((u32)w0 & 0x3fff, 14);
@@ -1342,7 +1344,6 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   // y quedaban pixeles que no pintaba ninguno (costuras de fondo en los cubos de
   // kestrel64-sdk 05_kgfx_cube, que parallel-rdp pinta limpios).
   //   x: s15.16 crudo -> sext28 >> 1 = 16.15; dxdy: (crudo >> 2) = por sub-scanline.
-  auto sext = [](u32 v, int bits) -> s32 { return (s32)(v << (32 - bits)) >> (32 - bits); };
   const s32 iYl = sext((u32)(w0 >> 32) & 0x3fff, 14), iYm = sext((u32)(w0 >> 16) & 0x3fff, 14),
             iYh = sext((u32)w0 & 0x3fff, 14);
   const s32 iXl = sext((u32)(w[1] >> 32), 28) >> 1, iDxl = sext((u32)w[1] >> 2, 28) >> 1;

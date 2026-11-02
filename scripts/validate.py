@@ -52,9 +52,9 @@ VI_FIELD_HZ = 59.94
 # Los conmutadores llevan valor explicito ("0" apaga) porque hilos+JIT van ON por
 # defecto en el binario: sin el "0" el modo oraculo `interp` no seria interp. Lo mismo
 # vale ahora para el RDP: el backend de GPU va ON por defecto, asi que TODO modo software
-# lleva KESTREL_PRDP="0". Sin eso, correr un modo software contra el exe de build-prdp
+# lleva KESTREL_GPURDP="0". Sin eso, correr un modo software contra el exe de build-gpu
 # rasterizaria en GPU y el md5 no seria el del oraculo determinista.
-SOFT = {"KESTREL_PRDP": "0"}
+SOFT = {"KESTREL_GPURDP": "0"}
 # Modelo fisico completo: 1 ciclo por instruccion + las paradas que documenta el HW.
 # Fallos de cache y lectura sin cache de cen64 (vr4300/fault.h: 48 I / 44 D / 38), latencias
 # multiciclo de la especificacion SGI R4300 rev 2.2 (MULT 5, DIV 37... paran la tuberia,
@@ -70,6 +70,9 @@ MODES = {
     "jit-nolink":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "0", "KESTREL_JIT_NOLINK": "1", **SOFT},
     "threaded":      {"KESTREL_THREADS": "1", "KESTREL_JIT": "0", **SOFT},
     "threaded-jit":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", **SOFT},
+    # La configuracion con la que juega el usuario (GPU-RDP si el exe lo trae, adelantos de
+    # dpLogWait/SP de fabrica). Solo para `bench`: NO es determinista, el md5 no es oraculo.
+    "ship":          {"KESTREL_THREADS": "1", "KESTREL_JIT": "1"},
     # Oraculo del dynarec del RSP: mismo modo que threaded-jit pero con el RSP
     # interpretado. El md5 tiene que salir identico o el JIT del RSP diverge.
     "rspinterp":     {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_RSPJIT": "0", **SOFT},
@@ -90,10 +93,10 @@ MODES = {
     "phys-threaded": {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", **PHYS, **SOFT},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1", **SOFT},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1", **SOFT},
-    # GPU-RDP propio (docs/GPU-RDP.md). Exe de build-prdp* (elegido con KESTREL_EXE). Es BIT A
+    # GPU-RDP propio (docs/GPU-RDP.md). Exe de build-gpu* (elegido con KESTREL_EXE). Es BIT A
     # BIT SoftRDP: el md5 se compara con sm64.txt y krom con --vs interp.
-    "gpurdp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_GPURDP": "1", **SOFT},
-    "gpurdp-jit":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_GPURDP": "1", **SOFT},
+    "gpurdp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_GPURDP": "1"},
+    "gpurdp-jit":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_GPURDP": "1"},
 }
 
 # Accuracy below this counts as "broken" rather than "imperfect" — used only to
@@ -131,8 +134,9 @@ def env_for(mode, extra=None):
     e = dict(os.environ)
     # Las puertas son el oraculo determinista: sin el adelanto de dpLogWait, que de fabrica
     # va puesto en velocidad libre y hace que multihilo deje de coincidir con lockstep.
-    e.setdefault("KESTREL_DPLOGLEAD", "0")
-    e.setdefault("KESTREL_SPLEAD", "0")
+    if mode != "ship":
+        e.setdefault("KESTREL_DPLOGLEAD", "0")
+        e.setdefault("KESTREL_SPLEAD", "0")
     e.update(MODES[mode])
     if extra:
         e.update(extra)

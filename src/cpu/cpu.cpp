@@ -710,7 +710,7 @@ auto CPU::unimplemented(u32 op) -> void {
     // hilo del RDP puede tener la lista de comandos todavia sin consumir cuando la CPU
     // llega al tope de instrucciones: el volcado saldria de un frame a medio pintar, o
     // directamente vacio. Con el dynarec la CPU quema el tope tan rapido que el RDP no
-    // ha empezado siquiera, y con parallel-rdp (que ademas paga arranque de GPU) la
+    // ha empezado siquiera, y con GPU-RDP (que ademas paga arranque de GPU) la
     // carrera se pierde SIEMPRE: la imagen salia entera a cero. rdpDrain() espera a que
     // la cola quede vacia, y el SYNC_FULL de dentro del trabajo ya espera a la GPU.
     if(mem && std::getenv("KESTREL_FBDUMP")) mem->rdpDrain();

@@ -61,7 +61,7 @@ bits; con los valores de cabecera de un cartucho normal salen 5,375 MB/s -- y le
 `MI_PI` al vencer. `loadRom` programa ademas `PI_BSD_DOM1_*` desde los bytes 0x01..0x03 de
 la cabecera, que es lo que hace el IPL2 y aqui no hacia nadie por ser HLE el arranque; ver
 `docs/history/STATUS-2026.md`) ·
-`KESTREL_GPURDP=0/1` (apaga/enciende GPU-RDP, el rasterizador de fabrica si hay Vulkan; manda sobre `KESTREL_PRDP`) · `KESTREL_PRDP=0` (SoftRDP; alias viejo, lo fijan las puertas) · `KESTREL_PRDP=1` (ahora = GPU-RDP, avisa; parallel-RDP se borro el 2026-11-02, y con el `KESTREL_PRDP_SYNCALL`, `KESTREL_VRDPLOG` y `KESTREL_DPBARSYNC`) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` · `KESTREL_WAVDUMP=path` (WAV s16 estéreo de todo lo que emite el AI, también con `KESTREL_AUDIO=0`; cabecera reescrita en cada buffer, vale tras un timeout) ·
+`KESTREL_GPURDP=0/1` (`0` = SoftRDP, lo fijan las puertas; `1`/defecto = GPU-RDP, el rasterizador de fabrica si hay Vulkan) · `KESTREL_MAXINSN=N` · `KESTREL_FBDUMP=path` · `KESTREL_WAVDUMP=path` (WAV s16 estéreo de todo lo que emite el AI, también con `KESTREL_AUDIO=0`; cabecera reescrita en cada buffer, vale tras un timeout) ·
 `KESTREL_CPUIDLE=0` (apaga el cobro en bloque del hilo ocioso del invitado -- `beq $0,$0,-1`
 con NOP en la ranura de retardo; el salto usa el MISMO permiso que una cadena enlazada del JIT,
 asi que no cambia cuando se mira cada evento. -14 % de pared en SM64 threaded-jit; se niega con
@@ -161,7 +161,7 @@ workers en su hilo y el otro sincrono, para bisecar de quien es una corrupcion.
 
 **Quien escribio esto** (caros, solo para depurar): `KESTREL_WRTAG=1` mantiene un tag de
 ultimo escritor por bloque de 16 B de RDRAM (CPU-uncached / D-cache / SP-DMA / PI-DMA /
-SI-DMA / RDP) con el PC del guest (SP-DMA: `0x04001000|pc` del RSP), lo imprime en el volcado de fallo, se consulta en vivo por MCP (`mem.wrtag` / `mem_wrtag(addr, length, group='' | 'who' | 'pc')`; agrupado barre 8 MiB en unos cientos de tramos; el RDP solo se marca con SoftRDP, `KESTREL_PRDP=0`), y chiva (`[fifo!]`)
+SI-DMA / RDP) con el PC del guest (SP-DMA: `0x04001000|pc` del RSP), lo imprime en el volcado de fallo, se consulta en vivo por MCP (`mem.wrtag` / `mem_wrtag(addr, length, group='' | 'who' | 'pc')`; agrupado barre 8 MiB en unos cientos de tramos; el RDP solo se marca con SoftRDP, `KESTREL_GPURDP=0`), y chiva (`[fifo!]`)
 cualquier escritura dentro del FIFO del RDP aun sin consumir (el volcado de una linea de D$ solo
 cuenta si CAMBIA bytes dentro de la ventana), y `[dirty!]` cuando un DMA del SP escribe RDRAM
 bajo una linea que la D$ de la CPU tiene sucia (fallo de coherencia independiente del ritmo del
@@ -244,8 +244,7 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
   16 ms de ida y vuelta.
 - `KESTREL_SPLIT_UPSCALE=N` (4; 0 = no tocar) — con pantalla partida GPU-RDP sube en caliente
   su escalado interno a N mientras dura (el trozo propio se amplia a toda la ventana) y al
-  volver a pantalla completa recupera el de arranque. (parallel-RDP, ya borrado, no cambiaba
-  en caliente.)
+  volver a pantalla completa recupera el de arranque.
 - `KESTREL_GPURDP_HISYNC=1` (apagado) — con escalado interno de GPU-RDP, desactiva el modo
   sombra (CPU pinta la 1x, GPU solo la copia de alta, asincrona) y vuelve al camino anterior:
   todo a la GPU con un vaciado sincrono por tramo (SM64 x4 100 intercambios ~6 s -> 13-20 s).
@@ -414,4 +413,4 @@ Todas `KESTREL_JIT_*`; `1` desactiva la parte indicada salvo que se diga otra co
 - `SMOKE` — autotest del JIT al arrancar (`src/main.cpp`).
 - `KESTREL_BRFAIL` — imprime los primeros 200 lideres de rama que el JIT no absorbe.
 
-Nombres que aparecen en comentarios o en el catalogo del lanzador pero que ningun codigo de `src/` lee (no son variables vivas): `KESTREL_DMAGRAIN` (comentario "probado y descartado" en `rsp.cpp`), `KESTREL_FPU` (errata de `KESTREL_FPUCOST`), `KESTREL_JIT_LINK` (comentario; el enlace de bloques ya es fijo, ver `KESTREL_JIT_NOLINK`), `KESTREL_SSAA` (era de parallel-RDP; quitada del menu y del lanzador). `KESTREL_NO` y `KESTREL_X` son solo prefijo/comentario. `KESTREL_DPBARSYNC`, `KESTREL_PRDP_SYNCALL` y `KESTREL_VRDPLOG` ya no existen (borrados con parallel-RDP el 2026-11-02). Retiradas el 2026-11-02 por ser depuracion con direcciones fijas de una biseccion vieja: `KESTREL_DIS`, `KESTREL_HDUMP`, `KESTREL_HUFT`, `KESTREL_UNARMED`, `KESTREL_SEENFIND`, `KESTREL_JIT_ONLY1`.
+Nombres que aparecen en comentarios o en el catalogo del lanzador pero que ningun codigo de `src/` lee (no son variables vivas): `KESTREL_DMAGRAIN` (comentario "probado y descartado" en `rsp.cpp`), `KESTREL_FPU` (errata de `KESTREL_FPUCOST`), `KESTREL_JIT_LINK` (comentario; el enlace de bloques ya es fijo, ver `KESTREL_JIT_NOLINK`), `KESTREL_SSAA` (quitada del menu y del lanzador). `KESTREL_NO` y `KESTREL_X` son solo prefijo/comentario. Retiradas el 2026-11-02 por ser depuracion con direcciones fijas de una biseccion vieja: `KESTREL_DIS`, `KESTREL_HDUMP`, `KESTREL_HUFT`, `KESTREL_UNARMED`, `KESTREL_SEENFIND`, `KESTREL_JIT_ONLY1`.

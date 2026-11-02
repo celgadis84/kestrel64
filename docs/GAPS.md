@@ -29,10 +29,10 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 |---|-------|------|
 | ~~4~~ | ~~**Trucos / GameShark**~~ **CERRADO 2026-09-04** | `src/core/cheats.{hpp,cpp}`: familias 80/81 (escritura cacheada por campo), A0/A1 (parche unico de arranque, sin cache), D0-D3 (condiciones) y el repetidor 50. El ritmo es el campo de video porque el aparato de verdad colgaba de la interrupcion del VI, y el nibble alto de la direccion decide si la escritura pasa por la D-cache (KSEG0) o va directa a la RDRAM (KSEG1). Fichero `.cht` al lado de la ROM o `KESTREL_CHEATS`, opcion en lanzador y menu. 88/89 (boton fisico del cartucho) y CC/DE/EE/FF (control interno) no se aplican y se avisa al cargar. Test propio `test/cheat_test.cpp`; detalle en `docs/CHEATS.md`. |
 | ~~5~~ | ~~**ROMs comprimidas**~~ **CERRADO 2026-09-04** | `src/core/archive.{hpp,cpp}`: zip (metodos 0 y 8) y gzip, con DEFLATE propio (RFC 1951, ~200 lineas) en vez de zlib para que el `.exe` estatico siga sin dependencias. Se desempaqueta ANTES de normalizar el orden de bytes, se comprueba el CRC-32 de los dos formatos, y dentro del zip se elige la entrada con extension de ROM (o la mas grande). 7z y rar se rechazan con su nombre en vez de con "magic no reconocido". Los ficheros de al lado de la ROM (.eep/.sra/.fla/.mpk, .st0-.st9, .cht) ignoran la extension del contenedor, asi que `mario.z64.gz` y `mario.z64` comparten partida. Test `test/archive_test.cpp` y siete envoltorios de SM64 verificados extremo a extremo contra el md5 del oraculo; detalle en `docs/ROMS-COMPRIMIDAS.md`. |
-| 6 | ~~**16:9 y escalado interno**~~ **CERRADO 2026-09-04** / ~~**texturas HD**~~ **CERRADO 2026-10-04** | `KESTREL_UPSCALE=1|2|4|8` pasa las banderas de escalado interno de parallel-rdp (`COMMAND_PROCESSOR_FLAG_UPSCALING_*`) al construir el `CommandProcessor`: SM64 pasa de 640x240 a 5120x1920 de scanout, y lo que el juego lee de su propia RDRAM sigue siendo 1x (los efectos que releen el framebuffer no se enteran). `KESTREL_SSAA=1` resuelve ese dominio ampliado promediando las NxN muestras al volcarlo a 1x. `KESTREL_ASPECT=4:3|16:9|estirar` (en caliente, `rt::aspectW/H`) decide el rectangulo destino en la ventana; 16:9 no ensancha el campo de vision -- eso solo lo hace el juego -- sino que estira la imagen anamorfica de los que traen modo panoramico propio. Con los valores de fabrica las banderas son 0 y los md5 no se mueven. Detalle en `docs/ESCALADO-Y-ASPECTO.md`. **2026-10-04 (h)**: filtros de imagen del presentador `KESTREL_FILTER` (FSR 1.0, Anime4K, bilineal nitido, CRT, cel-shading, oleo), en caliente; ver `docs/FILTROS-IMAGEN.md`. **2026-10-04 (i)**: texturas HD -- packs Rice/GLideN64 tal cual (`KESTREL_TEXPACK`), volcado con nombre de pack (`KESTREL_TEXDUMP`) y realce por algoritmo de las originales (`KESTREL_TEXFX=scale4x|cel|poster`), en SoftRDP y, desde 2026-10-06, en GPU-RDP (el de fabrica, tambien con escalado interno; `docs/GPU-RDP.md` fase 6 parte 2); ver `docs/TEXTURAS-HD.md`. parallel-RDP no las tendra (se retira). **2026-10-30**: se cambian en caliente desde el menu. Queda: contornos de cel por profundidad (z-buffer del invitado). |
+| 6 | ~~**16:9 y escalado interno**~~ **CERRADO 2026-09-04** / ~~**texturas HD**~~ **CERRADO 2026-10-04** | `KESTREL_UPSCALE=1|2|4|8` fija el escalado interno del rasterizador (hoy GPU-RDP, ver `docs/GPU-RDP.md`; la primera version, 2026-09-04, usaba el backend parallel-rdp, ya retirado), y lo que el juego lee de su propia RDRAM sigue siendo 1x (los efectos que releen el framebuffer no se enteran). `KESTREL_ASPECT=4:3|16:9|estirar` (en caliente, `rt::aspectW/H`) decide el rectangulo destino en la ventana; 16:9 no ensancha el campo de vision -- eso solo lo hace el juego -- sino que estira la imagen anamorfica de los que traen modo panoramico propio. Con los valores de fabrica los md5 no se mueven. Detalle en `docs/ESCALADO-Y-ASPECTO.md`. **2026-10-04 (h)**: filtros de imagen del presentador `KESTREL_FILTER` (FSR 1.0, Anime4K, bilineal nitido, CRT, cel-shading, oleo), en caliente; ver `docs/FILTROS-IMAGEN.md`. **2026-10-04 (i)**: texturas HD -- packs Rice/GLideN64 tal cual (`KESTREL_TEXPACK`), volcado con nombre de pack (`KESTREL_TEXDUMP`) y realce por algoritmo de las originales (`KESTREL_TEXFX=scale4x|cel|poster`), en SoftRDP y, desde 2026-10-06, en GPU-RDP (el de fabrica, tambien con escalado interno; `docs/GPU-RDP.md` fase 6 parte 2); ver `docs/TEXTURAS-HD.md`. parallel-RDP no las tendra (se retira). **2026-10-30**: se cambian en caliente desde el menu. Queda: contornos de cel por profundidad (z-buffer del invitado). |
 | 7 | **Microcódigo gráfico HLE** | Todo es LLE (RSP real ejecutando F3DEX). Correcto y preciso, pero no hay ruta HLE, que es lo que da velocidad en máquinas flojas y lo que permite arreglar juegos con microcódigo raro. Decisión consciente; anotado por completitud. |
 | 8 | **Multiplataforma** | **EN CURSO 2026-10-31**: Linux x86-64 compila y enlaza (SoftRDP), 9/9 tests unitarios, systemtest interp/jit PASS; JIT x86 con ABI Win64 en SysV (`KJIT_ABI`). Falta: cuelgue threaded-jit, audio (`waveOut`), GPU-RDP en Linux, CI Linux, aarch64 (macOS/Android) y core libretro. Estado y plan en `docs/MULTIPLATAFORMA.md`. |
-| 15 | ~~**GPU-RDP propio (quitar parallel-RDP)**~~ **CERRADO 2026-11-02** | Hoy el RDP rapido es parallel-RDP (`third_party/`, ~59 k lineas con Granite, MIT, parcheado: orden de bytes, banco SPIR-V). Cada arreglo de semantica se hace dos veces o diverge (baselines krom/sm64 por backend), y no admite texturas HD ni telemetria por primitiva. Plan: rasterizador propio en **Vulkan compute** (ya es la API del presentador y de `postfx`; macOS por MoltenVK; D3D12/Metal solo duplicarian, OpenGL no tiene compute en macOS), semantica = SoftRDP bit a bit, misma interfaz que `vrdp.hpp`, `KESTREL_GPURDP=1`. Fases 0-7 (fill -> tris -> TMEM -> combiner/blender -> copy/8 bit -> coherencia/rendimiento -> escalado+HD -> default y retirar parallel-RDP). Detalle en `docs/GPU-RDP.md`. Paso previo HECHO 2026-10-05: un solo exe con los dos rasterizadores elegibles en marcha y presentacion GDI sin Vulkan (`docs/distribucion.md`), que es donde se enchufara el tercero. **Fase 0 HECHA 2026-10-05** (`src/gpurdp/`, `KESTREL_GPURDP=1`): FILL_RECTANGLE FILL/COPY en compute, bit a bit con SoftRDP (krom 372/372 puntuaciones identicas, sm64 `b5521b24`), puerta `scripts/gate_gpurdp.sh`. **Fase 1 HECHA 2026-10-05**: triangulos sin textura 16 bpp (FILL/plano/shade, cobertura, z, combinador, blender) en `shaders/tri.comp`, subida de las filas que leen, cobro diferido; krom 371/371 identicas, sm64 `b5521b24`. **Fase 2 HECHA 2026-10-05**: triangulos con textura (instantanea de TMEM por triangulo, 10 formatos, TLUT, filtro 3 puntos, perspectiva, LOD, TEXEL1, alpha compare); krom 371/371 identicas. **Fase 4 (texrect) HECHA 2026-10-05**: TEXTURE_RECTANGLE/FLIP 1/2 ciclos + COPY 16 bpp en GPU, cargas de TMEM sin vaciar la cola si no tocan lo encolado; color images de 8/32 bits en GPU. **Fase 5 (rendimiento) EN CURSO 2026-10-06**: despacho por tramo con teselas 8x8 (orden por pixel sin barreras), barreras por huella, gemelos DEVICE_LOCAL; SM64 600 intercambios 57 -> 37,4 s (SoftRDP 13,5 s); techo actual = ~73 k vaciados sincronos (~165 us de ida y vuelta cada uno). **2026-10-30**: escalado x8 tambien en GPU-RDP (lo unico que solo tenia parallel-RDP; x8 GPU-RDP 17 s contra 52 s en SM64) y brecha a 1x en ruido (SM64 ~0-3 %, DK64 ~1-1,5 %). **Modo sombra 2026-10-30**: con escalado el CPU pinta la 1x y la GPU solo la copia de alta, asincrona (una tanda por `run()`): SM64 x4 13-20 -> 6,0 s (parallel-RDP 6,1), x8 17,3 -> 7,2 s (parallel-RDP 52,5), mismo detalle, 1x intacto. Ya no hay bloqueo de rendimiento. **Retirada fase 1 HECHA 2026-10-30**: parallel-RDP fuera del menu, lanzador, `release.sh --gates` y `pdbench.py` (solo `KESTREL_PRDP=1` a mano, con aviso). **Retirada fase 2 HECHA 2026-11-02** (792beea): borrados `third_party/parallel-rdp`, `src/vrdp/`, `gate_prdp.sh`, modos `prdp*` de validate.py y baselines `*prdp*`; queda `third_party/rdp-luts/luts.hpp` (tabla del divisor del blender, MIT) y la opcion cmake pasa a `KESTREL_GPU`. **Punto cerrado.** Detalle en `docs/GPU-RDP.md` Fase 7. |
+| 15 | ~~**GPU-RDP propio (quitar parallel-RDP)**~~ **CERRADO 2026-11-02** | Hasta 2026-11-02 el RDP rapido era parallel-RDP (`third_party/`, ~59 k lineas con Granite, MIT, parcheado: orden de bytes, banco SPIR-V). Cada arreglo de semantica se hace dos veces o diverge (baselines krom/sm64 por backend), y no admite texturas HD ni telemetria por primitiva. Plan: rasterizador propio en **Vulkan compute** (ya es la API del presentador y de `postfx`; macOS por MoltenVK; D3D12/Metal solo duplicarian, OpenGL no tiene compute en macOS), semantica = SoftRDP bit a bit, misma interfaz que `vrdp.hpp`, `KESTREL_GPURDP=1`. Fases 0-7 (fill -> tris -> TMEM -> combiner/blender -> copy/8 bit -> coherencia/rendimiento -> escalado+HD -> default y retirar parallel-RDP). Detalle en `docs/GPU-RDP.md`. Paso previo HECHO 2026-10-05: un solo exe con los dos rasterizadores elegibles en marcha y presentacion GDI sin Vulkan (`docs/distribucion.md`), que es donde se enchufara el tercero. **Fase 0 HECHA 2026-10-05** (`src/gpurdp/`, `KESTREL_GPURDP=1`): FILL_RECTANGLE FILL/COPY en compute, bit a bit con SoftRDP (krom 372/372 puntuaciones identicas, sm64 `b5521b24`), puerta `scripts/gate_gpurdp.sh`. **Fase 1 HECHA 2026-10-05**: triangulos sin textura 16 bpp (FILL/plano/shade, cobertura, z, combinador, blender) en `shaders/tri.comp`, subida de las filas que leen, cobro diferido; krom 371/371 identicas, sm64 `b5521b24`. **Fase 2 HECHA 2026-10-05**: triangulos con textura (instantanea de TMEM por triangulo, 10 formatos, TLUT, filtro 3 puntos, perspectiva, LOD, TEXEL1, alpha compare); krom 371/371 identicas. **Fase 4 (texrect) HECHA 2026-10-05**: TEXTURE_RECTANGLE/FLIP 1/2 ciclos + COPY 16 bpp en GPU, cargas de TMEM sin vaciar la cola si no tocan lo encolado; color images de 8/32 bits en GPU. **Fase 5 (rendimiento) EN CURSO 2026-10-06**: despacho por tramo con teselas 8x8 (orden por pixel sin barreras), barreras por huella, gemelos DEVICE_LOCAL; SM64 600 intercambios 57 -> 37,4 s (SoftRDP 13,5 s); techo actual = ~73 k vaciados sincronos (~165 us de ida y vuelta cada uno). **2026-10-30**: escalado x8 tambien en GPU-RDP (lo unico que solo tenia parallel-RDP; x8 GPU-RDP 17 s contra 52 s en SM64) y brecha a 1x en ruido (SM64 ~0-3 %, DK64 ~1-1,5 %). **Modo sombra 2026-10-30**: con escalado el CPU pinta la 1x y la GPU solo la copia de alta, asincrona (una tanda por `run()`): SM64 x4 13-20 -> 6,0 s (parallel-RDP 6,1), x8 17,3 -> 7,2 s (parallel-RDP 52,5), mismo detalle, 1x intacto. Ya no hay bloqueo de rendimiento. **Retirada fase 1 HECHA 2026-10-30**: parallel-RDP fuera del menu, lanzador, `release.sh --gates` y `pdbench.py` (solo `KESTREL_PRDP=1` a mano, con aviso). **Retirada fase 2 HECHA 2026-11-02** (792beea): borrados `third_party/parallel-rdp`, `src/vrdp/`, `gate_prdp.sh`, modos `prdp*` de validate.py y baselines `*prdp*`; queda `third_party/rdp-luts/luts.hpp` (tabla del divisor del blender, MIT) y la opcion cmake pasa a `KESTREL_GPU`. **Punto cerrado.** Detalle en `docs/GPU-RDP.md` Fase 7. |
 
 ### P2 — nicho
 
@@ -127,6 +127,12 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 ### Fidelidad
 
+- **libdragon testrom: `test_rdpq_tex_upload_multi` revienta** (abierto, 2026-11-02).
+  `ASSERTION FAILED: *SP_STATUS & SP_STATUS_SIG_RDPSYNCFULL` (test_rdpq_tex.c:201): la
+  interrupcion del RDP llega antes de que la CPU vea la senal del SP. Igual con drenaje ansioso
+  y diferido, o sea anterior a la fase 5. Mismo pase: `test_cache_invalidate` FAIL (146/148).
+  Al reventar no sale "Passed:" y `fidelity.py` espera todo `--libdragon-secs` (900 s por
+  defecto): para bisecar, `--libdragon-secs 120` y mirar `out/fidelity/kestrel-libdragon.log`.
 - **Enlace y EPC con VA de 64 bits** (abierto, 2026-10-23, prioridad baja). JAL/JALR/BxxAL y
   la EPC de las excepciones guardan `sext32(pc+8)`: correcto en modo 32 bits (todo juego y
   homebrew conocido). Con KX/SX/UX=1 y codigo fuera del rango sext32 el VR4300 guarda los 64
@@ -182,8 +188,8 @@ por ser pequeña; se ordena por impacto, no se filtra.*
   el `rdpq` de libdragon si los usa; con dos ciclos y TEX1 la muestra del nivel que falta se
   cuela como negro y arrastra el combinador. Confirma lo que ya dijo el usuario ("el softrdp
   siempre salio mal, no es de hoy") y ahora con un caso reproducible en lote y un oraculo al
-  lado. NO se persigue por ahora: la direccion es parallel-RDP, y el exe principal de `dist/`
-  ya es el de PRDP (SoftRDP sigue dentro del mismo exe: Video > Rasterizador).
+  lado. NO se persigue por ahora: la direccion de entonces era parallel-RDP (hoy GPU-RDP, bit a bit
+  SoftRDP); SoftRDP sigue dentro del mismo exe: Video > Rasterizador.
 
 - **El stick del mando no tenia PUERTA OCTOGONAL: la diagonal entregaba un valor que la
   consola no puede producir** — **ARREGLADO 2026-09-09** (`padOctagon`, `src/video/present.cpp`).
@@ -224,7 +230,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
   Consecuencias, por orden de importancia:
   1. **Un juego que cuenta cuadros se desincroniza.** Es la via por la que la demo de
-     apertura de DK64 se rompe con SoftRDP (`KESTREL_PRDP=0`).
+     apertura de DK64 se rompe con SoftRDP (`KESTREL_GPURDP=0`).
   2. **La velocidad del invitado depende del anfitrion.** Un PC lento no solo va lento: el
      JUEGO va a otra velocidad. Eso el hardware no lo hace.
   3. **`bench` sobre enhebrado+SoftRDP mide de menos.** Fija campos de video, no cuadros; si
@@ -265,9 +271,9 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
   Pistas para cuando se retome: el reborde aparece donde el poligono TERMINA, no donde
   empieza, lo que apunta al ultimo span de cada arista (redondeo de `xleft/xright` o de la
-  fraccion de la sub-linea) mas que al combinador. Reproducir: `KESTREL_PRDP=0` + DK64,
-  capturar por MCP (`capture_framebuffer` lee RDRAM, no pasa por el VI) y comparar contra la
-  misma escena con `KESTREL_PRDP=1`.
+  fraccion de la sub-linea) mas que al combinador. Reproducir: `KESTREL_GPURDP=0` + DK64
+  (SoftRDP), capturar por MCP (`capture_framebuffer` lee RDRAM, no pasa por el VI) y comparar
+  contra el oraculo de entonces (parallel-RDP, ya retirado; hoy GPU-RDP reproduce SoftRDP).
 
 - **Frontera AA/cobertura del SoftRDP** — el único frente de precisión grande que queda
   (subpíxel, 4 sub-líneas por píxel según el VHDL de MiSTer). Suite krom: media exacta
@@ -770,7 +776,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 > **REMEDIDO el 2026-09-18.** El perfil de abajo es de antes de las dos barreras de invitado y
 > de `KESTREL_PACEASK`, y ya no describe la maquina: `cpuWait` bajo del 20,2 % a ~5 %. El
-> reparto nuevo (Perfect Dark, 600 campos, `build-prof-prdp`, 1243 muestras, 89 % dentro de
+> reparto nuevo (Perfect Dark, 600 campos, `build-prof-gpu`, 1243 muestras, 89 % dentro de
 > imagen) es `PaceDiv::div` 15,1 % · `atomic_load<u64>` 9,3 % · `spBarrierWait` 6,5 % ·
 > `jitTryBlock` 6,0 % · `dpLogApply` 5,9 % · `rcpRetire` 3,9 % · `spCycleAt` 3,8 % ·
 > `rspPace` 2,3 % · `rdpPace` 1,6 %. `dpBarrierWait` ha DESAPARECIDO de la cabeza.
@@ -796,7 +802,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 La lista de antes (`dcFill`/`dcFlush` 4,5 %, `rcpPace` 2 %) venia de un perfil viejo, de cuando
 el interprete mandaba y el RCP iba en el mismo hilo. **Ya no es cierta**: medido de nuevo con
-`KESTREL_HOSTPROF=1` sobre SM64 en `build-prdp` (threaded-jit, Parallel-RDP, 400 intercambios,
+`KESTREL_HOSTPROF=1` sobre SM64 en `build-gpu` (threaded-jit, Parallel-RDP, 400 intercambios,
 906 muestras, 769 dentro de la imagen), simbolizado contra `llvm-nm --numeric-sort` con
 `ImageBase 0x140000000`, el hilo de CPU reparte asi:
 
@@ -849,9 +855,20 @@ Por ahi va el orden nuevo:
   `rsp.cyclesRun`, y esa ES la barrera, hay que mirarla. La vuelta ya era barata y la rama que
   se le anade cuesta mas. **No volver a adelgazar este bucle**: lo que se paga es la latencia
   de ida y vuelta entre los dos relojes de invitado, no el ancho de la vuelta. Tablas en
-  `docs/history/STATUS-2026.md`. Queda sin probar solo el retroceso exponencial.
+  `docs/history/STATUS-2026.md`. ~~Queda sin probar solo el retroceso exponencial.~~
+  **Retroceso exponencial PROBADO Y DESCARTADO (2026-11-02):** a partir de la vuelta N, 2^(k/N)
+  PAUSE por cada PAUSE del giro (tope 64). `scripts/ab_bench.py`, min de 4 intercalado,
+  GPU-RDP, threaded-jit, 200 campos: SM64 5,70 -> 5,66 s (N=1024) / 5,65 s (N=4096), DK64 4,06
+  -> 4,06 s. Dentro del ruido: soltar ranuras SMT no adelanta al RSP. Via de las barreras
+  AGOTADA; lo que queda es el RSP mismo.
+  **Drenaje diferido del RDP parado PROBADO Y DESCARTADO (2026-11-02):** `rspRdpIdleWait`
+  solo apuntaba el aviso y el drenado se hacia en la siguiente via RSP -> CPU (SP_STATUS,
+  semaforo, BREAK, DMA, DMEM). statehash identico, libdragon igual que el ansioso, pero
+  `ab_bench.py --mode ship` 200 campos: SM64 5,77 -> 5,74 s, DK64 4,08 -> 4,09 s. Ruido: el
+  27 % del hilo del RSP que se veia esperando al worker no estaba en el camino critico.
+  Retirado (no merece las seis vias de vaciado).
 - **El RSP**, que es el palo largo medido (65,7 % ocupado). **Perfil propio del hilo del RSP,
-  tomado el 2026-09-11** (`KESTREL_HOSTPROF_WHO=rsp`, build-prof-prdp con DWARF, SM64 /
+  tomado el 2026-09-11** (`KESTREL_HOSTPROF_WHO=rsp`, build-prof-gpu con DWARF, SM64 /
   Parallel-RDP / threaded-jit / 400 intercambios, 926 muestras, `scripts/hostprof_sym.py`).
   Los numeros que llevaba la cabecera de `src/rsp/rspjit.hpp` eran de ANTES del JIT del RSP y
   ya estan sustituidos:
@@ -986,7 +1003,7 @@ Por ahi va el orden nuevo:
   `docs/baselines/timings.md`). Metodo: mismo anfitrion (i7-870 + RX570), mismas tres ROMs
   (SM64, DK64, PD en juego), **mismo trabajo de invitado** (N campos VI desde el mismo punto,
   no segundos de pared ni Mips), ares sin tope de velocidad y sin sincronia de audio/video,
-  kestrel con el exe del paquete (`build-prdp-static`, GPU-RDP) y tambien SoftRDP para que la
+  kestrel con el exe del paquete (`build-gpu-static`, GPU-RDP) y tambien SoftRDP para que la
   comparacion de CPU no dependa de la GPU, min de 4 corridas intercaladas. ares se ejecuta
   tal cual (fork congelado, no se toca). Salida: tabla en `docs/baselines/timings.md` y
   frase actualizada en `README.md` ("Why another emulator" cita cifras de ares de agosto).
@@ -1146,7 +1163,7 @@ Detalle y cuentas en `docs/history/STATUS-2026.md`.
 ### snapper64: lo que la bateria mide y nosotros no modelamos
 
 `test_roms/snapper64.z64` (HailToDodongo) compara superficies **byte a byte** contra una
-referencia capturada en consola real. Marcador completo en `build-prdp` (2026-09-10): 4182 de
+referencia capturada en consola real. Marcador completo en `build-gpu` (2026-09-10): 4182 de
 6632. Lo que falla NO es precision del rasterizador -- parallel-RDP y nuestro SoftRDP puntuan
 **exactamente igual, grupo a grupo**, asi que son funciones que faltan, no error de redondeo.
 
@@ -1327,9 +1344,7 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
    (76 / 31 / 320M; antes del cambio 74 / 31 / 316M, tambien 3 de 3 -- el RSP recibe ahora los
    pasos que le tocan durante las paradas). Threaded no se puede comparar corrida a corrida
    porque no era determinista de base: ver 3b (resuelto el 2026-09-10). Puertas verdes: `gate_all`
-   rc=0 y `gate_prdp`
-   rc=0, siete modos `Base 0/3721 Timing 0/2 Cycle 0/6`, md5 de sm64 sin cambio en interp y en
-   parallel-RDP.
+   rc=0, siete modos `Base 0/3721 Timing 0/2 Cycle 0/6`, md5 de sm64 sin cambio en interp.
 
 3b. **RESUELTO (2026-09-10, cerrado del todo el 2026-09-11) -- el modo Threaded ya es
    determinista y clavado a Lockstep, columna `rsp=` incluida.**
@@ -1396,8 +1411,7 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
 
    DK64 clava 74 intercambios / 56 syncs / `origin=0283c0` y SM64 95 / 96 / `3b5280`, que son
    justo los numeros de Lockstep. Puertas verdes con el arreglo dentro: `gate_all` rc=0 (460 s,
-   krom interp 371/371 88.73/92.08, regress=0) y `gate_prdp` rc=0 (370 s, krom prdp 371/371
-   89.27/92.56, regress=0, las dos mejoras conocidas del Cube animado).
+   krom interp 371/371 88.73/92.08, regress=0).
 
    **Coste de rendimiento** (DK64, 900 campos, pared): con las dos barreras 11,67 s, sin la del
    RDP 10,58 s -- **~10 %**, y sin ella el determinismo se cae (415 -> 417 intercambios). La del
@@ -1423,13 +1437,12 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
      libre, y lo despierta el `kick` del tramo siguiente -- instante de invitado -- cobrandole
      las iteraciones enteras que caben. Detalle completo en `docs/history/SUBSCHED-2026-09.md`.
 
-   Medida final, DK64 PAL 300 campos, traza por campo entera: `build-prdp/` Threaded **6/6**
+   Medida final, DK64 PAL 300 campos, traza por campo entera: `build-gpu/` Threaded **6/6**
    byte-identico (md5 `d3bee5263f26e4dca3519e277220e090`, columna `rsp=` incluida), `build/`
    SoftRDP **4/4** (`b43236f9c027f4a0cbaf19df040e0ffc`), Lockstep 2/2
    (`ce4ec2bc2d6298cb69d270607db199ee`) e identico a la corrida con `KESTREL_RSPIDLE=0`.
    `rspCycles=60771479` clavado, `spArm=173/0 tarde`, `dpArm=56/0 tarde`, `stale=0`, `ooo=0`,
-   `park=48/0`. Puertas verdes: `gate_all` rc=0 468 s, `gate_prdp` rc=0 334 s, krom regress=0
-   en las dos e improve=2 en prdp.
+   `park=48/0`. Puertas verdes: `gate_all` rc=0 468 s, krom regress=0.
 
    **Coste:** 13,9 M sondeos emulados pasan a 5,7 k, pero el aparcamiento serializa los dos
    hilos a grano de tarea y la corrida de 300 campos va de 6 s (no determinista) a 9 s SoftRDP /
@@ -1447,7 +1460,7 @@ invitado* se descalibra en cuanto la perilla deja de estar apagada. Inventario:
    (`cartLatchTtl`; 235 ops de fabrica, 165 con CPI 2, 330 con CPI 1). systemtest 0/3721 en
    phys, phys-threaded, interp, jit, threaded-jit y CPI=2; statehash de jr/pd/sm/dk sin cambio.
    Texto original del pendiente:
-   **las puertas no encendian la perilla.** Ni `gate_all` ni `gate_prdp` ponen
+   **las puertas no encendian la perilla.** `gate_all` no pone
    `KESTREL_CACHECOST`, asi que los puntos de arriba pueden pudrirse sin que nadie se entere;
    el del SI vivio asi hasta que se busco otra cosa. Ya no hay excusa de determinismo: con el
    3b resuelto, Threaded tambien clava la traza, asi que el modo que se anada puede ser de los
@@ -1492,7 +1505,7 @@ DK64 en cambio si cuadra: 1,250 con base 1,0 contra su cota inferior de 1,19.
 
 ## Lockstep y Threaded no dan el mismo rastro en DK64 (2026-09-11)
 
-`KESTREL_FIELDTRACE=1`, DK64 PAL 300 campos, `build-prdp`, JIT. Cada modo es determinista
+`KESTREL_FIELDTRACE=1`, DK64 PAL 300 campos, `build-gpu`, JIT. Cada modo es determinista
 consigo mismo — Threaded `4fc7dc59e262d5a8a0cd2c89712b8ae3` 3/3 (y el mismo md5 en SoftRDP 2/2),
 Lockstep `8c18b4c8cfbd806a1cbb8f4d5168cc2d` 2/2 — pero **entre ellos difieren 79 lineas de 300
 desde f=191**, y la primera columna que se mueve es `syncs=` (`rcp.dpSyncs`): Lockstep va un
@@ -1505,8 +1518,7 @@ invitado en que se archiva cada tramo del FIFO cae en otro sitio; que eso mueva 
 un SYNC_FULL es esperable, que lo mueva un campo entero no esta explicado.
 
 Que NO es: los dos modos pasan las puertas con los mismos md5 de framebuffer (sm64
-`d35bd8aa9b13d459ce9332c07a79a53a` interp / `b5521b24d8fc280fbf102df22d7d30cb` prdp en los ocho
-modos), o sea que la imagen coincide; lo que no coincide es el reparto por campo.
+`d35bd8aa9b13d459ce9332c07a79a53a` interp en los modos de la puerta), o sea que la imagen coincide; lo que no coincide es el reparto por campo.
 
 Por donde empezar: `[ds]` (`KESTREL_DPSCHED=1`) de las dos corridas, primer tramo cuyo `kick`
 difiera. El horario es todo tiempo de invitado en los dos modos, asi que la diferencia tiene que
@@ -1522,7 +1534,7 @@ acaba ejecutando datos (`EPC` = `3c0239e0`, que es `lui $2,0x39e0`, una INSTRUCC
 direccion). Arreglo: ocho generaciones y coger la LIBRE mas baja, drenando si no quedara
 ninguna (`KESTREL_RDPGENS`, `[dpgen]`). Ocho corridas identicas bit a bit contra 2 de 8 que
 divergian. **Cierre confirmado en el punto original de fallo** (2026-09-18):
-cuatro corridas de 3e9 instrucciones con `KESTREL_PRDP=1`, dos en Lockstep y dos en
+cuatro corridas de 3e9 instrucciones (backend parallel-rdp de entonces), dos en Lockstep y dos en
 Threaded, dan el MISMO `[statehash] 17c2962b082d80b9` -- o sea Threaded ya da el valor del
 oraculo, no solo un valor estable. Detalle completo en `docs/history/STATUS-2026.md` (2026-09-18).
 Se deja debajo el rastro de la
@@ -1531,7 +1543,7 @@ investigacion porque los descartes siguen valiendo.
 
 Salio buscando otra cosa (el `#DE` de `aiArm`, ya arreglado) y sobrevive al arreglo.
 
-`KESTREL_PRDP=1 KESTREL_AUDIO=0 KESTREL_MAXINSN=3000000000`, borrando el estado del invitado
+`KESTREL_AUDIO=0 KESTREL_MAXINSN=3000000000` (backend parallel-rdp de entonces), borrando el estado del invitado
 entero antes de cada corrida (`.eep`/`.sra`/`.fla` **y el `.mpk` del Controller Pak**, que la
 primera version de la prueba se dejaba puesto y es estado persistente que el invitado lee):
 
@@ -1591,7 +1603,7 @@ divergieron -- pero hay que cerrarlo igual. Para eso esta ahora `[spvenc]`, que 
 vencidos por escotilla (adelanto de la cita / tope del aparcamiento / otro) y da el mayor
 rebase en ops.
 
-Siguiente corte, ya escrito: cuatro brazos `prdp` / `prdp+SYNCRDP` / `soft` / `soft+SYNCRDP`.
+Siguiente corte, ya escrito: cuatro brazos `parallel-rdp` / `parallel-rdp+SYNCRDP` / `soft` / `soft+SYNCRDP`.
 La hipotesis viva es el RDP: con Parallel-RDP el motor lee pixeles, texturas y TLUT de la RDRAM
 **viva** y escribe color/z desde la GPU en tiempo de ANFITRION, y junkrunner64 programa
 `SET_COLOR_IMAGE` a direcciones arbitrarias a proposito -- o sea que el RDP pinta encima de los
@@ -1607,8 +1619,8 @@ sale
 
 | brazo | corridas | 1 vs 2 | 1 vs 3 |
 |---|---|---|---|
-| `prdp` | 3 | IGUAL | IGUAL |
-| `prdp` + `SYNCRDP=1` | 3 | IGUAL | IGUAL |
+| `parallel-rdp` | 3 | IGUAL | IGUAL |
+| `parallel-rdp` + `SYNCRDP=1` | 3 | IGUAL | IGUAL |
 | `soft` | 3 | IGUAL | IGUAL |
 | `soft` + `SYNCRDP=1` | 3 | IGUAL | IGUAL |
 
@@ -1658,8 +1670,7 @@ midio plana.
   fila de rectangulos de color, y el fondo lleva bandas verticales. Pinta a texrect con
   formato/TLUT mal resuelto, o a combinador cayendo a color primitivo.
 
-No bloquea: el backend por defecto es parallel-rdp por orden expresa del usuario
-("NO quiero nada de SoftRDP, la idea es Parallel-RDP"). SoftRDP se queda como modelo de
+No bloquea: el backend por defecto era parallel-rdp (hoy GPU-RDP, bit a bit SoftRDP). SoftRDP se queda como modelo de
 coste y oraculo de diagnostico. Se arregla cuando toque la fase de precision del RDP propio.
 
 ## El reparto diario/cita del DMA del SP depende del anfitrion (2026-09-24)

@@ -329,7 +329,7 @@ auto Memory::paceGrant(u64 ahead, u64 allow) -> u32 {
 // Frenar NO es lo mismo que esperar: el hilo de CPU duerme en tiempo de pared y NO retira
 // instrucciones, o sea que el tiempo del invitado se para. El RDP sigue costando lo que dice
 // su modelo de ciclos, ni mas ni menos, corra el anfitrion lo que corra. Cuando el RDP va
-// sobrado (parallel-RDP sobre GPU) el freno no llega a morder y el solape se conserva entero.
+// sobrado (GPU-RDP) el freno no llega a morder y el solape se conserva entero.
 //
 // Salvavidas identico al del RSP: si el contador de GCLK deja de avanzar mas de kPaceMaxWait
 // sin que el trabajo termine, se suelta el freno de este episodio. El regulador es una
@@ -1565,7 +1565,7 @@ auto Memory::rspDmaRdpWait(u32 lo, u32 hi) -> void {
 // invitado. Eso es informacion que el microcodigo le pasa a la CPU (libdragon rdpq_fence:
 // SYNC_FULL + bucle sobre DPC_STATUS, y luego la CPU lee el framebuffer), asi que en el
 // anfitrion los pixeles tienen que estar ya en la RDRAM: esperar al drenado entero del worker
-// (bit2 de rcpPend, que con parallel-rdp incluye el fence de la GPU). Solo tiempo de
+// (bit2 de rcpPend, que con GPU-RDP incluye el fence de la GPU). Solo tiempo de
 // anfitrion: el reloj del RSP no avanza mientras, el invitado sale identico.
 auto Memory::rspRdpIdleWait() -> void {
   if(!tlIsRspThread || !dpBarrierOn()) return;

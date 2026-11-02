@@ -51,7 +51,7 @@ Reglas para todo el plan:
   3. Memoria y bus: RDRAM, MMIO, DMA, cachés, TLB.
   4. CPU: intérprete, JIT (bloques, enlazado, L2), PGO.
   5. RSP: LLE, JIT del RSP, modelo de ciclos.
-  6. RDP: SoftRDP (oráculo), GPU-RDP (de fábrica), parallel-rdp (retirado 2026-11-02); espejo y
+  6. RDP: SoftRDP (oráculo), GPU-RDP (de fábrica); espejo y
      coherencia.
   7. VI, presentación, audio.
   8. Estado: savestates, rebobinado, TAS.
@@ -101,7 +101,7 @@ Dos frentes medidos por separado.
 - Comprobaciones defensivas en rutas de confianza.
 - Comentarios que narran el *qué* en vez del *porqué*.
 - Funciones de cientos de líneas.
-- Retirada de parallel-rdp: HECHA (fase 1 2026-10-30, código borrado 2026-11-02).
+- Retirada de parallel-rdp: HECHA (código borrado 2026-11-02).
 
 **b) Rendimiento, guiado por perfil.**
 - Perfil de PD, SM64 y DK64 en juego. Optimizar solo lo que salga caliente.
@@ -132,9 +132,9 @@ Dos frentes medidos por separado.
 |---|---|---|
 | 1 Limpieza | horas | HECHA 2026-10-30: `docs/wip/` fuera (nota a `docs/history/SUBSCHED-2026-09.md`, copias solo en git), `STATUS.md` corto + `docs/history/`, `GAPS.md` a 100 col con `scripts/rewrap_md.py` (tablas sin tocar), índice `docs/README.md` |
 | 2 Arquitectura en dos idiomas | ~1,5 días | HECHA 2026-10-30: `ARCHITECTURE.md`/`ARQUITECTURA.md` (11 secciones, `Synced with:`), `scripts/check_docs_sync.py` + workflow `docs.yml`, resumen inglés en los 7 documentos clave, enlaces en README/CONTRIBUTING. Falta la cifra ares del README: la comparativa agendada el 2026-10-27 no se llegó a hacer |
-| 3 Verificación reproducible | horas | HECHA 2026-10-30: `TESTING.md`/`PRUEBAS.md` (pareja comprobada por `check_docs_sync.py`), enlaces en README/CONTRIBUTING; la CI corre los 9 tests unitarios sin ROM; `rewind_e2e.py` se salta sin `ROM_SM64`, así que `gate_all.sh` corre sin ROMs comerciales; `gate_quick.sh` ya no usa parallel-RDP |
+| 3 Verificación reproducible | horas | HECHA 2026-10-30: `TESTING.md`/`PRUEBAS.md` (pareja comprobada por `check_docs_sync.py`), enlaces en README/CONTRIBUTING; la CI corre los 9 tests unitarios sin ROM; `rewind_e2e.py` se salta sin `ROM_SM64`, así que `gate_all.sh` corre sin ROMs comerciales; `gate_quick.sh` corre sobre SoftRDP |
 | 4 Reestructuración | varios días | EN CURSO. 2026-11-02 `core/memory.cpp` (5.700) partido en `memory.cpp` 680, `memory_cart` 550, `memory_mmio` 760, `memory_dma` 540, `memory_pif` 390, `rcp_rdp` 600, `rcp_sync` 2.160 + `memory_internal.hpp`; statehash junkrunner64/SM64 T0/T1 idéntico a HEAD (`scripts/statehash_ab.sh`), SM64 md5 interp/threaded-jit, systemtest interp/threaded-jit/phys-threaded, 7 tests unitarios, bench SM64 sin cambio (min 6,62 → 6,61 s, sin PGO). `cpu/jit.cpp` (4.050) partido en `jit.cpp` 290 (búfer y caché de código, enlace, autopruebas), `jit_compile` 2.650 (residencia de registros, emisores, `compileBlock`: comparten estado de compilación, no se separan) y `jit_run` 1.130 (despacho del lado de la CPU, reentrada, salto de bucle ocioso, estadísticas) + `jit_internal.hpp`; statehash idéntico, SM64 md5 jit/threaded-jit/jit-nolink, systemtest jit/threaded-jit, bench sin cambio (6,60 → 6,57–6,61 s). `cpu/cpu.cpp` (3.700) partido en `cpu.cpp` 2.270 (núcleo del intérprete), `cpu_boot` (CIC, fastBoot, warmBoot), `cpu_fpu` (COP1 y sus atajos del dynarec), `cpu_disasm` y `video/fbdump.cpp` (volcados BMP y captura del framebuffer) + `cpu_internal.hpp`; `branch` y `fprGet/Set*` pasan a inline en la cabecera (fuera de línea costaban ~1 % en interp); statehash idéntico, systemtest interp/jit, SM64 md5, bench interp 60 campos en ruido. `rdp/rdp.cpp` (3.550): sale `rdp_cmd.cpp` 650 (cargas de TMEM, lotes de GPU-RDP, bucle de comandos `run`) + `rdp_internal.hpp`; todo lo que corre por píxel (raster, texel, combiner, blender, modelo de coste) se queda junto en `rdp.cpp` 2.900 para que siga inlineando. statehash y SM64 md5 idénticos, bench threaded-jit igual. `rcp_sync.cpp` quizá en dos |
-| 5 Optimización | ~1 semana | pendiente |
+| 5 Optimización | ~1 semana | EN CURSO. 2026-11-02 higiene: parallel-RDP retirado del todo (`KESTREL_PRDP`, alias CMake, migración del lanzador, `build-prdp*` → `build-gpu*`), `emitVecRight` muerto, `sext`/`loadBe32`/`peekBe32Coherent` en vez de copias, avisos; sección "AI-assisted code" en `CONTRIBUTING.md`; statehash idéntico. Rendimiento (`scripts/ab_bench.py --mode ship`): retroceso exponencial de las barreras y drenaje diferido del RSP, los dos en ruido y descartados (GAPS «Rendimiento»). Quedan: `spReadSync` del hilo del RSP (10 %), paseo de coste en el hilo del RSP, giro del worker del RDP, y PGO rehecho al final |
 | 6 Interfaces en inglés | 1–2 días | pendiente |
 
 **Arranque: martes 2026-10-27**, junto con la comparativa de velocidad con ares (GAPS).

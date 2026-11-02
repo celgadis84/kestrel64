@@ -205,15 +205,18 @@ static const bool g_jitOn = envFlag("KESTREL_JIT", true);
 // encolado esta RUNNABLE(2) y la cadena termina en el centinela de prioridad -1. La
 // primera violacion vuelca el anillo de PCs y el de eventos, que es justo la ventana
 // donde se rompio la seccion critica del guest.
+// Palabra big-endian de la direccion virtual a (KSEG0/1) leida a traves de la D-cache.
+static auto peekBe32Coherent(CPU& cpu, u32 a) -> u32 {
+  u32 p = a & 0x1fff'ffffu;
+  return ((u32)cpu.peekPhysCoherent(p) << 24) | ((u32)cpu.peekPhysCoherent(p + 1) << 16)
+       | ((u32)cpu.peekPhysCoherent(p + 2) << 8) | (u32)cpu.peekPhysCoherent(p + 3);
+}
+
 static auto guestQueueBroken(CPU& cpu, u32 qaddr, char* why, size_t whyN) -> bool {
   // Lectura COHERENTE: las estructuras del kernel viven en KSEG0, asi que una linea
   // sucia de la D-cache tapa lo que hay en RDRAM. Mirar la RAM cruda daria falsos
   // positivos (se ve el valor viejo de una cabeza de cola ya reescrita en cache).
-  auto rd32 = [&](u32 a) -> u32 {
-    u32 p = a & 0x1fff'ffffu;
-    return ((u32)cpu.peekPhysCoherent(p) << 24) | ((u32)cpu.peekPhysCoherent(p + 1) << 16)
-         | ((u32)cpu.peekPhysCoherent(p + 2) << 8) | (u32)cpu.peekPhysCoherent(p + 3);
-  };
+  auto rd32 = [&](u32 a) -> u32 { return peekBe32Coherent(cpu, a); };
   u32 h = rd32(qaddr);
   for(int n = 0; n < 64; n++) {
     if(h < 0x8000'0000u || h >= 0x8080'0000u) {
@@ -505,9 +508,6 @@ auto System::runLoop() -> void {
   // los hilos del RCP) y aqui solo se espera a que lo tenga listo.
   std::thread cpuThread([this] { run(); });
   // Sin GPU-RDP compilado (build/, build-static/) se va derecho a abrir la ventana.
-  const char* pe = std::getenv("KESTREL_PRDP");
-  if(pe && pe[0] == '1')
-    std::printf("[video] parallel-RDP retirado: KESTREL_PRDP=1 usa GPU-RDP\n");
   bool gpuWanted = gpurdp::built && gpurdp::wanted();
   bool gpuReady  = memory.gpuWaitReady(15000);
   // Si GPU-RDP se intento y cayo (sin Vulkan o sin GPU valida) el RDP sigue en SoftRDP y la
@@ -837,10 +837,7 @@ auto System::run() -> void {
         // apuntando a codigo de RDRAM. No hay simbolos ni direcciones cableadas de ningun juego.
         if(std::getenv("KESTREL_GUESTTHREADS")) {
           // Coherente: una linea sucia de la D-cache tapa la RDRAM (ver guestQueueBroken).
-          auto rd32 = [&](u32 a) -> u32 {
-            u32 p = a & 0x1fff'ffffu;
-            return ((u32)cpu.peekPhysCoherent(p) << 24) | ((u32)cpu.peekPhysCoherent(p + 1) << 16)
-                 | ((u32)cpu.peekPhysCoherent(p + 2) << 8) | (u32)cpu.peekPhysCoherent(p + 3); };
+          auto rd32 = [&](u32 a) -> u32 { return peekBe32Coherent(cpu, a); };
           std::fprintf(stderr, "[wdog] hilos del guest:\n");
           int found = 0; u32 qs[8] = {}; int qn = 0;
           for(u32 a = 0; a + 0x140 <= (u32)memory.rdram.size() && found < 24; a += 4) {

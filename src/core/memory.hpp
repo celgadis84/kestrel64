@@ -712,7 +712,7 @@ struct Memory {
   //
   // o sea: hasta que instante de invitado ha trabajado el RDP DE VERDAD. Es la gemela exacta
   // de spBarrierAt() y, como aquella, no hace falta publicar nada aparte porque rdpGclk ya es
-  // monotono y ya lo escribe un solo hilo. Con parallel-RDP el paseo de coste va delante del
+  // monotono y ya lo escribe un solo hilo. Con GPU-RDP el paseo de coste va delante del
   // dibujado, asi que rdpGclk salta al coste completo nada mas empezar y la barrera vale ya el
   // instante final: la GPU dibuja solapada y la CPU solo se para al final si llega antes. Con
   // SoftRDP en hilo el rasterizador cobra segun pinta, asi que la barrera sigue el avance real
@@ -1028,7 +1028,7 @@ struct Memory {
     // la latencia de despertar del anfitrion, la tarea acababa en un instante ya rebasado y
     // la fecha de fin del SP nacia tarde -- una vez cada dos o tres corridas de DK64, que es
     // justo la forma que tenia la divergencia que quedaba.
-    if(u64 pk = rspPark.load(std::memory_order_acquire))
+    if(rspPark.load(std::memory_order_acquire))
       if(!rspParkWake.load(std::memory_order_acquire)) return rspParkCap.load(std::memory_order_acquire);
     u64 lead = rspRdvAt.load(std::memory_order_acquire) ? kRdvLead : 0;
     if(u64 al = spLeadOps(); lead < al) lead = al;

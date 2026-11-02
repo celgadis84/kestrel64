@@ -1514,7 +1514,6 @@ auto Rsp::execCop2Move(u32 op) -> void {
 // microcodigo. Partido, el prologo del camino caliente es el que le corresponde.
 template<u32 FN>
 auto Rsp::execCop2T(u32 op) -> void {
-  constexpr u32 fn = FN;
   u32 e = op >> 21 & 0xf;
   int vt = op >> 16 & 31, vs = op >> 11 & 31, vd = op >> 6 & 31;
   // El valor de vt con su modificador de elemento se queda en registro para el camino
@@ -2215,10 +2214,8 @@ auto Rsp::watchdog() -> u64 {
 // que hace falta es QUE tarea era (la cabecera OSTask que la CPU dejo en DMEM 0xFC0), en
 // que instruccion gira y con que registros.
 auto Rsp::dumpHang() const -> void {
-  auto dm = [&](u32 a) -> u32 { a &= 0xffc;
-    return ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3]; };
-  auto im = [&](u32 a) -> u32 { a &= 0xffc;
-    return ((u32)mem->imem[a]<<24)|((u32)mem->imem[a+1]<<16)|((u32)mem->imem[a+2]<<8)|mem->imem[a+3]; };
+  auto dm = [&](u32 a) -> u32 { return loadBe32(&mem->dmem[a & 0xffc]); };
+  auto im = [&](u32 a) -> u32 { return loadBe32(&mem->imem[a & 0xffc]); };
   std::fprintf(stderr, "[rsphang] OSTask @DMEM 0xFC0: type=%u flags=%08x ucode=%08x size=%08x\n",
                dm(0xfc0), dm(0xfc4), dm(0xfd0), dm(0xfd4));
   std::fprintf(stderr, "[rsphang]   ucode_data=%08x/%08x dram_stack=%08x/%08x out_buf=%08x/%08x\n",
@@ -2431,7 +2428,7 @@ auto Rsp::step(u64 maxInsns) -> void {
       broke = false;
       // Reparto del coste del RSP por TIPO de tarea (OSTask.type en DMEM 0xFC0): con esto se
       // ve si el gasto se va en graficos o en audio. Solo contadores, sin efecto en el invitado.
-      { u32 a = 0xfc0; u32 ty = ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3];
+      { u32 ty = loadBe32(&mem->dmem[0xfc0]);
         const u64 now = cyclesRun.load(std::memory_order_relaxed);
         const u64 from = mem->spKickCycles > taskFrom ? mem->spKickCycles : taskFrom;
         u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += now > from ? now - from : 0;
@@ -2439,8 +2436,7 @@ auto Rsp::step(u64 maxInsns) -> void {
       dbg::g.rspEnd(cyclesRun.load(std::memory_order_relaxed) - mem->spKickCycles, mem->cartNow());
       static const bool tr = std::getenv("KESTREL_RSPTRACE") != nullptr;
       if(tr) { static unsigned n = 0; n++;
-        auto dm = [&](u32 a){ a &= 0xffc;
-          return ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3]; };
+        auto dm = [&](u32 a){ return loadBe32(&mem->dmem[a & 0xffc]); };
         if(n <= 8) std::fprintf(stderr,
           "[rsp] END #%u pc=0x%03x cycles=%llu type=%u flags=%08x dl=%08x dlsz=%08x dpc=%06x..%06x\n",
           n, mem->rcp.sp_pc, (unsigned long long)ran, dm(0xfc0), dm(0xfc4), dm(0xff0), dm(0xff4),

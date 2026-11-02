@@ -89,9 +89,7 @@ auto Rom::loadFile(const std::string& path, std::string& error) -> bool {
 }
 
 auto Rom::parseHeader() -> void {
-  auto be32 = [&](usize o) -> u32 {
-    return (u32)data[o] << 24 | (u32)data[o+1] << 16 | (u32)data[o+2] << 8 | data[o+3];
-  };
+  auto be32 = [&](usize o) -> u32 { return loadBe32(&data[o]); };
   for(int i = 0; i < 4; i++) header.pi_bsd_dom1[i] = data[i];
   header.clockRate  = be32(0x04);
   header.entryPoint = be32(0x08);

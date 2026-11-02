@@ -10612,3 +10612,17 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - La version mas rapida del coste destapo una carrera SP/DP en el planificador de ese port
   (DP done antes que SP done); era del invitado, arreglada en el SDK.
 - `KESTREL_RDPCOST_Z=0` apaga la sombra.
+
+## 2026-11-02 (b) — Fase 5 de calidad: higiene, retirada de parallel-RDP, dos negativos de rendimiento
+
+- parallel-RDP: fuera `KESTREL_PRDP`, el alias de CMake, la migracion "prdp" del lanzador y
+  de los perfiles, y `docs/parallel-rdp-integration.md`. Arboles `build-prdp*` -> `build-gpu*`
+  (scripts, docs y los worktrees del SDK).
+- Higiene: `emitVecRight` (LRV) muerto en el JIT del RSP, `sext` duplicado en SoftRDP,
+  `peekBe32Coherent` y `loadBe32` en lugar de lambdas repetidas, avisos de variables sin uso.
+  statehash junkrunner64 T0/T1 = `9f762d9182682e2e`.
+- Negativo: retroceso exponencial en el giro de las barreras (SM64 5,70 -> 5,65 s, DK64 igual).
+- Negativo: drenaje diferido del RDP parado visto por el RSP (SM64 5,77 -> 5,74 s, DK64
+  4,08 -> 4,09 s, `ab_bench.py --mode ship`). Retirado.
+- libdragon testrom: `test_rdpq_tex_upload_multi` falla (`SP_STATUS_SIG_RDPSYNCFULL`) con y
+  sin el cambio: preexistente, en GAPS. El arnes espera entonces todo `--libdragon-secs`.

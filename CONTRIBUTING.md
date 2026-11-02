@@ -25,8 +25,8 @@ Toolchain is clang from MSYS2 CLANG64; the build is CMake + Ninja.
 
 ```bash
 export PATH=/c/msys64/clang64/bin:$PATH
-cmake -B build-prdp -G Ninja -DKESTREL_GPU=ON
-cmake --build build-prdp -j8
+cmake -B build-gpu -G Ninja -DKESTREL_GPU=ON
+cmake --build build-gpu -j8
 ```
 
 `sh scripts/release.sh` builds every tree and packages `dist/`.
@@ -52,6 +52,32 @@ worth about ±2 %, so a single before/after pair proves nothing. Interleave the 
 and take the minimum of at least three runs per game, and discard the first run of a freshly
 linked binary (cold page-in inflates it systematically). Negative results are valuable and
 get written down in the log (`docs/history/STATUS-2026.md`) next to the positive ones.
+
+## AI-assisted code
+
+Patches written with an AI assistant are welcome and held to the same rules, plus these,
+which name the patterns such code tends to add. Each one has turned up in this tree.
+
+- **No duplicated helpers.** Before writing a byte-swap, sign-extend or coherent-read
+  lambda, look for the existing one (`loadBe32` in `src/core/types.hpp`, `sext` in
+  `src/rdp/rdp.cpp`). Before: a local `auto sext = [](u32 v, int b) {...}` in two functions.
+  After: one file-scope `static inline` used by both.
+- **No dead code "for later".** An emitter nobody calls (the old `emitVecRight` in the RSP
+  JIT), a member set but never read, a variable kept to silence a warning: delete it. Git
+  remembers.
+- **No compatibility shims for things that are gone.** When a backend or option is removed,
+  remove its env var, its CMake alias and its launcher mapping in the same change; do not keep
+  an alias that silently maps the old name to the new behaviour.
+- **No defensive checks on trusted paths.** Internal callers that the code already
+  guarantees (a non-null `mem`, an index masked to range) do not get a second check; validate
+  at the boundary (ROM header, savestate, MCP input) instead.
+- **Comments record why, not what.** `// increment the counter` above `n++` goes. A comment
+  stays when it names the hardware behaviour, the measurement or the failure that forced the
+  code into its shape, with a date when it is a measurement.
+- **New env vars are documented.** Every `KESTREL_*` read by the code has a line in
+  `docs/ENV-VARS.md`, saying its default and whether it can change guest-visible state.
+- **Claims come with numbers.** "Faster" needs the interleaved measurement from rule 4;
+  "same behaviour" needs the state hash (`scripts/statehash_ab.sh`).
 
 ## Before opening a pull request
 

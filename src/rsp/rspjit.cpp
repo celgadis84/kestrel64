@@ -342,7 +342,6 @@ struct Ctx {
   s32 recipOff = 0, isqrtOff = 0;                 // las dos tablas de 512 entradas
   s32 bitLaneOff = 0;                             // {1,2,4,...,128} por banda, para CTC2
   s32 byteHalfOff = 0;                            // {0,0,1,1,...,7,7}, para la mascara de LPV/LUV
-  s32 laneIdxOff = 0;                             // {1,0,3,2,...}, para la mascara de LRV
   // Acumulador de 48 bits residente en xmm6/7/8 (acch/accm/accl) mientras dure el bloque.
   bool accReg = false;      // el prologo los salvo: se puede cachear
   u8   accValid = 0;        // bit i: xmm(6+i) tiene la rebanada i
@@ -1211,52 +1210,6 @@ auto emitVecPack(Ctx& c, u32 op) -> void {
   if(!e.patch8(done)) c.ok = false;
 }
 
-// LRV en linea. Es la mitad de arriba de un cuarteto no alineado: rellena los bytes altos
-// del registro con los primeros bytes del cuarteto ALINEADO que sigue, y deja intactos los
-// de abajo.
-//
-//   a = (base + imm*16) & ~15;  start = 16 - ((base + imm*16) & 15) + e
-//   byte logico o del registro = dmem[a + (o - start)]   para o >= start; el resto no se toca
-//
-// Como `a` esta alineado a 16, la ventana leida son esos mismos 16 bytes y NUNCA cruza el
-// final de DMEM: no hay salida al helper, el camino en linea vale siempre.
-//
-// El byte logico o vive en el byte o^1 del anfitrion (`Rsp::laneIdx` es esa tabla), asi que
-// con L = laneIdx se saca todo con dos mascaras de bytes:
-//   indices del pshufb : L - start   (negativo -> bit 7 puesto -> `pshufb` escribe cero, y da
-//                                     igual porque esa banda la tapa la mezcla de despues)
-//   mascara de mezcla  : L > start-1  con `pcmpgtb`, comparacion CON signo pero todos los
-//                                     valores caen en 0..30, asi que se porta como sin signo.
-// `start` va de 1 a 31, nunca se sale de rango ni cuando (a & 15) < e (ahi sale > 16 y la
-// mascara queda a cero: la instruccion no escribe nada, igual que el bucle del interprete).
-auto emitVecRight(Ctx& c, u32 op) -> void {
-  E& e = c.e;
-  const u32 base = op >> 21 & 31, vt = op >> 16 & 31, el = op >> 7 & 0xf;
-  s32 imm = (s32)(op & 0x7f); if(imm & 0x40) imm -= 0x80;
-
-  accFlush(c);
-
-  e.ld32(rAX, rBX, c.RG(base));
-  if(imm) e.alu_imm(D_ADD, rAX, (u32)(imm * 16));
-  e.mov_rr(rCX, rAX);
-  e.alu_imm(D_AND, rCX, 15);
-  e.neg32(rCX);
-  e.alu_imm(D_ADD, rCX, 16u + el);          // start = 16 - ((a & 15) - e), entre 1 y 31
-  e.alu_imm(D_AND, rAX, 0xff0);             // cuarteto alineado: no cruza el final de DMEM
-  e.add64_rr(rAX, rDI);
-
-  e.ldx(1, rBX, c.laneIdxOff);              // L
-  e.movd_xr(2, rCX); e.zerox(3); e.pshufb_x(2, 3);       // start difundido a los 16 bytes
-  e.movx(3, 1); e.sse_rr(X_PSUBB, 3, 2);                 // indices = L - start
-  e.ldxu(0, rAX, 0); e.pshufb_x(0, 3);                   // los bytes ya colocados
-  e.onesx(4); e.sse_rr(X_PADDB, 2, 4);                   // start - 1
-  e.sse_rr(X_PCMPGTB, 1, 2);                             // mascara: bytes que SI se escriben
-  e.sse_rr(X_PAND, 0, 1);
-  e.ldx(4, rBX, c.VR(vt)); e.sse_rr(X_PANDN, 1, 4);      // ~mascara & lo que ya habia
-  e.sse_rr(X_POR, 0, 1);
-  e.stx(0, rBX, c.VR(vt));
-}
-
 // SPV / SUV en linea, solo con elemento 0 u 8 (lo que usan los microcodigos). Guardan un
 // byte por banda: SPV el alto (banda >> 8), SUV la banda >> 7. Con elemento 8 el bucle del
 // interprete arranca en la mitad de "la otra", asi que SPV e=8 es SUV e=0 y al reves. Se
@@ -1294,7 +1247,7 @@ auto emitVecMem(Ctx& c, u32 op, bool store) -> bool {
   // A/B: con KESTREL_RSPJIT_NOVECMEM todo vuelve al CALL de siempre. Se lee una vez, y en
   // el camino de COMPILACION, no en el de ejecucion.
   static const bool off = std::getenv("KESTREL_RSPJIT_NOVECMEM") != nullptr;
-  // A/B aparte para los barajados (LPV/LUV/LRV), que llevan su propio emisor.
+  // A/B aparte para los barajados (LPV/LUV y SPV/SUV), que llevan su propio emisor.
   static const bool offPack = std::getenv("KESTREL_RSPJIT_NOVECPACK") != nullptr;
   if(off) return false;
   const u32 sub = op >> 11 & 0x1f, base = op >> 21 & 31, vt = op >> 16 & 31;
@@ -1601,7 +1554,6 @@ auto compile(Rsp& rsp, Cache& c, u32 pc0) -> void {
   ctx.isqrtOff  = (s32)((const u8*)&rsp.invSqrts[0]    - (const u8*)&rsp);
   ctx.bitLaneOff= (s32)((const u8*)&rsp.bitLane[0]     - (const u8*)&rsp);
   ctx.byteHalfOff=(s32)((const u8*)&rsp.byteHalf[0]    - (const u8*)&rsp);
-  ctx.laneIdxOff =(s32)((const u8*)&rsp.laneIdx[0]     - (const u8*)&rsp);
   const s32 dmpOff = (s32)((const u8*)&rsp.dmp - (const u8*)&rsp);
   const s32 budOff = (s32)((const u8*)&rsp.jitBudget - (const u8*)&rsp);
   E& e = ctx.e;

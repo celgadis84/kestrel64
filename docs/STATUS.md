@@ -13,7 +13,7 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   audio, dynarec de CPU y de RSP activos de fábrica, y dos rasterizadores propios: SoftRDP
   (oráculo bit a bit) y GPU-RDP (Vulkan compute, el de fábrica).
 - Fidelidad: n64-systemtest sin fallos (0/3721, Timing 0/2, Cycle 0/6); Super Mario 64 en
-  SoftRDP idéntico bit a bit a GPU-RDP (y, hasta su retirada, a parallel-RDP); batería krom de 371 ROMs con media exacta ~89.
+  SoftRDP idéntico bit a bit a GPU-RDP; batería krom de 371 ROMs con media exacta ~89.
 - Se distribuye como un único `kestrel64.exe` enlazado estático, con menú propio, biblioteca
   de juegos, servidor MCP para telemetría y depuración, y juego en red.
 
@@ -60,26 +60,20 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
 
 - **SoftRDP** es el oráculo bit a bit: LOD y mipmaps, corrección de perspectiva,
   interpolación entera, delta-z, intercambio de filas impares en TMEM y antialiasing por
-  cobertura. Super Mario 64 es idéntico a parallel-RDP desde 2026-10-03 (md5 en
-  `docs/baselines/sm64.txt`). En la batería krom (371 ROMs) la media exacta ronda 89 y está a
-  la par de parallel-RDP en la carpeta RDP (2026-10-08).
+  cobertura. Super Mario 64 es idéntico a la referencia (md5 en
+  `docs/baselines/sm64.txt`). En la batería krom (371 ROMs) la media exacta ronda 89.
 - **GPU-RDP** propio (Vulkan compute, `src/gpurdp/`), rasterizador de fábrica desde
   2026-10-06. Escalado interno x2, x4 y x8 (x8 desde 2026-10-30), cambiable en caliente, y 4x
   automático al partir pantalla.
 - **Modo sombra** (2026-10-30): la CPU pinta a 1x y la GPU produce la copia de alta
-  resolución de forma asíncrona. Super Mario 64, 100 intercambios: x2 5,9 s, x4 5,9-6,0 s
-  (parallel-RDP 6,1 s), x8 7,2 s (parallel-RDP 52,5 s). `KESTREL_GPURDP_HISYNC=1` vuelve al
-  camino anterior. A 1x la diferencia de velocidad con parallel-RDP está en el ruido (Super
-  Mario 64 ~0-3 %, DK64 ~1-1,5 %).
+  resolución de forma asíncrona. Super Mario 64, 100 intercambios: x2 5,9 s, x4 5,9-6,0 s,
+  x8 7,2 s. `KESTREL_GPURDP_HISYNC=1` vuelve al camino anterior.
 - **Texturas HD** en formato Rice/GLideN64 (`KESTREL_TEXPACK`, `TEXDUMP`, `TEXFX`), en
   SoftRDP y GPU-RDP, activables en caliente desde 2026-10-30.
-- **parallel-RDP retirado**: fase 1 (menú, lanzador, `release.sh --gates`, pdbench) el
-  2026-10-30; **fase 2 HECHA el 2026-11-02**: borrados `third_party/parallel-rdp`, `src/vrdp/`,
-  `cmake/parallel_rdp.cmake`, `tools/slangmosh_lite.py`, `scripts/gate_prdp.sh`, los modos
-  `prdp`/`prdp-jit` de validate.py y las baselines `*prdp*`. Quedan `third_party/volk`,
-  `vulkan-headers` y `rdp-luts/luts.hpp` (tabla del divisor del blender, MIT). Opción cmake
-  `-DKESTREL_GPU=ON|OFF` (`KESTREL_PRDP` se acepta como alias viejo); `KESTREL_PRDP=0` sigue
-  eligiendo SoftRDP y `=1` significa GPU-RDP (avisa). Contexto Vulkan compartido:
+- **parallel-RDP retirado (2026-11-02)**: el código se borró del árbol (historia en git,
+  commits anteriores a esa fecha). Quedan `third_party/volk`, `vulkan-headers` y
+  `rdp-luts/luts.hpp` (tabla del divisor del blender, MIT). Opción cmake
+  `-DKESTREL_GPU=ON|OFF`; `KESTREL_GPURDP=0` elige SoftRDP. Contexto Vulkan compartido:
   `gpurdp::sharedVk()` + `gpurdp::queueLock`. GAPS #15 cerrado; ver `docs/GPU-RDP.md`, Fase 7.
 - **Coste del RDP en tiempo de invitado**: modelo actual con rmse 0,1332 contra las medidas
   de Thar0; falta el coste de setup por primitiva y por span. Hay datos de consola
@@ -183,8 +177,8 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
 - clang de MSYS2 CLANG64, todo estático desde 2026-09-30: solo se importa `vulkan-1.dll` del
   sistema, y `cmake/check_static.cmake` rompe el build si aparece libc++, libunwind, glfw3 o
   libwinpthread.
-- `sh scripts/release.sh` regenera los cuatro árboles (build, build-prdp, build-static,
-  build-prdp-static), el lanzador congelado, el zip y el instalador Inno Setup, y deja
+- `sh scripts/release.sh` regenera los cuatro árboles (build, build-gpu, build-static,
+  build-gpu-static), el lanzador congelado, el zip y el instalador Inno Setup, y deja
   `dist/VERSION.txt`. Opciones: `--gates` (gate_all + gate_gpurdp), `--quick`, `NOISS=1`.
 - El paquete trae un solo exe desde 2026-10-05; GPU-RDP y SoftRDP se eligen en
   Video > Rasterizador, y sin Vulkan cae a SoftRDP con presentación GDI. Doble clic arranca
@@ -200,7 +194,6 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   unitarios.
 - `scripts/gate_gpurdp.sh`: puerta específica del GPU-RDP.
 - `scripts/gate_quick.sh [krom] [lock] [phys] [thar0]`: puerta rápida, ~1,5 min.
-- `scripts/gate_prdp.sh`: borrada el 2026-11-02 junto con parallel-RDP (GAPS #15).
 - Política desde 2026-10-06: probar solo lo cambiado con una prueba dirigida; las baterías
   completas solo cuando se piden.
 - Baselines en `docs/baselines/` (`sm64.txt`, `krom-interp.tsv`,

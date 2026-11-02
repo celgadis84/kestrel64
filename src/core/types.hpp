@@ -33,6 +33,11 @@ using s32 = std::int32_t;
 using s64 = std::int64_t;
 using usize = std::size_t;
 
+// Palabra big-endian de 4 bytes sueltos (DMEM/IMEM, cabecera de ROM, ...).
+inline auto loadBe32(const u8* p) -> u32 {
+  return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+}
+
 // Byteswap helpers. N64 ROMs and the RDRAM bus are big-endian; the host x86-64 is
 // little-endian, so every 16/32/64-bit access through the bus swaps.
 inline auto bswap16(u16 v) -> u16 { return (u16)(v >> 8 | v << 8); }
@@ -78,13 +83,10 @@ struct Owned2 {
 };
 
 
-// Asignador alineado a pagina para los bloques de memoria del invitado. La RDRAM se le
-// entrega a Vulkan tal cual con VK_EXT_external_memory_host (parallel-rdp la mapea sin
-// copia); esa importacion exige que el puntero este alineado a
-// minImportedHostPointerAlignment (4 KiB en GPU de escritorio). Un std::vector normal solo
-// garantiza 16 B, la importacion falla en silencio y parallel-rdp cae a un espejo en la GPU
-// que hay que resubir alrededor de cada sync: 8 MB de PCIe por campo. Alinear la reserva
-// mantiene el camino de cero copias.
+// Asignador alineado a pagina para los bloques de memoria del invitado. Pensado para poder
+// entregar la RDRAM a Vulkan tal cual con VK_EXT_external_memory_host, que exige el puntero
+// alineado a minImportedHostPointerAlignment (4 KiB en GPU de escritorio); un std::vector
+// normal solo garantiza 16 B.
 template<typename T, usize A>
 struct AlignedAllocator {
   using value_type = T;
