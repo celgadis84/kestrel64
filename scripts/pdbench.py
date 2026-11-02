@@ -45,6 +45,14 @@ def load_map(path, names):
     return syms
 
 
+def shot(k, path):
+    # Una captura con el VI apagado (fundido, carga) no invalida la medida.
+    try:
+        k.capture_framebuffer(path)
+    except k.KestrelError as e:
+        print(f"pdbench: captura {path}: {e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("rom")
@@ -170,7 +178,7 @@ def main():
 
         # Ventana medida: se abre y se cierra con el core PARADO en un borde de campo.
         if a.png:
-            k.capture_framebuffer(f"{a.png}_0.png")
+            shot(k, f"{a.png}_0.png")
         k.rdp_stats("reset")
         if a.prof:
             k.profile_reset()
@@ -189,7 +197,7 @@ def main():
             k.profile_stop()
             prof = {"cpu": k.profile_cpu(top=a.prof), "rsp": k.profile_rsp(top=a.prof)}
         if a.png:
-            k.capture_framebuffer(f"{a.png}_1.png")
+            shot(k, f"{a.png}_1.png")
     finally:
         if proc.poll() is None:
             proc.kill()
