@@ -867,6 +867,13 @@ Por ahi va el orden nuevo:
   `ab_bench.py --mode ship` 200 campos: SM64 5,77 -> 5,74 s, DK64 4,08 -> 4,09 s. Ruido: el
   27 % del hilo del RSP que se veia esperando al worker no estaba en el camino critico.
   Retirado (no merece las seis vias de vaciado).
+  **Cota superior (2026-11-03):** saltarse del todo `rspRdpHostDrain` (incorrecto, solo para
+  medir) sale MAS lento: SM64 5,27 -> 6,46 s (min de 4, build-prof-gpu sin PGO). Esa espera
+  no es tiempo perdido; quitarla deja al RSP corriendo por delante y el giro lo paga despues.
+  **Recorrido de coste con interior de cobertura plena (2026-11-03):** fila a fila, tramo
+  `[fi0,fi1)` sin prueba de bordes en el bucle de solo coste de GPU-RDP. statehash identico
+  (`SH_GPURDP=1`), A/B sin PGO -2,5 % y +1,3 % en dos tandas: ruido. Retirado. El sombreado
+  de z cuesta 7,7 % (`KESTREL_RDPCOST_Z=0`, cambia el tiempo: solo para dimensionar).
 - **El RSP**, que es el palo largo medido (65,7 % ocupado). **Perfil propio del hilo del RSP,
   tomado el 2026-09-11** (`KESTREL_HOSTPROF_WHO=rsp`, build-prof-gpu con DWARF, SM64 /
   Parallel-RDP / threaded-jit / 400 intercambios, 926 muestras, `scripts/hostprof_sym.py`).

@@ -7,7 +7,8 @@
 # Defaults to junkrunner64 (libdragon 3D homebrew: CPU+RSP+RDP+audio) at 400 M instructions.
 # ROM paths are relative to KESTREL_TESTROMS (scripts/local.env) unless absolute.
 # Rendezvous are made deterministic with KESTREL_SPLEAD=0 KESTREL_DPLOGLEAD=0, and each ROM
-# runs with KESTREL_THREADS=0 (lockstep) and 1 (threaded).
+# runs with KESTREL_THREADS=0 (lockstep) and 1 (threaded). SoftRDP unless SH_GPURDP=1 (GPU-RDP:
+# exercises the cost-only walk that times the RDP).
 # A game that writes its save file (EEPROM next to the ROM) boots differently the first time
 # it runs on a machine; if only the very first line differs, run the script again.
 set -u
@@ -18,7 +19,7 @@ A=$1; B=$2; shift 2
 rc=0
 hash() { # hash <exe> <rom> <maxinsn> <threads>
   env KESTREL_LOADSTATE=0 KESTREL_THROTTLE=0 KESTREL_SPLEAD=0 KESTREL_DPLOGLEAD=0 \
-      KESTREL_GPURDP=0 KESTREL_THREADS=$4 KESTREL_MAXINSN=$3 \
+      KESTREL_GPURDP=${SH_GPURDP:-0} KESTREL_THREADS=$4 KESTREL_MAXINSN=$3 \
       timeout 120 "$1" --run "$2" 2>&1 | tr -d '\0' \
     | grep -oE "\[statehash\] [0-9a-f]+" | tail -1 | cut -d' ' -f2
 }

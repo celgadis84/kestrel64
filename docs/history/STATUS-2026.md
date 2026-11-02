@@ -10626,3 +10626,13 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   4,08 -> 4,09 s, `ab_bench.py --mode ship`). Retirado.
 - libdragon testrom: `test_rdpq_tex_upload_multi` falla (`SP_STATUS_SIG_RDPSYNCFULL`) con y
   sin el cambio: preexistente, en GAPS. El arnes espera entonces todo `--libdragon-secs`.
+
+## 2026-11-03 — Fase 5 de rendimiento: tres negativos mas
+
+- Perfil de anfitrion SM64 (ship): hilo CPU ~67 % esperando (dpSpinUntil + barreras); hilo
+  RSP: `rspRdpHostDrain` 24,7 %, `spReadSync` 9 %, recorrido de coste ~12 %, codigo JIT 19,6 %.
+- Negativo: interior de cobertura plena en el recorrido de coste (ruido). Retirado.
+- Negativo: cota superior sin drenaje RSP -> worker sale +22,6 % mas lento. La espera sobra
+  solo en apariencia.
+- `scripts/statehash_ab.sh` acepta `SH_GPURDP=1` (ejercita el recorrido de solo coste).
+  SM64 GPU-RDP T0 `2f41964924c4d26f`, T1 `97e0e8db361fbc43`.
