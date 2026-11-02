@@ -11,11 +11,11 @@ and play, with audio, four controllers, save types, save states, rewind and TAS 
 
 ## Why another emulator
 
-Measured on this workspace's host (i7-870, 2009 Nehalem; RX570 mostly idle): ares runs PD
-at ~45–52 vps — RSP-emulation-bound *by design*, not by a bug. A single-threaded
-cooperative cothread core uses 2 of 8 CPU cores and pays full low-level VU cost per RSP
-cycle on a weak single thread. No code/flag lever moves that ceiling (audited: the core is
-clean, the VU is optimal SSE4.1, LTO/threading gains sit in the noise).
+A single-threaded cooperative cothread core runs CPU, RSP and RDP one after another on
+one host thread, so on an old CPU with a weak single thread (this workspace's host is an
+i7-870, 2009 Nehalem, with an RX570 mostly idle) the low-level RSP cost per cycle sets the
+ceiling, however many cores sit idle. That is a design limit, not a bug: no code or flag
+lever inside such a core moves it.
 
 kestrel64's bet is architectural:
 

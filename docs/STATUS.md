@@ -39,8 +39,8 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   real, Super Mario 64 2,24x, DK64 2,70x. La velocidad se mide con `bench`, nunca con Mips.
 - Profundidad: `docs/CORES-CPU-RSP.md` (§2-3), `docs/PERF-CPU.md`, `docs/JIT-PLAN.md`
   (plan original, histórico).
-- Limitación: falta una comparativa nueva lado a lado contra ares (la única es de
-  2026-08-20; GAPS, Rendimiento). Pendiente de baja prioridad: enlace y EPC con direcciones
+- Sin comparativa de velocidad contra ares: descartada el 2026-11-03 (GAPS, Rendimiento);
+  el README no da cifras de ares. Pendiente de baja prioridad: enlace y EPC con direcciones
   virtuales de 64 bits (GAPS, Fidelidad).
 
 ## RSP

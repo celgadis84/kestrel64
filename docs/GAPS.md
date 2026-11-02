@@ -1001,8 +1001,11 @@ Por ahi va el orden nuevo:
   miraria lo que cambio. No es corto: hay que cazar TODAS las vias de escritura a la
   RDRAM -- CPU cacheada y sin cachear, DMA de RSP/PI/SI y el propio RDP -- y una sola que
   se escape corrompe el estado rebobinado en silencio, que es peor que el coste.
-- **Comparativa de velocidad kestrel64 contra ares, rehecha** (abierto 2026-10-24,
-  **agendado martes 2026-10-27**). La unica medida de los dos lado a lado es de 2026-08-20
+- ~~**Comparativa de velocidad kestrel64 contra ares, rehecha**~~ **DESCARTADA 2026-11-03**
+  (decision del usuario): el ares del fork congelado no pinta nada en pantalla y su binario no
+  lleva el servidor de telemetria (vivia en otra rama), asi que no hay forma de contar campos
+  de invitado del mismo trabajo. El README ya no cita cifras de ares; solo da las de kestrel.
+  Texto original (abierto 2026-10-24, agendado martes 2026-10-27): La unica medida de los dos lado a lado es de 2026-08-20
   (`docs/history/STATUS-2026.md`, "Velocidad honesta": threaded-jit 37,5 % de tiempo real con
   SoftRDP frente a
   ares 50-65 %). Desde entonces solo se ha medido kestrel (PD 1,12x en juego 2026-09-24, PGO
