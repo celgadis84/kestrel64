@@ -117,7 +117,7 @@ lo/hi TMEM banks: RG in low half `0x000-0x7ff`, BA in high half `0x800-0xfff`).
 
 If a texture renders as **diagonal stripes / checkerboard** but the colors are
 otherwise right, the bug is **TMEM interleave on load**, NOT the texel color
-decode above. Look at the load path (`LOAD_BLOCK`/`LOAD_TILE`, rdp.cpp ~692-728),
+decode above. Look at the load path (`LOAD_BLOCK`/`LOAD_TILE`, `loadTile` in rdp_cmd.cpp),
 not `sampleTexel`.
 
 Reference oracles for this: angrylion `tmem.c` (local checkout

@@ -276,7 +276,7 @@ Profundidad: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 | `src/core/` | bucle y relojes, memoria/MMIO/DMA/citas, carga de ROM, partidas, savestates, rebobinado, trucos, archivos comprimidos, extras del cartucho | `system.cpp`, `memory.cpp` (+ `memory_*.cpp`, `rcp_*.cpp`), `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
 | `src/cpu/` | intérprete del VR4300 y dynarec x86-64 | `cpu.cpp` (+ `cpu_boot.cpp`, `cpu_fpu.cpp`, `cpu_disasm.cpp`), `jit.cpp` (+ `jit_compile.cpp`, `jit_run.cpp`) |
 | `src/rsp/` | intérprete del RSP, RSP JIT, modelo de tiempos del pipeline | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
-| `src/rdp/` | SoftRDP (rasterizador de referencia), paquetes de texturas HD | `rdp.cpp`, `texpack.cpp` |
+| `src/rdp/` | SoftRDP (rasterizador de referencia), paquetes de texturas HD | `rdp.cpp` (+ `rdp_cmd.cpp`), `texpack.cpp` |
 | `src/gpurdp/` | GPU-RDP, rasterizador Vulkan compute y shaders | `gpurdp.cpp`, `shaders/` |
 | `src/vrdp/` | pegamento de parallel-RDP y contexto Vulkan compartido (en retirada) | `vrdp.cpp` |
 | `src/video/` | presentador, filtro del VI, filtros de imagen, captura | `present.cpp`, `vifilter.cpp`, `postfx.cpp`, `capture.cpp`, `fbdump.cpp` |

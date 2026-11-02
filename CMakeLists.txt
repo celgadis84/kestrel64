@@ -68,7 +68,7 @@ add_executable(kestrel64
   src/video/postfx.cpp
   src/video/vifilter.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -121,7 +121,7 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -156,7 +156,7 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -191,7 +191,7 @@ add_executable(tpak_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -228,7 +228,7 @@ add_executable(wildmem_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -265,7 +265,7 @@ add_executable(watch_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -301,7 +301,7 @@ add_executable(pif_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
@@ -337,7 +337,7 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
-  src/rdp/texpack.cpp
+  src/rdp/rdp_cmd.cpp  src/rdp/texpack.cpp
   src/rsp/rsp.cpp
   src/rsp/rspjit.cpp
   src/audio/audio.cpp
