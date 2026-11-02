@@ -1,4 +1,22 @@
 #pragma once
+// Presenter -- VI output window (Vulkan + GLFW) and host input.
+//
+// Responsibility: each refresh, read the framebuffer the VI scans out of RDRAM (applying the VI
+// filters and optional post-processing, or the GPU-RDP high-resolution copy) and blit it to the
+// swapchain, draw the HUD, and turn window keys into requests for the core. It shows whatever
+// is in RDRAM at VI_ORIGIN, independent of which rasterizer produced it.
+//
+// Invariants:
+// - open() must run on the main thread and BEFORE the CPU worker thread starts.
+// - If video is not wanted or Vulkan/window creation fails, presentation disables itself and
+//   the emulator keeps running headless.
+// - The Vulkan context is shared with GPU-RDP (gpurdp::sharedVk()); the shared queue must be
+//   used under gpurdp::queueLock().
+// - The bind*() methods only attach mailboxes (atomics owned by System); keys never act on the
+//   core directly, the run loop serves the request with the RCP stopped.
+//
+// Threads: start/open/pumpFrame/close all run on the main thread (the window thread); the core
+// runs on its own CPU thread. Cross-thread state is the atomics passed to start()/bind*().
 // kestrel64 — VI presentation (M3.1). A cross-platform Vulkan + GLFW window that
 // reads the VI framebuffer out of RDRAM each refresh and blits it to the
 // swapchain. This is the "eyes" of the emulator: it shows whatever the RDP has

@@ -1,4 +1,18 @@
 #pragma once
+// Archive -- in-memory unpacking of compressed ROM containers (.zip, .gz).
+//
+// Responsibility: own DEFLATE (RFC 1951), CRC-32 and zip/gzip readers so a ROM can be opened
+// straight from its container without an external dependency. .7z and .rar are detected by
+// signature and reported as unsupported.
+//
+// Invariants:
+// - unwrap() leaves `data` untouched and returns true when it is not a known container; it
+//   returns false only when it was a container and extraction failed (error is set).
+// - stripContainerExt() keeps save/state/cheat files of "game.z64.gz" and "game.z64" shared.
+// - crc32() builds its lookup table lazily on first use, without synchronisation.
+//
+// Threads: no shared state beyond that table; called on the thread loading the ROM (Rom::load
+// from System::init) and from the UI game-card code. Call crc32 once before going concurrent.
 // kestrel64 -- contenedores comprimidos de ROM (.zip, .gz) desempaquetados en memoria.
 //
 // Las ROMs circulan casi siempre dentro de un zip, y hasta ahora habia que descomprimirlas a

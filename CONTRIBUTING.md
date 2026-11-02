@@ -116,3 +116,8 @@ usually tell you whether the idea has already been measured.
 Code and commit messages in English. Comments explain *why*, not *what* — the code already
 says what it does; a comment earns its place by recording the hardware behaviour or the
 measurement that forced the shape of the code.
+
+Many existing comments are in Spanish; they stay as they are (rewriting them buys nothing
+and makes huge diffs). New comments are written in English. Every header that another
+subsystem includes opens with an English block: responsibility, invariants and the threads
+that touch it. Keep that block true when you change the contract.

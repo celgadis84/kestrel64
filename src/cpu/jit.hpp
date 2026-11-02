@@ -1,4 +1,20 @@
 #pragma once
+// CPU JIT -- code cache, block linking and x86-64 emitter for the R4300i dynarec.
+//
+// Responsibility: own the executable buffer (CodeBuffer), the cache of compiled blocks keyed by
+// PHYSICAL entry address (CodeCache), the link sites between blocks and the indirect-target
+// table (ITC), and the byte-level x86-64 Emitter used by jit_compile.cpp. Block compilation and
+// dispatch live in jit_compile.cpp / jit_run.cpp.
+//
+// Invariants:
+// - One CodeCache per emulated CPU; it is only used from the CPU thread.
+// - Linking only rewrites DATA words (LinkSite::vaImm / slot), never executable code.
+// - Anything that can make the guest run new code under an executed address (I-cache
+//   invalidation) must call unlinkAll(); a changed virtual mapping (CPU::tlbGen) must unlink too.
+// - Blocks that cross a 4 KB page are only valid for ckseg0 entries (see Block::crossPage).
+// - Emitter memory operands cannot use RSP/R12 as base (no SIB support).
+//
+// Threads: CPU thread only; callers from other threads must hold System::coreMutex.
 // kestrel64 dynarec de CPU — infra de code-cache + emisor x86-64.
 //
 // ACTIVO DE FABRICA: `KESTREL_JIT` por defecto 1 (`KESTREL_JIT=0` lo apaga y deja al

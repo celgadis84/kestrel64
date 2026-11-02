@@ -1,4 +1,17 @@
 #pragma once
+// TCP -- minimal blocking TCP server and client with length-prefixed framing.
+//
+// Shared by the telemetry (MCP) server and netplay. Frame: [u32 LE totalLen][payload], payload =
+// [u32 LE jsonLen][json][blob]. Winsock on Windows, BSD sockets elsewhere.
+//
+// Invariants:
+// - TcpConn owns its socket: movable, not copyable. recvFrame blocks and returns false on
+//   disconnect or error; close() may be called from ANOTHER thread to wake a blocked recvFrame.
+// - TcpServer::accept() blocks and returns an invalid conn once the listening socket is closed.
+// - listen() binds loopback only unless anyAddr is set (netplay); telemetry stays on loopback.
+//
+// Threads: no internal locking. A given TcpConn is expected to have one reader; callers that
+// send from several threads (netplay, relay) serialise sendFrame with their own mutex.
 // kestrel64 - minimal blocking TCP server with length-prefixed framing.
 //
 // VARIOS CLIENTES A LA VEZ. Antes se atendia a uno solo y en serie, y eso mordia en la

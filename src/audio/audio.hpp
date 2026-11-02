@@ -1,4 +1,19 @@
 #pragma once
+// Audio -- host audio sink fed from the AI DMA.
+//
+// Responsibility: take the big-endian s16 stereo PCM that the audio microcode leaves in RDRAM
+// and play it on the host device (Windows waveOut; no-ops elsewhere). Pacing of the guest is
+// done by the AI model in Memory, not here.
+//
+// Invariants:
+// - Never touches emulated state and never writes RDRAM: it only reads sample bytes, so the
+//   deterministic hashes do not depend on it.
+// - pushRdram() clips spans to the RDRAM bounds and opens the device lazily at sampleRate.
+// - KESTREL_AUDIO=0 or a missing backend makes everything a no-op (enabled() == false).
+//
+// Threads: push()/pushRdram() are called from the CPU thread (AI DMA in the MMIO code) and only
+// copy into a ring under a short mutex; a dedicated feeder thread refills the waveOut buffers
+// from that ring. statSnapshot() is read by the heartbeat; shutdown() is called from main.
 // kestrel64 — host audio sink. The AI register model in memory.cpp already paces
 // the game correctly (FIFO of 2 buffers, MI_AI on drain, dacrate timing); this is
 // the missing last mile: it takes the 16-bit big-endian stereo PCM the RSP audio

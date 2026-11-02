@@ -1,4 +1,24 @@
 #pragma once
+// Netplay -- input-lockstep multiplayer (one host, up to three guests in a star).
+//
+// Every machine runs the SAME emulation; only controller inputs cross the network. Each pad is
+// applied `delay` fields after it was read. The host snapshots the idle RCP, sends the state and
+// loads it itself, so all peers start from one restored state; guests send a CPU-state hash every
+// 60 fields and the host re-syncs on mismatch.
+//
+// Invariants:
+// - Determinism is mandatory: during a session SPLEAD=0 is forced, cheats are not applied and
+//   state load / rewind are refused (System::serviceStateReq drops them while lockstep()).
+// - A guest that loaded a foreign state is tainted(): no save file may be written.
+// - afterField() runs on the core loop OUTSIDE coreMutex and blocks until the inputs of the
+//   field arrive; serviceSync() must run with the RCP quiesced and coreMutex held.
+// - Only one session at a time; host()/join() report failure through `err`.
+//
+// Threads: afterField, serviceSync and the joybus read (pad) run on the CPU/core thread.
+// Session state is guarded by one internal mutex; per-peer receive threads, the accept loop,
+// the relay loop and a detached UPnP task are internal. g_lockstep/g_tainted/g_view/g_viewSlot
+// are atomics (the presenter reads viewCrop); g_pad is written and read only by the core thread.
+// host/join/stop/status/setView are called from the UI, telemetry or main thread.
 // kestrel64 - juego en red por sincronizacion de entradas (lockstep con retardo).
 //
 // Todas las maquinas corren la MISMA emulacion; por la red solo viajan los mandos. Un

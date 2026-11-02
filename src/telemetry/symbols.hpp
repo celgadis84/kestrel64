@@ -1,4 +1,17 @@
 #pragma once
+// Symbols -- guest symbol table loaded from a GNU ld map.
+//
+// Turns guest addresses into `function+off` for prof.cpu, cpu.disasm and sym.lookup.
+//
+// Invariants:
+// - CODE lookups only trust an address inside a .text range of the map; a static function
+//   without an exported symbol resolves to `object.o+off`.
+// - load() replaces the whole table; an empty result returns false with `err` set.
+// - codePhys() takes a PHYSICAL pc and tries TLB-mapped pages first, then KSEG0.
+//
+// Threads: no internal locking. The single process-wide table (globalSymbols) is loaded by
+// main() (--symbols) before serving and by the sym.load command, and read by the telemetry
+// handlers, all of which run under the server's serialised dispatch.
 // kestrel64 -- tabla de simbolos del INVITADO sacada de un map de GNU ld (p.ej. el pd.map
 // de un build de Perfect Dark). La usan prof.cpu, cpu.disasm y sym.lookup para devolver
 // `funcion+off` en vez de direcciones peladas (PD64_pending P5).

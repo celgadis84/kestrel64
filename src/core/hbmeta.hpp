@@ -1,4 +1,17 @@
 #pragma once
+// Homebrew header -- advanced n64brew ROM header and embedded metadata for the UI and MCP.
+//
+// Responsibility: decode the "ED" header (controller types per port, save type, RTC, region)
+// and load ROM metadata (zip appended to the ROM, or a <rom>.meta next to it). Applying the
+// save type and pads to the machine is done elsewhere (memory.cpp); this is for display.
+//
+// Invariants:
+// - parseHeader() expects the first 0x40 ROM bytes already in big-endian order and returns
+//   ed = false (other fields unset) unless the game code is "ED".
+// - An external .meta takes priority over the appended zip.
+//
+// Threads: stateless functions; called from System/Memory at ROM load, the telemetry thread
+// and the UI game-card code. Callers that cache a Meta own its synchronisation.
 // kestrel64 -- cabecera avanzada de homebrew y metadatos embebidos.
 //
 // n64brew, "ROM Header": con el codigo de juego "ED" en 0x3C-0x3D los bytes de 0x34 a 0x3F

@@ -1,4 +1,19 @@
 #pragma once
+// Menu -- menu bar and dialogs INSIDE the emulator window (Win32 only).
+//
+// The game window is the application: it opens ROMs and changes video, audio and pad options.
+// Options that can change live (core/runtime.hpp) are applied at once; the rest are saved to
+// the profile and the emulator relaunches itself with the new environment. Uses only the HWND
+// it is given (no GLFW/Vulkan); on other platforms the functions do nothing.
+//
+// Invariants:
+// - Hooks carries pointers to atomics owned by the run loop (pause, shutdown, state
+//   save/load/slot mailboxes); the menu writes them and the core loop consumes them.
+// - relaunchPending() must be queried by main() AFTER audio and video are closed, so the new
+//   process finds the sound device free; doRelaunch() then starts it.
+//
+// Threads: attach() and the menu procedure run on the window (UI/main) thread; the hook
+// mailboxes are atomics consumed by the core loop.
 // kestrel64 -- barra de menu y dialogos DENTRO de la ventana del emulador.
 //
 // La ventana de juego es la aplicacion: abre ROMs, cambia la resolucion, el sonido y el

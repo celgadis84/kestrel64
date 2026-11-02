@@ -1,4 +1,11 @@
 #pragma once
+// CIC -- boot checksum and chip table used by the PIF boot model.
+//
+// Invariants: ipl2Checksum() needs kIpl3Words big-endian words starting at ROM offset
+// kIpl3Off and a seed; chipForIpl3() identifies the CIC by IPL3 signature.
+//
+// Threads: pure functions and a constant table, no state; called from the CPU boot code
+// (cpu_boot.cpp), safe from any thread.
 // CIC-NUS boot checksum: the 48-bit value IPL2 computes over the cart's IPL3 (ROM 0x40..0xFFF)
 // and hands to the PIF with command 0x20; the PIF compares it (0x40) with the one burnt into
 // the cart's CIC and halts the CPU on a mismatch. The CIC's value is never sent to the CPU, so

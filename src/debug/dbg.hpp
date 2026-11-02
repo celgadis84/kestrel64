@@ -1,4 +1,19 @@
 #pragma once
+// Debug -- per-frame recorder of RDP commands, RSP tasks and guest timeline.
+//
+// Responsibility: when enabled, the core hooks (rdpJob, rspStart/rspEnd, flip) record what the
+// RCP did in the current frame; the `dbg.*` telemetry commands and the debugger window read the
+// last closed frame through snapshot(). Also holds the RDP command decoder (names, fields).
+//
+// Invariants:
+// - Off by default; every hook first reads the `on` atomic, so the cost when disabled is one load.
+// - A frame closes when the game flips VI_ORIGIN (flip()); freeze stops the closed frame from
+//   being replaced. At most kMaxCmds commands per frame are stored, the rest are only counted.
+// - Hooks must be called with the guest clock `now` (Memory::cartNow()), not host time.
+//
+// Threads: the RDP worker records RDP jobs, the RSP records task start (CPU thread) and end (RSP
+// worker), the CPU thread closes frames. All writes and snapshot() take `mx`; `on` and `freeze`
+// are atomics. Readers (telemetry, UI) always get a copy.
 // kestrel64 — capa de depuracion (docs/DEBUGGER.md).
 //
 // Graba, por CUADRO (el cuadro se cierra cuando el juego cambia VI_ORIGIN a otro buffer),

@@ -1,4 +1,19 @@
 #pragma once
+// Host profiler -- opt-in sampling of where the EMULATOR spends host cycles (Windows only).
+//
+// Enabled with KESTREL_HOSTPROF=<period ms>; a watcher thread suspends one target thread at a
+// fixed interval and buckets its RIP. Without the variable nothing starts; on other platforms
+// the functions are empty.
+//
+// Invariants:
+// - start(label) samples the CALLING thread, and only the one whose label matches
+//   KESTREL_HOSTPROF_WHO (default "cpu"); a second start while a sampler lives is ignored.
+// - gate() is optional; if installed, samples are taken only while the flag reads true.
+// - stop() joins the watcher and dumps the histogram; it is a no-op if no sampler runs.
+//
+// Threads: start() is called by the CPU ("cpu"), RSP ("rsp") and RDP worker ("rdp") threads at
+// their entry, gate() by the RSP thread, stop() by the CPU thread when its run loop ends. The
+// watcher is an internal thread.
 #include "../core/types.hpp"
 #include <atomic>
 

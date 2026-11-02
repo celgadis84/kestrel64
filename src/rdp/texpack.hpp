@@ -1,4 +1,19 @@
 #pragma once
+// Texture packs -- HD texture dump/replacement and algorithmic enhancement for the RDP.
+//
+// Responsibility: hash guest textures (RiceCRC32), dump new ones to PNG, look up replacement
+// images in a Rice/GLideN64-format pack and build their mip chains, or enhance the original
+// texels (KESTREL_TEXFX). Shared by SoftRDP and GPU-RDP, which use the same decoder.
+//
+// Invariants:
+// - Everything is off (active() == false) unless an env variable or configure() enables it.
+// - A Tex* returned by find()/enhanced() is valid only until the next init()/configure()
+//   (g_epoch changes); configure() must be called with the RDP stopped.
+// - Cache keys are crc64 = palette crc << 32 | texel crc, plus fmt and siz.
+//
+// Threads: the lookup/dump/cache entry points take an internal mutex (g_mu) and may be called
+// from the RDP worker or the thread that paints; g_dump/g_load/g_fx/g_epoch are plain globals
+// written only by init()/configure().
 // Texturas HD: volcado y sustitucion de texturas por hash, compatible con los packs de
 // Rice Video / GLideN64 (GLideNHQ). Ver docs/TEXTURAS-HD.md.
 //

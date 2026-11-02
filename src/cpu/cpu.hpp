@@ -1,4 +1,22 @@
 #pragma once
+// CPU -- VR4300 (MIPS III) interpreter and architectural state.
+//
+// Holds everything the guest CPU owns: GPRs, HI/LO, COP0/COP1 registers, the 32-entry TLB,
+// the modelled I/D caches and the guest-time counters. step() executes one instruction; the
+// dynarec (src/cpu/jit*.cpp) runs on top of the same struct and falls back to the interpreter,
+// which is the oracle for every case the JIT does not emit itself.
+//
+// Invariants:
+// - 32-bit ops sign-extend to 64 bits; delay slots live in the pc/nextPc pair.
+// - The guest clock is the five fields that Memory::cartNow() reads (retired, jitPending,
+//   stall*); only the CPU thread writes them, and they are serialized field by field in savestates.
+// - A host write into guest RAM must go through hostPoke() (keeps D$/I$ lines coherent and, with
+//   code=true, drops compiled blocks); call it with System::coreMutex held.
+// - Fields the JIT addresses with offsetof() must keep their layout (the JIT reads them directly).
+//
+// Threads: everything here is confined to the CPU thread (System::run). Other threads only get
+// in while holding System::coreMutex (telemetry, debugger, savestates), with the RCP idle;
+// the RSP thread reads the guest clock through Memory::cartNow().
 // kestrel64 — R4300i CPU (MIPS III, 64-bit): interprete + estado arquitectonico.
 //
 // GPRs are 64-bit; 32-bit ("word") ops sign-extend their result to 64 bits.

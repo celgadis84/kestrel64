@@ -1,4 +1,20 @@
 #pragma once
+// Last-writer map -- debug tag per 16-byte RDRAM block saying who wrote it last.
+//
+// Responsibility: find who corrupted code or data (CPU uncached, CPU D-cache write-back, SP/PI/SI
+// DMA, RDP) and report writes that land inside RDP FIFO spans not yet consumed. Armed only by
+// KESTREL_WRTAG=1 via init(); disarmed, every hook is one compare against the null `tag`.
+//
+// Invariants:
+// - init() runs from Memory::reset(), right after RDRAM is sized; tag/pcOf/blocks keep that
+//   size until the next reset.
+// - win[] holds the unconsumed FIFO windows as (hi << 32) | lo in ONE atomic, so a reader never
+//   mixes bounds of two spans; setWin/moveWinLo publish with release, readers acquire.
+// - dirtyProbe is installed by the CPU model (line valid and dirty in its D-cache).
+//
+// Threads: markers are called from whichever thread performs the write (CPU thread; SP DMA may
+// also run on the RSP worker). The tag and pc arrays are plain unsynchronised bytes -- a
+// debugging aid where a stale tag is acceptable -- while the windows and counters are atomics.
 // Mapa de "ultimo escritor" de RDRAM, un tag por bloque de 16 bytes (= linea de D-cache).
 // Cuando el guest se despena ejecutando codigo pisado, lo unico que hace falta saber es QUIEN
 // lo piso: la CPU (cacheada o no), un DMA del SP/PI/SI, o el rasterizador. Sin esto solo se ve

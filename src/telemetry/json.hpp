@@ -1,4 +1,15 @@
 #pragma once
+// JSON -- minimal value type, parser and writer for the telemetry protocol.
+//
+// Header-only and deliberately small: enough to parse request objects and build replies.
+//
+// Invariants:
+// - Integers keep exact 64-bit precision (isInt/sign), so register and address values do not
+//   pass through a double.
+// - Objects and arrays are held through shared_ptr: copying a Value shares its children.
+//
+// Threads: free of globals, so any thread may use it; a Value itself is not
+// synchronised. The telemetry server threads parse and build replies with it.
 // Loom — minimal JSON for the telemetry protocol. Not a general-purpose library:
 // enough to parse `{"id":N,"cmd":"...","args":{...}}` requests and build replies.
 

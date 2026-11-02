@@ -1,4 +1,23 @@
 #pragma once
+// RSP -- Reality Signal Processor core (scalar unit + 8-lane vector unit), interpreter and JIT.
+//
+// Runs the microcode loaded in IMEM against DMEM until BREAK. Graphics/audio microcode is run
+// for real (there is no HLE); the RDP is kicked through COP0 writes to the DPC registers.
+// start() arms the core from SP_PC and step(n) advances up to n instructions, so the same code
+// serves Lockstep (interleaved with the CPU) and Threaded (own worker, Memory::rspWorkerLoop).
+//
+// Invariants:
+// - Guest-visible RSP state (sp_status, MI_SP, DPC) is published by the CPU thread at the guest
+//   instant of the deadline; the core only computes and proposes.
+// - A DMA into IMEM while a task runs must call jitInvalidate(); IMEM is also fingerprinted at
+//   task start. With a breakpoint armed (bpMap) the interpreter is used instead of the JIT.
+// - Debug breakpoints (bpMap) are host-side: they freeze the core before the instruction and do
+//   not touch sp_status.
+//
+// Threads: step()/start() run on the RSP worker in Threaded mode and on the CPU thread in
+// Lockstep. Cross-thread members are atomic: cyclesRun, hostStop, extHalt, bpMap/bpCount/bpHit,
+// jitImemSyncReq, idle* counters. Everything else (registers, vpr, JIT table) is confined to
+// the thread that runs step(); rspThread records which one.
 #include <atomic>
 #include <emmintrin.h>   // __m128i: el camino rapido de COP2 lo lleva en la firma
 // kestrel64 — Reality Signal Processor, low-level interpreter (M3.3).

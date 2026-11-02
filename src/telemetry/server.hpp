@@ -1,4 +1,20 @@
 #pragma once
+// Telemetry server -- in-core half of the MCP bridge (JSON + binary frames over TCP).
+//
+// Binds 127.0.0.1 and dispatches command requests (memory, CPU, RSP/RDP, state, profiling,
+// netplay, pad injection...) against the live System. The debugger window uses the same
+// dispatch through call(), so there is a single access path to the core.
+//
+// Invariants:
+// - One thread per client, but DISPATCH is serialised by dispatchMx, so each command sees a
+//   consistent state. Commands that wait on the core (frame.advance, cpu.run_until,
+//   rewind.step, state.save/load) skip dispatchMx so they do not freeze other clients.
+// - CPU control/inspection handlers take coreMutex; the server never runs on the core thread.
+// - stop() closes the listener and every live connection to wake threads blocked in recv.
+//
+// Threads: serve() blocks on a dedicated thread (System::teleThread) and spawns the per-client
+// workers; it ends on stop() or system shutdown. call() may be invoked from the debugger
+// thread. `stopping` is atomic; `clients` is guarded by clientsMx.
 // kestrel64 — telemetry server. Length-framed JSON(+binary) over TCP; the in-core
 // half of the MCP bridge. Runs on its own thread, dispatches command requests
 // against the live System state.

@@ -1,4 +1,22 @@
 #pragma once
+// Input movie -- record/replay of what the guest reads from the controllers (.k64m, TAS).
+//
+// Responsibility: at each joybus "read buttons" answer, either append the sample to the movie
+// (Rec) or replace the answer with the next stored sample (Play). Armed by KESTREL_MOVIE_REC /
+// KESTREL_MOVIE_PLAY through init(); otherwise mode stays Off and the cost is one compare.
+//
+// Invariants:
+// - Granularity is the guest's controller read, not the video field; the sample carries the
+//   channel and a mismatching channel on replay logs a desync warning once.
+// - init() runs once after the cartridge is loaded and RDRAM sized; a movie from another
+//   cartridge (CRC mismatch) is refused, not played.
+// - seek(n) must follow a state load so the tape matches the rewound game; finish() writes
+//   the sample count into the header and closes the file.
+// - When a replay ends (ended), control returns to the host pad.
+//
+// Threads: sample/seek/finish/init run on the CPU thread (joybus, state load, shutdown).
+// polls and ended are relaxed atomics read by the telemetry thread (emu.status); mode, fp,
+// total and path are plain CPU-thread state (telemetry only reads them for display).
 // Grabacion y reproduccion de entradas ("peliculas", herramientas TAS).
 //
 // Lo que se graba NO es lo que el jugador aprieta sino lo que el JUEGO LEE: cada respuesta

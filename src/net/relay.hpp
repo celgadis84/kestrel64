@@ -1,4 +1,20 @@
 #pragma once
+// Relay -- rendezvous server and client helpers for netplay without open ports.
+//
+// Everybody connects OUT to the relay: the host gets a room code, guests join with it, and the
+// relay splices the two connections and forwards frames verbatim (it knows nothing about the
+// game). The host sees each spliced connection like one accepted on its own port.
+//
+// Invariants:
+// - openRoom() leaves `ctl` as the host control connection; nextGuest() must be called on it
+//   in a loop and returns an invalid TcpConn when the control closes (end of session or relay
+//   down). Each guest needs a NEW connection ("room.accept"), never the control one.
+// - serve() only returns if it cannot listen (the value is the process exit code).
+//
+// Threads: serve() runs on the main thread (`--relay`, no ROM, no window); it spawns one
+// detached thread per connection plus a pump thread per spliced pair, with a global mutex for
+// the room table and a per-control mutex serialising sends. openRoom/nextGuest/joinRoom are
+// called from netplay (host start-up, its relay loop, guest join) and may block on the network.
 // kestrel64 - rele (punto de encuentro) para el juego en red.
 //
 // Sin rele, el anfitrion tiene que abrir un puerto en su router y dar su IP publica. Con el

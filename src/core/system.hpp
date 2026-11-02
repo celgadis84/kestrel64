@@ -1,4 +1,28 @@
 #pragma once
+// System -- top-level emulator object and run loop.
+//
+// System owns the Rom, Memory, CPU, cheats and rewind engine, the telemetry server and the
+// presenter. It implements the blocking run loop (run/runLoop): sliced CPU execution (with the
+// RSP interleaved in Lockstep), VI field accounting, and servicing of requests that come from
+// other threads (save/load state, rewind, live options, reset, netplay sync).
+//
+// Invariants:
+// - Any access to CPU/memory state from outside the run thread must hold coreMutex. The run
+//   loop releases it between slices and yields while CoreMutex::waiting is non-zero, so a
+//   telemetry command cannot starve behind the (unfair) mutex.
+// - State save/load/rewind requests are only posted here (stateSaveReq, stateLoadReq,
+//   rewindReq, netSyncReq, rt::liveReq); serviceStateReq runs them on the run thread at the top
+//   of a loop turn, once the RCP is at rest (quiesceRcp / rcpAtRest), never mid-RDP job.
+// - The clock model (Clocks) is the single source of guest time: cycles per instruction, field
+//   length in instructions and the RSP:CPU step ratio all derive from it. Do not introduce a
+//   second time base; the fixed-point rspStepNum/rspStepDen keep the interleave reproducible.
+// - breakpoints, rspBpArmed and similar debug state are guarded by coreMutex.
+//
+// Threads: with video on, the CPU loop (run) runs on a worker thread and the window/present
+// loop runs on the main thread inside runLoop (GLFW needs it); without video run() executes
+// on the caller. The telemetry server has its own thread (startTelemetry). paused, shutdown,
+// the *Req flags, speed/busy percentages and counters are atomics readable from any thread;
+// stateMsg is guarded by stateMsgMutex; everything else is run-thread state under coreMutex.
 // kestrel64 — top-level system. Owns memory, the ROM, and the telemetry server.
 // At M0 there is no CPU yet; the system loads a ROM, builds the memory map, and
 // serves telemetry so the MCP can already inspect state.

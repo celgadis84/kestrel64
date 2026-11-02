@@ -1,4 +1,20 @@
 #pragma once
+// Capture -- screenshots (PNG) and video recording (MP4 / AVI) in GUEST time.
+//
+// Responsibility: grab the framebuffer the VI scans out of RDRAM when a field closes (not the
+// window), and write it as PNG or as one video frame per emulated field together with the audio
+// the AI emitted in that same guest time, so video and audio stay in sync at any emulation speed.
+//
+// Invariants:
+// - Requests may arrive at any time, but they are served by the core hooks onField()/onIdle():
+//   a screenshot is written at the next field close (or at once while paused).
+// - Video frames are never dropped: if the encoder falls behind, the core waits.
+// - stopVideo()/shutdown() must be called so the file is closed and valid.
+//
+// Threads: requestScreenshot/startVideo/stopVideo/toggleVideo/videoStats may be called from any
+// thread (window keys, menu, telemetry, KESTREL_RECORD); state is guarded by g_recMu/g_shotMu
+// and atomics. onField/onIdle/onAudio run on the core (CPU) thread. Video encoding runs on its
+// own thread fed through a queue.
 // kestrel64 -- captura de pantalla (PNG) y de video (AVI: MJPEG + PCM) en tiempo de INVITADO.
 //
 // Las dos salen del framebuffer que barre el VI, leido de la RDRAM al cerrar el campo (el

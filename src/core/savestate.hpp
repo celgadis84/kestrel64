@@ -1,4 +1,23 @@
 #pragma once
+// Savestate -- full machine snapshot to file or memory buffer, used by save slots, rewind and
+// netplay sync.
+//
+// Responsibility: serialise RDRAM, DMEM/IMEM, PIF RAM, cartridge save media, RCP registers and
+// CPU/RSP/RDP architectural state field by field (versioned container), and restore it.
+//
+// Invariants:
+// - Take or load a state only with the RCP at rest (RDP queue drained, no RSP task in flight);
+//   this makes a state portable between Lockstep and Threaded. Derived schedules are not
+//   stored; they are reset on load.
+// - The caller must hold System::coreMutex; these functions do not lock. They are not safe
+//   from another thread while the core runs.
+// - loadState restores the input movie position too (movie::seek) so a replay follows a rewind.
+// - captureDelta returns false (leaving `cur` untouched) when the state size changed; the
+//   caller then falls back to captureState.
+//
+// Threads: called on the run (CPU) loop thread from System::serviceStateReq and the rewind
+// engine, and from netplay when it syncs a peer. Other threads only post requests
+// (System::stateSaveReq / stateLoadReq / rewindReq / netSyncReq).
 // kestrel64 — estado guardado (savestate).
 //
 // Una foto completa del estado de la maquina: RDRAM, DMEM/IMEM, PIF RAM, el medio de

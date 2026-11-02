@@ -1,4 +1,23 @@
 #pragma once
+// SoftRDP -- bit-exact software RDP rasterizer (the reference renderer).
+//
+// Consumes a span of the RDP command FIFO (DPC_START..DPC_END, in RDRAM or in DMEM when xbus is
+// set) through run() and draws into the RDRAM color/z images the guest configured. It also owns
+// the RDP cost model (GCLK charged per command) and the telemetry counters (RdpStats).
+// GPU-RDP (src/gpurdp) takes primitives from this decoder, so SoftRDP stays the authority on
+// RDRAM and the oracle used by the deterministic gates.
+//
+// Invariants:
+// - run() must be given a whole span in FIFO order; state (scissor, tiles, TMEM, modes) persists
+//   between spans. sawSyncFull / cmdTail report on the last span only.
+// - With cmdSrc set, commands come from the snapshot taken at submit time, but pixels and
+//   textures are always read from live RDRAM.
+// - costOnly mode charges the cost counters without writing a pixel; a second instance
+//   (Memory::softCost) runs it ahead of the painting instance, and the cost must be charged once.
+//
+// Threads: the painting instance runs on the RDP worker in Threaded mode and inline in the CPU
+// thread in Lockstep. RdpStats counters are relaxed atomics read by the telemetry thread; the
+// prim*/workSince tracking is touched only by the charging thread.
 #include <atomic>
 #include <vector>
 // kestrel64 — software RDP (M3.2). Consumes the RDP command FIFO

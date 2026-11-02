@@ -1,4 +1,24 @@
 #pragma once
+// GPU-RDP -- Vulkan compute rasterizer that mirrors SoftRDP bit for bit.
+//
+// Responsibility: SoftRDP keeps decoding the whole FIFO and hands primitives (fills, triangles,
+// textured triangles) to this module, which queues them and runs them on the GPU in FIFO order.
+// Results are copied back to RDRAM at flush(), so outside SoftRdp::run RDRAM is always up to
+// date. With upscaling (x2/x4/x8) it runs in shadow mode: SoftRDP paints 1x and stays the
+// authority, the GPU produces a high-resolution copy used by the presenter (scanoutHi).
+//
+// Invariants:
+// - Queued primitives must be flushed before any command that reads or writes RDRAM by itself
+//   and at the end of every span; queueTri() returns false when full (flush, then requeue).
+// - The presenter shares the Vulkan context (sharedVk()): there is ONE global volk table, never
+//   create a second device. Both submitters must hold queueLock()/queueUnlock() around the
+//   shared queue.
+// - Builds without KESTREL_GPURDP get inline no-op stubs (active() == false).
+//
+// Threads: init(), the queue/flush functions and the Stats counters belong to the thread that
+// runs the RDP; the presenter (main thread) only takes the queue lock and reads the shared
+// handles. requestUpscale() may be called from any thread (atomic request applied at the next
+// flush). Stats are read without a lock (aligned 64-bit words).
 // kestrel64 -- GPU-RDP propio (docs/GPU-RDP.md). Rasterizador del RDP en compute de Vulkan con
 // la semantica de SoftRDP bit a bit. De fabrica desde la fase 7 (KESTREL_GPURDP=0 lo apaga y
 // queda SoftRDP). El presentador comparte su contexto Vulkan: volk tiene UNA tabla global de punteros.

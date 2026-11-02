@@ -1,4 +1,19 @@
 #pragma once
+// ROM library -- entry screen with a 3D cover carousel (docs/LAUNCHER.md).
+//
+// Shown when the emulator starts without a ROM, or from "File > Open ROM..." in the game window.
+// Pure Win32 + GDI on its own canvas: it touches neither GLFW, Vulkan nor the game present path.
+// On other platforms pickRomLibrary() returns an empty string.
+//
+// Invariants:
+// - pickRomLibrary() BLOCKS its caller in a private message loop and returns the chosen ROM
+//   path, or "" if closed without choosing or if a library is already open.
+// - One library per process (libraryOpen()).
+// - From the game window thread it must be launched on a separate thread: that thread is
+//   presenting frames and cannot enter a modal loop.
+//
+// Threads: runs on the thread that calls it (main() at startup, or a helper thread started by
+// the menu, detached); the open flag is atomic so libraryOpen() may be polled from any thread.
 // kestrel64 -- biblioteca de ROMs con carrusel 3D de caratulas.
 //
 // Es la puerta de entrada del emulador cuando se abre sin ROM (doble clic en el .exe, o

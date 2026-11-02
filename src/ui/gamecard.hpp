@@ -1,4 +1,21 @@
 #pragma once
+// Game card -- everything around a ROM: header, saves, manuals, cheats and per-game metadata.
+//
+// The logic is plain C++ (gamecard.cpp, no GUI) and the Win32 window is in gamecard_win32.cpp.
+// All data comes from files next to the cartridge, using the same names as the emulator itself
+// (.eep/.sra/.fla, .mpk, .st0-.st9, .cht), plus <state>/games/<CRC>.json shared with the
+// launcher so both front ends show the same card.
+//
+// Invariants:
+// - <base> is the ROM path without container (.zip/.gz) and without its extension.
+// - Cheat edits rewrite only the affected lines (comments, format and line endings survive);
+//   Meta keeps raw JSON values so keys unknown to the exe survive a write.
+// - Nothing goes out to the network unless the user turned the cheat download on.
+// - showCard() BLOCKS the calling thread in its own message loop; only one card per process
+//   (a second call brings it forward and returns false).
+//
+// Threads: the file/parse helpers have no shared state worth locking and are called from the
+// UI thread (menu, library) and main(); showCard/cardOpen belong to the UI thread that opened it.
 // kestrel64 -- ficha de juego: lo que hay alrededor de una ROM.
 //
 // Es la misma ficha que la del lanzador (tools/launcher/gamecard.py), escrita en C++ para que

@@ -1,4 +1,31 @@
 #pragma once
+// Memory -- physical memory map, big-endian bus, RCP register file, DMA engines and the
+// inter-thread rendezvous between the CPU and the RSP/RDP workers.
+//
+// Memory owns RDRAM, SP DMEM/IMEM, PIF RAM, the cartridge ROM/save media and every MMIO block
+// (MI/SP/DPC/VI/AI/PI/RI/SI). RSP and RDP are LLE: this layer only drives their DMA, registers,
+// interrupts and (in Threaded mode) their worker threads. Implementation is split over
+// memory*.cpp and rcp_*.cpp (map in memory_internal.hpp).
+//
+// Invariants:
+// - Guest-visible RCP state is changed only on the CPU thread. Workers compute and propose;
+//   task-end interrupts (MI_SP / MI_DP) are armed as deadlines on the guest clock and published
+//   by the CPU thread when that clock arrives, so Threaded matches Lockstep (statehash).
+// - Producers (workers) publish RDRAM writes with the release in Rcp::mi_intr raise; the CPU
+//   acquires when it reads it. Game code is expected to wait on the interrupt before reading
+//   a worker's output, so no finer coherency between threads is provided.
+// - Registers that two threads can update (Rcp::mi_intr, sp_status, sp_semaphore, dpc_* ) are
+//   std::atomic; plain Rcp fields are CPU-thread only. Hot fields are cache-line isolated on
+//   purpose (alignas(64)): do not repack them next to counters a worker writes per job.
+// - RcpMode (Lockstep or Threaded) is chosen once at start-up and only read afterwards. The
+//   workers exist only in Threaded: startRcpThreads()/stopRcpThreads().
+// - Savestates, rewind and telemetry reads that cross threads require the RCP at rest and
+//   System::coreMutex; see System::quiesceRcp.
+//
+// Threads: CPU thread (all MMIO, DMA, PIF/joybus, JIT memory helpers); RSP worker (runs the
+// microcode task to BREAK, arms the MI_SP deadline, may start SP DMA itself); RDP worker
+// (rasterizes queued FIFO spans, arms the MI_DP deadline on SYNC_FULL). Telemetry and UI threads reach it only under
+// coreMutex, or through the atomic counters (relaxed, diagnostics only).
 // Loom core — physical memory map and big-endian bus.
 //
 // RAM-backed regions (RDRAM, SP DMEM/IMEM, PIF RAM) + cartridge ROM, plus the RCP

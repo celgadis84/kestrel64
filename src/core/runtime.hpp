@@ -1,4 +1,24 @@
 #pragma once
+// Runtime settings -- process-wide values that the UI may change while the emulator runs.
+//
+// Each value is an atomic (or a mutex-guarded record) seeded once from the environment by
+// initFromEnv(), so default and gate behaviour is unchanged, and from then on owned by whoever
+// writes it (window menu, telemetry). Anything not listed here needs a restart.
+//
+// Invariants:
+// - Call initFromEnv() once before starting any other thread; environment variables are not
+//   written afterwards (changing the environment under other threads is unsafe).
+// - Multi-field requests use a flag published last with release: winReq is set only after
+//   winW/winH/winFull are written; liveReq is set after liveOpts is stored under liveMx.
+//   liveOpts take effect only when System::serviceStateReq applies them with the RCP at rest.
+// - Pad and Transfer Pak mappings are versioned by padGen / tpakGen[]; the consumer rereads on
+//   a generation change. The cartridge image itself is loaded by the joybus on the CPU thread.
+//
+// Threads: written mostly by the UI/menu thread and the telemetry thread; read by the CPU
+// thread (resetReq, tpak*, liveReq via System, throttle in the run loop), the presenter/main
+// thread (hud, aspect, filter, win*, pad mapping) and the audio code (audioOn, volume).
+// joyName/joyGen are published by the presenter, the only thread allowed to query GLFW;
+// joyName is guarded by joyMx.
 // kestrel64 -- ajustes que se pueden cambiar CON EL EMULADOR EN MARCHA.
 //
 // Hasta aqui toda la configuracion se leia una vez del entorno con getenv(), que es lo

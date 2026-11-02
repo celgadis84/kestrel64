@@ -1,4 +1,17 @@
 #pragma once
+// VI filter -- anti-alias, divot and de-dither applied on VI scan-out.
+//
+// Responsibility: turn the RDP coverage bits kept in the alpha slot of the framebuffer into the
+// filtered picture the Video Interface would output (fetchFiltered), and tell whether the VI
+// would do anything other than copy (active()). Reference: parallel-rdp shaders.
+//
+// Invariants:
+// - Pure function of RDRAM bytes, the hidden-bit plane and VI_CTRL: no emulated state is read
+//   or written, so it is deterministic.
+// - `out` must hold w*h u32 pixels (0x00RRGGBB); `hid` may be nullptr.
+//
+// Threads: stateless apart from thread_local scratch buffers, so any thread may call it
+// (presenter thread and framebuffer dump on the core thread both do).
 #include "../core/types.hpp"
 
 // Filtros de salida del Video Interface.

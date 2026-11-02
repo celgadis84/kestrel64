@@ -1,4 +1,19 @@
 #pragma once
+// Core types -- fixed-width integer aliases and small helpers shared by every subsystem.
+//
+// Holds the u8..u64 / s8..s64 aliases, byte-swap helpers (guest is big-endian, host is
+// little-endian), the page-aligned GuestBytes allocator used for RDRAM, the single-writer
+// counter helpers, and envFlag() for environment toggles.
+//
+// Invariants:
+// - bumpOwned/addOwned are plain load+store on an atomic: exactly ONE thread may write a given
+//   counter, otherwise counts are lost. Owned2 gives one cache-line-separated slot per writer
+//   (who = 0 or 1) for counters with two writers (CPU and RSP threads); readers sum both.
+// - GuestBytes memory is 4 KiB aligned so RDRAM can be imported by Vulkan as host memory.
+// - envFlag(): "0/off/false/no" disable, any other value enables, absent = default.
+//
+// Threads: header-only and stateless; safe from any thread. Counter values read from other
+// threads may lag by one update, which is fine for telemetry.
 // Loom core — fundamental fixed-width types and small helpers.
 
 #include <atomic>
