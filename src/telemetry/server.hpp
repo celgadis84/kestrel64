@@ -79,6 +79,7 @@ private:
   auto cmdRdpStats(const std::string& cmd, json::Value& data) -> void;
   gpurdp::Stats gpuStats0{};   // contadores de GPU-RDP al ultimo rdp.stats.reset
   auto cmdRspRegs(const json::Value& args, json::Value& data) -> void;
+  auto cmdRspTasks(json::Value& data) -> void;
   // Decode the live VI framebuffer to RGBA8888 (blob) + geometry (data).
   auto cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool;
   auto cmdCapture(const std::string& cmd, const json::Value& args, json::Value& data) -> bool;

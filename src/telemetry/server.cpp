@@ -167,6 +167,8 @@ auto Server::dispatch(const json::Value& req, const std::vector<u8>& reqBlob, js
     cmdRdpStats(cmd, data); done();
   } else if(cmd == "rsp.regs") {
     cmdRspRegs(args, data); done();
+  } else if(cmd == "rsp.tasks") {
+    cmdRspTasks(data); done();
   } else if(cmd == "vi.capture") {
     if(cmdViCapture(args, data, blob)) done(); else fail("vi.capture: VI blanked or bad geometry");
   } else if(cmd.rfind("capture.", 0) == 0) {
@@ -1199,11 +1201,41 @@ auto Server::cmdRunUntil(const json::Value& args, json::Value& data) -> void {
 // (disable, keep counts), prof.reset (zero counts, keep enabled state). The CPU
 // sampler buckets by physical address (16-byte resolution); the RSP sampler counts
 // per IMEM instruction. Turn on, run the workload, then query prof.cpu / prof.rsp.
+// Ciclos del RSP por OSTask.type (DMEM 0xFC0, 1 = grafica, 2 = audio) desde el ultimo
+// prof.reset/prof.start. Sin modelo de tiempo: son los ciclos que ya cuenta el RSP. La tarea
+// en curso va aparte (`partial`) y `other` es lo que no cae en ninguna de las dos (tareas
+// paradas por la CPU sin BREAK): total = suma de cubos + partial + other.
+auto Server::cmdRspTasks(json::Value& data) -> void {
+  std::lock_guard<System::CoreMutex> lk(system.coreMutex);
+  Rsp& s = system.memory.rsp;
+  const u64 now = s.exactCycles();
+  const u64 total = now > s.taskFrom ? now - s.taskFrom : 0;
+  const bool run = !(system.memory.rcp.sp_status.load() & 1);
+  const u64 kick = system.memory.spKickCycles > s.taskFrom ? system.memory.spKickCycles : s.taskFrom;
+  const u64 partial = run && now > kick ? now - kick : 0;
+  u64 sum = 0;
+  json::Value by = json::Value::array();
+  for(u32 i = 0; i < 8; i++) if(s.taskN[i]) {
+    json::Value e = json::Value::object();
+    e.set("type", (u64)i); e.set("tasks", s.taskN[i]); e.set("cycles", s.taskCyc[i]);
+    e.set("avgCycles", (double)s.taskCyc[i] / (double)s.taskN[i]);
+    e.set("pct", total ? 100.0 * (double)s.taskCyc[i] / (double)total : 0.0);
+    by.push(e);
+    sum += s.taskCyc[i];
+  }
+  data.set("total", total);
+  data.set("running", run);
+  data.set("partial", partial);
+  data.set("other", total > sum + partial ? total - sum - partial : (u64)0);
+  data.set("byType", by);
+}
+
 auto Server::cmdProfControl(const std::string& cmd, json::Value& data) -> void {
   std::lock_guard<System::CoreMutex> lk(system.coreMutex);
   if(cmd == "prof.start") {
     system.cpu.profEnable(true);
     system.memory.rsp.profOn = true; system.memory.rsp.profClear();
+    system.memory.rsp.taskClear();
     if(system.memory.rsp.tm) system.memory.rsp.tm->clearStats();
   } else if(cmd == "prof.stop") {
     system.cpu.profEnable(false);
@@ -1211,6 +1243,7 @@ auto Server::cmdProfControl(const std::string& cmd, json::Value& data) -> void {
   } else {  // prof.reset
     system.cpu.profClear();
     system.memory.rsp.profClear();
+    system.memory.rsp.taskClear();
     if(system.memory.rsp.tm) system.memory.rsp.tm->clearStats();
   }
   data.set("profiling", system.cpu.profOn);

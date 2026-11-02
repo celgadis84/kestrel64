@@ -472,7 +472,12 @@ public:
   // un contador u32 por ranura de 4 bytes, lo que senala la rutina de microcodigo exacta.
   u32  profPc[1024] = {};
   u64  profTotal = 0;
-  u64 taskN[8] = {}, taskCyc[8] = {};   // reparto por OSTask.type (KESTREL_RSPTASKS)
+  // Reparto por OSTask.type (DMEM 0xFC0): tareas acabadas en BREAK y sus ciclos ENTEROS
+  // (desde el arranque o desde taskClear, lo que sea mas tarde). rsp.tasks por MCP,
+  // KESTREL_RSPTASKS al salir. taskFrom = cyclesRun en el ultimo taskClear.
+  u64 taskN[8] = {}, taskCyc[8] = {};
+  u64 taskFrom = 0;
+  auto taskClear() -> void { for(u32 i = 0; i < 8; i++) taskN[i] = taskCyc[i] = 0; taskFrom = exactCycles(); }
   auto taskDump() -> void;
   auto profDump() -> void;
   auto profClear() -> void { for(auto& c : profPc) c = 0; profTotal = 0; }

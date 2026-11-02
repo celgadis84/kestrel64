@@ -1256,8 +1256,13 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
     2026-09-04); en caliente pasan ademas trucos, rebobinado y texturas HD/realce/volcado (STATUS
     2026-10-30). Siguen pidiendo relanzar las que montan la maquina (CPU/JIT, RCP, RDRAM, tipo de
     guardado, rasterizador, escalado interno, overclock).
-- **Contador de ciclos del RSP por tipo de tarea** (anotado 2026-11-01, peticion de la sesion
-  SDK). Hoy `prof.rsp` y `KESTREL_RSP_TIMING` reparten por ranura de IMEM, sin saber de que tarea
+- ~~**Contador de ciclos del RSP por tipo de tarea**~~ **CERRADO 2026-11-02**: `rsp.tasks` /
+  MCP `rsp_task_stats` (cubos por OSTask.type con los ciclos ENTEROS de cada tarea, desde el
+  lanzamiento o el ultimo `prof.reset`/`prof.start`; tarea en curso aparte), y
+  `KESTREL_RSPTASKS=1` al salir. Medido SM64 60 cambios de buffer: total 37 019 912, en tareas
+  37 016 302, resto 3 610 = la tarea en curso al salir (THREADS 0 y 1). Antes los cubos solo
+  sumaban el tramo del ultimo `step()` de cada tarea. Peticion original (2026-11-01, sesion
+  SDK): Hoy `prof.rsp` y `KESTREL_RSP_TIMING` reparten por ranura de IMEM, sin saber de que tarea
   viene cada ciclo; solo `reportRspStall` (`memory.cpp`) lee el tipo de OSTask en DMEM 0xFC0
   (1 = grafica, 2 = audio). Falta: al arrancar cada tarea (SP_STATUS halt -> run) leer ese tipo y
   acumular ciclos (y paradas con el modelo de tiempo) en un cubo por tipo, expuesto por MCP

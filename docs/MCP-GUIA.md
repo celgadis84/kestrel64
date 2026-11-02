@@ -108,6 +108,9 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
 - `cpu_registers`: gpr, hi/lo, COP0 y desensamblado en pc.
 - `cpu_disasm(addr, count)`.
 - `rsp_registers(vpr)`: escalares, y los vectoriales si `vpr=True`.
+- `rsp_task_stats`: ciclos del RSP por tipo de OSTask (1 = grafica, 2 = audio) desde
+  `profile_reset`/`profile_start`, sin modelo de tiempo: `byType` (tareas, ciclos enteros de
+  cada tarea acabada en BREAK, media, %), `partial` (tarea en curso) y `other`; total = suma.
 - `rcp_registers`: MI/SP/DPC/VI/AI/PI/SI. Sirve para ver si el RSP esta parado, si el RDP
   tiene FIFO pendiente, y el estado del VI.
 - `sym_load(path)` / `sym_lookup(addr|name)`: simbolos del invitado desde un map de GNU ld

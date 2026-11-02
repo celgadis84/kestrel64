@@ -240,6 +240,9 @@ auto Rsp::taskDump() -> void {
                  (unsigned long long)taskN[i], (unsigned long long)(taskCyc[i]/1000000),
                  100.0 * (double)taskCyc[i] / (double)tot,
                  (unsigned long long)(taskCyc[i] / taskN[i]));
+  const u64 all = cyclesRun.load(std::memory_order_relaxed) - taskFrom;
+  std::fprintf(stderr, "[rsptask] total=%llu en tareas=%llu resto=%llu\n", (unsigned long long)all,
+               (unsigned long long)tot, (unsigned long long)(all - tot));
   std::fflush(stderr);
 }
 
@@ -2430,7 +2433,9 @@ auto Rsp::step(u64 maxInsns) -> void {
       // Reparto del coste del RSP por TIPO de tarea (OSTask.type en DMEM 0xFC0): con esto se
       // ve si el gasto se va en graficos o en audio. Solo contadores, sin efecto en el invitado.
       { u32 a = 0xfc0; u32 ty = ((u32)mem->dmem[a]<<24)|((u32)mem->dmem[a+1]<<16)|((u32)mem->dmem[a+2]<<8)|mem->dmem[a+3];
-        u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += ran;
+        const u64 now = cyclesRun.load(std::memory_order_relaxed);
+        const u64 from = mem->spKickCycles > taskFrom ? mem->spKickCycles : taskFrom;
+        u32 s2 = ty < 8 ? ty : 0; taskN[s2]++; taskCyc[s2] += now > from ? now - from : 0;
         if(tm) tm->taskEnd(ty); }
       dbg::g.rspEnd(cyclesRun.load(std::memory_order_relaxed) - mem->spKickCycles, mem->cartNow());
       static const bool tr = std::getenv("KESTREL_RSPTRACE") != nullptr;

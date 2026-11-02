@@ -441,6 +441,15 @@ def rsp_registers(vpr: bool = False) -> dict:
     return data
 
 
+def rsp_task_stats() -> dict:
+    """RSP cycles per OSTask.type (DMEM 0xFC0: 1=gfx, 2=audio) since profile_reset/start,
+    no timing model needed. `byType` [{type, tasks, cycles, avgCycles, pct}] counts tasks
+    that ended in BREAK, each with its whole cycle count; `partial` = task still running,
+    `other` = cycles of tasks halted without BREAK. total = sum(byType) + partial + other."""
+    data, _ = query("rsp.tasks")
+    return data
+
+
 def breakpoint_add(addr) -> dict:
     """Set a PC breakpoint (virtual addr). The run loop auto-pauses when the CPU is
     about to execute it. Zero overhead while no breakpoints are set."""
@@ -779,6 +788,7 @@ def _serve_mcp():
     mcp.tool()(rcp_registers)
     mcp.tool()(rdp_stats)
     mcp.tool()(rsp_registers)
+    mcp.tool()(rsp_task_stats)
     mcp.tool()(controller_set)
     mcp.tool()(controller_state)
     mcp.tool()(capture_framebuffer)
