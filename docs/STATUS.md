@@ -80,7 +80,10 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
 - **Coste del RDP en tiempo de invitado**: modelo actual con rmse 0,1332 contra las medidas
   de Thar0; falta el coste de setup por primitiva y por span. Hay datos de consola
   (2026-10-24) pero no se calibra todavía. `KESTREL_RDP_STRICT=1` avisa de escrituras a
-  DPC_START/END durante SYNC_FULL.
+  DPC_START/END durante SYNC_FULL. Desde 2026-11-02 el paseo de coste lleva sombra de z
+  (píxeles muertos por el test de z ya no se cobran como escritos; `KESTREL_RDPCOST_Z=0`) y
+  `rdp.stats` da `pixelDetail` (px por chunk/línea, gclk/px, parte de z, IM_RD, primitivas
+  por tamaño).
 - Profundidad: `docs/GPU-RDP.md`, `docs/FIDELITY.md`, `docs/RDP-COVERAGE-AA.md`,
   `docs/RDP-TIMING.md`, `docs/TEXTURAS-HD.md`, `docs/TEXTURE-FORMATS.md`.
 - Limitaciones: falta el contorno cel por profundidad en texturas HD (GAPS #6); casos

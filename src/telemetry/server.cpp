@@ -688,8 +688,11 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
     for(auto* a : {&st.gclkPixel, &st.gclkFill, &st.gclkTmem, &st.gclkSync, &st.pxWritten,
                    &st.pxImRd, &st.pxZCmp, &st.pxZUpd, &st.loads, &st.loadBytes,
                    &st.loadRedundant, &st.loadRedundantBytes, &st.otherModesSame, &st.combineSame,
-                   &st.gpuTramos, &st.cpuTramos, &st.gpuFallTri, &st.gpuFallRect})
+                   &st.gpuTramos, &st.cpuTramos, &st.gpuFallTri, &st.gpuFallRect,
+                   &st.pxLines, &st.pxChunks, &st.gclkZ, &st.gclkImRd, &st.gclkMemBound})
       a->store(0, r);
+    for(auto& a : st.primBin) a.store(0, r);
+    for(auto& a : st.gclkBin) a.store(0, r);
     gpuStats0 = gpurdp::stats();
     st.viFlips0 = rcp.viFlips; st.viFields0 = rcp.viFields;
     st.guestOps0 = system.memory.cartNow(); st.retired0 = system.cpu.retired;
@@ -723,6 +726,17 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
   const u64 gp = st.gclkPixel.load(r), gf = st.gclkFill.load(r), gt = st.gclkTmem.load(r), gs = st.gclkSync.load(r);
   g.set("pixel", gp).set("fill", gf).set("tmem", gt).set("sync", gs).set("total", gp + gf + gt + gs);
   data.set("gclk", g);
+  // Desglose de gclk.pixel (1/2 ciclos): ver RdpStats.
+  {
+    json::Value d = json::Value::object();
+    d.set("lines", st.pxLines.load(r)).set("chunks", st.pxChunks.load(r)).set("gclkZ", st.gclkZ.load(r))
+     .set("gclkImRd", st.gclkImRd.load(r)).set("gclkMemBound", st.gclkMemBound.load(r));
+    static const char* bn[5] = {"lt16", "lt64", "lt256", "lt1024", "ge1024"};
+    json::Value pb = json::Value::object(), gb = json::Value::object();
+    for(int i = 0; i < 5; i++) { pb.set(bn[i], st.primBin[i].load(r)); gb.set(bn[i], st.gclkBin[i].load(r)); }
+    d.set("prims", pb).set("gclkBySize", gb);
+    data.set("pixelDetail", d);
+  }
   // Tiempo de INVITADO de la ventana (PD64_pending P4). No es pared del anfitrion como
   // rdpBusyPct/rspBusyPct de emu_status: sale del reloj de la CPU emulada (ops / insnTarget).
   // rdpBusyPct = GCLK del modelo de coste / (s * 62,5 MHz); rspRunPct = ciclos del RSP sin

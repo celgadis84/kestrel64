@@ -208,6 +208,7 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 ## Añadidas 2026-10-23 (existían en código sin documentar aquí)
 
 - `KESTREL_CACHECOST=1` — cobra fallos de I$/D$ (60 ciclos, como HW). Default 0 = fallos gratis. Obligatorio para medir el port PSX.
+- `KESTREL_RDPCOST_Z=0` — apaga la sombra de z del paseo solo-coste del RDP (los pixeles vuelven a cobrarse todos como escritos). Default 1: la sombra se aprende de los FILL de 16 bits y del propio Z_UPD, y no viaja en los savestates.
 - `KESTREL_RSP_TIMING=1` — modelo de ciclos del pipeline RSP; `profile_rsp metric=cycles|stalls` y `rsp_registers().timing` por MCP.
 - `KESTREL_TELEMETRY_PORT` — puerto que usa el puente `tools/mcp/kestrel_mcp.py` (default 9128).
 - `KESTREL_USB=1` — USB del SummerCart64 (registros USB_*, salida de depuracion del homebrew); se lee por MCP `usb.log` y en el panel USB del depurador. Ver `docs/DEBUGGER.md`.

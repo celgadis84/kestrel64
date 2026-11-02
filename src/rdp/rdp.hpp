@@ -35,6 +35,11 @@ struct RdpStats {
   std::atomic<u64> gclkPixel{0}, gclkFill{0}, gclkTmem{0}, gclkSync{0};
   std::atomic<u64> px[4]{};              // pixeles que entran al pipeline por modo de ciclo
   std::atomic<u64> pxWritten{0}, pxImRd{0}, pxZCmp{0}, pxZUpd{0};
+  // Desglose de gclkPixel (1/2 ciclos) para saber donde se va: lineas y chunks del span
+  // buffer, GCLK de primitivas con z (lectura o escritura) y con IM_RD, y primitivas + GCLK
+  // por tamano en pixeles (<16, <64, <256, <1024, resto).
+  std::atomic<u64> pxLines{0}, pxChunks{0}, gclkZ{0}, gclkImRd{0}, gclkMemBound{0};
+  std::atomic<u64> primBin[5]{}, gclkBin[5]{};
   // Redundancia. Un SYNC_* es redundante si no hubo NINGUNA primitiva (triangulo, rect de
   // textura, fill rect) desde el anterior del mismo tipo o desde el ultimo SYNC_FULL: no
   // habia nada en vuelo que esperar, y la parada se paga igual (n64brew).
@@ -92,11 +97,30 @@ struct SoftRdp {
   // espera -- y el emulador corre mas suelto de lo que jamas corrio la consola. En este
   // modo el bucle por pixel no se ejecuta: cada tramo aporta su ANCHURA de una vez, que es
   // la misma cuenta de pixeles que entrarian al pipeline, asi que el coste es O(altura)
-  // por primitiva en vez de O(area). Los pixeles de TRIANGULO se cobran como escritos: saber
-  // cuales moririan en el test pediria interpolar la z pixel a pixel, O(area). Un FILL_RECT
+  // por primitiva en vez de O(area). Excepcion: las primitivas con z (ver zSh) se pasean
+  // pixel a pixel para saber cuales mueren en el Z_CMP. Un FILL_RECT
   // en 1/2 ciclos si se evalua (alpha constante, z de primitiva constante contra la z de
   // RDRAM, solo lectura): Thar0 mide justo eso y sin ello se iba de 0.13 a 0.99 cyc/px.
   bool costOnly = false;
+  // Z sombra del paseo solo-coste, una entrada por palabra de 16 bits de RDRAM: bit 16 =
+  // valor conocido, bits 15..0 = z codificada como en RDRAM. El paseo va DELANTE del que
+  // pinta (en hilos, a veces varios tramos delante), asi que no puede leer el z-buffer de
+  // RDRAM sin depender del anfitrion; lleva su propia copia. Un valor es conocido desde que
+  // un FILL de 16 bits lo escribe con el color image == z image (el borrado de z de cada
+  // cuadro) y lo mantienen los Z_UPD del propio paseo. Sin valor conocido el pixel se cobra
+  // como escrito (lo de antes). Lo que la CPU o un DMA escriban en el z-buffer no se ve:
+  // un juego que borre la z por CPU nunca tiene valores conocidos. KESTREL_RDPCOST_Z=0 la
+  // apaga (todo triangulo con z se cobra como escrito, O(altura)).
+  std::vector<u32> zSh;
+  // Z_CMP (y Z_UPD) de un pixel en el paseo solo-coste contra zSh; sin valor conocido lee
+  // la z de RDRAM si fromRdram (rects con z de primitiva, como antes) o da el pixel por bueno.
+  auto costZ(Memory& mem, int x, int y, s32 d, bool cmp, bool upd, bool fromRdram) -> bool;
+  // Bytes de RDRAM [zShLo, zShHi) que pueden tener valores conocidos en zSh.
+  u32 zShLo = ~0u, zShHi = 0;
+  // Escritura de color del paseo solo-coste sobre el rect [x0,x1)x[y0,y1) del color image:
+  // un FILL de 16 bits sobre el z image o sobre zona conocida deja su valor en la sombra;
+  // cualquier otra escritura sobre zona conocida la olvida (vuelve a cobrarse como escrita).
+  auto zShColour(Memory& mem, int x0, int y0, int x1, int y1, bool fill16) -> void;
   // texRect dibujando por la ruta del triangulo (sin perspectiva ni GPU: ver texRect).
   bool rectTri = false;
   // Cobrar o no los contadores del RDP (DPC_CLOCK/PIPEBUSY/BUFBUSY/TMEM y el reloj de coste
@@ -270,7 +294,6 @@ private:
   }
 
   auto depthTest(Memory& mem, int x, int y, s32 d) -> bool;   // Z_CMP / Z_UPD on one pixel
-  auto depthPasses(Memory& mem, int x, int y, s32 d) const -> bool;   // Z_CMP only, read-only
   // Escritura al color image SIN el test de scissor: la usan los llamadores que ya lo han
   // hecho (blendPixel entra por su propio test y luego escribe hasta tres veces). El test
   // seguia repitiendose en cada eslabon de coverPixel -> blendPixel -> putPixel.

@@ -10590,3 +10590,25 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   `pdbench.py` mide con GPU-RDP; `fidelity.py --rdp gpu` por defecto.
 - El codigo sigue una version mas: `KESTREL_PRDP=1` a mano lo elige y avisa por stderr. Fase 2
   (borrar `third_party/`, Granite de `src/vrdp/`, `gate_prdp` y baselines) en `docs/GPU-RDP.md`.
+
+## 2026-11-02 — Coste del RDP: sombra de z y desglose de pixel en `rdp.stats`
+
+- El paseo solo-coste cobraba todo pixel con Z_CMP como escrito (color + z). Ahora lleva una
+  sombra de z propia (`SoftRdp::zSh`, u32 por palabra de 16 bits: bit 16 = conocida, 16 bits
+  bajos = z codificada). Se aprende de los FILL de 16 bits sobre el z image (o sobre zona ya
+  conocida) y del Z_UPD del paseo; `costZ` compara por modo como `pixelPass` sin delta-z
+  (opaco `<=`, decal `<`, transparente pasa, maxZ pasa) y un pixel muerto ya no paga escritura.
+  Lo desconocido se cobra como antes. `zShColour` olvida la sombra bajo cualquier escritura de
+  color (triangulo, texrect, fill no-z) que caiga en el rango conocido.
+- Primer intento rompia Thar0 (rmse 0,4684): la sombra de una prueba anterior sobrevivia a un
+  borrado de z hecho con el z image apuntando a otro sitio. Con el borrado por FILL de 16 bits
+  sobre zona conocida y el olvido por escritura de color vuelve a 0,1332.
+- No se serializa (el resto del paseo tampoco). `rewind-rtt` recarga instantaneas en el mismo
+  proceso: no limpiarla en `afterLoad` mantiene el RTT igual que la corrida continua.
+- `rdp.stats` gana `pixelDetail`: chunks, lineas, gclk de z / IM_RD / limitados por memoria y
+  primitivas por tamaño (lt16 .. ge1024) con su gclk.
+- Efecto en un port 3D del SDK (creditos, 60 flips): RDP ocupado 85 % -> 66 % del campo,
+  ~39 % de los pixeles 1cyc muertos por z. La z sigue siendo ~85-90 % del gclk de pixel.
+- La version mas rapida del coste destapo una carrera SP/DP en el planificador de ese port
+  (DP done antes que SP done); era del invitado, arreglada en el SDK.
+- `KESTREL_RDPCOST_Z=0` apaga la sombra.

@@ -150,6 +150,14 @@ por ser pequeña; se ordena por impacto, no se filtra.*
   escritos porque sin z-buffer fiable en RDRAM (lo tiene la GPU) no se sabe cuales moririan
   en el test, y el hardware paga casi lo mismo por uno muerto que por uno escrito.
   `KESTREL_RDPCOST=0` lo apaga para el A/B.
+  Desde 2026-11-02 el paseo lleva su propia **sombra de z** (`SoftRdp::zSh`, una entrada por
+  palabra de 16 bits): se aprende de los FILL de 16 bits sobre el z image y del Z_UPD del
+  propio paseo, y aplica la comparacion por modo (opaco, transparente, decal) solo donde la z
+  es conocida; lo desconocido se sigue cobrando como escrito. Cualquier escritura de color
+  sobre zona conocida la olvida (`zShColour`). No viaja en el savestate (tampoco el resto del
+  paseo): la puerta `rewind-rtt` recarga instantaneas en el mismo proceso y conservarla deja
+  el RTT igual que la corrida continua. `KESTREL_RDPCOST_Z=0` la apaga. Thar0 sigue en rmse
+  0,1332.
 
   Resultado en DK64 bajo parallel-RDP: `DPC_CLOCK` pasa de 0 a **192.586 GCLK por campo**,
   o sea el RDP ocupado un **18,5 %** del campo (1.042.709 GCLK disponibles a 62,5 MHz y

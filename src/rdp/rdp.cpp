@@ -25,6 +25,31 @@ static const bool g_noBlend  = std::getenv("KESTREL_NOBLEND")  != nullptr;
 static const bool g_noAA     = std::getenv("KESTREL_NOAA")     != nullptr;
 static const bool g_noFilter = std::getenv("KESTREL_NOFILTER") != nullptr;
 static const bool g_noRaster = std::getenv("KESTREL_NORASTER") != nullptr;  // DIAG: salta el rasterizado
+// Centroide: el HW evalua shade y z en la PRIMERA muestra cubierta en orden de scanline
+// (fila k, columna izquierda antes que derecha), con el desfase en cuartos de pixel xo (0..3)
+// / yo (0..3) aplicado a DxDx y DxDy (interpolation.h).
+static inline auto centroidOf(u32 cv, int& xo, int& yo) -> void {
+  int idx = 0;
+  for(int k = 0; k < 4; k++) {
+    if(cv & (1u << k))  { idx = 2 * k; break; }
+    if(cv & (16u << k)) { idx = 2 * k + 1; break; }
+  }
+  yo = idx >> 1; xo = ((idx & 1) << 1) + (yo & 1);
+}
+// Z de un pixel: 18 bits sin signo (15.3) con un bit de guarda, en el centroide (clamp_z).
+// rz = atributo z de arranque de la fila; dx/dy = DzDx / DzDy crudos.
+static inline auto zFromRow(s32 rz, s32 dx, s32 dy, s32 dxI, int xo, int yo) -> s32 {
+  const s32 z = (s32)((u32)rz + (u32)dx * (u32)dxI);
+  s32 sz = (s32)(((u32)(z >> 10) << 2) + (u32)(xo * (dx >> 10)) + (u32)(yo * (dy >> 10)));
+  sz >>= 5;
+  sz = ((s32)((u32)(sz - (1 << 17)) << 13) >> 13) + (1 << 17);
+  return sz < 0 ? 0 : sz > 0x3ffff ? 0x3ffff : sz;
+}
+// Z sombra del paseo solo-coste (SoftRdp::zSh); KESTREL_RDPCOST_Z=0 la apaga.
+static auto costZOn() -> bool {
+  static const bool on = []{ const char* e = std::getenv("KESTREL_RDPCOST_Z"); return !(e && e[0] == '0'); }();
+  return on;
+}
 #if defined(__SSE4_1__)
 // RGBA de 32 bits a cuatro carriles de 16 bits y vuelta, para el filtro de textura. El pixel
 // vive como R<<24|G<<16|B<<8|A, o sea que en memoria little-endian el byte 0 es el alpha: un
@@ -283,6 +308,7 @@ auto SoftRdp::acctFinish(Memory& mem, const AcctSnap& a, u64 nWrite, u64 nZWrite
   const bool viOn = a.viOn, fbviSame = a.fbviSame;
 
   double cycles;
+  bool memBound = false;   // rdp.stats: el chunk lo limita la memoria, no el pipeline
   if(cyc >= 2) {
     // FILL/COPY: una palabra de 64 bits por GCLK mas el ciclo muerto de cada linea; el VI
     // sigue robando bus igual que a los chunks (mismo T_VI calibrado). Sin tramos
@@ -309,6 +335,7 @@ auto SoftRdp::acctFinish(Memory& mem, const AcctSnap& a, u64 nWrite, u64 nZWrite
 
   double frac = double(nWrite) / double(npx);
   cycles = (frac * wrote + (1.0 - frac) * killed) * chunks;
+  memBound = wrote > pipeline;
   }
   u32 c = (u32)(u64)cycles;
   if(!a.charge) return;   // el paseo solo-coste de este tramo ya lo pago
@@ -320,6 +347,16 @@ auto SoftRdp::acctFinish(Memory& mem, const AcctSnap& a, u64 nWrite, u64 nZWrite
     if(fbRead) st.pxImRd.fetch_add(npx, r);
     if(zRead)  st.pxZCmp.fetch_add(npx, r);
     st.pxZUpd.fetch_add(nZWrite, r);
+    if(cyc < 2) {
+      st.pxLines.fetch_add(lines, r);
+      st.pxChunks.fetch_add(lines ? units : (npx + T_CHUNK - 1) / T_CHUNK, r);
+      if(zRead || zWrite) st.gclkZ.fetch_add(c, r);
+      if(fbRead) st.gclkImRd.fetch_add(c, r);
+      if(memBound) st.gclkMemBound.fetch_add(c, r);
+      const int b = npx < 16 ? 0 : npx < 64 ? 1 : npx < 256 ? 2 : npx < 1024 ? 3 : 4;
+      st.primBin[b].fetch_add(1, r);
+      st.gclkBin[b].fetch_add(c, r);
+    }
   }
   // Ocupacion del bus de RDRAM. Se deriva de la MISMA lista de transacciones que acaba de
   // usar el modelo de coste, asi que no hay ninguna constante nueva que calibrar: cada
@@ -416,14 +453,51 @@ auto SoftRdp::statsCmd(Memory& mem, u32 op, u64 cmd) -> void {
 // Per-pixel depth test against the 16-bit z image. Opaque z-mode: the pixel wins
 // when its depth is nearer (strictly less) than the stored depth. On a pass with
 // Z_UPDATE the new depth is written back. Returns whether the colour is drawn.
-// Solo el Z_CMP, sin escribir (lo usa el paseo solo-coste).
-auto SoftRdp::depthPasses(Memory& mem, int x, int y, s32 d) const -> bool {
+// El z del paseo solo-coste (ver zSh en rdp.hpp): misma regla que depthTest contra la z
+// sombra; solo escribe la sombra, nunca RDRAM.
+auto SoftRdp::costZ(Memory& mem, int x, int y, s32 d, bool cmp, bool upd, bool fromRdram) -> bool {
   const auto& m = mem.rdram;
   if(d < 0) d = 0; else if(d > 0x3ffff) d = 0x3ffff;
-  u32 zoff = zi_addr + (u32(y) * ci_width + u32(x)) * 2;
+  const u32 zoff = zi_addr + (u32(y) * ci_width + u32(x)) * 2;
   if(zoff + 1 >= m.size()) return false;
-  u32 old = zDecode(((u16)m[zoff] << 8) | m[zoff + 1]);
-  return !((other_lo & 0x10) && (u32)d >= old);
+  u32* e = zSh.empty() ? nullptr : &zSh[zoff >> 1];
+  const bool known = e && (*e & 0x10000);
+  if(cmp) {
+    u32 old = ~0u;   // desconocida: pasa
+    if(known) old = zDecode(*e & 0xffff);
+    else if(fromRdram) old = zDecode(((u16)m[zoff] << 8) | m[zoff + 1]);
+    // Regla de pixelPass sin delta-z (no lo hay en el paseo): z maxima pasa siempre;
+    // TRANSPARENT exige delante estricto; DECAL se cuenta como escrito; OPAQUE e
+    // INTERPENETRATING dejan pasar el empate (la tolerancia dz real solo amplia el paso,
+    // asi que el coste nunca mata un pixel que el pintado escribe).
+    if(old != 0x3ffff && old != ~0u) {
+      switch((other_lo >> 10) & 3) {
+        case 2:  if((u32)d >= old) return false; break;
+        case 3:  break;
+        default: if((u32)d > old) return false; break;
+      }
+    }
+  }
+  if(upd && known) *e = 0x10000u | zEncode((u32)d);
+  return true;
+}
+
+auto SoftRdp::zShColour(Memory& mem, int x0, int y0, int x1, int y1, bool fill16) -> void {
+  if(x1 <= x0 || y1 <= y0 || ci_size < 2 || !costZOn()) return;
+  const u32 bpp = ci_size == 3 ? 4 : 2, sz = (u32)mem.rdram.size();
+  const u32 a0 = ci_addr + (u32(y0) * ci_width + u32(x0)) * bpp;
+  const u32 a1 = ci_addr + (u32(y1 - 1) * ci_width + u32(x1)) * bpp;
+  const bool zClear = fill16 && zi_addr && ci_addr == zi_addr;
+  if(!zClear && (a1 <= zShLo || a0 >= zShHi)) return;   // lo normal: color lejos de la z
+  if(zSh.empty()) zSh.assign(sz >> 1, 0);
+  if(zClear) { zShLo = std::min(zShLo, a0); zShHi = std::max(zShHi, std::min(a1, sz)); }
+  for(int y = y0; y < y1; y++)
+    for(int x = x0; x < x1; x++) {
+      const u32 a = ci_addr + (u32(y) * ci_width + u32(x)) * bpp;
+      if(a + bpp > sz) break;
+      if(fill16) zSh[a >> 1] = 0x10000u | ((x & 1) ? (fill_color & 0xffff) : (fill_color >> 16));
+      else { zSh[a >> 1] = 0; if(bpp == 4) zSh[(a >> 1) + 1] = 0; }
+    }
 }
 
 auto SoftRdp::depthTest(Memory& mem, int x, int y, s32 d) -> bool {
@@ -866,11 +940,14 @@ auto SoftRdp::fillRect(Memory& mem, int x0, int y0, int x1, int y1) -> void {
       u32 c = combProg ? combineColor(flatTexel, flatTexel, 0) : blend_color;
       if((c & 0xff) < (blend_color & 0xff)) pass = 0;
     }
-    if(pass && pipeMode && (other_lo & 4) && (other_lo & 0x10) && zi_addr) {
+    const bool rzCmp = (other_lo & 0x10) != 0, rzUpd = (other_lo & 0x20) != 0;
+    if(pass && pipeMode && (other_lo & 4) && zi_addr && (rzCmp || (rzUpd && !zSh.empty()))) {
       pass = 0;
       for(int y = y0; y < y1; y++)
-        for(int x = x0; x < x1; x++) pass += depthPasses(mem, x, y, (s32)prim_z);
+        for(int x = x0; x < x1; x++) pass += costZ(mem, x, y, (s32)prim_z, rzCmp, rzUpd, true);
     }
+    // Borrado de z (FILL de 16 bits) o color encima de una z conocida.
+    if(pass) zShColour(mem, x0, y0, x1, y1, cycleType() == 3 && ci_size == 2);
     for(int y = y0; y < y1 && x1 > x0; y++) addSpan(x0, u64(x1 - x0));
     accountPixels(mem, npx, pass, (pipeMode && (other_lo & 0x20) && zi_addr) ? pass : 0);
     return;
@@ -1296,6 +1373,9 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   const s32 scLo = sx0 * 8, scHi = sx1 * 8;   // tijera en octavos de pixel
   const bool aaOn = (other_lo & 0x08) != 0 && !g_noAA;   // mismo criterio que blendParams
   auto quant = [&](s32 x) -> s32 { x = sext((u32)x, 27); return (x >> 12) | ((x & 0xfff) != 0); };
+  // Solo-coste: pixeles que escriben (costW) y si este triangulo pasa por la z sombra.
+  u64 costW = 0;
+  const bool costZRow = costOnly && zActive && !copy16 && !fillMode && costZOn() && (zCmp || !zSh.empty());
   const int yFirst = std::max(subLo, 0) >> 2, yLast = (subHi - 1) >> 2;
   for(int y = yFirst; y <= yLast && subHi > subLo; y++) {
     s32 qL[4], qR[4];
@@ -1326,11 +1406,12 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
     const int spanX0 = std::min(std::min(qL[0], qL[1]), std::min(qL[2], qL[3])) >> 3;
     const int spanX1 = std::max(std::max(qR[0], qR[1]), std::max(qR[2], qR[3])) >> 3;
     const int xs = std::max(spanX0, 0), xe = spanX1 + 1;
-    // Solo-coste: misma decision de pixel que el bucle largo (la de la cobertura), asi que
-    // la cuenta es IDENTICA; se salta el trabajo por pixel (textura, combinador, mezcla).
     const u64 rowPx0 = rasterPx;
-    if(costOnly) {
+    // Solo-coste sin z: misma decision de pixel que el bucle largo (la de la cobertura), asi
+    // que la cuenta es IDENTICA; se salta el trabajo por pixel (textura, combinador, mezcla).
+    if(costOnly && !costZRow) {
       for(int x = xs; x < xe; x++) { u32 c = coverage(x); if(copy16 || fillMode || (aaOn ? c != 0 : (c & 1) != 0)) rasterPx++; }
+      costW += rasterPx - rowPx0;
       addSpan(xs, rasterPx - rowPx0);
       continue;
     }
@@ -1355,6 +1436,21 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       const u32 v = (u32)c0 + (u32)dde * (u32)dyRow;
       return (s32)(((v & ~0x1ffu) + diff - xfrac * (u32)((ddx >> 8) & ~1)) & ~0x3ffu);
     };
+    // Solo-coste con z: la cobertura de siempre mas el Z_CMP / Z_UPD de cada pixel contra la
+    // z sombra (zSh), con la misma z de centroide que pinta el bucle largo.
+    if(costOnly) {
+      const s32 rz = zSrc ? 0 : rowAttr(tC[2], tDx[2], tDe[2], tDy[2]);
+      for(int x = xs; x < xe; x++) {
+        const u32 c = coverage(x);
+        if(!(aaOn ? c != 0 : (c & 1) != 0)) continue;
+        rasterPx++;
+        int xo, yo; centroidOf(c, xo, yo);
+        const s32 d = zSrc ? (s32)prim_z : zFromRow(rz, tDx[2], tDy[2], x - baseX, xo, yo);
+        costW += costZ(mem, x, y, d, zCmp, zUpd, false);
+      }
+      addSpan(xs, rasterPx - rowPx0);
+      continue;
+    }
     s32 rC[4], rT[4];
     for(int c = 0; c < 4; c++) {
       rC[c] = rowAttr(cC[c], cDx[c], cDe[c], cDy[c]);
@@ -1394,17 +1490,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
         }
       }
     }
-    // Centroide: el HW evalua shade y z en la PRIMERA muestra cubierta en orden de
-    // scanline (fila k, columna izquierda antes que derecha), con el desfase en cuartos
-    // de pixel xo (0..3) / yo (0..3) aplicado a DxDx y DxDy (interpolation.h).
-    auto centroid = [](u32 cv, int& xo, int& yo) {
-      int idx = 0;
-      for(int k = 0; k < 4; k++) {
-        if(cv & (1u << k))  { idx = 2 * k; break; }
-        if(cv & (16u << k)) { idx = 2 * k + 1; break; }
-      }
-      yo = idx >> 1; xo = ((idx & 1) << 1) + (yo & 1);
-    };
+    const auto centroid = centroidOf;
     // Shade: 9 bits con signo de guarda (>>14), centroide en i16, sujeto a 0..255 con la
     // regla de 9 bits (un poco por debajo de 0 -> 0, por encima de 0xff -> 0xff).
     auto shadeAt = [&](s32 dxI, int xo, int yo) -> u32 {
@@ -1419,14 +1505,7 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
       }
       return out;
     };
-    // Z: 18 bits sin signo (15.3) con un bit de guarda, mismo centroide (clamp_z).
-    auto zAt = [&](s32 dxI, int xo, int yo) -> s32 {
-      const s32 z = (s32)((u32)rT[2] + (u32)tDx[2] * (u32)dxI);
-      s32 sz = (s32)(((u32)(z >> 10) << 2) + (u32)(xo * (tDx[2] >> 10)) + (u32)(yo * (tDy[2] >> 10)));
-      sz >>= 5;
-      sz = ((s32)((u32)(sz - (1 << 17)) << 13) >> 13) + (1 << 17);
-      return sz < 0 ? 0 : sz > 0x3ffff ? 0x3ffff : sz;
-    };
+    auto zAt = [&](s32 dxI, int xo, int yo) -> s32 { return zFromRow(rT[2], tDx[2], tDy[2], dxI, xo, yo); };
     // Profundidad del pixel para la etapa de z de blendPixel (Z_SOURCE_SEL = la de
     // SET_PRIM_DEPTH); nullptr si la primitiva ni compara ni actualiza.
     s32 zCur = 0;
@@ -1550,7 +1629,10 @@ auto SoftRdp::drawTriangle(Memory& mem, const u64* w, int words, u32 op) -> void
   }
   pxShadeA = 0;   // rects y demas primitivas sin shade ven 0
   lodFracV = 0xff;
-  if(costOnly) accountPixels(mem, rasterPx, rasterPx, zUpd ? rasterPx : 0);
+  if(costOnly) {
+    if(costW) zShColour(mem, sx0, std::max(yFirst, sy0), scX1(), std::min(yLast + 1, sy1), false);
+    accountPixels(mem, rasterPx, costW, zUpd ? costW : 0);
+  }
   else         accountPixels(mem, rasterPx, pxWrites - accW0, pxZWrites - accZ0);
 }
 
@@ -2717,11 +2799,13 @@ auto SoftRdp::texRect(Memory& mem, const u64* w, bool flip) -> void {
     u64 npx = u64(std::max(0, X1 - bx)) * u64(std::max(0, Y1 - by));
     for(int y = by; y < Y1 && X1 > bx; y++) addSpan(bx, u64(X1 - bx));
     u64 pass = npx;
-    if(rectZOn && (other_lo & 0x10)) {
+    const bool rzCmp = (other_lo & 0x10) != 0, rzUpd = (other_lo & 0x20) != 0;
+    if(rectZOn && (rzCmp || !zSh.empty())) {
       pass = 0;
       for(int y = by; y < Y1; y++)
-        for(int x = bx; x < X1; x++) pass += depthPasses(mem, x, y, rectZ);
+        for(int x = bx; x < X1; x++) pass += costZ(mem, x, y, rectZ, rzCmp, rzUpd, true);
     }
+    if(pass) zShColour(mem, bx, by, X1, Y1, false);
     accountPixels(mem, npx, pass, (rectZOn && (other_lo & 0x20)) ? pass : 0);
     return;
   }
