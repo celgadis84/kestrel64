@@ -258,3 +258,7 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
   ("ED", bytes 0x34-0x37). Por defecto mandan sobre el perfil en los puertos con dato.
 - `KESTREL_LANG=<xx>` — idioma (ISO 639-1) de los metadatos de homebrew (`[meta.xx]` encima
   de `[meta]`). Por defecto el del sistema, si no `LANG`, si no `en`.
+
+## RDRAM de encendido (2026-11-01)
+
+`KESTREL_RDRAM_FILL=<semilla>` (distinta de 0): la RDRAM arranca con basura pseudoaleatoria (xorshift de esa semilla) en vez de ceros, como la consola, que no la borra. Para reproducir fallos que solo salen en HW por leer memoria sin inicializar (bordes del framebuffer, bufferes de audio). Determinista por semilla. `src/core/memory.cpp` `Memory::reset`.

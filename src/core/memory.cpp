@@ -124,6 +124,13 @@ auto Memory::sampleWorkerCpu() -> void {
 auto Memory::reset(bool expansionPak) -> void {
   rdram.assign(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000, 0);
   rdramHidden.assign(rdram.size() >> 1, 0);
+  // KESTREL_RDRAM_FILL=<semilla>: RDRAM de encendido con basura pseudoaleatoria, como la consola
+  // real (que no la borra). Destapa programas que leen memoria sin inicializar y que con ceros
+  // parecen correctos (bordes de framebuffer, muestras de audio). 0 / sin poner = ceros.
+  if(const char* f = std::getenv("KESTREL_RDRAM_FILL"); f && std::strtoul(f, nullptr, 0)) {
+    u32 x = (u32)std::strtoul(f, nullptr, 0);
+    for(auto& b : rdram) { x ^= x << 13; x ^= x >> 17; x ^= x << 5; b = (u8)(x >> 11); }
+  }
   wrtag::init((u32)rdram.size());
   dmem.assign(DMEM_SIZE, 0);
   imem.assign(IMEM_SIZE, 0);
