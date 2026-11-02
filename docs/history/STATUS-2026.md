@@ -10636,3 +10636,6 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
   solo en apariencia.
 - `scripts/statehash_ab.sh` acepta `SH_GPURDP=1` (ejercita el recorrido de solo coste).
   SM64 GPU-RDP T0 `2f41964924c4d26f`, T1 `97e0e8db361fbc43`.
+- PGO rehecho (`sh scripts/pgo.sh`) tras la fase 5 + `release.sh`: statehash junkrunner64
+  T0/T1 `9f762d9182682e2e` igual; SM64 ship 200 campos 5,32 -> 5,05 s (-5,1 %, min de 4)
+  frente al perfil anterior. Fase 5 cerrada.
