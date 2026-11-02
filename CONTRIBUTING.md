@@ -10,7 +10,7 @@ knobs**, because most of the interesting behaviour is threading-dependent:
 
 - the `KESTREL_*` environment variables you had set (paste the whole set)
 - whether it reproduces with `KESTREL_THREADS=0` (lockstep) as well as threaded
-- RDP backend: parallel-rdp (`-DKESTREL_PRDP=ON`) or the software path
+- RDP backend: GPU-RDP (`-DKESTREL_GPU=ON`) or the software path (SoftRDP)
 - the game, and where it happens
 
 A bug that appears threaded but not in lockstep is a determinism bug and is treated as a
@@ -25,7 +25,7 @@ Toolchain is clang from MSYS2 CLANG64; the build is CMake + Ninja.
 
 ```bash
 export PATH=/c/msys64/clang64/bin:$PATH
-cmake -B build-prdp -G Ninja -DKESTREL_PRDP=ON
+cmake -B build-prdp -G Ninja -DKESTREL_GPU=ON
 cmake --build build-prdp -j8
 ```
 

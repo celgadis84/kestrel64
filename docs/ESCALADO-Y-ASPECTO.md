@@ -5,9 +5,14 @@ texturas HD, que es otra cosa: un canal de sustitucion de texturas, no una opcio
 
 Dos ajustes independientes, uno de rasterizado y otro de presentacion.
 
+> **Aviso (2026-11-02):** este capitulo se escribio para parallel-RDP, que se borro el
+> 2026-11-02. El escalado interno lo hace hoy **GPU-RDP** en modo sombra (ver
+> `docs/GPU-RDP.md`); las menciones a parallel-RDP, `KESTREL_PRDP=1`, `[vrdp] scanout` y
+> `gate_prdp` de abajo describen esa implementacion historica.
+
 ## Escalado interno — `KESTREL_UPSCALE=1|2|4|8`
 
-Solo con **paraLLEl-RDP** (`KESTREL_PRDP=1`, ejecutable de `build-prdp`). El SoftRDP
+Solo con **GPU-RDP** (ejecutable de `build-prdp`; antes paraLLEl-RDP). El SoftRDP
 rasteriza siempre a resolucion nativa y ahi no hay nada que decidir.
 
 parallel-rdp mantiene un **dominio de RDRAM ampliado** en la GPU: los mismos comandos del

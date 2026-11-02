@@ -1,5 +1,9 @@
 # paraLLEl-RDP integration (GPU RDP backend)
 
+> **Historical document.** The parallel-RDP backend was removed on 2026-11-02 (`third_party/parallel-rdp`,
+> `src/vrdp/`, `gate_prdp.sh`). The rasterizers are now GPU-RDP (own, Vulkan compute) and SoftRDP;
+> see `docs/GPU-RDP.md`. What follows is kept for the record and is no longer maintained.
+
 Goal: replace/augment the CPU SoftRDP with Themaister's paraLLEl-RDP (cycle-accurate,
 GPU compute). Fixes SM64 title/effect corruption (SoftRDP accuracy gaps) AND offloads
 the RDP raster from the CPU to the idle GPU (RX570), moving toward realtime — the

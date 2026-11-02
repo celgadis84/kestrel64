@@ -13,7 +13,7 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   audio, dynarec de CPU y de RSP activos de fábrica, y dos rasterizadores propios: SoftRDP
   (oráculo bit a bit) y GPU-RDP (Vulkan compute, el de fábrica).
 - Fidelidad: n64-systemtest sin fallos (0/3721, Timing 0/2, Cycle 0/6); Super Mario 64 en
-  SoftRDP idéntico bit a bit a parallel-RDP; batería krom de 371 ROMs con media exacta ~89.
+  SoftRDP idéntico bit a bit a GPU-RDP (y, hasta su retirada, a parallel-RDP); batería krom de 371 ROMs con media exacta ~89.
 - Se distribuye como un único `kestrel64.exe` enlazado estático, con menú propio, biblioteca
   de juegos, servidor MCP para telemetría y depuración, y juego en red.
 
@@ -73,10 +73,14 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   Mario 64 ~0-3 %, DK64 ~1-1,5 %).
 - **Texturas HD** en formato Rice/GLideN64 (`KESTREL_TEXPACK`, `TEXDUMP`, `TEXFX`), en
   SoftRDP y GPU-RDP, activables en caliente desde 2026-10-30.
-- **parallel-RDP retirado** de menú, lanzador, `release.sh --gates` y pdbench el 2026-10-30
-  (fase 1). Solo queda a mano con `KESTREL_PRDP=1`, con aviso. La fase 2 (borrar
-  `third_party/`, la parte Granite de `src/vrdp/`, `gate_prdp.sh` y sus baselines) está
-  pendiente: GAPS #15 y `docs/GPU-RDP.md`, Fase 7.
+- **parallel-RDP retirado**: fase 1 (menú, lanzador, `release.sh --gates`, pdbench) el
+  2026-10-30; **fase 2 HECHA el 2026-11-02**: borrados `third_party/parallel-rdp`, `src/vrdp/`,
+  `cmake/parallel_rdp.cmake`, `tools/slangmosh_lite.py`, `scripts/gate_prdp.sh`, los modos
+  `prdp`/`prdp-jit` de validate.py y las baselines `*prdp*`. Quedan `third_party/volk`,
+  `vulkan-headers` y `rdp-luts/luts.hpp` (tabla del divisor del blender, MIT). Opción cmake
+  `-DKESTREL_GPU=ON|OFF` (`KESTREL_PRDP` se acepta como alias viejo); `KESTREL_PRDP=0` sigue
+  eligiendo SoftRDP y `=1` significa GPU-RDP (avisa). Contexto Vulkan compartido:
+  `gpurdp::sharedVk()` + `gpurdp::queueLock`. GAPS #15 cerrado; ver `docs/GPU-RDP.md`, Fase 7.
 - **Coste del RDP en tiempo de invitado**: modelo actual con rmse 0,1332 contra las medidas
   de Thar0; falta el coste de setup por primitiva y por span. Hay datos de consola
   (2026-10-24) pero no se calibra todavía. `KESTREL_RDP_STRICT=1` avisa de escrituras a
@@ -196,10 +200,10 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   unitarios.
 - `scripts/gate_gpurdp.sh`: puerta específica del GPU-RDP.
 - `scripts/gate_quick.sh [krom] [lock] [phys] [thar0]`: puerta rápida, ~1,5 min.
-- `scripts/gate_prdp.sh`: en retirada junto con parallel-RDP (GAPS #15).
+- `scripts/gate_prdp.sh`: borrada el 2026-11-02 junto con parallel-RDP (GAPS #15).
 - Política desde 2026-10-06: probar solo lo cambiado con una prueba dirigida; las baterías
   completas solo cuando se piden.
-- Baselines en `docs/baselines/` (`sm64.txt`, `krom-interp.tsv`, `krom-prdp.tsv`,
-  `sm64-prdp.txt`, `timings.md`, `pd-opt.md`). El invariante es la igualdad entre modos, no
+- Baselines en `docs/baselines/` (`sm64.txt`, `krom-interp.tsv`,
+  `timings.md`, `pd-opt.md`). El invariante es la igualdad entre modos, no
   un hash literal: el statehash se compara con SPLEAD=0 y DPLOGLEAD=0, threaded contra
   lockstep.

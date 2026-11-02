@@ -51,7 +51,7 @@ marked *(EN)* are in English.
 - [GPU-RDP.md](GPU-RDP.md) — GPU-RDP propio (Vulkan compute), rasterizador por defecto.
   In-house GPU-RDP (Vulkan compute), the default rasterizer.
 - [parallel-rdp-integration.md](parallel-rdp-integration.md) *(EN)* — integración de
-  parallel-RDP (retirándose). parallel-RDP integration (being retired).
+  parallel-RDP (histórico, retirado 2026-11-02). parallel-RDP integration (historical, removed 2026-11-02).
 - [RDP-TIMING.md](RDP-TIMING.md) *(EN)* — temporización del RDP frente a datos de hardware.
   RDP timing against hardware data.
 - [RDP-FIFO-BACKPRESSURE.md](RDP-FIFO-BACKPRESSURE.md) *(EN)* — contrapresión del FIFO DPC.

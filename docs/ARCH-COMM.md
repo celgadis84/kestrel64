@@ -143,9 +143,9 @@ byte-idéntica y el md5 del framebuffer idéntico. No es un reloj.
   contra RDRAM), SP_STATUS con sus 8 bits SIGNAL para el ping-pong con la CPU, y
   escrituras a DPC_* por COP0 para patear el RDP.
 
-### 4.3 RDP (`src/rdp/`, `src/vrdp/`)
+### 4.3 RDP (`src/rdp/`, `src/gpurdp/`)
 
-- Dos rasterizadores: **Parallel-RDP** (Vulkan, de fábrica) y SoftRDP (CPU).
+- Dos rasterizadores: **GPU-RDP** (propio, Vulkan compute, de fábrica) y SoftRDP (CPU). Parallel-RDP se borró el 2026-11-02.
 - **Arranque**: escritura a DPC_END (de la CPU o del RSP) -> `rdpSubmit` empuja un tramo
   `{current, end, xbus}` a una cola SPSC y pone GCLK|PIPE_BUSY.
 - **Ejecución**: el worker saca el tramo y lo rasteriza. Antes de dormirse gira
@@ -360,7 +360,7 @@ se cumplan. Medido: PD lockstep `14995cfadedc7f38` contra threaded-0 `0a64f3863f
 | MMIO, DMA, citas, barreras, workers | `src/core/memory.hpp`; implementación en `memory*.cpp` y `rcp_*.cpp` (mapa en `memory_internal.hpp`) |
 | CPU | `src/cpu/cpu*.cpp`, `src/cpu/jit*.cpp` |
 | RSP | `src/rsp/rsp.cpp`, `src/rsp/rspjit.cpp` |
-| RDP | `src/rdp/`, `src/vrdp/` |
+| RDP | `src/rdp/`, `src/gpurdp/` |
 | Presentación e input | `src/video/present.cpp` |
 
 Docs hermanos: `docs/ARCH-SYNC.md` (auditoría de esperas), `docs/HW-RCP-COMM.md` (hechos de

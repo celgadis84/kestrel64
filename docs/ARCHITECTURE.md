@@ -174,8 +174,9 @@ Three rasterizers share that front end:
   upscaling x2, x4 and x8 runs in **shadow mode**: SoftRDP paints at 1x and stays the authority
   on RDRAM, while the GPU produces the high-resolution copy asynchronously; writes that reach the
   images by other paths are found by diffing the mirror and patched in.
-- **parallel-RDP** (`src/vrdp/`, `third_party/`): being retired. Off the menus and gates since
-  2026-10-30; only reachable by hand with `KESTREL_PRDP=1`; the code goes in the next version.
+- **parallel-RDP**: removed. Off the menus and gates on 2026-10-30, code deleted on 2026-11-02.
+  `KESTREL_PRDP=0` still selects SoftRDP; `KESTREL_PRDP=1` now means GPU-RDP (and warns). The
+  presenter and GPU-RDP share one Vulkan context (`gpurdp::sharedVk()` + `gpurdp::queueLock`).
 
 HD texture packs (Rice/GLideN64 format) work in SoftRDP and GPU-RDP (`src/rdp/texpack.cpp`).
 
@@ -261,8 +262,7 @@ Depth: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 | `src/cpu/` | VR4300 interpreter and x86-64 dynarec | `cpu.cpp` (+ `cpu_boot.cpp`, `cpu_fpu.cpp`, `cpu_disasm.cpp`), `jit.cpp` (+ `jit_compile.cpp`, `jit_run.cpp`) |
 | `src/rsp/` | RSP interpreter, RSP JIT, pipeline timing model | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
 | `src/rdp/` | SoftRDP (reference rasterizer), HD texture packs | `rdp.cpp` (+ `rdp_cmd.cpp`), `texpack.cpp` |
-| `src/gpurdp/` | GPU-RDP, Vulkan compute rasterizer and shaders | `gpurdp.cpp`, `shaders/` |
-| `src/vrdp/` | parallel-RDP glue and shared Vulkan context (being retired) | `vrdp.cpp` |
+| `src/gpurdp/` | GPU-RDP, Vulkan compute rasterizer and shaders, shared Vulkan context | `gpurdp.cpp`, `shaders/` |
 | `src/video/` | presenter, VI filter, image filters, capture | `present.cpp`, `vifilter.cpp`, `postfx.cpp`, `capture.cpp`, `fbdump.cpp` |
 | `src/audio/` | AI output to the host | `audio.cpp` |
 | `src/telemetry/` | telemetry/MCP server, debugger endpoints, symbols, host profiler | `server.cpp`, `server_dbg.cpp`, `symbols.cpp`, `hostprof.cpp` |

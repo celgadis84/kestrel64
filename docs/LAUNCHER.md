@@ -187,18 +187,17 @@ El framebuffer del guest sigue siendo 320x240: esto solo decide a que resolucion
 **presenta**, el blit de la cadena de intercambio escala. La pantalla completa **no cambia
 el modo del monitor**: toma el que ya hay. Cambiarlo de verdad deja el escritorio roto si
 el emulador se cae, y no compra nada porque la imagen se escala igual en la presentacion.
-(Escalado interno de verdad = trabajo de paraLLEl-RDP, que hoy no soporta upscaling en esta
-integracion; ver `parallel-rdp-integration.md`.)
+(El escalado interno de verdad lo hace GPU-RDP, ver `GPU-RDP.md`; parallel-RDP, que no lo
+soportaba, se borro el 2026-11-02.)
 
 ## Rasterizador
 
-La eleccion de rasterizador es de **tiempo de compilacion** (`cmake -DKESTREL_PRDP=ON`), no
-una dll cargable como en la arquitectura de plugins de Zilmar. El lanzador por tanto elige
-**ejecutable**: `build/kestrel64.exe` para SoftRDP, `build-prdp/kestrel64.exe` para
-paraLLEl-RDP, y ademas pone `KESTREL_PRDP=1`. Si una compilacion no existe, su tarjeta sale
-apagada con la linea de cmake que hace falta. Desde 2026-10-06 hay una tercera tarjeta,
-**GPU-RDP** (propio, Vulkan compute), que va en el mismo exe que paraLLEl-RDP y es la que
-elige "Automatico".
+El rasterizador compilado depende de `cmake -DKESTREL_GPU=ON|OFF` (defecto ON), no de una
+dll cargable como en la arquitectura de plugins de Zilmar. El lanzador elige **ejecutable**:
+`build/kestrel64.exe` para SoftRDP puro y `build-prdp/kestrel64.exe` para GPU-RDP (propio,
+Vulkan compute, mismo exe con ambos rasterizadores). Si una compilacion no existe, su tarjeta
+sale apagada con la linea de cmake que hace falta. GPU-RDP es la que elige "Automatico"
+(desde 2026-10-06). parallel-RDP, que fue la tercera tarjeta, se borro el 2026-11-02.
 
 ## Mando configurable
 

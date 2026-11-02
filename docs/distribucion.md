@@ -81,18 +81,18 @@ La tercera fila no es un capricho: `Archivos de programa` no es escribible, y el
 guarda solo, sin boton de guardar. La segunda tampoco: instalado no hay un arbol de builds
 sino los `.exe` que se copiaron al lado del lanzador. Con que backend grafico se compilo cada
 uno no se ve desde fuera del binario, asi que `dist.sh` deja la nota al lado
-(`kestrel64.build`; `soft` o `prdp`) y el lanzador la lee.
+(`kestrel64.build`; `soft` o `prdp`, este ultimo = carpeta `build-prdp*`, GPU-RDP) y el lanzador la lee.
 
 ## Un ejecutable, rasterizador elegible (desde 2026-10-05)
 
-Hasta el 2026-10-04 el paquete llevaba dos ejecutables (`kestrel64.exe` con parallel-RDP y
+Hasta el 2026-10-04 el paquete llevaba dos ejecutables (`kestrel64.exe` con el backend Vulkan y
 `kestrel64-soft.exe` con SoftRDP) porque se creia que el plugin se elegia al compilar. No
 hacia falta: el exe de `build-prdp-static` lleva compilados LOS DOS rasterizadores y
-`KESTREL_PRDP=0/1` elige en el arranque. Lo que faltaba era que ese exe funcionase en una
+`KESTREL_PRDP=0` (o `KESTREL_GPURDP=0`) elige SoftRDP en el arranque. Lo que faltaba era que ese exe funcionase en una
 maquina sin Vulkan, y eso es lo que se arreglo:
 
-- `vrdpWaitReady` distingue "el backend esta arrancando" de "se intento y cayo"
-  (`Memory::vrdpFailed`): sin Vulkan el RDP sigue en SoftRDP y la ventana se abre al
+- `gpuWaitReady` distingue "el backend esta arrancando" de "se intento y cayo"
+  (`Memory::gpuFailed`; antes `vrdpWaitReady`/`vrdpFailed`): sin Vulkan el RDP sigue en SoftRDP y la ventana se abre al
   instante, en vez de esperar 15 s y no abrirla.
 - El presentador cae a **GDI** (`StretchDIBits`, `presentGdi` en `src/video/present.cpp`) si
   no hay cargador Vulkan, instancia, superficie, dispositivo fisico o cola de presentacion.
@@ -105,9 +105,9 @@ El plugin se elige como en el resto de emuladores: menu de la ventana Opciones >
 Rasterizador (`auto`/`gpurdp`/`soft`, se relanza solo) o la misma opcion en el
 lanzador. Desde 2026-10-06 (fase 7 de `docs/GPU-RDP.md`) `auto` = GPU-RDP propio si hay GPU con
 Vulkan, si no SoftRDP; texturas HD y realce van en los dos. parallel-RDP salio del menu y del
-lanzador el 2026-10-30 (un `prdp` guardado en una config vieja se lee como GPU-RDP); queda en
-el exe una version mas, solo con `KESTREL_PRDP=1` a mano.
-`build-static` (SoftRDP sin parallel-RDP) se sigue compilando porque es el exe de las
+lanzador el 2026-10-30 (un `prdp` guardado en una config vieja se lee como GPU-RDP) y su codigo
+se borro el 2026-11-02; `KESTREL_PRDP=1` ahora significa GPU-RDP y avisa.
+`build-static` (SoftRDP puro, `-DKESTREL_GPU=OFF`) se sigue compilando porque es el exe de las
 puertas rapidas, pero ya no viaja.
 
 Dos detalles de `--windowed` (sin consola detras) que rompen si no se tratan: `sys.stdout`
@@ -140,7 +140,7 @@ de entorno:
 
 ## Por que hace falta `pack.sh` y no basta con `dist.sh`
 
-Las baterias (`gate_all.sh`, `gate_prdp.sh`) recompilan `build/` y `build-prdp/` antes de correr.
+Las baterias (`gate_all.sh`, `gate_gpurdp.sh`) recompilan `build/` y `build-prdp/` antes de correr.
 El arbol **estatico** no lo recompila nadie, y es el unico `.exe` que arranca fuera de MSYS2. Sin
 un paso explicito, `dist/` y el instalador se quedan clavados en la fecha del ultimo empaquetado
 mientras el codigo avanza — y lo que se prueba desde el lanzador no es el codigo actual. Paso en

@@ -82,6 +82,6 @@ Coste, `KESTREL_HEARTBEAT` en SM64 a 960x720: el tiempo medio del presentador pa
 no cambia (CPU ~100 % en los dos). El resto de filtros cuesta menos.
 
 ```
-KESTREL_PRDP=1 KESTREL_VIDEO=1 KESTREL_WINSCALE=3 KESTREL_FILTER=cel \
+KESTREL_GPURDP=1 KESTREL_VIDEO=1 KESTREL_WINSCALE=3 KESTREL_FILTER=cel \
   KESTREL_FXDUMP=cel.ppm KESTREL_FXDUMP_AT=400 timeout 14 kestrel64.exe sm64.z64 --run
 ```

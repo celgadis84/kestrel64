@@ -29,14 +29,14 @@ kestrel64's bet is architectural:
 - **Telemetry-native core.** A purpose-built length-framed JSON+binary server is baked into
   the core. Bulk data — RAM dumps, framebuffers — rides as raw bytes with zero hex/base64
   overhead. A Python MCP bridge (`tools/mcp/kestrel_mcp.py`) exposes it to an agent.
-- **Reuse where rewriting adds nothing.** The GPU rasterizer is **parallel-rdp**
-  (Themaister, Vulkan); the RSP vector unit follows the shared SSE4.1 reference. There is
-  also an own **SoftRDP** rasterizer for hosts with no usable GPU and as a second opinion
-  on accuracy.
+- **Own rasterizers, bit for bit.** The GPU rasterizer is **GPU-RDP** (own, Vulkan
+  compute) and it matches the CPU **SoftRDP** rasterizer exactly; SoftRDP is the oracle and
+  the path for hosts with no usable GPU. The RSP vector unit follows the shared SSE4.1
+  reference.
 
 ## Performance
 
-Same host (i7-870, 2009; RX570), parallel-rdp backend, threaded RCP + both dynarecs,
+Same host (i7-870, 2009; RX570), parallel-rdp backend (since removed, 2026-11-02), threaded RCP + both dynarecs,
 measured 2026-09-17 as wall clock for a fixed amount of guest work:
 
 | Benchmark | Wall clock |
@@ -61,7 +61,7 @@ worked, what regressed and what was reverted lives in `docs/history/STATUS-2026.
 | **CPU** | R4300i interpreter (full ISA, FPU, TLB, exceptions) **+ x86-64 dynarec** (default ON, oracle = interpreter): block linking, indirect-target cache, soft TLB, guest idle-loop skipping |
 | **Caches / timing** | I-cache and D-cache emulated *and charged*; configurable CPI (default 1.4), cartridge/PI bus latch, physical cycle model mode |
 | **RSP** | LLE interpreter with SSE4.1 vector unit **+ RSP dynarec** (default ON, oracle = RSP interpreter), per-microcode-image code cache |
-| **RDP** | **parallel-rdp** (Vulkan, default build) and own SoftRDP rasterizer (fill/shade/texture triangles, z-buffer, texrects, all tile modes, combiner, blender, TLUT, 4-bit, YUV, coverage/AA subsamples) |
+| **RDP** | **GPU-RDP** (own, Vulkan compute, default) and own SoftRDP rasterizer, bit-identical (CPU oracle; fill/shade/texture triangles, z-buffer, texrects, all tile modes, combiner, blender, TLUT, 4-bit, YUV, coverage/AA subsamples) |
 | **RDP timing** | GCLK cost model per span, DPC counters, SYNC_FULL fence semantics, FIFO backpressure |
 | **VI / video** | Real scanout clock, filters, scaling/aspect, GLFW window, framebuffer capture |
 | **Audio** | AI DAC model + host sink (waveOut), audible in all supported games |
@@ -75,7 +75,7 @@ Docs: start with the architecture overview, [`docs/ARCHITECTURE.md`](docs/ARCHIT
 chronological log is `docs/history/STATUS-2026.md`), remaining gaps in `docs/GAPS.md`, design
 notes in
 `docs/ARCH-THREADING.md`, `docs/JIT-PLAN.md`, `docs/RDP-TIMING.md`, `docs/RSP-JIT.md`,
-`docs/VI-CLOCK.md`, `docs/parallel-rdp-integration.md`, and the rest of `docs/`.
+`docs/VI-CLOCK.md`, `docs/GPU-RDP.md`, and the rest of `docs/`.
 
 ## Build
 
@@ -89,8 +89,8 @@ sh scripts/release.sh        # all build trees + launcher + packaged dist/
 Individual trees, when a single A/B build is enough:
 
 ```bash
-cmake -B build      -G Ninja                        # SoftRDP only (no GPU needed)
-cmake -B build-prdp -G Ninja -DKESTREL_PRDP=ON      # parallel-rdp (Vulkan) backend
+cmake -B build      -G Ninja -DKESTREL_GPU=OFF      # SoftRDP only (no GPU needed)
+cmake -B build-prdp -G Ninja -DKESTREL_GPU=ON       # GPU-RDP (Vulkan) backend
 cmake --build build-prdp -j8
 ```
 
@@ -107,7 +107,7 @@ in `CLAUDE.md`. The ones worth knowing first:
 
 | Variable | Meaning |
 |----------|---------|
-| `KESTREL_PRDP=1` | use the GPU RDP (needs a `-DKESTREL_PRDP=ON` build) |
+| `KESTREL_GPURDP=0` / `KESTREL_PRDP=0` | use SoftRDP instead of the default GPU-RDP |
 | `KESTREL_THREADS=0` | Lockstep RCP — the determinism oracle |
 | `KESTREL_JIT=0` / `KESTREL_RSPJIT=0` | fall back to the interpreters |
 | `KESTREL_MAXINSN`, `KESTREL_MAXFLIPS` | stop caps (always use one in scripted runs) |
@@ -165,7 +165,7 @@ src/core/     memory map, RCP bus, DMA, scheduler, system loop
 src/cpu/      R4300i interpreter + dynarec
 src/rsp/      RSP LLE interpreter, vector unit, RSP dynarec
 src/rdp/      SoftRDP rasterizer
-src/vrdp/     parallel-rdp glue (KESTREL_PRDP)
+src/gpurdp/   GPU-RDP (Vulkan compute rasterizer)
 src/video/    VI scanout, presentation, window
 src/audio/    AI + host sink
 src/ui/       launcher and in-emulator UI
@@ -185,9 +185,9 @@ code is therefore *in* the binary:
 
 | Component | License |
 |---|---|
-| `third_party/parallel-rdp/` — Themaister | MIT |
-| volk (inside it) — Arseny Kapoulkine | MIT |
-| Vulkan-Headers (inside it) — The Khronos Group | Apache-2.0 |
+| `third_party/rdp-luts/` (blender divider table from parallel-rdp) — Themaister | MIT |
+| `third_party/volk/` — Arseny Kapoulkine | MIT |
+| `third_party/vulkan-headers/` — The Khronos Group | Apache-2.0 |
 | libc++ / libc++abi / libunwind — the LLVM project | Apache-2.0 WITH LLVM-exception |
 | GLFW — Marcus Geelnard, Camilla Löwy | zlib |
 
@@ -204,7 +204,7 @@ and determinism rules, and the gates a change has to pass.
 
 ## Credits
 
-- **parallel-rdp** — Hans-Kristian Arntzen (Themaister), the Vulkan RDP.
+- **parallel-rdp** — Hans-Kristian Arntzen (Themaister); the RDP blender divider table is taken from it.
 - **n64-systemtest** — Lemmy, the hardware conformance suite this core is held to.
 - **krom / PeterLemon** N64 demos and **Thar0**'s RDP-Timing-Tests, used as RDP oracles.
 - **n64brew**, **n64.dev** and the **libdragon** and **MiSTer N64** projects for the

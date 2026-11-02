@@ -2,8 +2,9 @@
 
 `scripts/fidelity.py` runs krom / Dillon / n64-systemtest / libdragon on kestrel64 and on
 ares and writes `out/fidelity.md`. It is NOT a gate: run on demand. `--rdp prdp|gpu|soft`
-picks kestrel's RDP backend (default `prdp`, the reference while GPU-RDP and SoftRDP are
-incomplete; the shipped exe starts on GPU-RDP, so the backend is always fixed explicitly).
+picks kestrel's RDP backend (default `gpu`; `prdp` is gone, parallel-rdp was removed 2026-11-02;
+the shipped exe starts on GPU-RDP, so the backend is always fixed explicitly). The sections
+below are dated 2026-10 and compare against parallel-rdp as the reference of that time.
 
 ## libdragon `testrom_emu.z64` on parallel-rdp (2026-10-08)
 

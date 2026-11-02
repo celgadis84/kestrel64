@@ -184,8 +184,10 @@ Tres rasterizadores comparten esa entrada:
   a 1x y sigue siendo la autoridad sobre la RDRAM, mientras la GPU produce la copia de alta
   resolución de forma asíncrona; las escrituras que llegan a las imágenes por otros caminos se
   detectan comparando el espejo y se parchean.
-- **parallel-RDP** (`src/vrdp/`, `third_party/`): en retirada. Fuera de menús y puertas desde el
-  2026-10-30; solo se llega a mano con `KESTREL_PRDP=1`; el código se va en la próxima versión.
+- **parallel-RDP**: retirado. Fuera de menús y puertas el 2026-10-30, código borrado el
+  2026-11-02. `KESTREL_PRDP=0` sigue eligiendo SoftRDP; `KESTREL_PRDP=1` ahora significa GPU-RDP
+  (y avisa). El presentador y GPU-RDP comparten un único contexto Vulkan (`gpurdp::sharedVk()` +
+  `gpurdp::queueLock`).
 
 Los paquetes de texturas HD (formato Rice/GLideN64) funcionan en SoftRDP y GPU-RDP
 (`src/rdp/texpack.cpp`).
@@ -277,8 +279,7 @@ Profundidad: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 | `src/cpu/` | intérprete del VR4300 y dynarec x86-64 | `cpu.cpp` (+ `cpu_boot.cpp`, `cpu_fpu.cpp`, `cpu_disasm.cpp`), `jit.cpp` (+ `jit_compile.cpp`, `jit_run.cpp`) |
 | `src/rsp/` | intérprete del RSP, RSP JIT, modelo de tiempos del pipeline | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
 | `src/rdp/` | SoftRDP (rasterizador de referencia), paquetes de texturas HD | `rdp.cpp` (+ `rdp_cmd.cpp`), `texpack.cpp` |
-| `src/gpurdp/` | GPU-RDP, rasterizador Vulkan compute y shaders | `gpurdp.cpp`, `shaders/` |
-| `src/vrdp/` | pegamento de parallel-RDP y contexto Vulkan compartido (en retirada) | `vrdp.cpp` |
+| `src/gpurdp/` | GPU-RDP, rasterizador Vulkan compute y shaders, contexto Vulkan compartido | `gpurdp.cpp`, `shaders/` |
 | `src/video/` | presentador, filtro del VI, filtros de imagen, captura | `present.cpp`, `vifilter.cpp`, `postfx.cpp`, `capture.cpp`, `fbdump.cpp` |
 | `src/audio/` | salida del AI al anfitrión | `audio.cpp` |
 | `src/telemetry/` | servidor de telemetría/MCP, puntos del depurador, símbolos, perfilador del anfitrión | `server.cpp`, `server_dbg.cpp`, `symbols.cpp`, `hostprof.cpp` |

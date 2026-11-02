@@ -10,7 +10,7 @@ Fecha de este estado: 2026-10-31.
 
 ## Hecho
 
-- **Linux x86-64 compila y enlaza** (`-DKESTREL_PRDP=OFF -DKESTREL_BUILD_LOCAL=OFF`, clang 18,
+- **Linux x86-64 compila y enlaza** (`-DKESTREL_GPU=OFF -DKESTREL_BUILD_LOCAL=OFF`, clang 18,
   libc++/lld, GLFW 3.3 y Vulkan del sistema). Cambios:
   - `memory.cpp`: `tlIsRspThread` fuera del `#ifdef _WIN32`.
   - `sdcard.hpp`: espacio `sdio` (`_fseeki64`/`_ftelli64`/`_wfopen` frente a `fseeko`/`ftello`/`fopen`).
@@ -46,7 +46,7 @@ Fecha de este estado: 2026-10-31.
    mientras tanto silencio.
 5. **Red** (`winsock2`) y `VirtualAlloc`: compilan protegidos; comprobar que el camino POSIX
    funciona (netplay, servidor de telemetria en 9128).
-6. **GPU-RDP** (`-DKESTREL_PRDP=ON`) en Linux: Vulkan + glslang ya instalados.
+6. **GPU-RDP** (`-DKESTREL_GPU=ON`) en Linux: Vulkan + glslang ya instalados.
 7. **CI**: trabajo Linux en `.github/workflows/build.yml` (compilar + 9 tests).
 8. **aarch64 (macOS Apple Silicon, Android)**:
    - Fase A: el JIT x86 no existe en ARM -> solo interprete (CPU y RSP) con

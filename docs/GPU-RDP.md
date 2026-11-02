@@ -1,7 +1,8 @@
 # GPU-RDP propio — plan (GAPS #15)
 
 > **English summary.** Plan and status log (GAPS #15) for kestrel's own GPU RDP rasterizer in Vulkan
-> compute, meant to replace the parallel-RDP dependency (`third_party/parallel-rdp`). SoftRDP stays
+> compute, written to replace the parallel-RDP dependency (`third_party/parallel-rdp`, deleted
+> 2026-11-02). SoftRDP stays
 > the bit-exact oracle.
 > - Why: large foreign dependency, semantics fixed twice, and features it lacks (HD textures,
 >   per-primitive telemetry). Vulkan compute was chosen over D3D12/Metal/OpenGL/WebGPU.
@@ -12,7 +13,7 @@
 > - Per-span CPU/GPU split (`KESTREL_GPURDP_MINPX`, default 4096); internal upscaling
 >   (`KESTREL_GPURDP_UPSCALE`, x8 added) with an asynchronous shadow mode; HD textures on GPU.
 > - GPU-RDP is the default rasterizer (`KESTREL_GPURDP` selects). Retiring parallel-RDP: phase 1
->   done, phase 2 (deleting its code) planned for the next version. Performance notes and discarded
+>   done (2026-10-30), phase 2 (deleting its code) done 2026-11-02. Performance notes and discarded
 >   experiments are kept in detail.
 > The rest of this document is in Spanish.
 
@@ -109,8 +110,8 @@ SoftRDP, **no** contra la de parallel-RDP).
 
 Codigo: `src/gpurdp/` (`gpurdp.hpp/.cpp`, `shaders/fill.comp`, SPIR-V embebido en
 `gpurdp_spv.inc` por `tools/gen_gpurdp_shaders.py`). Vulkan a pelo sobre volk, nada de
-Granite. Se compila en los builds con parallel-RDP (de ahi sale volk) y se enciende con
-`KESTREL_GPURDP=1`; entonces parallel-RDP no arranca (comparten la tabla global de volk).
+Granite. Se compila con `-DKESTREL_GPU=ON` (volk va vendorizado en `third_party/volk`) y se apaga con
+`KESTREL_GPURDP=0` o `KESTREL_PRDP=0`. (Historico: antes convivia con parallel-RDP.)
 
 Forma elegida para ir migrando sin romper nada: **SoftRDP sigue decodificando el FIFO entero
 y el GPU-RDP le roba primitivas una a una**, no la interfaz de `vrdp.hpp` desde el dia uno.
@@ -127,8 +128,8 @@ Asi cada fase mueve un trozo y lo que aun no esta en GPU sigue en SoftRDP, bit a
   sueltos de 8/16 bpp); pase aparte para los bits ocultos de 16 bpp. El espejo no se sube
   nunca: un relleno pisa bytes enteros y al volver solo se copian los bytes de los rects.
 - Dispositivo propio creado en el hilo del RDP (`Memory::vrdpBringUp`), con extensiones de
-  superficie y swapchain; el presentador lo comparte (`gpurdp::sharedVk`) igual que con
-  parallel-RDP, y las colas se guardan con el mismo candado (`vrdp::queueLock`).
+  superficie y swapchain; el presentador lo comparte (`gpurdp::sharedVk`), y las colas se
+  guardan con el mismo candado (`gpurdp::queueLock`; antes `vrdp::queueLock`).
 
 Prueba: `scripts/gate_gpurdp.sh` (systemtest + sm64 interp/jit contra `sm64.txt` + krom contra
 la referencia de interp). Resultado: systemtest 0/3721, sm64 `b5521b24` (= SoftRDP) en los dos
@@ -408,7 +409,7 @@ mismo md5 `b338947b` (37 k triangulos texturizados en la GPU, ningun vaciado por
 - Puertas: todo modo de `validate.py` fija `KESTREL_PRDP`, asi que `gate_all`/`gate_prdp` no
   cambian de rasterizador. `pdbench.py` (sesion PD-opt) fija parallel-RDP para que su tabla
   siga comparable salvo `KESTREL_GPURDP=1` en el entorno.
-- Retirar parallel-RDP de `third_party/`: pendiente de un ciclo de uso. Lo que aun solo tiene
+- (Historico, hecho 2026-11-02) Retirar parallel-RDP de `third_party/`: pendiente de un ciclo de uso. Lo que aun solo tiene
   el: escalado x8 (GPU-RDP llega a x4) y su ventaja de ~10 % en SM64 (sin contabilidad por
   primitiva no espera a la GPU).
 
@@ -593,8 +594,9 @@ Medido (SM64, 100 intercambios desde arranque, ventana, RX 570):
     `gate_gpurdp` sobre el exe estatico), `pdbench.py` mide con GPU-RDP (las filas viejas de
     `docs/baselines/pd-opt.md` eran parallel-RDP), `fidelity.py --rdp gpu` por defecto.
     `KESTREL_PRDP=1` a mano sigue funcionando y avisa por stderr.
-  - **Fase 2 (siguiente version)**: borrar `third_party/parallel-rdp*`, la parte Granite de
+  - **Fase 2 HECHA 2026-11-02** (commit 792beea): borrado `third_party/parallel-rdp*`, la parte Granite de
     `src/vrdp/` (lo que comparten presentador y GPU-RDP, como `vrdp::queueLock` y el contexto
     Vulkan compartido, se queda), `gate_prdp.sh` y sus baselines (`krom-prdp.tsv`,
-    `sm64-prdp.txt`), los modos `prdp*` de `validate.py`, `KESTREL_PRDP_STATS`; renombrar la
-    opcion de cmake y los arboles `build-prdp*`.
+    `sm64-prdp.txt`), los modos `prdp*` de `validate.py`, `KESTREL_PRDP_STATS`; la
+    opcion de cmake pasa a `KESTREL_GPU` (`KESTREL_PRDP` vale como alias); las carpetas
+    `build-prdp*` conservan el nombre (`-DKESTREL_GPU=ON`). `KESTREL_PRDP=1` ahora = GPU-RDP y avisa.

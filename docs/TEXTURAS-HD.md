@@ -16,9 +16,9 @@ cada gancho mira `texpack::active()` y sale; puertas y md5 no se mueven.
 
 **GPU-RDP (de fabrica) y SoftRDP.** Desde 2026-10-06 el GPU-RDP muestrea el sustituto en la GPU
 con la misma cuenta que SoftRDP, en double (`tri_hd`, pide `shaderFloat64`; sin el, esas
-primitivas van al CPU), mismo md5; ver `docs/GPU-RDP.md` fase 6. parallel-RDP (`KESTREL_PRDP=1`)
-muestrea TMEM dentro de sus shaders con el tamano del original y no tiene por donde meter una
-textura de otro tamano; con el sale un aviso `[texpack]` y no pasa nada.
+primitivas van al CPU), mismo md5; ver `docs/GPU-RDP.md` fase 6. parallel-RDP (borrado 2026-11-02)
+muestreaba TMEM dentro de sus shaders con el tamano del original y no tiene por donde meter una
+textura de otro tamano; con el salia un aviso `[texpack]` y no pasaba nada.
 
 ## Compatibilidad con los packs existentes
 
@@ -71,7 +71,7 @@ y el color/forma del dibujo nuevo. Para que no centellee de lejos:
 
 Para verlo de verdad en alta resolucion hay que rasterizar a mas resolucion: el GPU-RDP (el de
 fabrica) muestrea los sustitutos en la GPU (`docs/GPU-RDP.md`, fase 6 parte 2) y lo combina
-con `KESTREL_UPSCALE`. parallel-RDP no los admite.
+con `KESTREL_UPSCALE`. parallel-RDP (ya borrado) no los admitia.
 
 ## Hacer un pack propio con IA (Real-ESRGAN y similares)
 

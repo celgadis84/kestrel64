@@ -51,7 +51,7 @@ Reglas para todo el plan:
   3. Memoria y bus: RDRAM, MMIO, DMA, cachés, TLB.
   4. CPU: intérprete, JIT (bloques, enlazado, L2), PGO.
   5. RSP: LLE, JIT del RSP, modelo de ciclos.
-  6. RDP: SoftRDP (oráculo), GPU-RDP (de fábrica), parallel-rdp (alternativa); espejo y
+  6. RDP: SoftRDP (oráculo), GPU-RDP (de fábrica), parallel-rdp (retirado 2026-11-02); espejo y
      coherencia.
   7. VI, presentación, audio.
   8. Estado: savestates, rebobinado, TAS.
@@ -101,7 +101,7 @@ Dos frentes medidos por separado.
 - Comprobaciones defensivas en rutas de confianza.
 - Comentarios que narran el *qué* en vez del *porqué*.
 - Funciones de cientos de líneas.
-- Retirada de parallel-rdp si GPU-RDP ya lo cubre: decisión aparte, con medida.
+- Retirada de parallel-rdp: HECHA (fase 1 2026-10-30, código borrado 2026-11-02).
 
 **b) Rendimiento, guiado por perfil.**
 - Perfil de PD, SM64 y DK64 en juego. Optimizar solo lo que salga caliente.
