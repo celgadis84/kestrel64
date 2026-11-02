@@ -7,7 +7,7 @@
 // siempre, sin pasar por aqui.
 //
 // Se incluye DESPUES del bloque de cabeceras de Vulkan del fichero que lo usa (volk o
-// GLFW_INCLUDE_VULKAN, segun KESTREL_PRDP), porque los tipos Vk* vienen de ahi.
+// GLFW_INCLUDE_VULKAN, segun KESTREL_GPURDP), porque los tipos Vk* vienen de ahi.
 #include "../core/types.hpp"
 
 namespace kestrel::postfx {

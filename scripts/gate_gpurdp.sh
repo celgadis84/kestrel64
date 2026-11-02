@@ -1,6 +1,6 @@
 #!/bin/sh
 # Puerta del GPU-RDP propio (docs/GPU-RDP.md), KESTREL_GPURDP=1 sobre el exe de
-# build-prdp-static (el que viaja). A diferencia de gate_prdp.sh aqui NO hay referencias
+# build-prdp-static (el que viaja). Aqui NO hay referencias
 # propias: el GPU-RDP tiene que ser SoftRDP bit a bit, asi que sm64 se compara con sm64.txt
 # y krom con la referencia de interp. Necesita GPU con Vulkan.
 # pd: intro de Perfect Dark PAL contra pd.txt (SoftRDP).

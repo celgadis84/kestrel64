@@ -14,18 +14,18 @@ derechos de autor, y no hacen falta para compilarlo. Para jugar hace falta una R
 que seas duenno.
 
 
-1. parallel-rdp -- rasterizador RDP sobre Vulkan
+1. parallel-rdp -- solo la tabla del divisor del blender (third_party/rdp-luts)
    Copyright (c) 2020 Themaister (Hans-Kristian Arntzen)
    https://github.com/Themaister/parallel-rdp
    Licencia MIT (SPDX: MIT). Texto completo en la seccion A.
 
-2. volk -- cargador de Vulkan, distribuido dentro de parallel-rdp
+2. volk -- cargador de Vulkan (third_party/volk)
    Copyright (c) 2018-2023 Arseny Kapoulkine
    https://github.com/zeux/volk
    Licencia MIT (SPDX: MIT). Texto completo en la seccion A; es el mismo texto,
    cambiando el titular.
 
-3. Vulkan-Headers -- cabeceras de la API de Vulkan, dentro de parallel-rdp
+3. Vulkan-Headers -- cabeceras de la API de Vulkan (third_party/vulkan-headers)
    Copyright 2015-2024 The Khronos Group Inc.
    https://github.com/KhronosGroup/Vulkan-Headers
    Licencia Apache-2.0 (SPDX: Apache-2.0). Texto completo en:

@@ -109,7 +109,7 @@ CATEGORIES = [
     O("rdpspin", "KESTREL_RDPSPIN", "Vueltas del RDP ocioso", "int", 131072, adv=True,
       min=0, max=10000000,
       help="Cuanto gira el hilo del RDP, sin trabajo, antes de dormir. 0 = dormir enseguida. "
-      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo con Parallel-RDP. "
+      "Ahorra despertarlo por el kernel en cada DPC_END: -13 % de tiempo (medido con parallel-RDP). "
       "De fabrica 131072 desde el re-barrido del 2026-09-18."),
     O("rspspin", "KESTREL_RSPSPIN", "Vueltas del RSP ocioso", "int", 0, adv=True,
       min=0, max=10000000,
@@ -213,8 +213,7 @@ CATEGORIES = [
     O("texpack", "KESTREL_TEXPACK", "Pack de texturas HD (carpeta)", "path", "",
       help="Carpeta con un pack de texturas en formato Rice / GLideN64 (ficheros "
            "<NOMBRE ROM>#crc#fmt#siz_all.png); los packs hechos para GLideN64 valen tal cual. "
-           "Solo con el rasterizador SoftRDP (en automatico se elige solo): paraLLEl-RDP "
-           "muestrea la textura en la GPU y no admite sustitutos. Ver docs/TEXTURAS-HD.md."),
+           "Vale con SoftRDP y GPU-RDP. Ver docs/TEXTURAS-HD.md."),
     O("texfx", "KESTREL_TEXFX", "Realce de texturas", "choice", "",
       values=[["", "Ninguno - texturas originales"],
               ["scale4x", "Scale4x - agranda 4x sin emborronar (pixel art)"],
@@ -230,7 +229,7 @@ CATEGORIES = [
            "Real-ESRGAN y poniendo la carpeta resultante como pack). Solo SoftRDP."),
     O("upscale", "KESTREL_UPSCALE", "Escalado interno (GPU)", "choice", "1",
       values=[["1", "1x - resolucion nativa"], ["2", "2x"], ["4", "4x"], ["8", "8x"]],
-      help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. GPU-RDP y paraLLEl-RDP hasta 8x "
+      help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. GPU-RDP hasta 8x "
            "(8x pide ~768 MB; si no hay, sigue a 1x); el SoftRDP va siempre a 1x. Lo que el juego lee de su propio "
            "framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen."),
     O("ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", "bool", False, adv=True,
@@ -396,7 +395,6 @@ CATEGORIES = [
     O("citrace", "KESTREL_CITRACE", "Traza de imagen de color", "bool", False, adv=True),
     O("tridbg", "KESTREL_TRIDBG", "Depuracion de triangulos", "bool", False, adv=True),
     O("dpsynclog", "KESTREL_DPSYNCLOG", "Registro de DP sync", "bool", False, adv=True),
-    O("vrdplog", "KESTREL_VRDPLOG", "Registro de paraLLEl-RDP", "bool", False, adv=True),
     O("evlog", "KESTREL_EVLOG", "Registro de eventos del bus", "bool", False, adv=True),
     O("pcring", "KESTREL_PCRING", "Anillo de PCs", "bool", False, adv=True),
     O("pcsample", "KESTREL_PCSAMPLE", "Muestreo de PC", "int", 0, min=0, max=100000000, adv=True),

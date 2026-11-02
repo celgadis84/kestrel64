@@ -46,7 +46,6 @@ body:
     attributes:
       label: RDP backend
       options:
-        - parallel-rdp (KESTREL_PRDP=1)
         - software RDP
         - Both
     validations:

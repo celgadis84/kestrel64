@@ -4,7 +4,7 @@
 POR QUE ESTO Y NO UNA ACTION QUE COMPILE
 ----------------------------------------
 Un runner de GitHub puede compilar, pero NO puede validar: las puertas
-(`gate_all.sh`, `gate_prdp.sh`, systemtest, la suite krom) necesitan ROMs, y en este
+(`gate_all.sh`, `gate_gpurdp.sh`, systemtest, la suite krom) necesitan ROMs, y en este
 repositorio NO entra ni entrara una sola ROM. Un binario compilado en CI seria un
 binario que nadie ha pasado por las puertas -- justo lo contrario de la regla del
 proyecto. Asi que lo que se publica es el .exe DE ESTA MAQUINA, el mismo que acaba de
@@ -171,8 +171,8 @@ threaded) necesitan ROMs, y aqui no se distribuye ninguna.
 | `kestrel64-{ver}-win64.zip` | Portable: descomprimir y listo. |
 
 Dentro van un solo emulador, `kestrel64.exe`, y el lanzador `kestrel64-gui.exe`. El
-emulador trae tres rasterizadores, a elegir en Video > Rasterizador: GPU-RDP (propio,
-por GPU con Vulkan, el de fabrica), Parallel-RDP y SoftRDP (por CPU). Sin Vulkan cae
+emulador trae dos rasterizadores, a elegir en Video > Rasterizador: GPU-RDP (propio,
+por GPU con Vulkan, el de fabrica) y SoftRDP (por CPU). Sin Vulkan cae
 solo a SoftRDP.
 
 **Requisitos:** Windows de 64 bits; para los rasterizadores por GPU, una grafica con

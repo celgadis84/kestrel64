@@ -324,9 +324,7 @@ struct Memory {
 
   // `gen` = generacion del buffer de comandos (ver rdpShadow). Cambia cuando el juego
   // instala un START fresco, o sea otro FIFO.
-  // sync: el trabajo trae un SYNC_FULL (o no se sabe); syncAt = fin de invitado del ultimo tramo
-  // con SYNC_FULL que se le haya unido. Ver dpBarrierAt.
-  struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; bool sync; u64 syncAt; };
+  struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; };
   // Trabajos vivos (encolados + el que se esta pintando) que leen de CADA generacion de la
   // sombra. Con el solo se puede contestar la pregunta que importa: al instalar un START
   // fresco, la generacion que se va a REUTILIZAR, esta libre? Si no lo esta, la copia nueva
@@ -725,13 +723,6 @@ struct Memory {
   // cualquiera. Un solo u64 atomico: no hace falta seqlock porque ya no hay pareja de campos
   // que leer coherente -- el arranque de cada tramo vive en el anillo.
   std::atomic<u64> dpSchedEnd{0};
-  // Barrera del RDP con Parallel-RDP: fin de invitado del tramo MAS ANTIGUO aun sin pintar que
-  // trae SYNC_FULL (~0 = ninguno). dpSyncEnds es la cola de esos fines, con rdpMx. La ultima
-  // SYNC de dpScheduleSpan la deja en dpLastSpanSync. Ver dpBarrierAt.
-  std::atomic<u64>  dpSyncBarAt{~0ull};
-  std::deque<u64>   dpSyncEnds;
-  std::atomic<bool> dpBarSyncOnly{false};
-  bool dpLastSpanSync = true;
   // Ventana de PIPE_BUSY (n64brew: del primer comando al SYNC_FULL), en reloj de invitado.
   // dpPipeFrom = arranque del primer tramo tras el ultimo SYNC_FULL (0 = pipeline parado);
   // dpPipeBusy0 = DPC_PIPE_BUSY en ese instante. Solo bajo rdpMx (ver dpScheduleSpan).
@@ -933,17 +924,9 @@ struct Memory {
   // Con SoftRDP es el fin de TODO lo mandado: el rasterizador lee texturas y escribe pixeles
   // en RDRAM mientras pinta, asi que la CPU no puede dejar atras un tramo sin pintar.
   //
-  // Con Parallel-RDP eso no protege nada: el worker solo ENCOLA los comandos (ya copiados en
-  // rdpSnapshot) y la GPU lee texturas y escribe el color image de RDRAM cuando le toca, que es
-  // mas tarde. La unica garantia de RDRAM es el fence de SYNC_FULL (vrdp::runFifo), y ese es
-  // justo el instante en que cae MI_DP y el juego queda autorizado a reescribir sus buffers.
-  // Asi que ahi la barrera es solo el fin del tramo con SYNC_FULL mas antiguo pendiente. Lo
-  // demas que la CPU lee del motor (DPC_STATUS/CURRENT, MI_DP) sale del horario de invitado.
-  // junkrunner64: libdragon manda ~1.600 tramos por cuadro y la CPU se paraba en cada uno a
-  // esperar el relevo del worker (11 % de pared). KESTREL_DPBARSYNC=0 vuelve a lo de SoftRDP.
+  // Lo demas que la CPU lee del motor (DPC_STATUS/CURRENT, MI_DP) sale del horario de invitado.
   auto dpBarrierAt() const -> u64 {
-    return dpBarSyncOnly.load(std::memory_order_relaxed) ? dpSyncBarAt.load(std::memory_order_acquire)
-                                                         : dpSchedEnd.load(std::memory_order_acquire);
+    return dpSchedEnd.load(std::memory_order_acquire);
   }
   // El motor esta drenado en `now` si el ultimo tramo con fecha ya cerro. Entonces
   // DPC_CURRENT vale una constante -- la direccion de cierre de ese tramo -- y no puede
@@ -1310,12 +1293,12 @@ struct Memory {
   auto rspPace(u64 cpuOps) -> u32;           // freno del dominio RSP
  public:
   // Publico: System espera aqui antes de abrir la ventana, porque el presentador comparte el
-  // contexto Vulkan del backend. Lo LEVANTA el hilo del RDP (Granite ata su estado por hilo),
-  // asi que esto solo espera; devuelve false si expira el plazo o si el backend no esta pedido.
-  auto vrdpWaitReady(u32 timeoutMs) -> bool;
+  // contexto Vulkan de GPU-RDP. Lo LEVANTA el hilo del RDP, asi que esto solo espera; devuelve
+  // false si expira el plazo o si GPU-RDP no esta pedido.
+  auto gpuWaitReady(u32 timeoutMs) -> bool;
   // El arranque del backend ya se intento y NO quedo activo (sin Vulkan, sin GPU valida):
   // el RDP sigue en SoftRDP y la ventana se abre igual, sin esperar el plazo entero.
-  auto vrdpFailed() const -> bool;
+  auto gpuFailed() const -> bool;
 private:
   // Puntero de lectura propio del consumidor del FIFO (el "CURRENT" del command processor).
   // Cuando el ultimo comando de un span esta partido, el RDP se para DELANTE de el y lo
@@ -1331,9 +1314,9 @@ private:
   bool rdpCostHasResume = false;
 
   auto rdpWorkerLoop() -> void;
-  auto vrdpBringUp() -> void;      // trae parallel-rdp arriba una sola vez
-  std::once_flag vrdpOnce;
-  std::atomic<bool> vrdpTried{false};
+  auto gpuBringUp() -> void;       // trae GPU-RDP arriba una sola vez
+  std::once_flag gpuOnce;
+  std::atomic<bool> gpuTried{false};
   auto rspWorkerLoop() -> void;
 public:
 

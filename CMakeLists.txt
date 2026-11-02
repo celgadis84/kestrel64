@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(kestrel64 CXX C)   # C needed for volk.c (parallel-rdp's Vulkan loader)
+project(kestrel64 CXX C)   # C needed for volk.c (Vulkan loader, third_party/volk)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,16 +12,21 @@ endif()
 option(KESTREL_BUILD_LOCAL "Tune for the build host (-march=native)" ON)
 set(KESTREL_LTO "thin" CACHE STRING "thin | full | off")
 
-# GPU RDP via Themaister's paraLLEl-RDP. ON by default: el rasterizado en GPU es EL camino
-# del emulador (ver docs/parallel-rdp-integration.md). El arbol esta vendorizado bajo
-# third_party/, asi que esto no pide red ni compilador de shaders; lo unico que hace falta en
-# ejecucion es un vulkan-1.dll utilizable, y si no lo hay el backend se cae solo a SoftRDP.
+# Vulkan: GPU-RDP (docs/GPU-RDP.md, rasterizador de fabrica) y presentacion por Vulkan. Los
+# shaders van horneados en SPIR-V (src/gpurdp/gpurdp_spv.inc), asi que no hace falta red ni
+# compilador de shaders; en ejecucion basta un vulkan-1.dll utilizable, y sin el se cae solo a
+# SoftRDP con la ventana por GDI. volk + cabeceras de Vulkan vendorizados en third_party/.
 #
-# El arbol `build/` de los gates se configura a mano con -DKESTREL_PRDP=OFF: gate_all es el
-# oraculo DETERMINISTA (systemtest / md5 en lockstep) y no puede depender de que haya GPU.
-option(KESTREL_PRDP "Build the paraLLEl-RDP GPU rasterizer backend" ON)
-if(KESTREL_PRDP)
-  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/parallel_rdp.cmake)
+# El arbol `build/` de los gates se configura con -DKESTREL_GPU=OFF: gate_all es el oraculo
+# DETERMINISTA (systemtest / md5 en lockstep) y no puede depender de que haya GPU.
+# KESTREL_PRDP es el nombre viejo de la opcion (del backend parallel-RDP, retirado 2026-11-02);
+# se sigue aceptando para no romper arboles ya configurados ni scripts.
+option(KESTREL_GPU "Build the Vulkan GPU-RDP rasterizer and Vulkan presenter" ON)
+# Migracion de un solo uso: el valor viejo pasa a KESTREL_GPU y se borra de la cache, para que
+# un -DKESTREL_GPU posterior mande.
+if(DEFINED KESTREL_PRDP)
+  set(KESTREL_GPU ${KESTREL_PRDP} CACHE BOOL "" FORCE)
+  unset(KESTREL_PRDP CACHE)
 endif()
 
 # Enlazado autocontenido (ver docs/distribucion.md). SIEMPRE estatico en Windows salvo que se
@@ -85,17 +90,17 @@ add_executable(kestrel64
 
 target_include_directories(kestrel64 PRIVATE src)
 
-# GPU RDP backend glue: compiled + linked only when KESTREL_PRDP=ON (target defined in the
-# include above). The parallel_rdp target carries its own PUBLIC include dirs.
-if(KESTREL_PRDP)
-  target_sources(kestrel64 PRIVATE src/vrdp/vrdp.cpp)
-  target_link_libraries(kestrel64 PRIVATE parallel_rdp)
-  target_compile_definitions(kestrel64 PRIVATE KESTREL_PRDP=1)
-  # GPU-RDP propio (docs/GPU-RDP.md), rasterizador de fabrica desde la fase 7 (KESTREL_GPURDP=0 o
-  # KESTREL_PRDP=0/1 explicito lo apagan). Va
-  # con los builds de parallel-RDP porque de ahi sale volk; el codigo es todo nuestro.
-  target_sources(kestrel64 PRIVATE src/gpurdp/gpurdp.cpp)
-  target_compile_definitions(kestrel64 PRIVATE KESTREL_GPURDP=1)
+# GPU-RDP + volk, solo con KESTREL_GPU=ON. volk carga vulkan-1.dll en ejecucion: no se enlaza
+# el loader. VK_NO_PROTOTYPES en todo el target: con volk los vk* son PUNTEROS globales, y una
+# cabecera que los viese como prototipos saltaria a la direccion del puntero (fallo DEP).
+if(KESTREL_GPU)
+  target_sources(kestrel64 PRIVATE src/gpurdp/gpurdp.cpp third_party/volk/volk.c)
+  target_include_directories(kestrel64 PRIVATE third_party/volk third_party/vulkan-headers/include)
+  target_compile_definitions(kestrel64 PRIVATE KESTREL_GPURDP=1 VK_NO_PROTOTYPES)
+  if(WIN32)
+    target_compile_definitions(kestrel64 PRIVATE VK_USE_PLATFORM_WIN32_KHR)
+  endif()
+  set_source_files_properties(third_party/volk/volk.c PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 
 # RSP core unit test (hand-assembled microcode; no windowing deps).

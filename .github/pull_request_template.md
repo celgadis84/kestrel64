@@ -6,7 +6,7 @@
 ## Validation
 
 - [ ] `sh scripts/gate_all.sh` passes
-- [ ] `sh scripts/gate_prdp.sh` passes
+- [ ] `sh scripts/gate_gpurdp.sh` passes
 - [ ] lockstep (`KESTREL_THREADS=0`) and threaded agree: same state hash, same framebuffer md5
 - [ ] gate wall-clock recorded in `docs/baselines/timings.md`
 

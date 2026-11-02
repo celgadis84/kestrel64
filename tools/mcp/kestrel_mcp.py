@@ -251,14 +251,13 @@ def rdp_stats(action: str = "read") -> dict:
     imRd, zCmp, zUpd), redundancy (SYNC_* with no primitive since the previous one of
     the same kind or SYNC_FULL; TMEM/TLUT loads leaving TMEM identical; repeated
     identical SET_OTHER_MODES / SET_COMBINE) and `perFlip`: the same divided by
-    framebuffer swaps in the window. Works with SoftRDP and parallel-rdp alike.
+    framebuffer swaps in the window. Works with SoftRDP and GPU-RDP alike.
     `guest`: GUEST-time split of the window (not host wall time): seconds/ms, cpuOps,
     rdpBusyPct (GCLK / 62.5 MHz), rspRunPct (cycles the RSP executed), rspPollPct (RSP
     cycles absorbed in recognized poll loops), cpuIdlePct (CPU ops in the kernel idle
     loop), msPerFlip. Model lower bounds: 1 RSP cycle per instruction, no VU stalls.
-    `backend` (soft/gpurdp/prdp) and `exactPixels`: with SoftRDP and GPU-RDP `written`/`zUpd`
-    come from each pixel's real outcome (depth test, alpha compare); with parallel-RDP they
-    come from a cost-only walk and count every rasterized pixel (upper bound).
+    `backend` (soft/gpurdp) and `exactPixels` (always true): `written`/`zUpd` come from each
+    pixel's real outcome (depth test, alpha compare).
     `gpurdp` (GPU-RDP only): flushes, primitives, tris/texTris/fills, dispatches, tramosGpu /
     tramosCpu (per-tramo area routing, KESTREL_GPURDP_MINPX), fallbackTri/fallbackRect
     (primitives the GPU path refused and SoftRDP drew), hostMs upload/record/wait/download,
@@ -651,8 +650,7 @@ def dbg_fb(path: str = "kestrel_dbg_fb.png", kind: str = "color", addr=None, wid
 
 
 def dbg_tmem(path: str = "") -> dict:
-    """SoftRDP TMEM (4 KiB) + the 8 tile descriptors. path!='' saves the raw 4 KiB. Under
-    parallel-RDP TMEM lives on the GPU and this copy can be stale."""
+    """SoftRDP TMEM (4 KiB) + the 8 tile descriptors. path!='' saves the raw 4 KiB."""
     data, blob = query("dbg.tmem")
     if path:
         with open(path, "wb") as f:

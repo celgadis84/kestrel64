@@ -1,9 +1,8 @@
 #pragma once
 // kestrel64 -- GPU-RDP propio (docs/GPU-RDP.md). Rasterizador del RDP en compute de Vulkan con
-// la semantica de SoftRDP bit a bit; a la larga sustituye a parallel-RDP (o queda como
-// alternativa). De fabrica desde la fase 7 (KESTREL_GPURDP=0 lo apaga; KESTREL_PRDP=0/1 explicito
-// elige SoftRDP / parallel-RDP) y entonces parallel-RDP no arranca: los dos usan volk, que tiene UNA tabla global de punteros, y el presentador comparte
-// el contexto del que este vivo.
+// la semantica de SoftRDP bit a bit. De fabrica desde la fase 7 (KESTREL_GPURDP=0 o
+// KESTREL_PRDP=0 lo apagan y queda SoftRDP); sustituyo a parallel-RDP, retirado 2026-11-02. El
+// presentador comparte su contexto Vulkan: volk tiene UNA tabla global de punteros.
 //
 // Fase 0: SoftRDP sigue decodificando el FIFO entero y el GPU-RDP le "roba" primitivas una a
 // una. De momento solo FILL_RECTANGLE en ciclo FILL/COPY (escritura pura, no lee RDRAM).
@@ -20,11 +19,23 @@
 // al rasterizarlo; las que se repiten seguidas comparten ranura) y los 8 tiles ya plegados.
 
 #include "../core/types.hpp"
-#include "../vrdp/vrdp.hpp"   // SharedVk: el presentador lo consume igual venga de quien venga
 
+#include <mutex>
 #include <vector>
 
 namespace kestrel::gpurdp {
+
+// Handles del contexto Vulkan. El presentador los reutiliza en vez de crear un segundo
+// dispositivo: volk resuelve los punteros de funcion en UNA tabla global, asi que dos contextos
+// vivos se pisan las entradas y la siguiente llamada salta a un puntero nulo. Van como void*
+// para no arrastrar vulkan.h hasta el nucleo; present.cpp los recastea.
+struct SharedVk { void* instance; void* gpu; void* device; u32 queueFamily; void* queue; };
+
+// Candado de la cola compartida. vkQueueSubmit/vkQueuePresentKHR sobre una misma cola no son
+// seguros entre hilos, y aqui submiten dos: el RDP y el presentador.
+inline auto queueMutex() -> std::mutex& { static std::mutex m; return m; }
+inline auto queueLock()   -> void { queueMutex().lock(); }
+inline auto queueUnlock() -> void { queueMutex().unlock(); }
 
 #ifdef KESTREL_GPURDP
 inline constexpr bool built = true;
@@ -84,7 +95,7 @@ inline auto wanted() -> bool { return false; }
 inline auto init(u32) -> bool { return false; }
 inline auto shutdown() -> void {}
 inline auto active() -> bool { return false; }
-inline auto sharedVk() -> const vrdp::SharedVk* { return nullptr; }
+inline auto sharedVk() -> const SharedVk* { return nullptr; }
 inline auto queueFill(const FillRect&) -> void {}
 inline auto pending() -> bool { return false; }
 inline auto queueTri(const TriRec&, const u8* = nullptr) -> bool { return false; }
@@ -97,16 +108,15 @@ inline auto queueTriHi(const TriRec&, const u8*, const u8*, u32, const u8*) -> v
 inline auto queueFillHi(const FillRect&, const u8*, u32, const u8*) -> void {}
 inline auto submitHi(const u8*, u32, const u8*) -> void {}
 #else
-// KESTREL_GPURDP distinto de 0, o sin poner y sin KESTREL_PRDP explicito (de fabrica).
+// De fabrica; no lo quieren KESTREL_GPURDP=0 ni KESTREL_PRDP=0 (SoftRDP).
 auto wanted() -> bool;
 // Levanta Vulkan (instancia, dispositivo, pipelines, espejo de RDRAM). Desde el hilo que corre
 // el RDP. false = sin Vulkan util: SoftRDP sigue solo.
 auto init(u32 rdramSize) -> bool;
 auto shutdown() -> void;
 auto active() -> bool;
-// Contexto para el presentador (misma forma que vrdp::sharedVk). Las colas se guardan con
-// vrdp::queueLock/queueUnlock, que es el candado que ya toma el presentador.
-auto sharedVk() -> const vrdp::SharedVk*;
+// Contexto para el presentador; nullptr si no esta activo. La cola se guarda con queueLock.
+auto sharedVk() -> const SharedVk*;
 auto queueFill(const FillRect& r) -> void;
 auto pending() -> bool;
 // false = cola llena: vaciar (flush) y volver a encolar. Con `tmem` (4 KB, paleta incluida en

@@ -10,7 +10,6 @@
 #include "movie.hpp"
 #include "../audio/audio.hpp"
 #include "../gpurdp/gpurdp.hpp"
-#include "../vrdp/vrdp.hpp"   // vrdp::built: si ESTE .exe lleva el backend de GPU
 #include "runtime.hpp"
 #include "../video/capture.hpp"
 #include "../net/netplay.hpp"
@@ -74,12 +73,6 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
     if(const char* f = std::getenv("KESTREL_RECORD_FORMAT")) vo.format = f;
     std::string err;
     if(!capture::startVideo(vo, err)) std::printf("[captura] %s\n", err.c_str());
-  }
-  if(texpack::active() && vrdp::built && !(gpurdp::built && gpurdp::wanted())) {
-    const char* pe = std::getenv("KESTREL_PRDP");
-    if(!pe || pe[0] != '0')
-      std::printf("[texpack] texturas HD/realce solo con GPU-RDP o SoftRDP: Video > "
-                  "Rasterizador (parallel-RDP no las admite)\n");
   }
   std::printf("[system] loaded \"%s\" (%s, %.2f MB, entry 0x%08x)\n",
               rom.header.name.c_str(),
@@ -506,27 +499,22 @@ auto System::runLoop() -> void {
   if(!videoOn) { run(); return; }
   // Bring up Vulkan/GLFW on THIS (main) thread BEFORE the CPU worker starts —
   // a CPU-bound sibling stalls the driver's device bring-up on this box.
-  // El backend GPU tiene que estar arriba ANTES de abrir la ventana: el presentador comparte
-  // su contexto Vulkan (ver vrdp::sharedVk), y dos contextos vivos se pisan la tabla global de
-  // punteros de volk. Pero levantarlo aqui NO vale: Granite ata su estado al hilo que lo crea
-  // y ese tiene que seguir siendo el del RDP. Asi que se arranca la CPU primero (con ella los
-  // hilos del RCP) y aqui solo se espera a que el hilo del RDP lo tenga listo.
+  // GPU-RDP tiene que estar arriba ANTES de abrir la ventana: el presentador comparte su
+  // contexto Vulkan (ver gpurdp::sharedVk), y dos contextos vivos se pisan la tabla global de
+  // punteros de volk. Lo levanta el hilo del RDP, asi que se arranca la CPU primero (con ella
+  // los hilos del RCP) y aqui solo se espera a que lo tenga listo.
   std::thread cpuThread([this] { run(); });
-  // "Querer" parallel-RDP solo tiene sentido si este .exe lo lleva compilado. El paquete
-  // traia DOS ejecutables (kestrel64.exe con GPU, kestrel64-soft.exe sin ella); en uno sin
-  // parallel-RDP compilado (build/, build-static/), dar por bueno el default "GPU si" hacia esperar quince segundos a un backend
-  // que no existe y despues NO abrir la ventana -- el emulador inutil por doble clic.
-  // Sin backend se va derecho a abrir la ventana, que es lo unico que se puede hacer.
+  // Sin GPU-RDP compilado (build/, build-static/) se va derecho a abrir la ventana.
   const char* pe = std::getenv("KESTREL_PRDP");
-  bool prdpWanted = (vrdp::built && (!pe || pe[0] != '0')) || (gpurdp::built && gpurdp::wanted());
-  bool prdpReady  = memory.vrdpWaitReady(15000);
-  if(pe && pe[0] != '0' && !vrdp::built)
-    std::printf("[video] este ejecutable no lleva parallel-RDP; se rasteriza con SoftRDP\n");
-  // Si el backend se intento y cayo (sin Vulkan o sin GPU valida) el RDP sigue en SoftRDP y
-  // la ventana se abre con su propio presentador, que a su vez cae a GDI si no hay Vulkan.
-  // Solo un backend que sigue ARRANCANDO al vencer el plazo deja sin ventana.
-  if(prdpWanted && !prdpReady && !memory.vrdpFailed())
-    std::printf("[video] parallel-rdp no arranco a tiempo; sin ventana\n");
+  if(pe && pe[0] == '1')
+    std::printf("[video] parallel-RDP retirado: KESTREL_PRDP=1 usa GPU-RDP\n");
+  bool gpuWanted = gpurdp::built && gpurdp::wanted();
+  bool gpuReady  = memory.gpuWaitReady(15000);
+  // Si GPU-RDP se intento y cayo (sin Vulkan o sin GPU valida) el RDP sigue en SoftRDP y la
+  // ventana se abre con su propio presentador, que a su vez cae a GDI si no hay Vulkan. Solo
+  // un backend que sigue ARRANCANDO al vencer el plazo deja sin ventana.
+  if(gpuWanted && !gpuReady && !memory.gpuFailed())
+    std::printf("[video] GPU-RDP no arranco a tiempo; sin ventana\n");
   else if(!presenter.open())
     std::printf("[video] init failed; running headless\n");
   while(!shutdown.load() && presenter.pumpFrame()) {}
@@ -678,9 +666,6 @@ auto System::applyLiveOpts() -> void {
     rewinder.configure(o.rewind, o.rewindMb, o.rewindFields);
   if(o.texfx != cur.texfx || o.texdump != cur.texdump || o.texpack != cur.texpack) {
     texpack::reconfigure(o.texfx, o.texdump, o.texpack);
-    if(texpack::active() && vrdp::built && !(gpurdp::built && gpurdp::wanted()))
-      std::printf("[texpack] texturas HD/realce solo con GPU-RDP o SoftRDP: Video > "
-                  "Rasterizador (parallel-RDP no las admite)\n");
   }
   cur = o;
   std::fflush(stdout);

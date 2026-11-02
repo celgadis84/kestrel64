@@ -28,13 +28,13 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 cp "$EXE" "$OUT/"
 
 # Avisos de licencia. NO es un adorno: los ejecutables que se reparten van enlazados
-# estaticamente, o sea que dentro del binario hay codigo de parallel-rdp, volk, libc++ y
-# GLFW, y sus licencias (MIT, zlib) exigen que el aviso viaje con la copia. Sin estos dos
+# estaticamente, o sea que dentro del binario hay codigo de volk, libc++, GLFW y la
+# tabla del blender de parallel-rdp, y sus licencias (MIT, zlib) exigen que el aviso viaje con la copia. Sin estos dos
 # ficheros el zip incumple, aunque todas sean permisivas.
 cp LICENSE "$OUT/LICENSE.txt"
 cp THIRD-PARTY.txt "$OUT/"
 
-# Un solo ejecutable (desde 2026-10-05): kestrel64.exe lleva parallel-RDP y SoftRDP, el
+# Un solo ejecutable (desde 2026-10-05): kestrel64.exe lleva GPU-RDP y SoftRDP, el
 # rasterizador se elige en Video > Rasterizador (se relanza solo), y en una maquina sin
 # Vulkan cae a SoftRDP con la ventana pintada por GDI. El kestrel64-soft.exe de antes sobra;
 # se borra por si la carpeta viene de un paquete viejo.
@@ -108,7 +108,7 @@ depuracion, para poder enganchar el depurador antes de la primera instruccion.
 Con --run arranca corriendo.
 
 Requisitos: Windows de 64 bits. Con una GPU con Vulkan (cualquiera de la ultima
-decada, driver al dia) se usa paraLLEl-RDP en la GPU; sin ella el emulador sigue
+decada, driver al dia) se usa GPU-RDP en la GPU; sin ella el emulador sigue
 funcionando con el rasterizador por software y la ventana pintada por GDI.
 
 Las DLL de esta carpeta son parte del programa: deben quedarse junto al .exe.
@@ -116,7 +116,7 @@ Las DLL de esta carpeta son parte del programa: deben quedarse junto al .exe.
 
 El rasterizador (plugin grafico) se elige dentro del emulador, menu Opciones >
 Video > Rasterizador: Automatico (GPU si hay Vulkan), SoftRDP (en CPU, el de
-referencia, determinista) o paraLLEl-RDP (GPU). Al cambiarlo se relanza solo.
+referencia, determinista) o GPU-RDP (GPU). Al cambiarlo se relanza solo.
 
 kestrel64-gui.exe es el lanzador grafico y la forma normal de usar esto: biblioteca
 de ROM con caratulas, overclock por componente, mando, telemetria y depurador. No

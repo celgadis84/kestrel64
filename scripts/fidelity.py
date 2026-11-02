@@ -51,7 +51,7 @@ ROMS = romcfg.testroms()
 KESTREL = Path(os.environ.get("KESTREL_EXE", ROOT / "build-prdp-static" / "kestrel64.exe"))
 FAITHFUL = {"KESTREL_SPLEAD": "0", "KESTREL_SPSIGQ": "0", "KESTREL_DPLOGLEAD": "0"}
 # RDP backend, fixed explicitly: the shipped exe starts on GPU-RDP, which is not complete yet.
-RDP_ENV = {"prdp": {"KESTREL_PRDP": "1"}, "gpu": {"KESTREL_GPURDP": "1"}, "soft": {"KESTREL_PRDP": "0"}}
+RDP_ENV = {"gpu": {"KESTREL_GPURDP": "1"}, "soft": {"KESTREL_PRDP": "0"}}
 ARES = Path(romcfg.get("ARES_EXE", "ares.exe"))
 OUT = ROOT / "out" / "fidelity"
 KPORT = 9133
@@ -492,7 +492,7 @@ def main():
     ap.add_argument("--kmode", default="faithful", choices=["faithful", "default"],
                     help="kestrel: faithful (gate settings) or default (shipped speed settings)")
     ap.add_argument("--rdp", default="gpu", choices=sorted(RDP_ENV),
-                    help="kestrel RDP backend: gpu (GPU-RDP, default), soft, prdp (parallel-rdp, being retired)")
+                    help="kestrel RDP backend: gpu (GPU-RDP, default) or soft")
     ap.add_argument("--report", default=str(OUT / "fidelity.md"))
     ap.add_argument("--quiet", action="store_true")
     ARGS = args = ap.parse_args()

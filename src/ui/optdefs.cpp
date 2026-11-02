@@ -240,7 +240,6 @@ static const Option kOpt_debug[] = {
   {"citrace", "KESTREL_CITRACE", "Traza de imagen de color", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"tridbg", "KESTREL_TRIDBG", "Depuracion de triangulos", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"dpsynclog", "KESTREL_DPSYNCLOG", "Registro de DP sync", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
-  {"vrdplog", "KESTREL_VRDPLOG", "Registro de paraLLEl-RDP", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"evlog", "KESTREL_EVLOG", "Registro de eventos del bus", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"pcring", "KESTREL_PCRING", "Anillo de PCs", OType::Bool, "0", "", true, false, false, 0, 0, 0, nullptr, 0, false},
   {"pcsample", "KESTREL_PCSAMPLE", "Muestreo de PC", OType::Int, "0", "", true, false, false, 0, 1e+08, 0, nullptr, 0, false},

@@ -2,12 +2,12 @@
 # Deja listo lo que se le da a alguien que no compila: el .exe estatico, el zip portable
 # y el instalador de Windows.
 #
-# Existe porque las baterias (gate_all.sh / gate_prdp.sh) recompilan build/ y build-prdp/,
+# Existe porque las baterias (gate_all.sh / gate_gpurdp.sh) recompilan build/ y build-prdp/,
 # pero NO el arbol estatico, que es el unico que arranca fuera de MSYS2. Sin este paso el
 # dist/ se queda con el .exe de hace semanas y lo que se prueba desde el lanzador no es
 # el codigo actual. Un solo comando para que no vuelva a desincronizarse.
 #
-# Va UN ejecutable (desde 2026-10-05): kestrel64.exe lleva parallel-RDP y SoftRDP y el
+# Va UN ejecutable (desde 2026-10-05): kestrel64.exe lleva GPU-RDP y SoftRDP y el
 # rasterizador se elige dentro; sin Vulkan cae solo a SoftRDP con ventana GDI.
 #
 # Uso:  sh scripts/pack.sh            (build-prdp-static)
@@ -25,7 +25,7 @@ sh "$(dirname "$0")/killown.sh"   # solo exes de este repo, no los de otra sesio
 # "no se encontro glfw3.dll" en una maquina sin MSYS2.
 [ -f "$BUILD/CMakeCache.txt" ] || \
   cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
+        -DKESTREL_GPU=ON -DKESTREL_STATIC=ON
 cmake --build "$BUILD" -j8
 
 

@@ -31,8 +31,8 @@
 #include <map>
 #include <tuple>
 
-// Tabla del divisor del blender (parallel-rdp luts.hpp, vendorizado; la misma que usa SoftRDP).
-#include "../../third_party/parallel-rdp/parallel-rdp/luts.hpp"
+// Tabla del divisor del blender (third_party/rdp-luts, de parallel-rdp; la misma que usa SoftRDP).
+#include "../../third_party/rdp-luts/luts.hpp"
 
 namespace kestrel::gpurdp {
 
@@ -110,7 +110,7 @@ struct Ctx {
   VkQueryPool qpool = VK_NULL_HANDLE;
   double tsPeriod = 0;   // ns por tic
   u64 gUp = 0, gRun = 0, gDown = 0;   // ns de GPU
-  vrdp::SharedVk shared{};
+  SharedVk shared{};
   // Modo sombra (con escalado): el CPU pinta la RDRAM a 1x y la GPU solo la copia de alta, sin
   // esperar ni devolver nada. inflight = lote enviado cuyo fence aun no se ha esperado.
   bool inflight = false;
@@ -220,7 +220,7 @@ auto hasExt(const std::vector<VkExtensionProperties>& v, const char* n) -> bool 
 auto initVk(Ctx& c, u32 rdramSize) -> bool {
   if(volkInitialize() != VK_SUCCESS) { std::fprintf(stderr, "[gpurdp] sin cargador Vulkan\n"); return false; }
   // Extensiones de superficie si las hay: el presentador comparte esta instancia y crea su
-  // superficie sobre ella (igual que con parallel-RDP, ver vrdp.cpp).
+  // superficie sobre ella.
   u32 n = 0; vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
   std::vector<VkExtensionProperties> ie(n);
   vkEnumerateInstanceExtensionProperties(nullptr, &n, ie.data());
@@ -353,10 +353,10 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
       vkEndCommandBuffer(c.cmd);
       VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
       si.commandBufferCount = 1; si.pCommandBuffers = &c.cmd;
-      // Misma cola que el lote normal: mismo candado (puede ser la de parallel-rdp).
-      vrdp::queueLock();
+      // Misma cola que el lote normal: mismo candado (la comparte el presentador).
+      queueLock();
       const VkResult sr = vkQueueSubmit(c.queue, 1, &si, c.fence);
-      vrdp::queueUnlock();
+      queueUnlock();
       if(sr != VK_SUCCESS) return false;
       const VkResult wr = vkWaitForFences(c.dev, 1, &c.fence, VK_TRUE, ~0ull);
       vkResetFences(c.dev, 1, &c.fence);
@@ -846,11 +846,12 @@ auto scanoutHi(const u8* rdram, u32 size, u32 origin, u32 stride, u32 w, u32 h, 
 }
 
 auto wanted() -> bool {
-  // Fase 7: rasterizador de fabrica. KESTREL_GPURDP manda si esta puesto; si no, lo apaga
-  // cualquier eleccion explicita de KESTREL_PRDP (=1 parallel-RDP, =0 SoftRDP).
+  // Fase 7: rasterizador de fabrica. KESTREL_GPURDP manda si esta puesto; si no, KESTREL_PRDP=0
+  // (el interruptor de SoftRDP de siempre, que fijan todas las puertas) lo apaga. KESTREL_PRDP=1
+  // pedia parallel-RDP, ya retirado: ahora es GPU-RDP (System::runLoop avisa).
   if(const char* e = std::getenv("KESTREL_GPURDP"); e && e[0]) return e[0] != '0';
   const char* p = std::getenv("KESTREL_PRDP");
-  return !p || !p[0];
+  return !p || p[0] != '0';
 }
 
 auto init(u32 rdramSize) -> bool {
@@ -890,7 +891,7 @@ auto shutdown() -> void {
 
 auto active() -> bool { return g_live.load(std::memory_order_acquire); }
 
-auto sharedVk() -> const vrdp::SharedVk* { return active() ? &g->shared : nullptr; }
+auto sharedVk() -> const SharedVk* { return active() ? &g->shared : nullptr; }
 
 auto queueFill(const FillRect& r) -> void {
   g->ops.push_back({false, (u32)g->q.size()});
@@ -1113,9 +1114,9 @@ auto flush(u8* rdram, u32 size, u8* hidden, std::vector<TriOut>* outs) -> void {
   VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1; si.pCommandBuffers = &c.cmd;
   const auto t2 = clk::now();
-  vrdp::queueLock();
+  queueLock();
   VkResult sr = vkQueueSubmit(c.queue, 1, &si, c.fence);
-  vrdp::queueUnlock();
+  queueUnlock();
   if(sr != VK_SUCCESS) {
     std::fprintf(stderr, "[gpurdp] vkQueueSubmit fallo (%d)\n", (int)sr);
     if(outs) outs->assign(c.tris.size(), TriOut{});
@@ -1332,9 +1333,9 @@ auto submitHi(const u8* rdram, u32 size, const u8* hidden) -> void {
   VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.commandBufferCount = 1; si.pCommandBuffers = &c.cmd;
   const auto t2 = clk::now();
-  vrdp::queueLock();
+  queueLock();
   const VkResult sr = vkQueueSubmit(c.queue, 1, &si, c.fence);
-  vrdp::queueUnlock();
+  queueUnlock();
   if(sr != VK_SUCCESS) {
     static bool said = false;
     if(!said) { said = true; std::fprintf(stderr, "[gpurdp] vkQueueSubmit del lote de alta fallo (%d)\n", (int)sr); }

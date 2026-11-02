@@ -4,7 +4,7 @@
 # QUE SALE DE AQUI Y QUE NO
 # -------------------------
 # Un runner de GitHub puede compilar pero NO puede validar: las puertas (`gate_all.sh`,
-# `gate_prdp.sh`, systemtest, la suite krom) necesitan ROMs, y en este repositorio no entra
+# `gate_gpurdp.sh`, systemtest, la suite krom) necesitan ROMs, y en este repositorio no entra
 # ni entrara una sola ROM. Por eso lo que sale de aqui va marcado como tal en el VERSION.txt
 # del propio paquete, y la regla del proyecto sigue en pie: una version que se anuncia como
 # buena es la que paso las puertas en la maquina de desarrollo. Este workflow existe para que
@@ -77,12 +77,12 @@ jobs:
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "version = $VER"
 
-      # Los DOS rasterizadores, los dos estaticos: el paquete lleva parallel-RDP como
-      # recomendado y SoftRDP al lado para maquinas sin Vulkan y como oraculo determinista.
-      - name: build (parallel-RDP, estatico)
+      # Los DOS arboles, los dos estaticos: el paquete lleva GPU-RDP (con SoftRDP dentro) y
+      # el SoftRDP puro queda como oraculo determinista.
+      - name: build (GPU-RDP, estatico)
         run: |
           cmake -S . -B build-prdp-static -G Ninja -DCMAKE_BUILD_TYPE=Release \
-                -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
+                -DKESTREL_GPU=ON -DKESTREL_STATIC=ON
           cmake --build build-prdp-static -j4
 
       - name: build (SoftRDP, estatico)
@@ -111,7 +111,7 @@ jobs:
           {
             echo ""
             echo "origen:  GitHub Actions (workflow release.yml), ejecucion $GITHUB_RUN_ID"
-            echo "puertas: NO EJECUTADAS -- gate_all.sh y gate_prdp.sh necesitan ROMs y en"
+            echo "puertas: NO EJECUTADAS -- gate_all.sh y gate_gpurdp.sh necesitan ROMs y en"
             echo "         este repositorio no hay ninguna. Compilacion reproducible desde"
             echo "         el codigo; la validacion de exactitud se hace en la maquina de"
             echo "         desarrollo."
@@ -136,12 +136,11 @@ jobs:
 
           **Que hay dentro** (\`kestrel64-$VER-win64.zip\`)
 
-          - \`kestrel64.exe\` -- parallel-RDP (GPU, Vulkan). El recomendado.
-          - \`kestrel64-soft.exe\` -- SoftRDP. Para maquinas sin Vulkan, y rasterizador de referencia.
+          - \`kestrel64.exe\` -- GPU-RDP (GPU, Vulkan) y SoftRDP (CPU), elegibles en Video > Rasterizador.
           - \`kestrel64-gui.exe\` -- lanzador grafico.
           - \`VERSION.txt\` -- version, commit y md5 de cada ejecutable.
           - \`LICENSE.txt\` y \`THIRD-PARTY.txt\` -- MIT, y los avisos de lo que va
-            enlazado estatico dentro del binario (parallel-rdp, volk, libc++, GLFW).
+            enlazado estatico dentro del binario (volk, libc++, GLFW, tabla del blender de parallel-rdp).
             Todo permisivo; ni una ROM en el paquete.
 
           **Alcance de la validacion.** El runner compila y pasa las seis pruebas unitarias

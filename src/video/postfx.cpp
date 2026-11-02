@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#ifdef KESTREL_PRDP
+#ifdef KESTREL_GPURDP
 #define VK_NO_PROTOTYPES
 #include <volk.h>
 #else

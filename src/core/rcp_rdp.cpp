@@ -4,7 +4,6 @@
 #include "memory_internal.hpp"
 #include "wrtag.hpp"
 #include "../telemetry/hostprof.hpp"
-#include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
 #include "../debug/dbg.hpp"
 
@@ -20,40 +19,24 @@ namespace kestrel {
 // Arranque idempotente del backend GPU. Lo llama el hilo del RDP nada mas nacer y
 // tambien rdpRunJob(), que es el unico camino en modo lockstep (ahi no hay hilo).
 // std::call_once y no un bool: en modo threaded los dos sitios pueden coincidir.
-auto Memory::vrdpBringUp() -> void {
-  std::call_once(vrdpOnce, [this]{
-    // KESTREL_GPURDP=1: el GPU-RDP propio en vez de parallel-RDP. Nunca los dos: comparten la
-    // tabla global de volk y el presentador solo puede colgarse de un contexto.
+auto Memory::gpuBringUp() -> void {
+  std::call_once(gpuOnce, [this]{
     if(gpurdp::wanted()) gpurdp::init((u32)rdram.size());
-    else vrdp::init(rdram.data(), (u32)rdram.size());
-    vrdpTried.store(true, std::memory_order_release);
+    gpuTried.store(true, std::memory_order_release);
   });
 }
 
-// Espera a que el hilo del RDP haya levantado parallel-rdp. El presentador comparte ese
-// contexto Vulkan, pero NO puede levantarlo el mismo: Granite registra indice de hilo y ata
-// su estado al hilo que lo crea, asi que traerlo arriba fuera del hilo del RDP deja al worker
-// sin sus lookups por hilo y el RDP acaba sin completar trabajos (el juego se queda esperando
-// MESG_DP_COMPLETE para siempre). De ahi que esto solo espere.
-auto Memory::vrdpFailed() const -> bool {
-  return vrdpTried.load(std::memory_order_acquire) && !vrdp::active() && !gpurdp::active();
+// Espera a que el hilo del RDP haya levantado GPU-RDP. El presentador comparte ese contexto
+// Vulkan, pero no lo levanta el: todo el uso de Vulkan del RDP vive en el hilo del RDP.
+auto Memory::gpuFailed() const -> bool {
+  return gpuTried.load(std::memory_order_acquire) && !gpurdp::active();
 }
 
-auto Memory::vrdpWaitReady(u32 timeoutMs) -> bool {
-  if(gpurdp::built && gpurdp::wanted()) {             // GPU-RDP propio: esperar a ese
-    for(u32 i = 0; i < timeoutMs; i++) {
-      if(gpurdp::active()) return true;
-      if(vrdpFailed()) return false;
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return false;
-  }
-  if(!vrdp::built) return false;                      // este .exe no lo lleva: nada que esperar
-  const char* e = std::getenv("KESTREL_PRDP");
-  if(e && e[0] == '0') return false;                  // SoftRDP forzado: nada que esperar
+auto Memory::gpuWaitReady(u32 timeoutMs) -> bool {
+  if(!gpurdp::built || !gpurdp::wanted()) return false;   // sin GPU-RDP: nada que esperar
   for(u32 i = 0; i < timeoutMs; i++) {
-    if(vrdp::active()) return true;
-    if(vrdpFailed()) return false;                    // intentado y caido: no esperar mas
+    if(gpurdp::active()) return true;
+    if(gpuFailed()) return false;                         // intentado y caido: no esperar mas
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   return false;
@@ -135,11 +118,8 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
   // Publicar el fin de cuadro en el reloj del invitado en vez de en el del anfitrion. En
   // Lockstep no hace falta: lo ejecuta el propio hilo de CPU y ya cae en un punto determinista.
   const bool defer = rcpDeadlineOn();
-  // GPU path (paraLLEl-RDP): opt-in via KESTREL_PRDP. Lazily brought up on first job with
-  // this RDRAM block; when live it consumes the FIFO on the GPU instead of SoftRDP. The
-  // guest RDRAM vector is allocated once and never resized, so its pointer is stable for
-  // the CommandProcessor's lifetime. Stubs make this a no-op in non-PRDP builds.
-  vrdpBringUp();
+  // GPU-RDP se levanta con el primer trabajo (lockstep no tiene hilo del RDP que lo haga).
+  gpuBringUp();
   // Reanudar un comando que quedo partido por el borde del span anterior. Solo si este span
   // continua justo donde acabo aquel: si el juego instalo un buffer nuevo (START fresco), el
   // trozo pendiente pertenece a un FIFO que ya no existe y se descarta, como en HW.
@@ -170,50 +150,6 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
                 cartNow());
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   wrtag::setWin(0, current & 0x00ff'ffffu, end & 0x00ff'ffffu);
-  if(vrdp::active()) {
-    // `stop` puede quedar delante de `end` si el ultimo comando del span esta partido: el
-    // command processor no ejecuta comandos a medias. Ese trozo NO se pierde -- el siguiente
-    // kick reanuda desde ahi porque dpc_submitted retrocede al punto de parada.
-    // El paseo de coste va DELANTE del dibujado, y no es un detalle de orden.
-    //
-    // Es software puro, determinista, y no escribe un byte: recorre los comandos con el
-    // decodificador de SoftRdp y cobra en rcp.rdpGclk lo que ese tramo habria costado en la
-    // consola. Ponerlo detras de vrdp::runFifo (como estaba) deja rdpGclk CLAVADO durante todo
-    // el trabajo y lo sube de golpe al final, con dos consecuencias:
-    //
-    //   - Memory::rdpPace frena a la CPU contra "el trabajo que el RDP lleva hecho", y ese
-    //     trabajo valia cero hasta el ultimo instante: el freno no mordia mientras la GPU
-    //     dibujaba, que es justo cuando tiene que morder.
-    //   - el plazo de fin de tarea (dpEndArm) nacia con el coste ya conocido pero con la CPU
-    //     del invitado ya pasada de largo, o sea VENCIDO -- y entonces MI_DP cae donde el
-    //     anfitrion decida. Dos corridas del mismo binario publicaban la interrupcion en
-    //     instrucciones distintas y el juego divergia (docs/GAPS.md 3b).
-    //
-    // Cobrando primero, el coste del tramo esta puesto antes de que la GPU empiece: el freno
-    // acota a la CPU contra el trabajo REAL y el plazo nace vivo.
-    if(!preCosted && rdpCostPass(costCur, end, xbus, cmdSrc)) {
-      const u32 endM = xbus ? (end & 0x0fff'ffffu) : (end & 0x00ff'ffffu);
-      if(softCost.stopAt != endM) { rdpCostResume = softCost.stopAt; rdpCostHasResume = true; }
-    }
-    u32 stop = end;
-    bool sync = vrdp::runFifo(cmdSrc, (u32)rdram.size(), dmem.data(), current, end, xbus,
-                              &stop);
-    if(stop != end) { rdpResume = stop; rdpHasResume = true; }
-    rdpPublishCurrent(stop);
-    if(sync) {
-      ev("rdpint", current, end);
-      if(defer) {
-        // Con el tramo ya fechado, el plazo de MI_DP lo armo quien lo lanzo.
-        if(!preCosted) dpEndArm(dpJobOps, rcp.rdpGclk.load(std::memory_order_relaxed) - gclk0);
-      } else {
-        rcp.dpc_status &= ~(0x8u | 0x20u); // pipe drained: clear START_GCLK | PIPE_BUSY
-        rcp.dpSyncs++;                     // misma contabilidad que el camino SoftRDP
-        dpRets.fetch_add(1, std::memory_order_relaxed);
-        raiseIntr(MI_DP);
-      }
-    }
-    return;
-  }
   // El rasterizador publica su puntero de lectura en DPC_CURRENT mientras consume el
   // FIFO: es lo que el microcodigo mira para saber cuanto buffer puede reutilizar.
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
@@ -382,12 +318,6 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
           (u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - tSch).count(), std::memory_order_relaxed);
     }
-    const bool sync = dpLastSpanSync;
-    const u64 syncAt = dpSchedEnd.load(std::memory_order_relaxed);
-    if(sync) {
-      if(dpSyncEnds.empty()) dpSyncBarAt.store(syncAt, std::memory_order_release);
-      dpSyncEnds.push_back(syncAt);
-    }
     // El FIFO del RDP es UNO: escribir DPC_END no encola "un trabajo", solo adelanta el
     // puntero final del mismo buffer de comandos. Si el ultimo tramo encolado todavia no ha
     // empezado y este continua exactamente donde acababa, con el mismo modo de bus, es el
@@ -396,13 +326,11 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
     if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus
        && rdpQueue.back().gen == rdpGen) {
       rdpQueue.back().end = end;
-      if(sync) { rdpQueue.back().sync = true; rdpQueue.back().syncAt = syncAt; }
       if(g_dpSubProf) rdpCoal.fetch_add(1, std::memory_order_relaxed);
     }
     else {
       rdpQueue.push_back({current, end, xbus, rdpGen,
-                          tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow(),
-                          sync, syncAt});
+                          tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow()});
       // Un lector vivo mas para esta generacion de la sombra: no se puede reutilizar hasta
       // que el worker termine de LEER sus comandos. El tramo unido (rama de arriba) no
       // cuenta: alarga un trabajo ya contado.
@@ -499,7 +427,7 @@ auto Memory::rdpWorkerLoop() -> void {
   pinToPhysicalCore(1);
   hostprof::start("rdp");   // opt-in: KESTREL_HOSTPROF_WHO=rdp
   rdpThreadH = selfThreadHandle();
-  // Levantar parallel-rdp AQUI, antes de esperar el primer trabajo. Traer arriba
+  // Levantar GPU-RDP AQUI, antes de esperar el primer trabajo. Traer arriba
   // Vulkan (device, colas, banco SPIR-V, importar los 8 MB de RDRAM) cuesta cientos
   // de milisegundos, y si se hace de forma perezosa dentro del primer job ese coste
   // sale del reloj del RDP: la CPU ya escribio DPC_END y esta mirando DPC_STATUS.
@@ -509,33 +437,17 @@ auto Memory::rdpWorkerLoop() -> void {
   // primer comando, asi que el arranque se solapa con el boot de la CPU. Va en este
   // hilo, no en el que llama a startRcpThreads(), para que todo el uso de Vulkan
   // siga ocurriendo en el mismo hilo que antes.
-  vrdpBringUp();
-  // Barrera solo en SYNC_FULL (ver dpBarrierAt): solo con Parallel-RDP vivo y pintando en su
-  // worker. Se decide aqui, antes del primer trabajo; hasta entonces vale la barrera entera.
-  {
-    static const bool syncOnly = [] {
-      const char* e = std::getenv("KESTREL_DPBARSYNC");
-      return !e || !*e || (std::strcmp(e, "0") && std::strcmp(e, "off"));
-    }();
-    if(syncOnly && vrdp::active() && !rdpInlineDiag()) {
-      std::lock_guard<std::mutex> lk(rdpMx);
-      dpBarSyncOnly.store(true, std::memory_order_release);
-    }
-  }
+  gpuBringUp();
   for(;;) {
     RdpJob job;
     // dpPending cuenta tramos encolados + el que se esta pintando, y el worker ya descuento el
     // suyo: aqui arriba > 0 es exactamente "cola no vacia". Sin wakeup perdido: si el tramo
     // llega despues del giro, o el productor ve rdpWaiting (lo lee con el mutex) o el
     // predicado de abajo ve la cola llena.
-    bool spun = false;
     for(u32 k = 0, n = rdpSpinLen(); k < n; k++) {
-      if(dpPending.load(std::memory_order_acquire)) { spun = true; break; }
+      if(dpPending.load(std::memory_order_acquire)) break;
       if((k & kSpinPauseMask) == kSpinPauseMask) spinPause();
     }
-    // Sin trabajo tras el giro: el hilo se va a dormir. Lo acumulado en el renderer sale a la
-    // GPU (ver vrdp::idle). Fuera de rdpMx: puede costar un submit de Vulkan.
-    if(!spun && !rdpInlineDiag() && !dpPending.load(std::memory_order_acquire)) vrdp::idle();
     {
       std::unique_lock<std::mutex> lk(rdpMx);
       // rdpWaiting le dice al productor si hace falta despertarnos (ver rdpSubmit).
@@ -569,13 +481,7 @@ auto Memory::rdpWorkerLoop() -> void {
       // dpCompSeq NO es tiempo de invitado: es cuantos trabajos lleva pintados el anfitrion.
       // Solo sirve para que los que esperan sepan que algo se ha movido de verdad.
       dpCompSeq.fetch_add(1, std::memory_order_release);
-      if(job.sync) {
-        while(!dpSyncEnds.empty() && dpSyncEnds.front() <= job.syncAt) dpSyncEnds.pop_front();
-        dpSyncBarAt.store(dpSyncEnds.empty() ? ~0ull : dpSyncEnds.front(), std::memory_order_release);
-      }
       if(rdpQueue.empty()) {
-        dpSyncEnds.clear();
-        dpSyncBarAt.store(~0ull, std::memory_order_release);
         rcpPend.fetch_and(~4u, std::memory_order_release);
         dpBarWaivedAt = ~0ull;
         dpWrReset();   // motor drenado: lo pintado ya esta en RDRAM (ver rspDmaRdpWait)

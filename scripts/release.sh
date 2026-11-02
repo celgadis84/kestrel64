@@ -9,9 +9,9 @@
 #
 # Que sale:
 #   build/                     exe SoftRDP  (oraculo determinista de las puertas)
-#   build-prdp/                exe parallel-RDP (puerta de GPU)
+#   build-prdp/                exe GPU-RDP (puerta de GPU)
 #   (desde 2026-09-30 TODOS estaticos: arrancan sin clang64 en el PATH; ver CMakeLists)
-#   build-prdp-static/         exe parallel-RDP ESTATICO = el que se distribuye
+#   build-prdp-static/         exe GPU-RDP ESTATICO = el que se distribuye
 #   build-static/              exe SoftRDP ESTATICO      = puertas (gate_quick); no viaja
 #   dist/                      kestrel64.exe (GPU+SoftRDP, plugin elegible dentro)
 #                              + kestrel64-gui.exe + LEEME.txt + VERSION.txt
@@ -21,7 +21,7 @@
 # Uso:
 #   sh scripts/release.sh            # todo
 #   sh scripts/release.sh --gates    # ademas gate_all ANTES de empaquetar y gate_gpurdp sobre
-#                                    # el exe estatico (parallel-RDP fuera de puertas 2026-10-30)
+#                                    # el exe estatico
 #   sh scripts/release.sh --quick    # solo los arboles estaticos + empaquetado (iteracion rapida)
 #   NOISS=1 sh scripts/release.sh    # sin instalador
 set -e
@@ -65,10 +65,10 @@ kill_exes
 
 if [ -z "$QUICK" ]; then
   echo "== build/ (SoftRDP, oraculo) =="
-  conf build
+  conf build -DKESTREL_GPU=OFF
   cmake --build build -j8
-  echo "== build-prdp/ (parallel-RDP) =="
-  conf build-prdp -DKESTREL_PRDP=ON
+  echo "== build-prdp/ (GPU-RDP) =="
+  conf build-prdp -DKESTREL_GPU=ON
   cmake --build build-prdp -j8
 fi
 
@@ -79,17 +79,17 @@ if [ -n "$GATES" ]; then
 fi
 
 echo "== build-prdp-static/ (lo que se distribuye) =="
-conf build-prdp-static -DKESTREL_PRDP=ON -DKESTREL_STATIC=ON
+conf build-prdp-static -DKESTREL_GPU=ON -DKESTREL_STATIC=ON
 cmake --build build-prdp-static -j8
 if [ -n "$GATES" ]; then
   sh scripts/gate_gpurdp.sh
   kill_exes
 fi
 
-# build-static (sin parallel-RDP) ya NO viaja en el paquete: el exe que se distribuye lleva
+# build-static (sin GPU-RDP) ya NO viaja en el paquete: el exe que se distribuye lleva
 # los dos rasterizadores. Se sigue compilando porque es el exe de las puertas rapidas.
 echo "== build-static/ (SoftRDP, para las puertas) =="
-conf build-static -DKESTREL_STATIC=ON
+conf build-static -DKESTREL_GPU=OFF -DKESTREL_STATIC=ON
 cmake --build build-static -j8
 
 # dist.sh ya congela el lanzador (scripts/gui.sh), copia lo que haga falta, escribe el LEEME

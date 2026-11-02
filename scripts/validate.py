@@ -92,13 +92,8 @@ MODES = {
     "phys-threaded": {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", **PHYS, **SOFT},
     "threaded-trace":   {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_TRACE": "1", **SOFT},
     "threaded-nolink":  {"KESTREL_THREADS": "1", "KESTREL_JIT": "1", "KESTREL_JIT_NOLINK": "1", **SOFT},
-    # Backend RDP en GPU (parallel-rdp). Necesitan un exe de `build-prdp/`, que se
-    # elige con KESTREL_EXE; el toggle solo dice al exe cual de los dos RDP usar.
-    # `prdp` es el oraculo lento (interp lockstep), `prdp-jit` la configuracion real.
-    "prdp":          {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_PRDP": "1"},
-    "prdp-jit":      {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_PRDP": "1"},
-    # GPU-RDP propio (docs/GPU-RDP.md). Exe de build-prdp*. A diferencia de parallel-rdp
-    # tiene que ser BIT A BIT SoftRDP: el md5 se compara con sm64.txt y krom con --vs interp.
+    # GPU-RDP propio (docs/GPU-RDP.md). Exe de build-prdp* (elegido con KESTREL_EXE). Es BIT A
+    # BIT SoftRDP: el md5 se compara con sm64.txt y krom con --vs interp.
     "gpurdp":        {"KESTREL_JIT": "0", "KESTREL_THREADS": "0", "KESTREL_GPURDP": "1", **SOFT},
     "gpurdp-jit":    {"KESTREL_JIT": "1", "KESTREL_THREADS": "1", "KESTREL_GPURDP": "1", **SOFT},
 }
@@ -483,13 +478,9 @@ def gate_sm64(mode, args):
         print(f"sm64[{mode}]: FAIL no framebuffer dump (rc={rc})")
         return False
     md5 = hashlib.md5(dump.read_bytes()).hexdigest()
-    # El md5 depende del BACKEND de RDP, no del modo de CPU: los cinco modos de SoftRDP
-    # coinciden byte a byte entre si, y los dos de parallel-rdp entre si, pero los dos
-    # grupos no tienen por que coincidir (ni deben: son rasterizadores distintos). Un
-    # unico sm64.txt hacia que congelar la referencia de PRDP pisara la de SoftRDP y
-    # los cinco modos normales salieran DIVERGE. Fichero por backend, y el de SoftRDP
-    # conserva el nombre historico.
-    bl = BASELINES / ("sm64-prdp.txt" if MODES[mode].get("KESTREL_PRDP") == "1" else "sm64.txt")
+    # SoftRDP y GPU-RDP son bit a bit iguales y los modos de CPU coinciden byte a byte:
+    # una sola referencia.
+    bl = BASELINES / "sm64.txt"
     want = bl.read_text(encoding="utf-8").split()[0] if bl.exists() else None
     if args.update_baseline:
         BASELINES.mkdir(parents=True, exist_ok=True)
@@ -528,7 +519,7 @@ def gate_pd(mode, args):
         print(f"pd[{mode}]: FAIL no framebuffer dump (rc={rc})")
         return False
     md5 = hashlib.md5(dump.read_bytes()).hexdigest()
-    bl = BASELINES / ("pd-prdp.txt" if MODES[mode].get("KESTREL_PRDP") == "1" else "pd.txt")
+    bl = BASELINES / "pd.txt"
     want = bl.read_text(encoding="utf-8").split()[0] if bl.exists() else None
     if args.update_baseline:
         BASELINES.mkdir(parents=True, exist_ok=True)

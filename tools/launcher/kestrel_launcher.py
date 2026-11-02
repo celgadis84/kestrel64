@@ -13,7 +13,7 @@ API
     GET  /api/schema           esquema de opciones + mando (de options.py)
     GET  /api/config           perfil guardado
     POST /api/config           guardar perfil
-    GET  /api/builds           compilaciones disponibles (SoftRDP / paraLLEl-RDP)
+    GET  /api/builds           compilaciones disponibles (SoftRDP / GPU-RDP)
     GET  /api/roms?dir=...     escaneo de carpeta -> lista con cabecera leida
     GET  /api/browse?dir=...   navegador de carpetas (el navegador web no puede)
     GET  /api/boxart?id=...    caratula (cache local, descarga si hay red)
@@ -159,12 +159,12 @@ GPURDP_DESC = ("Rasterizador propio en la GPU (Vulkan compute). Mismos pixeles q
 
 def builds():
     """Compilaciones presentes. El plugin grafico se elige en tiempo de COMPILACION
-    (opcion de cmake KESTREL_PRDP), asi que el lanzador elige EJECUTABLE, no una dll."""
+    (opcion de cmake KESTREL_GPU), asi que el lanzador elige EJECUTABLE, no una dll."""
     out = []
     for d, pid, label, desc in (
         ("build", "soft", "SoftRDP",
          "Rasterizador propio en CPU. Determinista, no necesita GPU. Es el oraculo."),
-        ("build-prdp", "prdp", "paraLLEl-RDP",
+        ("build-prdp", "prdp", "GPU-RDP",
          "RDP a bajo nivel sobre Vulkan, en la GPU. Mas rapido y mas exacto en subpixel."),
     ):
         exe = os.path.join(KESTREL, d, "kestrel64.exe")
@@ -193,8 +193,8 @@ def builds():
             except OSError:
                 tag = ""
             if tag.startswith("prdp"):
-                pid, label = "prdp", "paraLLEl-RDP"
-            # Un .exe con parallel-RDP lleva tambien SoftRDP (KESTREL_PRDP=0 lo elige), y desde
+                pid, label = "prdp", "GPU-RDP"
+            # Un .exe con GPU-RDP lleva tambien SoftRDP (KESTREL_PRDP=0 lo elige), y desde
             # 2026-10-05 el paquete trae solo ese: los dos plugins salen del mismo fichero.
             for p2, l2 in ((pid, label),) + ((("soft", "SoftRDP"),) if pid == "prdp" else ()):
                 if any(x["id"] == p2 for x in out):
@@ -222,7 +222,7 @@ def pick_exe(plugin):
         for x in b:
             if x["id"] == plugin:
                 return x
-    # auto: GPU-RDP si esta compilado (el .exe de parallel-RDP lo lleva), si no SoftRDP.
+    # auto: GPU-RDP si esta compilado, si no SoftRDP.
     for want in ("gpurdp", "soft"):
         for x in b:
             if x["id"] == want:

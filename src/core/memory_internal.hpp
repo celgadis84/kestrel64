@@ -62,8 +62,7 @@ auto mempakAddrCrc(u16 blockAddr) -> u8;
 auto mempakDataCrc(const u8* data) -> u8;
 auto mempakFormat(std::vector<u8>& p) -> void;
 
-// Diagnostico KESTREL_RDPINLINE: el RDP corre en el hilo de CPU aun en modo threaded. Decide
-// tambien que hilo es el dueno de Granite, y por tanto quien puede llamar a vrdp::idle.
+// Diagnostico KESTREL_RDPINLINE: el RDP corre en el hilo de CPU aun en modo threaded.
 inline auto rdpInlineDiag() -> bool {
   static const bool on = std::getenv("KESTREL_RDPINLINE") != nullptr;
   return on;

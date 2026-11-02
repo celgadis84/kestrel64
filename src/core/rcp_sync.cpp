@@ -628,8 +628,6 @@ auto Memory::dpScheduleSpan(u32 current, u32 end, bool xbus, const u8* src, u64 
   dpSchedEnd.store(t1, std::memory_order_release);
   dpSubSeq.store(seq + 1, std::memory_order_release);
   dpcEpoch.fetch_add(1, std::memory_order_release);
-  // Sin pase de coste no se sabe si trae SYNC_FULL: se da por hecho. Un tramo vacio no trae nada.
-  dpLastSpanSync = costed ? softCost.sawSyncFull : (current != end && rdpCostOn()) || !rdpCostOn();
   // CMD_BUSY y PIPE_BUSY se separan en los huecos (n64brew, "Reality Display Processor/
   // Interface"): CMD_BUSY cuenta mientras el FIFO tiene comandos, PIPE_BUSY desde el primer
   // comando hasta el SYNC_FULL, tambien con el FIFO vacio esperando al RSP. El modelo de coste
@@ -1025,9 +1023,7 @@ auto Memory::dpRdvOn() -> bool {
 auto Memory::rcpSchedReset() -> void {
   std::lock_guard<std::mutex> lk(rdpMx);
   dpSchedEnd.store(0, std::memory_order_relaxed);
-  dpSyncEnds.clear();
   rdpHwHung.store(false, std::memory_order_relaxed);
-  dpSyncBarAt.store(~0ull, std::memory_order_relaxed);
   dpSubSeq.store(0, std::memory_order_relaxed);
   dpcEpoch.fetch_add(1, std::memory_order_release);
   dpCompSeq.store(0, std::memory_order_relaxed);

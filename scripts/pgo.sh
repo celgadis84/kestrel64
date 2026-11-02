@@ -5,7 +5,7 @@
 # (despachador del JIT, ayudantes de memoria, cita CPU<->RSP). El compilador, a ciegas, coloca
 # esos saltos con reglas genericas. Con un perfil de juego real coloca la rama caliente en
 # linea y aparta la fria. MEDIDO (min de 4, intercalado, i7-870): PD -7,1 %, SM64 -8,6 %,
-# DK64 -4,2 %; ademas gate_all 760 -> 720 s y gate_prdp 378 -> 362 s.
+# DK64 -4,2 %; ademas gate_all 760 -> 720 s.
 #
 # No toca la semantica del invitado: es colocacion de codigo del ANFITRION. La prueba es que
 # el statehash de las tres tandas sale identico al del binario sin PGO, y esto lo imprime.
@@ -53,7 +53,7 @@ merge() {
 build_gen() {
   sh "$(dirname "$0")/killown.sh"   # solo exes de este repo, no los de otra sesion
   echo "== arbol instrumentado =="
-  cmake -S . -B build-pgogen -G Ninja -DCMAKE_BUILD_TYPE=Release -DKESTREL_PRDP=ON \
+  cmake -S . -B build-pgogen -G Ninja -DCMAKE_BUILD_TYPE=Release -DKESTREL_GPU=ON \
         -DKESTREL_PGO=gen >/dev/null
   cmake --build build-pgogen -j8 --target kestrel64
 }

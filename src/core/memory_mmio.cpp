@@ -4,7 +4,6 @@
 #include "memory_internal.hpp"
 #include "wrtag.hpp"
 #include "../audio/audio.hpp"
-#include "../vrdp/vrdp.hpp"
 #include "../debug/dbg.hpp"
 
 namespace kestrel {
@@ -517,9 +516,6 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     }
     return;
   case BASE_VI & 0x1ff0'0000:
-    // Mirror the VI programming to the GPU backend so its scanout matches. The N64 VI
-    // register index (offset>>2, 0..13) maps 1:1 onto ::RDP::VIRegister. No-op when PRDP off.
-    if(((off & 0xff) >> 2) < 14) vrdp::viWrite((off & 0xff) >> 2, v);
     switch(off & 0xff) {
     case 0x00: rcp.vi_ctrl = v; break;
     // Count buffer flips, not writes: a single-buffered ROM rewrites VI_ORIGIN with the
@@ -703,15 +699,6 @@ auto Memory::viTick(u64 retiredNow) -> bool {
       u32 bpp   = (rcp.vi_ctrl & 3) == 3 ? 4u : 2u;
       ramBytesVi.fetch_add((u64)rcp.vi_width * lines * bpp, std::memory_order_relaxed);
     }
-    // Cierre de campo: rota el contexto por-cuadro del backend GPU. Corre en el hilo de
-    // emulacion, el mismo que encola comandos del RDP — begin_frame_context tiene que ir
-    // serializado con la emision (el scanout es la unica llamada entre hilos). No-op si
-    // esta apagado. Antes practicamente no se llamaba (solo al dar la vuelta el contador).
-    vrdp::frameBegin();
-    // Con el RDP en este mismo hilo (lockstep, o el diagnostico RDPINLINE) no hay worker que
-    // se quede ocioso: el aviso de ocio de parallel-rdp va una vez por campo. Sin el, una lista
-    // que no acaba en SYNC_FULL no llega nunca a la GPU y la RDRAM se queda sin pintar.
-    if(rcpMode != RcpMode::Threaded || rdpInlineDiag()) vrdp::idle();
   }
   // El DAC drena por muestras, no por campos: fuera del cierre de campo, en cada subtramo.
   aiTick(retiredNow);

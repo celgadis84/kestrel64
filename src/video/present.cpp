@@ -1,6 +1,5 @@
 #include "present.hpp"
 #include "../core/memory.hpp"
-#include "../vrdp/vrdp.hpp"
 #include "../core/runtime.hpp"
 #include "../ui/menu.hpp"
 #include "../net/netplay.hpp"
@@ -13,8 +12,8 @@
 #include <numeric>
 #include <string>
 
-#ifdef KESTREL_PRDP
-// paraLLEl-RDP's volk *defines* the vk* symbols as function POINTER VARIABLES. present.cpp
+#ifdef KESTREL_GPURDP
+// volk *defines* the vk* symbols as function POINTER VARIABLES. present.cpp
 // must see the matching declarations (VK_NO_PROTOTYPES → pointers, from volk.h), or a call
 // like vkCreateInstance(...) would jump to the pointer's storage address and execute its
 // bytes (DEP fault). volk.h pulls in the Vulkan headers, so GLFW picks up the VK types too.
@@ -105,11 +104,11 @@ struct Vk {
 
   postfx::State* fx = nullptr;   // filtros de presentacion; nullptr = la GPU no los admite
 
-  bool shared = false;        // instancia/dispositivo prestados por parallel-rdp: no destruir
+  bool shared = false;        // instancia/dispositivo prestados por GPU-RDP: no destruir
   bool presentable = false;   // false → surface unusable (e.g. no desktop session); compose only
   // Sin Vulkan utilizable (no hay vulkan-1.dll, driver sin Vulkan, sin dispositivo): la
   // ventana sigue abriendose y el cuadro se presenta por GDI (StretchDIBits). Asi un unico
-  // .exe vale para cualquier maquina; SoftRDP rasteriza en CPU y parallel-RDP ya se cae solo.
+  // .exe vale para cualquier maquina; SoftRDP rasteriza en CPU y GPU-RDP ya se cae solo.
   bool gdi = false;
 };
 
@@ -172,7 +171,7 @@ auto createSwapchain(Vk& v, bool quiet = false) -> bool {
   ci.preTransform = caps.currentTransform;
   ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
   // FIFO bloquea DENTRO del driver hasta el vblank, y el present corre bajo el candado de la
-  // cola que parallel-rdp usa para TODOS sus envios (ver vrdp::queueLock). O sea que con vsync
+  // cola que GPU-RDP usa para TODOS sus envios (ver gpurdp::queueLock). O sea que con vsync
   // duro el hilo del RDP se queda fuera del candado hasta 16,7 ms por campo, y detras de el se
   // para el invitado entero. Sin ventana ese candado no se coge nunca: esa es exactamente la
   // diferencia entre 9,9 s (sin ventana) y >120 s (con ventana) por el mismo trabajo de PD.
@@ -220,19 +219,19 @@ auto createSwapchain(Vk& v, bool quiet = false) -> bool {
 // estirando o recortando una imagen del tamano equivocado. Hay que rehacerla cuando el
 // tamano cambia y cuando el driver dice OUT_OF_DATE.
 //
-// La cola grafica puede ser la de parallel-rdp (ver initVulkan). vkQueueSubmit y
-// vkQueuePresentKHR sobre una misma cola no son seguros entre hilos, y Granite submite desde
+// La cola grafica puede ser la de GPU-RDP (ver initVulkan). vkQueueSubmit y
+// vkQueuePresentKHR sobre una misma cola no son seguros entre hilos, y GPU-RDP submite desde
 // el hilo del RDP mientras esto corre en el de la ventana: sin el candado el driver pierde el
 // dispositivo. Con contexto propio no hay contienda y el guarda no hace nada.
 struct QueueGuard {
   bool on;
-  explicit QueueGuard(bool shared) : on(shared) { if(on) vrdp::queueLock(); }
-  ~QueueGuard() { if(on) vrdp::queueUnlock(); }
+  explicit QueueGuard(bool shared) : on(shared) { if(on) gpurdp::queueLock(); }
+  ~QueueGuard() { if(on) gpurdp::queueUnlock(); }
 };
 
 // vkDeviceWaitIdle primero: las imagenes viejas pueden seguir en vuelo en la cola. Pide
 // sincronizacion externa de TODAS las colas del dispositivo, asi que con el dispositivo de
-// parallel-rdp va bajo el mismo candado que sus envios.
+// GPU-RDP va bajo el mismo candado que sus envios.
 //
 // La cadena vieja se destruye ANTES de crear la nueva: se crea sin `oldSwapchain`, y una
 // superficie con otra cadena viva da VK_ERROR_NATIVE_WINDOW_IN_USE_KHR en muchos drivers. Si
@@ -315,15 +314,12 @@ static auto createSrcImage(Vk& v, u32 w, u32 h) -> bool {
 }
 
 auto initVulkan(Vk& v) -> bool {
-  // Con parallel-rdp activo hay que COMPARTIR su contexto Vulkan en vez de crear uno propio:
+  // Con GPU-RDP activo hay que COMPARTIR su contexto Vulkan en vez de crear uno propio:
   // volk resuelve todos los vk* en UNA tabla global de punteros, asi que el segundo contexto
   // que se carga pisa las entradas del primero y la siguiente llamada del otro salta a un
   // puntero nulo. La caida al abrir la ventana con PRDP era exactamente eso (host RIP 0).
   // De paso ahorra un dispositivo logico entero en la GPU.
-  const vrdp::SharedVk* sh = vrdp::sharedVk();
-#ifdef KESTREL_PRDP
-  if(!sh) sh = gpurdp::sharedVk();   // GPU-RDP propio (KESTREL_GPURDP=1): mismo trato
-#endif
+  const gpurdp::SharedVk* sh = gpurdp::sharedVk();
   if(sh) {
     v.shared   = true;
     v.instance = (VkInstance)sh->instance;
@@ -335,12 +331,12 @@ auto initVulkan(Vk& v) -> bool {
   // Cualquier fallo de Vulkan de aqui en adelante deja la ventana en presentacion GDI.
   bool vkOk = true;
   // KESTREL_FORCEGDI=1: probar el camino sin Vulkan en una maquina que si lo tiene (solo
-  // cuando el contexto no es el de parallel-RDP, que ya lo esta usando).
+  // cuando el contexto no es el de GPU-RDP, que ya lo esta usando).
   if(!v.shared) {
     const char* fg = std::getenv("KESTREL_FORCEGDI");
     if(fg && std::strcmp(fg, "0") != 0) vkOk = false;
   }
-#ifdef KESTREL_PRDP
+#ifdef KESTREL_GPURDP
   if(!v.shared && volkInitialize() != VK_SUCCESS) {
     std::fprintf(stderr, "[video] volkInitialize failed\n"); vkOk = false;
   }
@@ -358,7 +354,7 @@ auto initVulkan(Vk& v) -> bool {
       std::fprintf(stderr, "[video] vkCreateInstance failed\n"); vkOk = false;
       v.instance = VK_NULL_HANDLE;
     }
-#ifdef KESTREL_PRDP
+#ifdef KESTREL_GPURDP
     else volkLoadInstance(v.instance);   // populate instance-level entry points
 #endif
   }
@@ -433,7 +429,7 @@ auto initVulkan(Vk& v) -> bool {
   for(int i = 0; i < 20; i++) { glfwPollEvents(); std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
 
   if(v.shared) {
-    // El dispositivo ya lo eligio parallel-rdp; aqui solo hay que verificar que su cola
+    // El dispositivo ya lo eligio GPU-RDP; aqui solo hay que verificar que su cola
     // grafica sepa presentar en esta superficie. Si no puede, se queda en compose-only.
     VkBool32 present = VK_FALSE;
     vkGetPhysicalDeviceSurfaceSupportKHR(v.phys, v.qfamily, v.surface, &present);
@@ -480,7 +476,7 @@ auto initVulkan(Vk& v) -> bool {
       v.dev = VK_NULL_HANDLE;
       return toGdi("vkCreateDevice failed");
     }
-#ifdef KESTREL_PRDP
+#ifdef KESTREL_GPURDP
     volkLoadDevice(v.dev);   // populate device-level entry points (swapchain etc.)
 #endif
     vkGetDeviceQueue(v.dev, v.qfamily, 0, &v.queue);
@@ -654,7 +650,7 @@ auto destroyVulkan(Vk& v) -> void {
   v.fx = nullptr;
   destroySrcImage(v);
   if(v.swap) vkDestroySwapchainKHR(v.dev, v.swap, nullptr);
-  // El dispositivo y la instancia prestados son de parallel-rdp: los destruye su Context.
+  // El dispositivo y la instancia prestados son de GPU-RDP: los destruye el.
   // La superficie si es nuestra aunque la instancia no lo sea.
   if(v.dev && !v.shared) vkDestroyDevice(v.dev, nullptr);
   if(v.surface) vkDestroySurfaceKHR(v.instance, v.surface, nullptr);
@@ -1339,37 +1335,20 @@ auto Presenter::pumpFrame() -> bool {
   frame.assign((usize)width * height, 0xff000000u);   // bytes 0,0,0,255 → black
   const auto& ram = mem->rdram;
 
-  // GPU RDP path: pull the scanned-out image straight from paraLLEl-RDP (VRAM),
-  // bypassing the RDRAM framebuffer read. Its RGBA8888 [R,G,B,A] byte order matches
-  // `frame`'s little-endian ABGR word, so it copies row-for-row. No-op when PRDP off.
-  bool vrdpFrame = false;
-  if(vrdp::active()) {
-    u32 sw = 0, sh = 0;
-    const u8* rgba = vrdp::scanout(sw, sh);
-    if(rgba && sw && sh) {
-      width  = sw > kMaxSrcW ? kMaxSrcW : sw;
-      height = sh > kMaxSrcH ? kMaxSrcH : sh;
-      frame.assign((usize)width * height, 0xff000000u);
-      for(u32 y = 0; y < height; y++)
-        std::memcpy(&frame[y * width], rgba + (usize)y * sw * 4, (usize)width * 4);
-      vrdpFrame = true;
-    }
-    vrdp::scanoutDone();
-  }
-
+  bool hiFrame = false;   // cuadro ya barrido por la GPU (escalado): sin filtros del VI
   // GPU-RDP con escalado interno: barrido desde su copia de alta resolucion. Sin los filtros
   // del VI (son de 1x; el detalle ya viene de la resolucion).
-  if(!vrdpFrame && gpurdp::upscale() > 1) {
+  if(gpurdp::upscale() > 1) {
     std::vector<u32> hi; u32 hw = 0, hh = 0;
     if(gpurdp::scanoutHi(ram.data(), (u32)ram.size(), origin, stride, width, height, type, hi, hw, hh,
                          kMaxSrcW, kMaxSrcH)) {
       width = hw; height = hh;
       frame.swap(hi);
-      vrdpFrame = true;
+      hiFrame = true;
     }
   }
 
-  if(!vrdpFrame && std::getenv("KESTREL_VIDEO_TEST")) {
+  if(!hiFrame && std::getenv("KESTREL_VIDEO_TEST")) {
     for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
       u32 R = x * 255 / width, G = y * 255 / height, B = 128;
       if((x % 32) == 0 || (y % 32) == 0) { R = G = B = 255; }
@@ -1378,11 +1357,11 @@ auto Presenter::pumpFrame() -> bool {
     type = 99;
   }
   // Filtros del VI (AA de cobertura, divot, de-dither). El RDP deja en el framebuffer la
-  // cobertura del pixel; el borde suave lo hace el VI al barrer. Cuando el backend es
-  // parallel-rdp esto no entra: su propio VI ya filtro el barrido.
+  // cobertura del pixel; el borde suave lo hace el VI al barrer. Con el cuadro de alta del
+  // escalado no entra: los filtros son de 1x.
   const u32 viCtrl = mem->rcp.vi_ctrl;
   std::vector<u32> filt;
-  if(!vrdpFrame && type != 99 && vi::active(viCtrl)) {
+  if(!hiFrame && type != 99 && vi::active(viCtrl)) {
     filt.resize((usize)width * height);
     vi::fetchFiltered(ram.data(), ram.size(), mem->rdramHidden.data(), mem->rdramHidden.size(),
                       origin, stride, width, height, viCtrl, filt.data());
@@ -1392,7 +1371,7 @@ auto Presenter::pumpFrame() -> bool {
     }
   }
 
-  if(vrdpFrame || !filt.empty()) {
+  if(hiFrame || !filt.empty()) {
     // ya hay pixeles (barrido de la GPU, o el camino filtrado del VI de arriba)
   } else if(type == 2) {  // RGBA5551, 2 bytes/pixel, big-endian
     for(u32 y = 0; y < height; y++) for(u32 x = 0; x < width; x++) {
@@ -1447,7 +1426,7 @@ auto Presenter::pumpFrame() -> bool {
   }
   // KESTREL_NOPRESENT=1: ventana abierta y cuadro construido, pero sin tocar la cola de Vulkan.
   // Es la biseccion del coste de presentar: si con esto va rapido, el freno esta en el present
-  // (candado de cola compartido con parallel-rdp), no en construir el cuadro ni en el barrido.
+  // (candado de cola compartido con GPU-RDP), no en construir el cuadro ni en el barrido.
   static const bool noPresent = []{ const char* e = std::getenv("KESTREL_NOPRESENT"); return e && e[0] == '1'; }();
   auto tPres = std::chrono::steady_clock::now();
   if(v.gdi && !noPresent) presentGdi(v, frame.data(), width, height);

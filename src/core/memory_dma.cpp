@@ -3,7 +3,6 @@
 #include "memory.hpp"
 #include "memory_internal.hpp"
 #include "wrtag.hpp"
-#include "../vrdp/vrdp.hpp"
 #include <algorithm>
 
 namespace kestrel {

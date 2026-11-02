@@ -9,8 +9,8 @@
 #include <cstring>
 #if defined(__SSE4_1__)
 #include <smmintrin.h>
-// Tabla del divisor del blender medida en hardware (parallel-rdp luts.hpp, vendorizado).
-#include "../../third_party/parallel-rdp/parallel-rdp/luts.hpp"
+// Tabla del divisor del blender medida en hardware (third_party/rdp-luts, de parallel-rdp).
+#include "../../third_party/rdp-luts/luts.hpp"
 #endif
 #include <cstdio>
 #include <set>

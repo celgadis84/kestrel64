@@ -6,7 +6,6 @@
 #include "../core/wrtag.hpp"
 #include "../core/hbmeta.hpp"
 #include "../core/movie.hpp"
-#include "../vrdp/vrdp.hpp"
 #include "../gpurdp/gpurdp.hpp"
 #include "../video/capture.hpp"
 #include "../net/netplay.hpp"
@@ -766,13 +765,11 @@ auto Server::cmdRdpStats(const std::string& cmd, json::Value& data) -> void {
     .set("fill", st.px[3].load(r)).set("written", st.pxWritten.load(r)).set("imRd", st.pxImRd.load(r))
     .set("zCmp", st.pxZCmp.load(r)).set("zUpd", st.pxZUpd.load(r));
   data.set("pixels", px);
-  // Que rasterizador pinto y si los pixeles son exactos. Con SoftRDP y GPU-RDP `written` y
-  // `zUpd` salen del resultado real de cada pixel (prueba de z, alpha compare); con
-  // parallel-RDP la contabilidad es un paseo de solo-coste del SoftRDP y cuenta como escrito
-  // todo pixel rasterizado (cota superior: no ve que pixeles pierden la prueba de z).
+  // Que rasterizador pinto. Con SoftRDP y GPU-RDP `written` y `zUpd` salen del resultado real
+  // de cada pixel (prueba de z, alpha compare): siempre exactos.
   const bool gpu = gpurdp::active();
-  data.set("backend", gpu ? "gpurdp" : vrdp::active() ? "prdp" : "soft");
-  data.set("exactPixels", !vrdp::active() || gpu);
+  data.set("backend", gpu ? "gpurdp" : "soft");
+  data.set("exactPixels", true);
   if(gpu) {
     const gpurdp::Stats a = gpurdp::stats(), &b = gpuStats0;
     json::Value gv = json::Value::object();
@@ -911,7 +908,6 @@ auto Server::cmdCapture(const std::string& cmd, const json::Value& args, json::V
     bool ok = capture::waitScreenshot(id, args.has("timeout_ms") ? args.get("timeout_ms").asU32() : 5000, path, w, h, err);
     if(!ok) { data.set("msg", err); return false; }
     data.set("path", path).set("width", w).set("height", h).set("format", "png");
-    if(vrdp::active()) data.set("note", "parallel-rdp activo: la foto sale de la RDRAM, no del escaneo de la GPU");
     return true;
   }
   if(cmd == "capture.video.start") {
@@ -972,26 +968,6 @@ auto Server::cmdNetplay(const std::string& cmd, const json::Value& args, json::V
 }
 
 auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool {
-  // Con el backend de GPU vivo, la imagen BUENA no esta en la RDRAM: parallel-rdp rasteriza
-  // y escanea por su cuenta, y lo que se ve en la ventana sale de vrdp::scanout() ya con el
-  // filtrado del VI aplicado. Leer la RDRAM aqui daba una foto a medio hacer y sin filtro --
-  // parecia SoftRDP con los bordes rotos --, asi que cuando hay GPU se captura SU imagen.
-  if(vrdp::active()) {
-    u32 w = 0, h = 0;
-    const u8* rgba = vrdp::scanout(w, h);
-    if(rgba && w && h) {
-      blob.assign(rgba, rgba + (usize)w * h * 4);
-      vrdp::scanoutDone();
-      data.set("width", (u64)w);
-      data.set("height", (u64)h);
-      data.set("format", "rgba8888");
-      data.set("source", "gpu");
-      std::lock_guard<System::CoreMutex> lk(system.coreMutex);
-      data.set("origin", (u64)(system.memory.rcp.vi_origin & 0x00FFFFFF));
-      return true;
-    }
-    vrdp::scanoutDone();   // simetrico: scanout() deja el cerrojo cogido aunque no haya foto
-  }
   u32 origin, width, ctrl, autoH;
   {
     std::lock_guard<System::CoreMutex> lk(system.coreMutex);

@@ -220,7 +220,7 @@ function buildVideo() {
     c.className = "pcard" + (cur === d.id ? " on" : "") + (d.ok ? "" : " off");
     c.innerHTML = `<b>${d.label}</b><span>${d.desc}</span>` +
       (d.ok ? (d.tag ? `<div class="tag">${d.tag}</div>` : "")
-            : `<div class="tag">no compilado — cmake -DKESTREL_PRDP=ON</div>`);
+            : `<div class="tag">no compilado — cmake -DKESTREL_GPU=ON</div>`);
     if (d.ok) c.onclick = () => { CFG.plugin = d.id; touch(); buildVideo(); render(); };
     cards.appendChild(c);
   });
