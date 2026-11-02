@@ -49,6 +49,10 @@ add_executable(kestrel64
   src/core/rewind.cpp
   src/core/cheats.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -100,6 +104,10 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -131,6 +139,10 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -162,6 +174,10 @@ add_executable(tpak_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -195,6 +211,10 @@ add_executable(wildmem_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -228,6 +248,10 @@ add_executable(watch_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -260,6 +284,10 @@ add_executable(pif_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp
@@ -292,6 +320,10 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   src/telemetry/hostprof.cpp
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
+  src/cpu/cpu_boot.cpp
+  src/cpu/cpu_fpu.cpp
+  src/cpu/cpu_disasm.cpp
+  src/video/fbdump.cpp
   src/cpu/jit.cpp
   src/cpu/jit_compile.cpp
   src/cpu/jit_run.cpp

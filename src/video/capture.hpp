@@ -21,7 +21,7 @@ namespace kestrel {
 
 struct Memory;
 
-// Framebuffer que barre el VI en RGB24 de arriba abajo (lo implementa cpu.cpp junto al volcado
+// Framebuffer que barre el VI en RGB24 de arriba abajo (lo implementa fbdump.cpp junto al volcado
 // BMP de KESTREL_FBDUMP, que usa la MISMA geometria). Con el VI apagado sale negro del tamano
 // que tocaria. Devuelve false solo sin memoria o sin geometria utilizable.
 struct FbGrab {
@@ -31,6 +31,10 @@ struct FbGrab {
   std::vector<u8> rgb;   // w*h*3
 };
 auto grabFramebuffer(Memory* mem, FbGrab& out) -> bool;
+// KESTREL_FBDUMP: the framebuffer the VI scans out, as a 24-bit BMP at `path`.
+auto dumpFramebufferBmp(Memory* mem, const char* path) -> void;
+// KESTREL_FBSEQ: per-field (or guest-requested) BMP sequence; called when a VI field closes.
+auto fbSeqField(Memory* mem, u32 field) -> void;
 
 namespace capture {
 

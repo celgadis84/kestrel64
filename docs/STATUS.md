@@ -19,7 +19,7 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
 
 ## CPU (VR4300)
 
-- **Intérprete** (`src/cpu/cpu.cpp`): MIPS III de 64 bits con delay slots, COP0 completo,
+- **Intérprete** (`src/cpu/cpu*.cpp`): MIPS III de 64 bits con delay slots, COP0 completo,
   FPU con redondeo y banderas, TLB de 32 entradas con sus excepciones, cachés I y D modeladas
   con tags, y excepción Watch. Es el oráculo: el dynarec llama a sus helpers en lo difícil.
 - **Dynarec x86-64** (`src/cpu/jit*.cpp`), activo de fábrica (`KESTREL_JIT=0` lo apaga):

@@ -25,7 +25,7 @@ igual, más lento.
 
 ---
 
-## 2. CPU — intérprete (`src/cpu/cpu.cpp`, 3521 líneas)
+## 2. CPU — intérprete (`src/cpu/cpu.cpp` ~2.270 líneas + `cpu_boot.cpp`, `cpu_fpu.cpp`, `cpu_disasm.cpp`)
 
 ### Qué modela
 

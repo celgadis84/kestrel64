@@ -596,7 +596,7 @@ por ser pequeña; se ordena por impacto, no se filtra.*
   `0xC86E2000`~~ **DECIDIDO 2026-09-04: sigue opcional; el parche ya no existe.** El
   hardcode a Perfect Dark murio cuando el arranque paso a reproducir el IPL3 del 6105 para
   CUALQUIER cartucho de ese CIC (copia de ROM 0x554..0x888 a RDRAM 0x004..0x338 y el DMA
-  con paso del microcodigo): en `cpu.cpp` no queda mas que la tabla de CICs indexada por
+  con paso del microcodigo): en `cpu_boot.cpp` no queda mas que la tabla de CICs indexada por
   CRC de la imagen del IPL3, que no es un juego sino una firma. Medido HLE vs
   `KESTREL_LLE_IPL3=1`, todo en lockstep porque es el unico modo determinista aqui:
   n64-systemtest 0/3721+0/2+0/6 en los dos, SM64 md5 identico

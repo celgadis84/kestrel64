@@ -119,7 +119,7 @@ Depth: `docs/ARCH-COMM.md` (section 4), `docs/FLASHCART-SD.md`, `docs/ROMS-COMPR
 
 ## 4. CPU
 
-- **Interpreter** (`src/cpu/cpu.cpp`): 64-bit MIPS III with delay slots, full COP0, FPU with
+- **Interpreter** (`src/cpu/cpu*.cpp`): 64-bit MIPS III with delay slots, full COP0, FPU with
   rounding and flags, 32-entry TLB with its exceptions, I- and D-caches modelled with tags, and
   the Watch exception. It is the reference: the dynarec calls its helpers for the hard cases.
 - **Dynarec** (`src/cpu/jit*.cpp`: code cache and linking in `jit.cpp`, emitters and
@@ -258,12 +258,12 @@ Depth: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 |---|---|---|
 | `src/main.cpp` | command line, startup | `main.cpp` |
 | `src/core/` | run loop and clocks, memory/MMIO/DMA/rendezvous, ROM loading, saves, savestates, rewind, cheats, archives, cartridge extras | `system.cpp`, `memory.cpp` (+ `memory_*.cpp`, `rcp_*.cpp`), `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
-| `src/cpu/` | VR4300 interpreter and x86-64 dynarec | `cpu.cpp`, `jit.cpp` (+ `jit_compile.cpp`, `jit_run.cpp`) |
+| `src/cpu/` | VR4300 interpreter and x86-64 dynarec | `cpu.cpp` (+ `cpu_boot.cpp`, `cpu_fpu.cpp`, `cpu_disasm.cpp`), `jit.cpp` (+ `jit_compile.cpp`, `jit_run.cpp`) |
 | `src/rsp/` | RSP interpreter, RSP JIT, pipeline timing model | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
 | `src/rdp/` | SoftRDP (reference rasterizer), HD texture packs | `rdp.cpp`, `texpack.cpp` |
 | `src/gpurdp/` | GPU-RDP, Vulkan compute rasterizer and shaders | `gpurdp.cpp`, `shaders/` |
 | `src/vrdp/` | parallel-RDP glue and shared Vulkan context (being retired) | `vrdp.cpp` |
-| `src/video/` | presenter, VI filter, image filters, capture | `present.cpp`, `vifilter.cpp`, `postfx.cpp`, `capture.cpp` |
+| `src/video/` | presenter, VI filter, image filters, capture | `present.cpp`, `vifilter.cpp`, `postfx.cpp`, `capture.cpp`, `fbdump.cpp` |
 | `src/audio/` | AI output to the host | `audio.cpp` |
 | `src/telemetry/` | telemetry/MCP server, debugger endpoints, symbols, host profiler | `server.cpp`, `server_dbg.cpp`, `symbols.cpp`, `hostprof.cpp` |
 | `src/debug/` | debugger core (recorders, watches) | `dbg.cpp` |

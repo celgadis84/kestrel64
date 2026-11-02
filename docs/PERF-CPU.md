@@ -113,7 +113,7 @@ depending on the mode. The interpreter never overshoots; the JIT could. Blocks
 whose `K` exceeds the remaining budget are now declined — bit-exact field
 boundaries across interp/JIT.
 
-### 7. Host FP environment via MXCSR, not `<cfenv>` (`cpu.cpp`)
+### 7. Host FP environment via MXCSR, not `<cfenv>` (`cpu_fpu.cpp`)
 
 Every computational COP1 op sets the host rounding mode and clears the IEEE status
 before computing, then harvests the sticky flags. Through `<cfenv>` that is
@@ -130,7 +130,7 @@ host profiler put ~32 % of the emulator's total time there:
 
 On x86-64 every float/double operation is SSE, so MXCSR alone governs rounding and
 the sticky flags, and reading/writing it is two instructions. `namespace mx` in
-`cpu.cpp` does exactly that; `mx::prep()` only writes the register when the value
+`cpu_fpu.cpp` does exactly that; `mx::prep()` only writes the register when the value
 actually changes (the guest's rounding mode almost never moves between ops), and
 `cvtInt` saves/restores only the RC field, matching what `fesetround(save)` did.
 
