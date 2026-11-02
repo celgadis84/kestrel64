@@ -219,8 +219,8 @@ SIEMPRE el `.map` de cada ROM (`rom=map`).
 ### Editar fuente con python desde bash (trampas repetidas)
 - El heredoc `<<'PYEOF'` **se come las barras invertidas dobles**: un patron con `\\n`
   NO casa con el `\n` del fichero. Construir siempre la barra con `chr(92)`.
-- Codificacion y finales de linea son **por fichero**: `src/cpu/jit.{hpp,cpp}` y `src/main.cpp`
-  son latin-1 con LF; `src/core/system.cpp` es UTF-8 con **CRLF**. Abrir con el `encoding`
+- Codificacion y finales de linea son **por fichero**: `src/main.cpp` es latin-1 con LF
+  (`src/cpu/jit*.{hpp,cpp}` son UTF-8 con LF); `src/core/system.cpp` es UTF-8 con **CRLF**. Abrir con el `encoding`
   correcto y `newline=''`, y no meter acentos escritos en UTF-8 dentro de un fichero latin-1
   (anclas de busqueda: usarlas SIN acentos).
 

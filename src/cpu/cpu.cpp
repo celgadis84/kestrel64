@@ -2987,7 +2987,7 @@ auto CPU::readCop0(u32 reg) -> u64 {
     // I-cache del fetch de ESTA instruccion (o su enclavamiento) para la tuberia antes de que
     // llegue a ejecutarse, y el reloj sigue corriendo mientras. El interprete vuelca
     // stallCycles tras ejecutar (countAdd al final del paso); sin esto un osGetCount que abre
-    // linea leia Count 24 ticks corto y el dynarec (que suma lo pendiente, ver jit.cpp MFC0)
+    // linea leia Count 24 ticks corto y el dynarec (que suma lo pendiente, ver jit_compile.cpp MFC0)
     // armaba otro Compare. Sin paradas pendientes, la suma vale 0 y es el registro de siempre.
     case C0_Count:  return (u32)((u32)cop0[reg] + (u32)(((u64)countFrac + ((u64)stallCycles << 7)) >> 8));
     default: return cop0[reg];

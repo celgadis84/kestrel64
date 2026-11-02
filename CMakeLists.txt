@@ -50,6 +50,8 @@ add_executable(kestrel64
   src/core/cheats.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/net/tcp.cpp
   src/net/netplay.cpp
   src/net/relay.cpp
@@ -99,6 +101,8 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp
@@ -128,6 +132,8 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp
@@ -157,6 +163,8 @@ add_executable(tpak_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp
@@ -188,6 +196,8 @@ add_executable(wildmem_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp
@@ -219,6 +229,8 @@ add_executable(watch_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp
@@ -249,6 +261,8 @@ add_executable(pif_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp
@@ -279,6 +293,8 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   src/telemetry/symbols.cpp
   src/cpu/cpu.cpp
   src/cpu/jit.cpp
+  src/cpu/jit_compile.cpp
+  src/cpu/jit_run.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
   src/core/memory_cart.cpp

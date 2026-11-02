@@ -22,7 +22,7 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
 - **Intérprete** (`src/cpu/cpu.cpp`): MIPS III de 64 bits con delay slots, COP0 completo,
   FPU con redondeo y banderas, TLB de 32 entradas con sus excepciones, cachés I y D modeladas
   con tags, y excepción Watch. Es el oráculo: el dynarec llama a sus helpers en lo difícil.
-- **Dynarec x86-64** (`src/cpu/jit.cpp`), activo de fábrica (`KESTREL_JIT=0` lo apaga):
+- **Dynarec x86-64** (`src/cpu/jit*.cpp`), activo de fábrica (`KESTREL_JIT=0` lo apaga):
   residencia de registros, memoria rápida con guardas, enlace de bloques, caché de destinos
   indirectos, bloques que cruzan página, COP0 en bloque y control de código automodificable
   por línea de I-caché. El nivel 2 del plan se cerró el 2026-10-01.

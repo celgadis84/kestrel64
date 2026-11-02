@@ -3,7 +3,7 @@
 // Guest code that walks off the end of RDRAM, misaligns a load, or dereferences an
 // unmapped page must raise a *guest* exception (or read defined garbage) — never a host
 // access violation and never a silent divergence between the interpreter and the dynarec.
-// The JIT fastmem path (src/cpu/jit.cpp) short-circuits ckseg0 accesses with an inline
+// The JIT fastmem path (src/cpu/jit_compile.cpp) short-circuits ckseg0 accesses with an inline
 // bounds/alignment/kernel-mode guard, so every one of those guards needs an address that
 // actually trips it, checked against the interpreter, which is the oracle.
 //

@@ -17,7 +17,7 @@ ejecuta el mismo código.
 
 | Núcleo | Intérprete | Dynarec | De fábrica | Apagar |
 |--------|-----------|---------|-----------|--------|
-| CPU VR4300 | `src/cpu/cpu.cpp` | `src/cpu/jit.cpp` (x86-64) | **JIT ON** | `KESTREL_JIT=0` |
+| CPU VR4300 | `src/cpu/cpu.cpp` | `src/cpu/jit*.cpp` (x86-64) | **JIT ON** | `KESTREL_JIT=0` |
 | RSP | `src/rsp/rsp.cpp` | `src/rsp/rspjit.cpp` (x86-64) | **JIT ON** | `KESTREL_RSPJIT=0` |
 
 Los dos dynarecs son solo x86-64 Windows (ABI Win64). Sin ellos el emulador funciona
@@ -62,7 +62,7 @@ igual, más lento.
 
 ---
 
-## 3. CPU — dynarec (`src/cpu/jit.cpp`, 3231 líneas)
+## 3. CPU — dynarec (`src/cpu/jit*.cpp`)
 
 Compilador de bloques de línea recta a x86-64, con enlace de bloques. **Activo de fábrica**
 (`KESTREL_JIT=0` lo apaga). El intérprete sigue siendo el camino de todo lo que el

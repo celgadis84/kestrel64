@@ -122,7 +122,8 @@ Depth: `docs/ARCH-COMM.md` (section 4), `docs/FLASHCART-SD.md`, `docs/ROMS-COMPR
 - **Interpreter** (`src/cpu/cpu.cpp`): 64-bit MIPS III with delay slots, full COP0, FPU with
   rounding and flags, 32-entry TLB with its exceptions, I- and D-caches modelled with tags, and
   the Watch exception. It is the reference: the dynarec calls its helpers for the hard cases.
-- **Dynarec** (`src/cpu/jit.cpp`, on by default, `KESTREL_JIT=0` turns it off): straight-line
+- **Dynarec** (`src/cpu/jit*.cpp`: code cache and linking in `jit.cpp`, emitters and
+  `compileBlock` in `jit_compile.cpp`, CPU-side dispatch in `jit_run.cpp`; on by default, `KESTREL_JIT=0` turns it off): straight-line
   blocks compiled from a physical address to x86-64, with register residency in Win64
   non-volatile registers, fast memory with guards, static block linking, an indirect target cache
   for `JR`/`JALR`, page-crossing blocks, COP0 inside blocks, and self-modifying code detection
@@ -257,7 +258,7 @@ Depth: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 |---|---|---|
 | `src/main.cpp` | command line, startup | `main.cpp` |
 | `src/core/` | run loop and clocks, memory/MMIO/DMA/rendezvous, ROM loading, saves, savestates, rewind, cheats, archives, cartridge extras | `system.cpp`, `memory.cpp` (+ `memory_*.cpp`, `rcp_*.cpp`), `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
-| `src/cpu/` | VR4300 interpreter and x86-64 dynarec | `cpu.cpp`, `jit.cpp` |
+| `src/cpu/` | VR4300 interpreter and x86-64 dynarec | `cpu.cpp`, `jit.cpp` (+ `jit_compile.cpp`, `jit_run.cpp`) |
 | `src/rsp/` | RSP interpreter, RSP JIT, pipeline timing model | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
 | `src/rdp/` | SoftRDP (reference rasterizer), HD texture packs | `rdp.cpp`, `texpack.cpp` |
 | `src/gpurdp/` | GPU-RDP, Vulkan compute rasterizer and shaders | `gpurdp.cpp`, `shaders/` |

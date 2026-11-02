@@ -278,7 +278,7 @@ struct Rsp {
   // hilo capaz de desatascar la escena (es ella quien archiva el tramo que despierta al RSP).
   // Durante el aparcamiento a la CPU la acotan la barrera de invitado del SP
   // (spBarrierEff -> rspPark + kParkLead) y rcpPace, las dos en reloj de invitado. Ver la
-  // nota larga del prologo en jit.cpp para POR QUE el freno hace falta cuando el RSP si corre.
+  // nota larga del prologo en jit_compile.cpp para POR QUE el freno hace falta cuando el RSP si corre.
   bool brake = false;
 
   // Vector unit SSE fast path (8 lanes = 1 XMM). Bit-exact with the scalar reference

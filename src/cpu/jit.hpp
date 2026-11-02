@@ -137,7 +137,7 @@ public:
   auto movzx_r8(Reg dst, Reg src) -> void { buf.emit(0x0F); buf.emit(0xB6); modrm(3,dst,src); }
   // ---- variantes reg-reg de los helpers de gpr (residencia en registro del host) ----
   // Mismo opcode que la forma memory-operand, con ModRM mod=11: el operando r/m pasa de
-  // [rbx+8*g] a un registro del host que aloja ese mismo gpr (ver RegCache en jit.cpp).
+  // [rbx+8*g] a un registro del host que aloja ese mismo gpr (ver RegCache en jit_compile.cpp).
   auto alu32_rr(u8 opc, Reg dst, Reg src) -> void { if((dst&8)||(src&8)) rex(false,dst,0,src); buf.emit(opc); modrm(3,dst,src); }
   auto alu64_rr(u8 opc, Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(opc); modrm(3,dst,src); }
   auto cmp64_rr(Reg dst, Reg src) -> void { rex(true,dst,0,src); buf.emit(0x3B); modrm(3,dst,src); }

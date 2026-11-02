@@ -1256,7 +1256,7 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   else if(metric == "imiss") { src = &c.profIMiss; mtotal = c.profIMissTotal; }
   else if(metric == "dline") { src = &c.profDLine; mtotal = c.profDMissTotal; dline = true; }
   else if(metric != "exec")  { data.set("warn", std::string("metric desconocida, uso exec")); }
-  // El interprete muestrea en CPU::step(); el JIT, por bloque en su driver (jit.cpp).
+  // El interprete muestrea en CPU::step(); el JIT, por bloque en su driver (jit_run.cpp).
   if(envFlag("KESTREL_JIT", true))
     data.set("warn", std::string(metric == "exec"
         ? (envFlag("KESTREL_JIT_NOLINK", false) ? "JIT sin enlaces: cada bloque cuenta entero en su PC de entrada (16 B)" : "JIT activo: un bloque cuenta entero en su PC de entrada y una cadena enlazada en la del bloque cabeza; KESTREL_JIT_NOLINK=1 reparte por bloque")

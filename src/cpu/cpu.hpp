@@ -5,7 +5,7 @@
 // Branch delay slots are modeled with the pc/nextPc pair (see step()).
 // Address translation goes through the real 32-entry TLB (see translate()), with the
 // KSEG0/KSEG1 shortcut as the fast path; I$/D$ are modeled (tags, dirty, fill).
-// El dynarec (src/cpu/jit.cpp) esta ACTIVO de fabrica y usa este interprete como
+// El dynarec (src/cpu/jit*.cpp) esta ACTIVO de fabrica y usa este interprete como
 // oraculo y como ruta de respaldo. Ver docs/CORES-CPU-RSP.md.
 
 #include "../core/types.hpp"
@@ -954,7 +954,7 @@ public:
   // (entrega de interrupt pendiente o cruzaría Count==Compare). Lo llama el prólogo emitido.
   auto jitReenterProceed(u32 K) -> u32;
   // Lectura de una palabra de instrucción por el compilador de bloques (mismo valor
-  // que icFetch, pero expuesto para el codegen en jit.cpp sin abrir toda la I-cache).
+  // que icFetch, pero expuesto para el codegen en jit_compile.cpp sin abrir toda la I-cache).
   auto jitFetchWord(u32 phys) -> u32 { return icFetch(phys); }
   // Modelo de I-cache EXACTO en el dynarec (solo con KESTREL_ICACHECOST > 0). El interprete
   // rellena una linea -- y cobra su fallo -- en el fetch de la primera op que la pisa; el

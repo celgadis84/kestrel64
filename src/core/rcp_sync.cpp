@@ -2034,7 +2034,7 @@ auto Memory::rspSubmitKick() -> void {
     spBarSafe = 0;
     // La barrera nueva es un plazo que el permiso de la cadena del JIT en curso no conocia (el
     // lanzamiento es un store en mitad de ella). Antes lo cubria la guarda `rsp.brake` del
-    // prologo; en Threaded con plazos esa guarda ya no se emite (ver jit.cpp), asi que se
+    // prologo; en Threaded con plazos esa guarda ya no se emite (ver jit_compile.cpp), asi que se
     // anula el permiso igual que siDma o dpScheduleSpan.
     jitCancelChain();
     rspKick = true;
