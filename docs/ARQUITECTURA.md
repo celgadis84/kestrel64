@@ -98,7 +98,7 @@ Profundidad: `docs/ARCH-COMM.md` (secciones 2-3, 6-8), `docs/ARCH-SYNC.md`,
 
 ## 3. Memoria y bus
 
-`src/core/memory.cpp` es el dueño de la RDRAM (8 MB, o 4 MB con `KESTREL_RDRAM=4`), de todos los
+La clase `Memory` (`src/core/memory.hpp`) es la dueña de la RDRAM (8 MB, o 4 MB con `KESTREL_RDRAM=4`), de todos los
 registros MMIO, de los motores de DMA y de las citas entre hilos. El hilo de CPU es el dueño de
 todo el MMIO; el único otro hilo que escribe registros del RCP es el RSP, a través de su COP0.
 
@@ -114,8 +114,12 @@ todo el MMIO; el único otro hilo que escribe registros del RCP es el RSP, a tra
   detectado por firma; EEPROM, SRAM, FlashRAM; cuatro mandos con Rumble, Controller y Transfer
   Pak; SummerCart64 con tarjeta SD como FAT32 virtual.
 
-`memory.cpp` es el fichero más grande del árbol; partirlo es la fase 4 de
-`docs/PLAN-CALIDAD.md`.
+Su implementación está partida por responsabilidad (mapa en `src/core/memory_internal.hpp`):
+`memory.cpp` (reset, mapa de direcciones, lecturas/escrituras de la CPU, bus PI),
+`memory_cart.cpp` (partidas, paks, SummerCart64), `memory_mmio.cpp` (registros, ticks de VI/AI),
+`memory_dma.cpp` (DMA de PI/SP/SI), `memory_pif.cpp` (PIF, CIC, RTC, joybus), `rcp_rdp.cpp`
+(trabajos y worker del RDP) y `rcp_sync.cpp` (regulador, barreras de invitado, citas, worker
+del RSP).
 
 Profundidad: `docs/ARCH-COMM.md` (sección 4), `docs/FLASHCART-SD.md`,
 `docs/ROMS-COMPRIMIDAS.md`.
@@ -268,7 +272,7 @@ Profundidad: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 | Directorio | Responsabilidad | Ficheros de entrada |
 |---|---|---|
 | `src/main.cpp` | línea de órdenes, arranque | `main.cpp` |
-| `src/core/` | bucle y relojes, memoria/MMIO/DMA/citas, carga de ROM, partidas, savestates, rebobinado, trucos, archivos comprimidos, extras del cartucho | `system.cpp`, `memory.cpp`, `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
+| `src/core/` | bucle y relojes, memoria/MMIO/DMA/citas, carga de ROM, partidas, savestates, rebobinado, trucos, archivos comprimidos, extras del cartucho | `system.cpp`, `memory.cpp` (+ `memory_*.cpp`, `rcp_*.cpp`), `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
 | `src/cpu/` | intérprete del VR4300 y dynarec x86-64 | `cpu.cpp`, `jit.cpp` |
 | `src/rsp/` | intérprete del RSP, RSP JIT, modelo de tiempos del pipeline | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
 | `src/rdp/` | SoftRDP (rasterizador de referencia), paquetes de texturas HD | `rdp.cpp`, `texpack.cpp` |

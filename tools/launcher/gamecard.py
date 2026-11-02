@@ -4,7 +4,7 @@
 Todo sale de ficheros al lado del cartucho, con los MISMOS nombres que usa el emulador,
 para que la ficha ensene lo que el emulador de verdad va a cargar y no una idea propia:
 
-  <base>.eep/.sra/.fla     partida del cartucho      (src/core/memory.cpp, withExt)
+  <base>.eep/.sra/.fla     partida del cartucho      (src/core/memory_cart.cpp, withExt)
   <base>.mpk, .mpk2..4     Controller Pak por mando  (idem)
   <base>.st0..st9          estados guardados         (src/core/savestate.cpp, stateSlotPath)
   <base>.cht               trucos, se cargan solos   (src/core/cheats.cpp, loadForRom)

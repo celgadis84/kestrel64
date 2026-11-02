@@ -1,6 +1,6 @@
 #pragma once
 // Tarjeta SD del flashcart (la que expone la SummerCart64, ver Memory::sc*). Solo es un
-// almacen de sectores de 512 bytes; el protocolo del cartucho vive en memory.cpp.
+// almacen de sectores de 512 bytes; el protocolo del cartucho vive en memory_cart.cpp.
 //
 // Dos respaldos, segun lo que apunte KESTREL_SD:
 //   * un fichero: imagen cruda (.img) de la tarjeta, leida y escrita en su sitio;

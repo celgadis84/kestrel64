@@ -36,6 +36,12 @@ add_executable(kestrel64
   src/main.cpp
   src/core/system.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/rom.cpp
   src/core/archive.cpp
   src/core/hbmeta.cpp
@@ -95,6 +101,12 @@ add_executable(rsp_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp
@@ -118,6 +130,12 @@ add_executable(save_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp
@@ -141,6 +159,12 @@ add_executable(tpak_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp
@@ -166,6 +190,12 @@ add_executable(wildmem_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp
@@ -191,6 +221,12 @@ add_executable(watch_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp
@@ -215,6 +251,12 @@ add_executable(pif_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp
@@ -239,6 +281,12 @@ add_executable(cheat_test EXCLUDE_FROM_ALL
   src/cpu/jit.cpp
   src/video/vifilter.cpp
   src/core/memory.cpp
+  src/core/memory_cart.cpp
+  src/core/memory_mmio.cpp
+  src/core/memory_dma.cpp
+  src/core/memory_pif.cpp
+  src/core/rcp_rdp.cpp
+  src/core/rcp_sync.cpp
   src/core/archive.cpp
   src/rdp/rdp.cpp
   src/rdp/texpack.cpp

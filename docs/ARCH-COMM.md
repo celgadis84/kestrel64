@@ -357,7 +357,7 @@ se cumplan. Medido: PD lockstep `14995cfadedc7f38` contra threaded-0 `0a64f3863f
 | Tema | Fichero |
 |------|---------|
 | Bucle, relojes, plazos | `src/core/system.cpp`, `src/core/system.hpp` |
-| MMIO, DMA, citas, barreras, workers | `src/core/memory.cpp` (4882 líneas), `src/core/memory.hpp` |
+| MMIO, DMA, citas, barreras, workers | `src/core/memory.hpp`; implementación en `memory*.cpp` y `rcp_*.cpp` (mapa en `memory_internal.hpp`) |
 | CPU | `src/cpu/cpu.cpp`, `src/cpu/jit.cpp` |
 | RSP | `src/rsp/rsp.cpp`, `src/rsp/rspjit.cpp` |
 | RDP | `src/rdp/`, `src/vrdp/` |

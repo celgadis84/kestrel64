@@ -5,7 +5,7 @@
 // el exe no dependa de el. Todo sale de ficheros al lado del cartucho, con los MISMOS nombres
 // que usa el emulador:
 //
-//   <base>.eep/.sra/.fla     partida del cartucho      (src/core/memory.cpp)
+//   <base>.eep/.sra/.fla     partida del cartucho      (src/core/memory_cart.cpp)
 //   <base>.mpk, .mpk2..4     Controller Pak por mando
 //   <base>.st0..st9          estados guardados         (src/core/savestate.cpp)
 //   <base>.cht               trucos                    (src/core/cheats.cpp)

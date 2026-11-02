@@ -93,7 +93,7 @@ parking).
 
 ## 3. Memory and bus
 
-`src/core/memory.cpp` owns RDRAM (8 MB, or 4 MB with `KESTREL_RDRAM=4`), every MMIO register,
+The `Memory` class (`src/core/memory.hpp`) owns RDRAM (8 MB, or 4 MB with `KESTREL_RDRAM=4`), every MMIO register,
 the DMA engines and the inter-thread rendezvous. The CPU thread owns all MMIO; the only other
 writer of RCP registers is the RSP through its COP0.
 
@@ -109,8 +109,11 @@ writer of RCP registers is the RSP through its COP0.
   signature; EEPROM, SRAM, FlashRAM; four controllers with Rumble, Controller and Transfer Pak;
   SummerCart64 with a virtual FAT32 SD card.
 
-`memory.cpp` is the largest file in the tree; splitting it is phase 4 of
-`docs/PLAN-CALIDAD.md`.
+Its implementation is split by responsibility (map in `src/core/memory_internal.hpp`):
+`memory.cpp` (reset, address map, CPU reads/writes, PI bus), `memory_cart.cpp` (saves, paks,
+SummerCart64), `memory_mmio.cpp` (register file, VI/AI ticks), `memory_dma.cpp` (PI/SP/SI DMA),
+`memory_pif.cpp` (PIF, CIC, RTC, joybus), `rcp_rdp.cpp` (RDP jobs and worker) and
+`rcp_sync.cpp` (pacing, guest-time barriers, rendezvous, RSP worker).
 
 Depth: `docs/ARCH-COMM.md` (section 4), `docs/FLASHCART-SD.md`, `docs/ROMS-COMPRIMIDAS.md`.
 
@@ -253,7 +256,7 @@ Depth: `docs/distribucion.md`, `CONTRIBUTING.md`, `docs/baselines/`.
 | Directory | Responsibility | Entry files |
 |---|---|---|
 | `src/main.cpp` | command line, startup | `main.cpp` |
-| `src/core/` | run loop and clocks, memory/MMIO/DMA/rendezvous, ROM loading, saves, savestates, rewind, cheats, archives, cartridge extras | `system.cpp`, `memory.cpp`, `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
+| `src/core/` | run loop and clocks, memory/MMIO/DMA/rendezvous, ROM loading, saves, savestates, rewind, cheats, archives, cartridge extras | `system.cpp`, `memory.cpp` (+ `memory_*.cpp`, `rcp_*.cpp`), `rom.cpp`, `savestate.cpp`, `rewind.cpp` |
 | `src/cpu/` | VR4300 interpreter and x86-64 dynarec | `cpu.cpp`, `jit.cpp` |
 | `src/rsp/` | RSP interpreter, RSP JIT, pipeline timing model | `rsp.cpp`, `rspjit.cpp`, `rsptiming.hpp` |
 | `src/rdp/` | SoftRDP (reference rasterizer), HD texture packs | `rdp.cpp`, `texpack.cpp` |

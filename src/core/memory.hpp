@@ -546,7 +546,7 @@ struct Memory {
   u64 dmaPayTail = 0;                            // solo el hilo del RSP
   std::atomic<u64> dmaPayHead{0};                // lo avanza quien aplica
   std::atomic<u64> dmaLogPushes{0};
-  auto spDmaLogPush(u64 at, u32 len) -> bool;    // true = apuntado (ver memory.cpp)
+  auto spDmaLogPush(u64 at, u32 len) -> bool;    // true = apuntado (ver memory_dma.cpp)
   auto spDmaLogApply(const DpLogDma& d) -> void;
   auto spDmaOverlay(const DpLogDma& d, u8* base, u32 a, u32 b) const -> void;
   // Escrituras del RSP a SP_STATUS en el mismo diario (reg = 8|4). El microcodigo cambia
@@ -1164,7 +1164,7 @@ struct Memory {
     return spCycleAt(rsp.cyclesRun.load(std::memory_order_acquire) - spKickCycles);
   }
   auto spBarrierWait(u64 now) -> void;   // SOLO hilo de CPU
-  // BARRERA DE ESCRITURA -- ver Memory::cpuRamWrBarrier en memory.cpp. KESTREL_WRBARRIER=1.
+  // BARRERA DE ESCRITURA -- ver Memory::cpuRamWrBarrier en rcp_sync.cpp. KESTREL_WRBARRIER=1.
   static auto wrBarrierOn() -> bool;
   static auto dmaBarrierOn() -> bool;
   auto cpuRamWrBarrier(u64 now) -> void;   // SOLO hilo de CPU
@@ -1275,7 +1275,7 @@ struct Memory {
 
   // --- regulador de velocidad CPU<->RSP (solo Threaded) -----------------------
   // Estado privado del HILO CPU (nadie mas lo toca), salvo los contadores atomicos
-  // que son telemetria. Ver Memory::rcpPace en memory.cpp para el razonamiento.
+  // que son telemetria. Ver Memory::rcpPace en rcp_sync.cpp para el razonamiento.
   u64  paceCpu0 = 0, paceRsp0 = 0;   // CPU en tiempo de invitado / ciclos RSP al enganchar
   bool pacePrimed = false;           // hay episodio enganchado
   bool paceGiveUp = false;           // salvavidas: freno suelto en este episodio
@@ -1304,7 +1304,7 @@ struct Memory {
   auto rcpPace(u64 cpuOps) -> u32;
  private:
   auto paceGrant(u64 ahead, u64 allow) -> u32;   // permiso a partir de lo ya leido
-  auto rdpPace(u64 cpuOps) -> u32;           // freno del dominio RDP (ver memory.cpp)
+  auto rdpPace(u64 cpuOps) -> u32;           // freno del dominio RDP (ver rcp_sync.cpp)
   auto rdpCostPass(u32 current, u32 stop, bool xbus, const u8* cmdSrc) -> bool;
   static auto rdpCostOn() -> bool;   // KESTREL_RDPCOST=0 apaga el modelo de coste
   auto rspPace(u64 cpuOps) -> u32;           // freno del dominio RSP
@@ -1827,7 +1827,7 @@ private:
   // Corre el bloque de ordenes de la PIF RAM y rellena las respuestas de mandos/EEPROM;
   // devuelve los microsegundos de linea joybus que costo (ver el bloque SI de arriba).
   auto pifProcessJoybus() -> u32;
-  // Desafio anti-pirateria del CIC-NUS-6105 (ver el cuerpo en memory.cpp). Lo pide el juego
+  // Desafio anti-pirateria del CIC-NUS-6105 (ver el cuerpo en memory_pif.cpp). Lo pide el juego
   // poniendo el bit 1 del byte de control y leyendo el bloque; la respuesta ocupa los 15
   // bytes 0x30..0x3E de la PIF RAM.
   auto pifCicChallenge() -> void;
