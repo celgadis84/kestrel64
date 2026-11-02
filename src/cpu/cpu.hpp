@@ -674,8 +674,6 @@ struct CPU {
   bool fpTrace = false;
   int  fpTraceEret = 0;
   int  fpWatchN = 0;
-  int  fpDbgN = 0;
-  bool huftTrap = false;
   u32  audioHook = 0;        // KESTREL_AUDIOHOOK: vaddr of n_alAudioFrame, stubbed to empty return
   bool haltUnimpl = false;   // KESTREL_HALT_UNIMPL: halt+dump on unknown op instead of RI
   u64 unimplCount = 0;       // reserved/unknown ops turned into RI exceptions

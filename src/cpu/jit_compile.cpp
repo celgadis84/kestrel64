@@ -696,7 +696,7 @@ extern "C" KJIT_ABI u8 jitInterpThunk(void* cpu, u32 op, u32 off) {
 //     interprete lo deja en el ultimo modo del invitado, y el CALL lo repone), y el Enable de
 //     Inexact apagado. Operandos normales o cero; resultado exacto en rango normal o cero.
 //   - ABS/NEG/C.cond: operandos normales o cero (NaN, infinito o subnormal -> CALL).
-// Solo con los cobros opcionales apagados (KESTREL_FPU, KESTREL_INTERLOCK), sin oraculo
+// Solo con los cobros opcionales apagados (KESTREL_FPUCOST, KESTREL_INTERLOCK), sin oraculo
 // (KESTREL_FPORACLE) y sin KESTREL_JIT_NOFPINLINE: los tres dependen de que la op pase por el
 // trampolin. Nunca en ranura de retardo (ese camino usa su propio trampolin).
 static const bool g_fpInline = !std::getenv("KESTREL_JIT_NOFPINLINE") && !std::getenv("KESTREL_FPORACLE")
@@ -1450,8 +1450,6 @@ static auto emitSafeOp(Emitter& e, RegCache& rc, u32 op) -> bool {
   const s32 hiOff = (s32)offsetof(CPU, hi);   // HI/LO son campos u64 del CPU (RBX==&cpu)
   const s32 loOff = (s32)offsetof(CPU, lo);
 
-  static const int only = std::getenv("KESTREL_JIT_ONLY1") ? 1 : 0;
-  if(only && !(OP == 0x09)) return false;   // narrowing: solo ADDIU
   switch(OP) {
     case 0x09: /*ADDIU*/ if(!rt) return true; rc.ld32(RAX, rs); e.alu32_imm(0, RAX, (u32)simm); store32(rt); return true;
     // NOTA: DADDIU/DADDU/DSUBU/DSLL*/DSRA*/DSLLV* (64-bit ISA) NO se JITean: en VR4300 trapean
@@ -1560,7 +1558,7 @@ u64 g_compFailCop[2][32] = {{0}};
 u64 g_compFailC0Rd[2][32] = {{0}};   // MFC0/MTC0 por registro COP0 destino
 const int g_compFailOn = std::getenv("KESTREL_JIT_STATS") ? 1 : 0;
 
-// Block-linking Step 1 (gated KESTREL_JIT_LINK): emite un prólogo re-validable en cada bloque
+// Block-linking Step 1 (hoy siempre puesto; KESTREL_JIT_NOLINK lo apaga): emite un prólogo re-validable en cada bloque
 // que re-muestrea interrupt + borde de timer antes del cuerpo. Neutro sin enlace todavía (el
 // driver ya hace el mismo check, así que es redundante pero debe seguir dando 0/3721); habilita
 // que un futuro bloque enlazado entre aquí sin volver al driver. El prólogo llama a este

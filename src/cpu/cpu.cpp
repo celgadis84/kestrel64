@@ -201,7 +201,7 @@ auto CPU::reset() -> void {
 // Recompute the single hot-path debug guard from the individual trap flags plus
 // the pc-window/pc-sample env vars (which are read lazily inside the prologue).
 auto CPU::refreshDebugArmed() -> void {
-  debugArmed = bpAddr || bpTrace || trapWild || excTail || huftTrap ||
+  debugArmed = bpAddr || bpTrace || trapWild || excTail ||
                audioHook || maxInsn || pcRingOn || profOn || g_intLog ||
                (mem && mem->trapSpRegStore) ||
                std::getenv("KESTREL_PCLO") || std::getenv("KESTREL_PCSAMPLE");
@@ -874,23 +874,6 @@ auto CPU::unimplemented(u32 op) -> void {
       return true;
     }
   }
-  // buildHufts sanity: on entry (0x80006054) scan the code-length array b[a0]
-  // for the first `a1` word entries. A value > 16 (BMAX) is an out-of-range code
-  // length that overruns the local count[] on the stack -> runaway offset loop.
-  if(huftTrap && (u32)pc == 0x8000'6054) {
-    u32 b = (u32)gpr[4], n = (u32)gpr[5];
-    if(n && n < 4096) {
-      u32 mx = 0, mxi = 0;
-      for(u32 i = 0; i < n; i++) { u32 v = read32(b + i * 4); if(v > mx) { mx = v; mxi = i; } }
-      if(mx > 16) {
-        std::fprintf(stderr, "[huft] bad code-length: b=0x%08x n=%u max=%u at idx=%u ra=0x%08x retired=%llu\n",
-                     b, n, mx, mxi, (u32)gpr[31], (unsigned long long)retired);
-        for(u32 i = 0; i < n && i < 24; i++) std::fprintf(stderr, "  b[%u]=%u\n", i, read32(b + i * 4));
-        std::fflush(stderr);
-        halted = true; haltReason = "huft bad code-length"; return true;
-      }
-    }
-  }
   return false;
 }
 
@@ -1251,53 +1234,11 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
         halted = true;
       }
     } }
-  if(fpTrace && excCode==15 && fpDbgN==0 && std::getenv("KESTREL_HDUMP")) {
-    memAbort=false;
-    std::fprintf(stderr, "== handler prologue @0x80000180 ==\n");
-    for(u32 a=0x80170b68; a<0x80170f80; a+=4) {
-      u32 w=read32(a); std::fprintf(stderr, "%08x: %08x %s\n", a, w, disasm(w,a).c_str());
-    }
-    memAbort=false; std::fflush(stderr); fpDbgN=1000000;  // one-shot
-  }
-  if(fpTrace && excCode==15 && (u32)gpr[31]==0x80010cb4 && std::getenv("KESTREL_DIS")) {
-    static int done=0; if(done<12){ done++;
-      memAbort=false;
-      u32 skipDisc=read32(0x801acf64), skipVal=read32(0x801acf6c), seenDisc=read32(0x801acfa4);
-      memAbort=false;
-      std::fprintf(stderr,"[L666] epc=0x%08x insn=%08x f0=%016llx f2=%016llx fcr31=0x%08x skipDisc=%u skipVal=%u seenDisc=%u ret=%llu\n",
-        (u32)epc, (u32)((mem?mem->read32((u32)epc&0x1fffffff):0)), (unsigned long long)fpr[0],(unsigned long long)fpr[2], fcr31, skipDisc, skipVal, seenDisc, (unsigned long long)retired);
-      static int disC=0; if(!disC){ disC=1;
-        std::fprintf(stderr,"  -- caller code [ra-0x60 .. ra+0x8] --\n");
-        for(u32 a=0x8001037c; a<=0x800103d4; a+=4){ memAbort=false; u32 w=read32(a); memAbort=false;
-          std::fprintf(stderr,"    0x%08x: %08x %s%s\n",a,w,disasm(w,a).c_str(), a==(u32)gpr[31]?"  <- ra":""); }
-      }
-      static int dis1=0; if(!dis1 && pcRingOn){ dis1=1;
-        std::fprintf(stderr,"  -- last %d executed insns before leak (oldest first) --\n", kPcRing);
-        u32 nn = pcRingIdx < (u32)kPcRing ? pcRingIdx : (u32)kPcRing;
-        u32 st = pcRingIdx >= (u32)kPcRing ? pcRingIdx - kPcRing : 0;
-        for(u32 k=0;k<nn;k++){ u32 i=(st+k)%kPcRing;
-          std::fprintf(stderr,"    0x%08x: %08x %s\n",(u32)pcRing[i],opRing[i],disasm(opRing[i],pcRing[i]).c_str()); }
-      }
-      std::fflush(stderr);
-    }
-  }
   if(fpTrace && (excCode==15 || excCode==11)) {
     std::fprintf(stderr, "[E%u] epc=0x%08x bd=%d exl=%d fcr31=0x%08x ra=0x%08x sp=0x%08x ret=%llu\n",
                  excCode, (u32)epc, bd?1:0, exl?1:0, fcr31, (u32)gpr[31], (u32)gpr[29], (unsigned long long)retired);
     std::fflush(stderr);
     fpTraceEret = (excCode==15) ? 2 : 1;
-  }
-  if(excCode == 15 && fpDbg && std::getenv("KESTREL_UNARMED")) {
-    memAbort=false; u32 disc = read32(0x801acf64); memAbort=false;
-    if(disc == 0) {   // skip NOT armed => fire outside expect_exception window => leaks into SEEN
-      memAbort=false; u32 fop = read32(epc); memAbort=false;
-      static int lk=0;
-      if(lk++ < 30) {
-        std::fprintf(stderr, "[UNARMED] epc=0x%08x insn=%08x %s fcr31=0x%08x ret=%llu\n",
-                     (u32)epc, fop, disasm(fop,epc).c_str(), fcr31, (unsigned long long)retired);
-        std::fflush(stderr);
-      }
-    }
   }
   static const bool trapRi = std::getenv("KESTREL_TRAPRI") != nullptr;
   if((excCode == 10 || excCode == 2 || excCode == 3 || excCode == 11) && trapRi) {
@@ -2140,19 +2081,10 @@ auto CPU::cop0op(u32 op) -> void {
         if(excTrace && exceptions < 200)
           std::fprintf(stderr, "[eret] -> 0x%08x status=%08x retired=%llu\n",
                        (u32)nextPc, (u32)cop0[C0_Status], (unsigned long long)retired);
-        int eretKind = fpTraceEret;
         if(fpTrace && fpTraceEret) {
           std::fprintf(stderr, "[R] -> 0x%08x status=%08x ret=%llu\n",
                        (u32)nextPc, (u32)cop0[C0_Status], (unsigned long long)retired);
           std::fflush(stderr); fpTraceEret = 0;
-        }
-        static bool seen15done=false;
-        static const bool seenFind = std::getenv("KESTREL_SEENFIND") != nullptr;
-        if(seenFind && eretKind==2 && !seen15done) {
-          memAbort=false;
-          std::fprintf(stderr, "[SEENDUMP15@eret ret=%llu] (epc was code-15)\n",(unsigned long long)retired);
-          for(u32 a=0x801acf50;a<0x801ad010;a+=4){u32 w=read32(a); if(w) std::fprintf(stderr,"  0x%08x=0x%08x\n",a,w);}
-          memAbort=false; std::fflush(stderr); seen15done=true;  // one-shot
         }
         pc = nextPc; nextPc = pc + 4;   // ERET has no delay slot
         inDelay = false; llbit = false;

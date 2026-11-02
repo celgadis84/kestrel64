@@ -209,7 +209,7 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 - `KESTREL_CACHECOST=1` — cobra fallos de I$/D$ (60 ciclos, como HW). Default 0 = fallos gratis. Obligatorio para medir el port PSX.
 - `KESTREL_RDPCOST_Z=0` — apaga la sombra de z del paseo solo-coste del RDP (los pixeles vuelven a cobrarse todos como escritos). Default 1: la sombra se aprende de los FILL de 16 bits y del propio Z_UPD, y no viaja en los savestates.
 - `KESTREL_RSP_TIMING=1` — modelo de ciclos del pipeline RSP; `profile_rsp metric=cycles|stalls` y `rsp_registers().timing` por MCP.
-- `KESTREL_TELEMETRY_PORT` — puerto que usa el puente `tools/mcp/kestrel_mcp.py` (default 9128).
+- `KESTREL_TELEMETRY_PORT` — lo lee solo el puente Python `tools/mcp/kestrel_mcp.py` (y los smoke `dbg_smoke.py`/`debugger_smoke.py`), default 9128. El emulador NO la lee: su puerto se fija con `--port <n>` (`src/main.cpp`, default 9128).
 - `KESTREL_USB=1` — USB del SummerCart64 (registros USB_*, salida de depuracion del homebrew); se lee por MCP `usb.log` y en el panel USB del depurador. Ver `docs/DEBUGGER.md`.
 - `KESTREL_DEBUGGER=1` (o `--debugger`) — abre la ventana del depurador al arrancar. Menu Depurar > Depurador... la abre en marcha.
 - `KESTREL_DEBUGGER_SHOT=<ruta.bmp>` — la ventana del depurador vuelca su backbuffer a los 180 cuadros (pruebas sin pantalla, `scripts/debugger_smoke.py`).
@@ -261,3 +261,157 @@ escribe el lanzador grafico `tools/launcher/run_launcher.cmd`.
 ## RDRAM de encendido (2026-11-01)
 
 `KESTREL_RDRAM_FILL=<semilla>` (distinta de 0): la RDRAM arranca con basura pseudoaleatoria (xorshift de esa semilla) en vez de ceros, como la consola, que no la borra. Para reproducir fallos que solo salen en HW por leer memoria sin inicializar (bordes del framebuffer, bufferes de audio). Determinista por semilla. `src/core/memory.cpp` `Memory::reset`.
+
+## Variables sin documentar hasta 2026-11-02 (auditoria de `src/`)
+
+Convencion: salvo que se diga otra cosa, una variable "de presencia" se activa con cualquier valor (incluido `0`); las marcadas "default ON" se apagan con `0`/`off`. Lo que no esta claro en el codigo se marca "sin uso claro".
+
+### Presentacion, ventana y opciones de producto
+
+- `KESTREL_ASPECT=4:3|16:9|estirar|W:H|WxH` — relacion de aspecto de la ventana (default 4:3). Tambien se cambia desde el menu. `src/core/runtime.hpp`.
+- `KESTREL_FILTER=nearest|bilinear|sharp|fsr|crt|cel|oleo|a4k` (o su numero) — filtro de escalado/postproceso al presentar. Opcion del lanzador.
+- `KESTREL_UPSCALE=1|2|4|8` — escala interna del RDP en GPU-RDP (1 = off). Es el valor de reserva de `KESTREL_GPURDP_UPSCALE`; si falta memoria vuelve a 1x. Opcion del lanzador.
+- `KESTREL_THROTTLE=0|1` — limitador de velocidad explicito (0 off, 1 on); gana al automatico.
+- `KESTREL_VOLUME=0..100` — volumen de audio.
+- `KESTREL_HUD_OFF` — oculta el HUD al presentar.
+- `KESTREL_VSYNC=1` — fuerza modo de presentacion FIFO en Vulkan (default MAILBOX/IMMEDIATE).
+- `KESTREL_FORCEGDI` — distinto de `0`: fuerza la ruta de presentacion GDI sin Vulkan (solo si no hay contexto GPU-RDP compartido).
+- `KESTREL_NOPRESENT=1` — no toca la cola Vulkan al presentar (biseca el coste del present).
+- `KESTREL_NOVIDEO` — `0` = quiere ventana; cualquier otro valor fuerza sin ventana. `KESTREL_VIDEO` (ya documentada) la fuerza con ventana.
+- `KESTREL_VIDEO_DUMP=<ruta>` — vuelca un BMP de cada fotograma presentado.
+- `KESTREL_FXDUMP=<f.ppm>` + `KESTREL_FXDUMP_AT=<n>` — vuelca UNA vez la salida del filtro postfx en el fotograma presentado n (default 300).
+- `KESTREL_TVTYPE=pal|ntsc|mpal` (o 0/1/2) — fuerza la region de video.
+- `KESTREL_LAUNCHER` — lo pone el lanzador al lanzar el juego, para no contar dos veces la sesion en la ficha del juego.
+- `KESTREL_PROFILE=<ruta>` — ruta del `profile.json` (el menu la fija al relanzar).
+- `KESTREL_PGO_NAME=<nombre>` — solo en compilacion PGO_GEN: etiqueta del `.profraw`.
+
+### Volcados de framebuffer y texturas
+
+- `KESTREL_FBSEQ=<patron printf>` — un BMP numerado por campo cerrado, en tiempo guest (p. ej. `frame_%05u.bmp`). Complementos: `KESTREL_FBSEQ_EVERY=<n>` (uno de cada n campos, default 1), `KESTREL_FBSEQ_FROM=<campo>` (salta el inicio), `KESTREL_FBSEQ_GUEST=1` (en vez de por campo, vuelca los fotogramas que el guest pide escribiendo N en `0x13FF001C`; N copias; lo usa el port PSX).
+- `KESTREL_FBFRAME=1` — con FBDUMP/FBSEQ en modo entrelazado (SERRATE), vuelca el cuadro completo en vez de un campo.
+- `KESTREL_VIFILTER=1` — aplica el filtro del VI al volcar con FBDUMP (A/B).
+- `KESTREL_TEXFX=scale4x|cel|poster` (o 1/2/3) — mejora de texturas. `KESTREL_TEXDUMP=<dir>` vuelca texturas a `<dir>/<ident ROM>`. `KESTREL_TEXPACK=<dir>` carga un pack de reemplazo. `src/rdp/texpack.cpp`.
+
+### Entrada
+
+- `KESTREL_PAD1..4` (PAD1 ya documentada) y `KESTREL_PADDEV1..4=<dispositivo>` — dispositivo asignado a cada puerto; los nombres se construyen con `%d` (no existe `KESTREL_PAD` suelta ni `KESTREL_PAD4` como caso especial). `src/video/present.cpp`.
+- `KESTREL_PADS=1101` — un digito por puerto (0/1): que puertos tienen mando.
+- `KESTREL_PADTYPE=0200` — tipo por puerto (0/1 mando, 2 raton; id 0x0200).
+- `KESTREL_BUTTONS=<mascara hex>` — mascara fija de botones del jugador 1 cuando no hay ventana (por MCP es preferible `controller_set`).
+
+### Cartucho, RTC, SD y estados
+
+- `KESTREL_RTC=1|0` — reloj del cartucho (canal 4 de joybus); sin la variable, bit 0 de `0x3F` de la cabecera ED.
+- `KESTREL_SD=<carpeta|.img>|0` — tarjeta SD del SummerCart64. Default: carpeta de la ROM; `0` la quita.
+- `KESTREL_LOADSTATE=<slot>` — carga un savestate al arrancar.
+- `KESTREL_HLE_IPL3=1` — fuerza la via antigua de arranque HLE (biseccion). `KESTREL_LLE_IPL3=1` — fuerza ejecutar el IPL3 (LLE). Un IPL3 desconocido va a LLE solo. `src/cpu/cpu_boot.cpp`.
+- `KESTREL_PIFBOOTWAIT=0` — quita el plazo de arranque del PIF (solo biseccion).
+- `KESTREL_SILOG` — log del desafio PIF/CIC y de SI.
+
+### Paradas, limites y trazas de ejecucion
+
+- `KESTREL_MAXFIELDS=<n>` — para tras n campos de video. `KESTREL_MAXSYNCS=<n>` — para tras n SYNC_FULL del RDP (animaciones que no hacen flip). `KESTREL_STABLE=<insns>[,<checks>]` — para cuando el framebuffer del VI queda identico n comprobaciones tras haber cambiado al menos una vez.
+- `KESTREL_HANGDOG=<s>` — guardian: s segundos sin flip de VI (tras al menos uno) provoca volcado y salida. Off por defecto.
+- `KESTREL_HALT_UNIMPL` — ante un op desconocido, para y vuelca en vez de lanzar RI (comportamiento antiguo).
+- `KESTREL_BP=<addr>` — para cuando pc llega por primera vez a addr. `KESTREL_BPTRACE` — con BP, registra registros en cada paso en vez de parar.
+- `KESTREL_PCRING` — anillo de los ultimos 4096 (pc, op) ejecutados, volcado al salir.
+- `KESTREL_EXCTAIL` — anillo de las ultimas 40 excepciones, volcado al salir.
+- `KESTREL_EXCTRACE=<n>` — sube el tope de la traza de excepciones (default 80).
+- `KESTREL_FAULTTRACE` — traza las primeras 24 excepciones que no son Int/Sys, con banco de registros.
+- `KESTREL_TRAPRI` — traza excepciones con excCode 10/2/3/11 (RI, TLBL, TLBS, CpU).
+- `KESTREL_TRAPWILD` — trampa: salto o fetch a MMIO del RCP (`0xA4000000..0xA4900000`), puntero corrupto; vuelca el rastro de saltos y para.
+- `KESTREL_TRAPZERO` — trampa: salto a `nextPc < 0x1000`, una sola vez, con rastro de saltos.
+- `KESTREL_TRAPSPREG` — trampa en las escrituras de CPU a registros de SP.
+- `KESTREL_NOINT` — suprime la entrega de interrupciones (diagnostico).
+- `KESTREL_INTLOG=2` — registra TODAS las interrupciones con instrucciones retiradas y MI (comparar modos linea a linea).
+- `KESTREL_STATTRACE` — traza los MTC0 a Status que cambian CU1.
+- `KESTREL_JLOG_NOSPIN` — sin uso claro (se lee como bandera en `src/cpu/cpu.cpp`, ligada al registro de saltos).
+- `KESTREL_PCLO=<n>`/`KESTREL_PCHI=<n>` — rango decimal de instrucciones retiradas en que se imprimen lineas `[pc]` (ad hoc; fija gpr[14]).
+- `KESTREL_PCSAMPLE=<0|0x80000000..>` — muestreo de paginas de pc; un valor >= `0x80000000` desglosa esa pagina instruccion a instruccion.
+- `KESTREL_MEMDUMP=<...>` — vuelca palabras guest de RDRAM al llegar al tope de `KESTREL_MAXINSN` (vistas cruda y coherente). Formato del valor: ver `src/cpu/cpu.cpp` (MEMDUMP).
+- `KESTREL_THREADSCAN` — en el volcado, escanea estructuras OSThread por su forma (no depende de simbolos).
+- `KESTREL_QCHK=<addr>` — vigila el invariante de las colas de hilos de libultra (p. ej. `__osRunQueue`). `KESTREL_QCHKN=<n>` (default 1024 instrucciones) y `KESTREL_QCHKAFTER=<n>` (default 30). `src/core/system.cpp`.
+- `KESTREL_SEENADDR=<phys>` — anillo de 24 transiciones de una palabra de RDRAM. `KESTREL_LEAKDUMP` — con SEENADDR, vuelca el anillo si el veredicto xlog contiene "with exception".
+- `KESTREL_CODEWATCH_LO=<hex>`/`KESTREL_CODEWATCH_HI=<hex>`/`KESTREL_CODEWATCH_AFTER=<n>` — ajustan `KESTREL_CODEWATCH`: rango fisico vigilado (default `0x8000..0x50000`) e instrucciones retiradas antes de armarse (default 30000000).
+- `KESTREL_WATCHLEN=<n>` — longitud vigilada por `KESTREL_WATCH`.
+- `KESTREL_FIELDTRACE=1|2` — una linea `[ft]` por campo (`f= ret= ops=`), comparable por md5 entre ejecuciones; `2` anade `rsp=`/`gclk=` (dependen del host, no valen para diff). `0` o vacio = off.
+- `KESTREL_FLIPLOG` — registra cuantos campos de VI costo cada fotograma.
+- `KESTREL_VILOG` — log muestreado de lecturas/escrituras de registros VI.
+- `KESTREL_AUDIOHOOK=<vaddr>` — vaciado de `n_alAudioFrame` (reproductor de secuencias de un juego): lo sustituye por un retorno vacio. Depuracion.
+- `KESTREL_AUDIO_TRACE` — imprime los primeros 12 empujes de AI (`[audio] push #n addr len rate`).
+- `KESTREL_ARGDBG` / `KESTREL_FPDBG` / `KESTREL_FPTRACE` — depuracion de FPU: FPDBG es la base; ARGDBG imprime los argumentos FPU (requiere FPDBG); FPTRACE traza excepciones FPU (excCode 15).
+- `KESTREL_FPORACLE` — oraculo: compara las rutas rapidas FPU del JIT con el interprete (desactiva el FP en linea del JIT).
+- `KESTREL_DCWT` — D-cache en escritura directa (diagnostico).
+- `KESTREL_CITRACE` — imprime `[rdp!] SET_COLOR_IMAGE bajo` en cada SET_COLOR_IMAGE (no solo por debajo del suelo). `src/rdp/rdp_cmd.cpp`.
+
+### Coste y reloj guest
+
+- `KESTREL_DCACHECOST=<n|on|off>` / `KESTREL_ICACHECOST=<n|on|off>` — coste de fallo por cache; `0`/`off` = 0, `1`/`on` = 60 ciclos, otro numero hasta 1024. Si faltan, valen `KESTREL_CACHECOST`.
+- `KESTREL_UNCACHEDCOST=<n|on|off>` — ciclos por lectura no cacheada (KSEG1); mismos valores (1 = 60, max 1024). Default 0.
+- `KESTREL_FPUCOST` / `KESTREL_INTERLOCK` / `KESTREL_MULDIVCOST` — coste de FPU / interlocks / mul-div: `stat` cuenta sin cobrar, `0`/`off` apaga, otro valor cobra (FPUCOST admite ademas `block`). Default 0.
+- `KESTREL_STALLCLOCK=0|off|vi|cart` — si las esperas cuentan como tiempo guest: `0`/`off` ninguna, `vi` solo VI, `cart` solo plazos PI/SI. Default ambas.
+- `KESTREL_RDPCOST=0` — apaga el modelo de coste del RDP (A/B).
+- `KESTREL_TMEMSETUP=<gclk>` — coste fijo de carga de TMEM (default 14; 0 = modelo antiguo).
+- `KESTREL_RSPBUDGET=<instr>` — tope duro por tarea RSP (default 0: solo avisa y rearma).
+- `KESTREL_RSPIDLE=0` — apaga `idleSkip` del RSP (el md5 debe coincidir).
+- `KESTREL_IDLEPACE` — default ON; `0` es una prueba (regulador dependiente del host). `src/cpu/jit_run.cpp`.
+- `KESTREL_RTC` — ver Cartucho.
+
+### Sincronizacion RCP y enhebrado
+
+Todas en `src/core/rcp_sync.cpp` salvo indicacion; "default ON" se apaga con `0`/`off` (compuertas de biseccion).
+
+- `KESTREL_DPBARRIER` (barrera guest del RDP), `KESTREL_SPBARRIER` (barrera de SP), `KESTREL_RCPDEADLINE` (plazos guest del RCP, solo Threaded), `KESTREL_WRBARRIER` (barrera de escritura CPU->RSP) — default ON.
+- `KESTREL_DPGUEST` — default ON; `0` vuelve al modelo host en lecturas de registros DP.
+- `KESTREL_DPRDV=1` — default OFF; encuentro CPU-RSP al sondear DPC_CURRENT con una pasada abierta por delante de la CPU.
+- `KESTREL_DPSCHED` — traza las planificaciones en tiempo guest (comparables por md5).
+- `KESTREL_DPSUBPROF` — tiempo de pared dentro de `rdpSubmit` (`src/core/rcp_rdp.cpp`).
+- `KESTREL_EVLOG=1|2` — anillo de eventos RCP (16384); `2` sin eventos RDP; lo vuelca el watchdog.
+- `KESTREL_SPRELAUNCH=0` — A/B: siempre se detiene (reaparece el fallo de libdragon).
+- `KESTREL_SPSIGQ=<log2>` — cuanto de senales SP (default 14; 0 = exacto).
+- `KESTREL_RDPINLINE` — RDP en el hilo de CPU incluso en Threaded (biseccion). `src/core/memory_internal.hpp`.
+- `KESTREL_RSPINLINE` — arranca el RSP en linea en el escritor. `src/core/memory_mmio.cpp`.
+- `KESTREL_RDVPAUSE=<mascara>` — mascara de PAUSE en los giros (0 default, 15 = comportamiento antiguo). `src/core/rcp_rdp.cpp`.
+- `KESTREL_OCC=<us>` — muestreador de solape RSP/RDP (default 200 us).
+- `KESTREL_DMAWARN` — aviso opcional de DMA con vectores (16 lineas max; falsos positivos de libdragon).
+- `KESTREL_AFFINITY` — solo Windows: fija hilos a nucleos fisicos. OFF por defecto; se activa si existe y no es `0`/`off`.
+- `KESTREL_HOSTPROF_OUT=<fichero>` — vuelca el histograma completo. `KESTREL_HOSTPROF_WHO=rdp|rsp` — muestrea el host de ese hilo (opt-in).
+- `KESTREL_GPUFLUSHSTAT` — al salir, por que se vacio la cola GPU.
+
+### RSP
+
+- `KESTREL_NOVECFAST` — apaga las cargas vectoriales rapidas (A/B).
+- `KESTREL_RSPMIX=<cop2|cop2one|cop2one0|vecld|alu1|alu|nop|scald>` + `KESTREL_RSPMIXFN=<hex>` (default `0x0e`, VMADN) + `KESTREL_VUOP=<hex>` — mezcla de ops del microbench de VU (`Rsp::benchVU`, se lanza con `--vubench`).
+- `KESTREL_VUSTAT=1` — mezcla de instrucciones RSP; solo con compilacion `-DKESTREL_VUSTAT=1`.
+
+### SoftRDP
+
+- `KESTREL_NOAA`, `KESTREL_NOBLEND`, `KESTREL_NOFILTER`, `KESTREL_NORASTER` — de presencia: apagan antialias, mezcla, filtro; NORASTER omite rasterizar (mide su coste).
+- `KESTREL_TRIDBG` — depuracion de triangulos de SoftRDP.
+- `KESTREL_RDPOPS=<n>` — histograma de opcodes RDP cada n pasadas DP (default 512; `1` para demos de un solo buffer).
+
+### GPU-RDP (Vulkan)
+
+- `KESTREL_GPURDP_UPSCALE=2|4|8` — escala interna (1 = off; si falta, `KESTREL_UPSCALE`).
+- `KESTREL_GPURDP_MINPX=<px>` — reparto CPU/GPU por pasada (default 4096; 0 = todo a GPU).
+- `KESTREL_GPURDP_HDMB=<MB>` — tamano del buffer HD (default 64, 1..1024).
+- `KESTREL_GPURDP_ALLBAR=1` — barrera entre todas las unidades (A/B). `KESTREL_GPURDP_NOBATCH=1` — un despacho por primitiva (A/B). `KESTREL_GPURDP_FILLLIN=1` — relleno lineal (A/B).
+- `KESTREL_GPURDP_GPUTIME=1` — marcas de tiempo GPU por vaciado.
+- `KESTREL_GPURDP_LOCAL=1` — gemelos DEVICE_LOCAL (fase 5).
+- `KESTREL_GPURDP_SPIN=1` — espera de fence por giro en vez de dormir.
+
+### JIT de CPU (biseccion y diagnostico)
+
+Todas `KESTREL_JIT_*`; `1` desactiva la parte indicada salvo que se diga otra cosa.
+
+- `NOALU64`, `NOBRANCH`, `NOJMP`, `NOCOP0`, `NODIV`, `NOC0INLINE`, `NOREGCACHE`, `NOSMC`, `NOXPAGE`, `NOFAST` (via rapida del prologo), `NOFPINLINE` — A/B por parte del compilador.
+- `NOFASTMEM=<mascara>` — 1=LW 2=SW 4=los stores lo hacen todo 8=LWC1 16=SWC1 32=otras cargas int 64=otros stores 128=LDC1/SDC1.
+- `NOTRAPALU=<n>` — 0 ADDI+ADD/SUB (default), 1 ninguno, 2 solo ADDI, 3 solo ADD/SUB.
+- `BRDIFF` — compara bloques de rama ALU puros con el interprete. `BRDIFF_PHYS=0x..` — fuerza ese bloque. `BRSEL=<mascara>` — clases de rama: 1 BEQ/BNE, 2 BLEZ/BGTZ/REGIMM, 4 likely, 8 J/JAL, 16 JR/JALR (default todas).
+- `DIFF` — compara bloques sin memoria ni ramas. `DIFFGO` — no parar ante un desacuerdo.
+- `DUMP=<fichero>` — vuelca bloques calientes con opcodes MIPS + x86. `DUMPSEL=<phys>[,..]` — limita a esas direcciones.
+- `PCCHK` — comprueba que pc sea extension de signo (modo 32 bits). `REGCHK=<gpr>`, `REGCHK_FROM`, `REGCHK_VAL` — lo mismo para un gpr concreto (`src/cpu/jit_run.cpp`).
+- `SMOKE` — autotest del JIT al arrancar (`src/main.cpp`).
+- `KESTREL_BRFAIL` — imprime los primeros 200 lideres de rama que el JIT no absorbe.
+
+Nombres que aparecen en comentarios o en el catalogo del lanzador pero que ningun codigo de `src/` lee (no son variables vivas): `KESTREL_DMAGRAIN` (comentario "probado y descartado" en `rsp.cpp`), `KESTREL_FPU` (errata de `KESTREL_FPUCOST`), `KESTREL_JIT_LINK` (comentario; el enlace de bloques ya es fijo, ver `KESTREL_JIT_NOLINK`), `KESTREL_SSAA` (era de parallel-RDP; quitada del menu y del lanzador). `KESTREL_NO` y `KESTREL_X` son solo prefijo/comentario. `KESTREL_DPBARSYNC`, `KESTREL_PRDP_SYNCALL` y `KESTREL_VRDPLOG` ya no existen (borrados con parallel-RDP el 2026-11-02). Retiradas el 2026-11-02 por ser depuracion con direcciones fijas de una biseccion vieja: `KESTREL_DIS`, `KESTREL_HDUMP`, `KESTREL_HUFT`, `KESTREL_UNARMED`, `KESTREL_SEENFIND`, `KESTREL_JIT_ONLY1`.

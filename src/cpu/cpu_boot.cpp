@@ -317,7 +317,6 @@ envflags:
   if(std::getenv("KESTREL_BPTRACE")) bpTrace = true;
   if(std::getenv("KESTREL_TRAPWILD")) trapWild = true;
   if(mem && std::getenv("KESTREL_TRAPSPREG")) mem->trapSpRegStore = true;
-  if(std::getenv("KESTREL_HUFT")) huftTrap = true;
   if(const char* a = std::getenv("KESTREL_AUDIOHOOK")) audioHook = (u32)std::strtoul(a, nullptr, 0);
   if(const char* m = std::getenv("KESTREL_MAXINSN")) maxInsn = std::strtoull(m, nullptr, 0);
   if(std::getenv("KESTREL_EXCTRACE")) excTrace = true;

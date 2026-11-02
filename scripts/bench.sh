@@ -6,7 +6,7 @@
 # el save antes de CADA corrida: sin eso el oráculo "interp == JIT" no vale nada.
 #
 # uso: bash scripts/bench.sh <etiqueta>=<VAR=1 VAR2=1> ...
-#   ej: bash scripts/bench.sh interp= jit=KESTREL_JIT=1 "link=KESTREL_JIT=1 KESTREL_JIT_LINK=1"
+#   ej: bash scripts/bench.sh interp= jit=KESTREL_JIT=1 nolink="KESTREL_JIT=1 KESTREL_JIT_NOLINK=1"
 set -u
 export PATH=/c/msys64/clang64/bin:$PATH
 

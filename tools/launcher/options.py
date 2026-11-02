@@ -232,10 +232,6 @@ CATEGORIES = [
       help="Rasteriza a N veces la resolucion del N64 dentro de la GPU. GPU-RDP hasta 8x "
            "(8x pide ~768 MB; si no hay, sigue a 1x); el SoftRDP va siempre a 1x. Lo que el juego lee de su propio "
            "framebuffer sigue siendo 1x, asi que no rompe los efectos que releen la imagen."),
-    O("ssaa", "KESTREL_SSAA", "Supermuestreo al volcar a 1x", "bool", False, adv=True,
-      help="Con escalado interno, al devolver la imagen ampliada al framebuffer del juego "
-           "promedia las NxN muestras en vez de coger una. Antialiasing gratis en los "
-           "efectos que releen el framebuffer, a cambio de una pasada mas."),
     O("hud", "KESTREL_HUD_OFF", "HUD de telemetria sobre la imagen", "bool", True, invert=True),
     O("noaa", "KESTREL_NOAA", "Antialiasing del RDP", "bool", True, invert=True,
       help="SoftRDP. Apagarlo sube el relleno y cambia el borde de los poligonos."),
@@ -379,7 +375,6 @@ CATEGORIES = [
     O("watch", "KESTREL_WATCH", "Punto de vigilancia de escritura (addr)", "hex", ""),
     O("watchlen", "KESTREL_WATCHLEN", "Longitud vigilada (bytes)", "int", 0, min=0, max=1048576),
     O("watchp", "KESTREL_WATCHP", "Vigilancia por D-cache", "bool", False, adv=True),
-    O("dis", "KESTREL_DIS", "Desensamblado", "bool", False, adv=True),
     O("exctrace", "KESTREL_EXCTRACE", "Traza de excepciones", "bool", False),
     O("exctail", "KESTREL_EXCTAIL", "Cola de excepciones", "bool", False, adv=True),
     O("faulttrace", "KESTREL_FAULTTRACE", "Traza de fallos", "bool", False, adv=True),

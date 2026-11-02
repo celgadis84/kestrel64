@@ -19,10 +19,8 @@ threaded RCP without editing anything:
 
     interp        (oracle: no JIT, lockstep RCP)
     jit           KESTREL_JIT=1
-    link          KESTREL_JIT=1 KESTREL_JIT_LINK=1
     threaded      KESTREL_THREADS=1
     threaded-jit  KESTREL_THREADS=1 KESTREL_JIT=1
-    threaded-link KESTREL_THREADS=1 KESTREL_JIT=1 KESTREL_JIT_LINK=1
 
 GOTCHA baked in: SM64 writes its EEPROM (.eep) next to the ROM. Left over from a
 previous run it changes the boot path and therefore the md5, with no emulator
