@@ -397,6 +397,10 @@ Todas en `src/core/rcp_sync.cpp` salvo indicacion; "default ON" se apaga con `0`
 - `KESTREL_GPURDP_ALLBAR=1` — barrera entre todas las unidades (A/B). `KESTREL_GPURDP_NOBATCH=1` — un despacho por primitiva (A/B). `KESTREL_GPURDP_FILLLIN=1` — relleno lineal (A/B).
 - `KESTREL_GPURDP_GPUTIME=1` — marcas de tiempo GPU por vaciado.
 - `KESTREL_GPURDP_LOCAL=1` — gemelos DEVICE_LOCAL (fase 5).
+- `KESTREL_GPURDP_PIPECACHE=<fichero>` — `VkPipelineCache` de tri/tri_hd en disco (defecto
+  `%LOCALAPPDATA%\kestrel64\gpurdp-pipelines.bin`; `0` lo apaga). Con la cache del driver fria
+  compilar los shaders cuesta ~60 s en una RX 570; la ventana espera a GPU-RDP mientras arranca
+  (hasta 5 min, con aviso cada 5 s) en vez de rendirse a los 15 s sin imagen.
 - `KESTREL_GPURDP_SPIN=1` — espera de fence por giro en vez de dormir.
 
 ### JIT de CPU (biseccion y diagnostico)

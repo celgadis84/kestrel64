@@ -10645,3 +10645,14 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - 32 cabeceras con uso entre subsistemas reciben un bloque en inglés (responsabilidad,
   invariantes, hilos) tras `#pragma once`; los comentarios en español no se tocan.
 - `CONTRIBUTING.md` «Style»: comentarios nuevos en inglés y el bloque se mantiene al día.
+
+## 2026-11-03 (c) — Ventana sin imagen con GPU-RDP: shaders recompilados en cada arranque
+
+- Síntoma: `dist/` y los estáticos abrían sin ventana con GPU-RDP (de fábrica); con
+  `KESTREL_GPURDP=0` sí. `System::runLoop` esperaba 15 s a GPU-RDP y luego seguía sin ventana.
+- Causa (lldb + tiempo por hilo): el hilo del RDP pasaba ~61 s al 100 % dentro de
+  `amdvlk64.dll` compilando `tri`/`tri_hd` (RX 570); la caché de shaders del driver estaba
+  fría. Sin ventana (`--run`, puertas) solo retrasa: las puertas sí validaban GPU-RDP.
+- Arreglo: `VkPipelineCache` propio en `%LOCALAPPDATA%\kestrel64\gpurdp-pipelines.bin`
+  (`KESTREL_GPURDP_PIPECACHE`), y la ventana espera mientras GPU-RDP siga arrancando (aviso
+  cada 5 s, tope 5 min). Con caché: pipelines 6 ms. SM64 en ventana con GPU-RDP correcto.

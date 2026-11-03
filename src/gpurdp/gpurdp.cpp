@@ -19,6 +19,18 @@
 
 #define VK_NO_PROTOTYPES
 #include <volk.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
+#include <string>
 
 #include <atomic>
 #include <chrono>
@@ -83,6 +95,7 @@ struct Ctx {
   // texturas subidas, por (Tex*, escala S, escala T), asignadas en orden y vaciadas enteras
   // cuando no caben y la cola esta vacia (o cuando texpack se reinicia).
   VkPipeline triHd = VK_NULL_HANDLE;
+  VkPipelineCache pcache = VK_NULL_HANDLE;   // persisted to disk, see pipeCachePath()
   bool f64 = false, hdFail = false;
   Buf hd;
   u32 hdUsed = 0, hdEpoch = 0;
@@ -215,6 +228,79 @@ auto freeBuf(Ctx& c, Buf& b) -> void {
 auto hasExt(const std::vector<VkExtensionProperties>& v, const char* n) -> bool {
   for(auto& e : v) if(!std::strcmp(e.extensionName, n)) return true;
   return false;
+}
+
+// On-disk VkPipelineCache. The tri/tri_hd compute shaders are large, and some drivers (AMD
+// RX 570 here) do not keep their own shader cache for them: every launch recompiled both
+// from SPIR-V, ~60 s of one host core, and the window gave up waiting for GPU-RDP after 15 s
+// (no picture at all). The driver validates the blob header (vendor, device, pipelineCacheUUID)
+// and ignores a stale one, so a driver update or another GPU just recompiles once.
+// KESTREL_GPURDP_PIPECACHE=<file> overrides the path; "0" disables it.
+auto pipeCachePath() -> std::string {
+  if(const char* e = std::getenv("KESTREL_GPURDP_PIPECACHE"); e && e[0]) {
+    if(!std::strcmp(e, "0")) return {};
+    return e;
+  }
+#ifdef _WIN32
+  const char* base = std::getenv("LOCALAPPDATA");
+  if(!base || !base[0]) return {};
+  std::string dir = std::string(base) + "\\kestrel64";
+  CreateDirectoryA(dir.c_str(), nullptr);
+  return dir + "\\gpurdp-pipelines.bin";
+#else
+  const char* base = std::getenv("XDG_CACHE_HOME");
+  std::string dir;
+  if(base && base[0]) dir = base;
+  else if(const char* h = std::getenv("HOME"); h && h[0]) dir = std::string(h) + "/.cache";
+  else return {};
+  dir += "/kestrel64";
+  mkdir(dir.c_str(), 0755);
+  return dir + "/gpurdp-pipelines.bin";
+#endif
+}
+
+auto loadPipeCache(Ctx& c) -> void {
+  std::vector<u8> blob;
+  const std::string path = pipeCachePath();
+  if(!path.empty()) {
+    if(FILE* f = std::fopen(path.c_str(), "rb")) {
+      std::fseek(f, 0, SEEK_END);
+      long n = std::ftell(f);
+      std::fseek(f, 0, SEEK_SET);
+      if(n > 0 && n < (64l << 20)) {
+        blob.resize((size_t)n);
+        if(std::fread(blob.data(), 1, blob.size(), f) != blob.size()) blob.clear();
+      }
+      std::fclose(f);
+    }
+  }
+  VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+  ci.initialDataSize = blob.size(); ci.pInitialData = blob.empty() ? nullptr : blob.data();
+  if(vkCreatePipelineCache(c.dev, &ci, nullptr, &c.pcache) != VK_SUCCESS) {
+    ci.initialDataSize = 0; ci.pInitialData = nullptr;      // corrupt blob: start empty
+    if(vkCreatePipelineCache(c.dev, &ci, nullptr, &c.pcache) != VK_SUCCESS) c.pcache = VK_NULL_HANDLE;
+  }
+}
+
+auto savePipeCache(Ctx& c) -> void {
+  const std::string path = pipeCachePath();
+  if(path.empty() || !c.pcache) return;
+  size_t n = 0;
+  if(vkGetPipelineCacheData(c.dev, c.pcache, &n, nullptr) != VK_SUCCESS || !n) return;
+  std::vector<u8> blob(n);
+  if(vkGetPipelineCacheData(c.dev, c.pcache, &n, blob.data()) != VK_SUCCESS) return;
+  // Write-then-rename so a kill mid-write never leaves a truncated cache behind.
+  const std::string tmp = path + ".tmp";
+  FILE* f = std::fopen(tmp.c_str(), "wb");
+  if(!f) return;
+  const bool ok = std::fwrite(blob.data(), 1, n, f) == n;
+  std::fclose(f);
+  if(!ok) { std::remove(tmp.c_str()); return; }
+#ifdef _WIN32
+  MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+  std::rename(tmp.c_str(), path.c_str());
+#endif
 }
 
 auto initVk(Ctx& c, u32 rdramSize) -> bool {
@@ -388,12 +474,26 @@ auto initVk(Ctx& c, u32 rdramSize) -> bool {
     cpi.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     cpi.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT; cpi.stage.module = mod; cpi.stage.pName = "main";
     cpi.layout = c.pl;
-    VkResult r = vkCreateComputePipelines(c.dev, VK_NULL_HANDLE, 1, &cpi, nullptr, &out);
+    VkResult r = vkCreateComputePipelines(c.dev, c.pcache, 1, &cpi, nullptr, &out);
     vkDestroyShaderModule(c.dev, mod, nullptr);
     return r == VK_SUCCESS;
   };
+  loadPipeCache(c);
+  const auto tp0 = std::chrono::steady_clock::now();
   if(!makePipe(kSpv_fill, sizeof kSpv_fill, c.fill) || !makePipe(kSpv_tri, sizeof kSpv_tri, c.tri)) return false;
+  const auto tp1 = std::chrono::steady_clock::now();
   if(c.f64 && !makePipe(kSpv_tri_hd, sizeof kSpv_tri_hd, c.triHd)) c.triHd = VK_NULL_HANDLE;
+  const auto tp2 = std::chrono::steady_clock::now();
+  const double msBase = std::chrono::duration<double, std::milli>(tp1 - tp0).count();
+  const double msHd   = std::chrono::duration<double, std::milli>(tp2 - tp1).count();
+  // Rewrite the file when something was actually compiled (a cache hit is a few ms) or when
+  // there is no file yet: the driver's own cache may have served this run but can be wiped
+  // (Windows disk cleanup clears it), and then the next launch pays the full compile again.
+  bool haveFile = false;
+  if(const std::string p = pipeCachePath(); !p.empty())
+    if(FILE* f = std::fopen(p.c_str(), "rb")) { haveFile = true; std::fclose(f); }
+  if(msBase + msHd > 250.0 || !haveFile) savePipeCache(c);
+  std::fprintf(stderr, "[gpurdp] pipelines ms: fill+tri=%.0f tri_hd=%.0f\n", msBase, msHd);
 
   VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBind * 2};
   VkDescriptorPoolCreateInfo dpi = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -442,6 +542,7 @@ auto destroy(Ctx& c) -> void {
     if(c.fill) vkDestroyPipeline(c.dev, c.fill, nullptr);
     if(c.tri) vkDestroyPipeline(c.dev, c.tri, nullptr);
     if(c.triHd) vkDestroyPipeline(c.dev, c.triHd, nullptr);
+    if(c.pcache) vkDestroyPipelineCache(c.dev, c.pcache, nullptr);
     if(c.pl) vkDestroyPipelineLayout(c.dev, c.pl, nullptr);
     if(c.dpool) vkDestroyDescriptorPool(c.dev, c.dpool, nullptr);
     if(c.dsl) vkDestroyDescriptorSetLayout(c.dev, c.dsl, nullptr);

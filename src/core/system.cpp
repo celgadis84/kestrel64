@@ -509,7 +509,16 @@ auto System::runLoop() -> void {
   std::thread cpuThread([this] { run(); });
   // Sin GPU-RDP compilado (build/, build-static/) se va derecho a abrir la ventana.
   bool gpuWanted = gpurdp::built && gpurdp::wanted();
-  bool gpuReady  = memory.gpuWaitReady(15000);
+  // Sin tope fijo mientras el hilo del RDP siga ARRANCANDO GPU-RDP: con la cache de shaders
+  // del driver fria, compilar tri/tri_hd cuesta ~60 s en la RX 570 y el antiguo tope de 15 s
+  // dejaba al usuario sin ventana y sin imagen. gpuWaitReady vuelve en cuanto arranca o cae.
+  bool gpuReady = false;
+  for(u32 waited = 0; gpuWanted && !gpuReady && !memory.gpuFailed() && !shutdown.load(); waited += 5) {
+    gpuReady = memory.gpuWaitReady(5000);
+    if(!gpuReady && !memory.gpuFailed() && waited < 300)
+      std::fprintf(stderr, "[video] esperando a GPU-RDP (%u s; compilando shaders la primera vez)\n", waited + 5);
+    if(waited >= 300) break;
+  }
   // Si GPU-RDP se intento y cayo (sin Vulkan o sin GPU valida) el RDP sigue en SoftRDP y la
   // ventana se abre con su propio presentador, que a su vez cae a GDI si no hay Vulkan. Solo
   // un backend que sigue ARRANCANDO al vencer el plazo deja sin ventana.
