@@ -167,7 +167,14 @@ def main():
             # El nivel arranca con la cutscena de intro (letterbox): START la salta. La
             # pulsacion dura N lecturas del joybus, no ms, asi que cae en el mismo fotograma
             # de juego en cualquier modo. 60 campos antes para que el juego ya lea el mando.
-            adv(60)
+            # Por fotogramas de JUEGO, no campos: un build cuyos primeros fotogramas tardan
+            # mas (carga) recibiria START antes de que la cutscena lo acepte.
+            fn = lambda: rd32(gv + OFF_LVFRAMENUM)
+            while fn() < 20:
+                if time.time() > deadline:
+                    proc.kill()
+                    sys.exit("pdbench: TIMEOUT esperando lvframenum 20")
+                adv(10)
             k.controller_set("start", polls=4)
             adv(120)
         base = f240()
