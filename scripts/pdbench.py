@@ -37,6 +37,8 @@ def load_map(path, names):
     with open(path, errors="replace") as f:
         for line in f:
             m = rx.match(line)
+            if not m:   # lld -Map: "VMA LMA size align  sym"
+                m = re.match(r"^([0-9a-f]{8})\s+[0-9a-f]+\s+[0-9a-f]+\s+\d+\s+(\w+)\s*$", line)
             if m and m.group(2) in names:
                 syms[m.group(2)] = int(m.group(1), 16) & 0x1fffffff
     miss = [n for n in names if n not in syms]
