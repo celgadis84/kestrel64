@@ -60,6 +60,24 @@ por ser pequeña; se ordena por impacto, no se filtra.*
 
 ## Parte 2 — pendientes técnicos propios
 
+### PRIORITARIO: posible regresión de velocidad del anfitrión (anotado 2026-11-03)
+
+El usuario nota el emulador mucho más lento tras la tanda del 2026-11-02/03: retirada de
+parallel-RDP (5fdade3), partición de ficheros de la fase 4 (e3eb3e9..2a84854, posibles
+inlines perdidos entre unidades) y perfiles PGO regenerados (387d1e3, 5adbff5;
+`pgo/local/kestrel-commercial.profdata` del 11-02 21:56). Objetivo del usuario: el emulador
+lo más rápido posible; parallel-RDP se retiró porque GPU-RDP estaba a la par, y eso hay que
+volver a comprobarlo.
+Plan: compilar 1e77d36 (antes de la partición) y 9e4843a (antes de quitar parallel-RDP) EN
+ESTE CHECKOUT (no worktree: las funciones static del perfil llevan la ruta absoluta) en
+`build-ab-old` con las mismas opciones que `build-gpu-static` (GPU, LTO thin, PGO comercial),
+y A/B intercalado con `scripts/ab_bench.py` usando `KESTREL_EXE` como variable por variante
+(`old=KESTREL_EXE=...` `new=KESTREL_EXE=...`) en SM64, PD y DK64; además GPU-RDP contra
+SoftRDP (`KESTREL_GPURDP=0`). Si hay regresión: bisecar, revisar inlines (LTO thin entre las
+unidades nuevas) y perfil caducado. Visto también: corrupción en las filas bajas del
+framebuffer (VI de 220 líneas de PD mostrado a 240?) y fondo de menú corrupto con la ROM del
+decomp, o sea del emulador.
+
 ### Robustez
 
 - ~~**Endurecer el camino `fastmem` del JIT**~~ **CERRADO 2026-09-04**: una direccion de invitado
