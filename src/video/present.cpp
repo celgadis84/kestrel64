@@ -1331,6 +1331,10 @@ auto Presenter::pumpFrame() -> bool {
   u32 baseH = (mem->rcp.viHalflines() >= 550) ? 288 : 240;
   u32 height = ysc ? ((baseH * ysc) >> 10) : baseH;
   if(height == 0 || height > kMaxSrcH) height = baseH;
+  const u32 srcH = height;
+  // Filas que el VI barre de verdad (ventana V_VIDEO): debajo la tele da borde negro, no la
+  // RDRAM que sigue al framebuffer. Solo campo simple (serrate = entrelazado, sin tocar).
+  const u32 visRows = (mem->rcp.vi_ctrl & 0x40) ? 0 : mem->rcp.viVisibleRows();
 
   frame.assign((usize)width * height, 0xff000000u);   // bytes 0,0,0,255 → black
   const auto& ram = mem->rdram;
@@ -1387,6 +1391,10 @@ auto Presenter::pumpFrame() -> bool {
       if(p + 3 >= ram.size()) continue;
       frame[y * width + x] = 0xff000000u | ((u32)ram[p + 2] << 16) | ((u32)ram[p + 1] << 8) | ram[p];
     }
+  }
+  if(visRows && visRows < srcH && type != 99) {
+    const u32 from = (u32)((u64)visRows * height / srcH);   // cuadro de alta: misma proporcion
+    std::fill(frame.begin() + (usize)from * width, frame.end(), 0xff000000u);
   }
 
   // Pantalla partida en red: solo el trozo de este jugador (lo decide el anfitrion, campo a

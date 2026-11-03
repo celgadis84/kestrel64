@@ -970,7 +970,7 @@ auto Server::cmdNetplay(const std::string& cmd, const json::Value& args, json::V
 }
 
 auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vector<u8>& blob) -> bool {
-  u32 origin, width, ctrl, autoH;
+  u32 origin, width, ctrl, autoH, visRows;
   {
     std::lock_guard<System::CoreMutex> lk(system.coreMutex);
     Rcp& r = system.memory.rcp;
@@ -986,6 +986,10 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
     const u32 baseH = (r.viHalflines() >= 550) ? 288 : 240;
     autoH = ysc ? ((baseH * ysc) >> 10) : baseH;
     if(autoH == 0 || autoH > 576) autoH = baseH;
+    // Filas por debajo de la ventana V_VIDEO: la tele saca borde negro, no la RDRAM que sigue
+    // al framebuffer (PD: 218 lineas activas, las filas 219+ salian como ruido). Solo campo
+    // simple; el cuadro entrelazado (frame=1) se deja como estaba.
+    visRows = (args.has("frame") && args.get("frame").asU32()) || (ctrl & 0x40) ? 0 : r.viVisibleRows();
   }
   u32 type = ctrl & 0x3;                  // 0/1 blank, 2 = 16bpp 5551, 3 = 32bpp 8888
   if(width == 0 || (type != 2 && type != 3)) return false;
@@ -993,7 +997,10 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
   if(height == 0 || height > 576) height = autoH;
   u32 bpp = (type == 3) ? 4 : 2;
   auto& ram = system.memory.rdram;
-  u64 need = (u64)origin + (u64)width * height * bpp;
+  // Solo se leen las filas que el VI barre: un framebuffer pegado al final de la RDRAM (PD,
+  // 0x7DDC80 con 218 lineas) no tiene 240 filas detras y la captura fallaba.
+  const u32 readRows = visRows && visRows < height ? visRows : height;
+  u64 need = (u64)origin + (u64)width * readRows * bpp;
   if(need > ram.size()) return false;
 
   // El ultimo byte (32bpp) / el bit 0 (16bpp) del pixel NO es alfa: es la COBERTURA que el
@@ -1004,10 +1011,13 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
   // plano aparte, no el alfa.
   blob.resize((usize)width * height * 4);
   usize o = 0;
+  const u32 blackFrom = visRows && visRows < height ? visRows * width : width * height;
   for(u32 i = 0; i < width * height; i++) {
     u32 p = origin + i * bpp;
     u8 R, G, B;
-    if(type == 3) {
+    if(i >= blackFrom) {
+      R = G = B = 0;
+    } else if(type == 3) {
       R = ram[p]; G = ram[p+1]; B = ram[p+2];
     } else {
       u16 px = (u16)((ram[p] << 8) | ram[p+1]);   // big-endian halfword
@@ -1024,6 +1034,7 @@ auto Server::cmdViCapture(const json::Value& args, json::Value& data, std::vecto
   data.set("bpp", (u64)(bpp * 8));
   data.set("format", "rgba8888");
   data.set("source", "rdram");
+  data.set("visRows", (u64)visRows);
   return true;
 }
 

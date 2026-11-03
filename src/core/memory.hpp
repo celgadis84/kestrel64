@@ -142,6 +142,14 @@ struct Rcp {
   // tick del VI, la lectura de VI_V_CURRENT y el alto del framebuffer tenian tres copias
   // de esta expresion con mascaras distintas (0x3ff / 0x3fe) y dos valores por defecto.
   auto viHalflines() const -> u32 { u32 t = vi_vsync & 0x3ff; return t >= 2 ? t : 525; }
+  // Framebuffer rows the VI scans out in one field: the active window of V_VIDEO (half-lines,
+  // two per line) by Y_SCALE (2.10, source rows per line). Below it the TV shows black border,
+  // never the RDRAM past the framebuffer. 0 = window off or not set (caller keeps its height).
+  auto viVisibleRows() const -> u32 {
+    const u32 vs = (vi_vstart >> 16) & 0x3ff, ve = vi_vstart & 0x3ff, ysc = vi_yscale & 0xfff;
+    if(ve <= vs || !ysc) return 0;
+    return (((ve - vs) >> 1) * ysc + 0x3ff) >> 10;
+  }
   // VI_ORIGIN que se barrio en el ultimo campo de cada paridad (lo apunta viTick al cerrar
   // campo). Solo para volcar/capturar el cuadro entrelazado entero; no es estado del invitado.
   u32 viFieldOrigin[2] = {};
