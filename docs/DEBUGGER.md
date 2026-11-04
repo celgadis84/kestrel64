@@ -85,6 +85,16 @@ entre subtramos antes de que despertara quien esperaba, y una orden de telemetr�
 esperar ~1,9 s con la emulación libre. `System::CoreMutex` apunta a quien espera (`waiting`) y
 `runLoop` cede mientras haya alguien. No toca la semántica del invitado.
 
+## Herramientas sobre la grabadora
+
+- `tools/rdpframe.py <rom> [--frames N | --sym MAP SIMBOLO VALOR] [--dump FICHERO]`: arranca
+  cualquier ROM (SDK, port, juego nativo), graba un cuadro con `dbg.rdp.frame` y da área por
+  estado de render (other modes / combiner / textura), triángulos duplicados, cargas de
+  textura redundantes, estimación de coste en HW y cota de fusión de coplanares. `--dump`
+  (o `RDPDUMP=`) escribe las palabras RDP crudas (u64 big-endian) para reproducirlas en HW u
+  otros emuladores. `--sym` espera a que un u32 del `.map` llegue a VALOR (p. ej. un contador
+  de cuadros del juego); `--poke` escribe un byte mientras espera.
+
 ## Pendiente (fase 2)
 
 Recarga de funciones en caliente al estilo deployer SC64 (parchear una función sin reiniciar,
