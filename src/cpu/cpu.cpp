@@ -883,6 +883,7 @@ auto CPU::profEnable(bool on) -> void {
     profDMiss.assign(kProfBuckets, 0);
     profIMiss.assign(kProfBuckets, 0);
     profDLine.assign(kProfBuckets, 0);
+    profStall.assign(kProfBuckets, 0);
   }
   if(on) profClear();
   profOn = on;
@@ -890,9 +891,10 @@ auto CPU::profEnable(bool on) -> void {
 }
 
 auto CPU::profClear() -> void {
-  for(auto* v : {&profBuckets, &profDMiss, &profIMiss, &profDLine})
+  for(auto* v : {&profBuckets, &profDMiss, &profIMiss, &profDLine, &profStall})
     if(!v->empty()) std::fill(v->begin(), v->end(), 0u);
-  profTotal = profDMissTotal = profIMissTotal = 0;
+  profTotal = profDMissTotal = profIMissTotal = profStallTotal = 0;
+  profStallLast = stallTotal;
 }
 
 auto CPU::step() -> void {
@@ -948,6 +950,10 @@ auto CPU::step() -> void {
   }
   if(debugArmed && profOn) {   // physical-PC hotpath sampler (MCP prof.*)
     u32 pp = fpe & 0x1fff'ffff;
+    if(u64 d = stallTotal - profStallLast) {   // paradas desde la muestra anterior: su instruccion
+      profStallLast = stallTotal;
+      if(!profStall.empty()) { profStall[profCurPhys >> kProfShift] += (u32)d; profStallTotal += d; }
+    }
     if(pp < (8u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; profCurPhys = pp; }
   }
   // pc/nextPc branch-delay model: fetch pc, advance, then default nextPc = pc+4.

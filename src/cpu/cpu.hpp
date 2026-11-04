@@ -651,6 +651,11 @@ struct CPU {
   // interprete atribuye bien: el camino rapido del JIT ni siquiera pasa por la D$.
   std::vector<u32> profDMiss, profIMiss, profDLine;
   u64   profDMissTotal = 0, profIMissTotal = 0;
+  // Ciclos de parada por PC (metric "stall"; "time" = exec + stall): el aumento de stallTotal
+  // entre dos muestras del interprete se carga a la instruccion anterior, la que paro (fallo
+  // de cache, MUL/DIV, FPU, acceso sin cache, interbloqueo). Solo con KESTREL_JIT=0.
+  std::vector<u32> profStall;
+  u64   profStallTotal = 0, profStallLast = 0;
   u32   profCurPhys = 0;
   auto  profEnable(bool on) -> void;                            // alloc + clear when enabling
   auto  profClear() -> void;

@@ -1275,7 +1275,14 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   if(metric == "dmiss")      { src = &c.profDMiss; mtotal = c.profDMissTotal; }
   else if(metric == "imiss") { src = &c.profIMiss; mtotal = c.profIMissTotal; }
   else if(metric == "dline") { src = &c.profDLine; mtotal = c.profDMissTotal; dline = true; }
-  else if(metric != "exec")  { data.set("warn", std::string("metric desconocida, uso exec")); }
+  else if(metric == "stall") { src = &c.profStall; mtotal = c.profStallTotal; }
+  std::vector<u32> timeBuf;   // "time": ciclos = instrucciones + paradas, por cubo
+  if(metric == "time" && !c.profStall.empty()) {
+    timeBuf.resize(c.profBuckets.size());
+    for(size_t i = 0; i < timeBuf.size(); i++) timeBuf[i] = c.profBuckets[i] + c.profStall[i];
+    src = &timeBuf; mtotal = c.profTotal + c.profStallTotal;
+  }
+  else if(metric != "exec" && metric != "stall")  { data.set("warn", std::string("metric desconocida, uso exec")); }
   // El interprete muestrea en CPU::step(); el JIT, por bloque en su driver (jit_run.cpp).
   if(envFlag("KESTREL_JIT", true))
     data.set("warn", std::string(metric == "exec"
