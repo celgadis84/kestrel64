@@ -144,6 +144,35 @@ try:
                 red += 1; redb += ((w0 >> 12) & 0xFFF) + 1 if op == 0x33 else 0
             tmem[addr] = key
     print(f'tex loads {nld}  redundant {red} ({redb} texels by LOAD_BLOCK)')
+    # Sync audit: a SYNC_PIPE / TILE / LOAD is needed only if a primitive ran since the last
+    # sync of its kind (else 'dup') AND what it guards changes before the next primitive
+    # (pipe: modes / colours / images / scissor; tile: SET_TILE / TILE_SIZE / loads; load: a
+    # load), else 'idle'. HW cost per sync (GCLK): pipe ~50, tile ~33, load ~25.
+    PRIM = set(range(0x08, 0x10)) | {0x24, 0x25, 0x36}
+    GUARD = {0x27: set(range(0x2D, 0x30)) | set(range(0x37, 0x40)) | {0x2C},
+             0x28: {0x30, 0x32, 0x33, 0x34, 0x35},
+             0x26: {0x30, 0x33, 0x34}}
+    COST = {0x27: 50, 0x28: 33, 0x26: 25}
+    since = {0x27: True, 0x28: True, 0x26: True}
+    audit = {o: [0, 0, 0] for o in COST}        # total, dup, idle
+    for i, c in enumerate(cmds):
+        op = c['op']
+        if op in PRIM:
+            for o in since: since[o] = True
+        elif op == 0x29:
+            for o in since: since[o] = False
+        elif op in COST:
+            a = audit[op]; a[0] += 1
+            if not since[op]: a[1] += 1
+            else:
+                for c2 in cmds[i + 1:]:
+                    o2 = c2['op']
+                    if o2 in GUARD[op]: break
+                    if o2 in PRIM or o2 == 0x29: a[2] += 1; break
+            since[op] = False
+    waste = sum((audit[o][1] + audit[o][2]) * COST[o] for o in COST)
+    print('syncs', '  '.join(f'{n} {audit[o][0]} (dup {audit[o][1]} idle {audit[o][2]})' for o, n in ((0x27, 'pipe'), (0x28, 'tile'), (0x26, 'load'))),
+          f' full {hist.get(0x29, 0)}  waste ~{waste} clk ({waste / 62500:.2f} ms)')
     print(f'dup tris {dup}  dup area {dupa:.0f} px  ops', ' '.join(f'{o:02x}:{n}' for o, n in sorted(hist.items(), key=lambda x: -x[1])[:12]))
     # HW cost estimate from demo 54 (docs/data/rdptime_hw_2026-11-04.csv, tools/rdptime_fit.py):
     # clk = base + per line + per pixel, by Z / AA. Lines = scanlines the triangle spans.
