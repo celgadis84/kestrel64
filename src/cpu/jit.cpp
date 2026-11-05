@@ -239,7 +239,10 @@ auto CodeCache::addLink(const LinkSite& s) -> void {
   s32 bi = find(s.targetPhys);
   // Un sitio con destino TLB no puede saltar a un bloque que se pasa de su pagina de entrada:
   // ese bloque solo es correcto por la ruta directa con la que se compilo (ver Block::crossPage).
-  if(bi >= 0 && !blocks[bi].dead && blocks[bi].linkEntry
+  // Y solo a un bloque publicado en la epoca ACTUAL: tras un desenlace global (invalidacion de
+  // I-cache, remapeo) un bloque vivo puede estar cubriendo bytes que el guest ya reescribio
+  // (DMA a un marco reutilizado) y solo el driver, al revalidarlo, puede volver a publicarlo.
+  if(bi >= 0 && !blocks[bi].dead && blocks[bi].linkEntry && blocks[bi].linkedEpoch == linkEpoch
      && !(s.tlbTarget && (blocks[bi].crossPage || !s.tlbOk))) {
     LinkSite& L = links[idx];
     *L.slot = (u64)(std::uintptr_t)blocks[bi].linkEntry;
