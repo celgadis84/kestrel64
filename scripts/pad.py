@@ -27,17 +27,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import kestrel_mcp as k  # noqa: E402
 
 
-def wait_fields(n):
-    # emu.status da el contador de campos VI; contar campos y no segundos hace que la
-    # espera signifique lo mismo aunque el emulador vaya a otra velocidad.
-    st = k.emu_status()
+def _counter(st):
+    # Contador de tiempo de juego: campos VI si emu.status los da; si no, lecturas del mando
+    # (pad.polls, una por fotograma en casi todos los juegos). El reloj de pared NO vale: con
+    # el emulador lento las pulsaciones seguidas se pisan (la anterior sigue viva).
     key = next((x for x in ("viFields", "fields", "viField", "frames") if x in st), None)
-    if key is None:                       # sin contador, caer a reloj de pared a 60 Hz
+    if key is not None:
+        return st[key]
+    pad = st.get("pad") or {}
+    return pad.get("polls")
+
+
+def wait_fields(n):
+    # Contar tiempo de juego y no segundos hace que la espera signifique lo mismo aunque el
+    # emulador vaya a otra velocidad.
+    c = _counter(k.emu_status())
+    if c is None:                         # sin contador, caer a reloj de pared a 60 Hz
         time.sleep(n / 60.0)
         return
-    target = st[key] + n
+    target = c + n
     t0 = time.time()
-    while k.emu_status()[key] < target and time.time() - t0 < 60:
+    while _counter(k.emu_status()) < target and time.time() - t0 < 120:
         time.sleep(0.05)
 
 
