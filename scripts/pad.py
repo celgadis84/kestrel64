@@ -14,10 +14,12 @@ Pasos:
                         cup cdown cleft cright, combinables con "+" o ",". polls por
                         defecto 6 (son lecturas del joybus = fotogramas del juego,
                         no milisegundos: valen igual a 30% que a 200% de velocidad).
-  stick:<x>,<y>[:polls] palanca analogica, rango propio de N64 -80..80.
+  stick:<x>,<y>[:polls[:botones]] palanca analogica, rango propio de N64 -80..80;
+                        con botones, pulsados a la vez (stick:60,0:30:z).
   wait:<n>              espera n fotogramas de juego contando campos VI de emu.status.
   shot:<ruta>           captura el framebuffer del VI a PNG.
   status                imprime fps/ocupacion.
+  peek:<addr>[:n]       imprime n bytes (16) de RDRAM fisica en hex, coherente con D-cache.
 """
 import os, sys, time
 
@@ -56,10 +58,14 @@ def main(argv):
             print(k.capture_framebuffer(tail or "kestrel_fb.png"))
         elif head == "status":
             print(k.emu_status())
+        elif head == "peek":   # peek:<dir fisica hex>[:bytes] = vuelca RDRAM via D-cache
+            a, _, n = tail.partition(":")
+            print("peek", a, k.read_memory("rdram", a, int(n or 16), coherent=True)["hex"])
         elif head == "stick":
-            xy, _, polls = tail.partition(":")
+            xy, _, rest = tail.partition(":")
+            polls, _, btns = rest.partition(":")   # stick:x,y:polls:z = palanca con botones pulsados
             x, _, y = xy.partition(",")
-            k.controller_set("", int(x), int(y or 0), int(polls or 6))
+            k.controller_set(btns, int(x), int(y or 0), int(polls or 6))
             wait_fields(int(polls or 6) + 2)  # como los botones: no pisar la palanca con el paso siguiente
         else:
             k.controller_set(head, 0, 0, int(tail or 6))
