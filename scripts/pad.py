@@ -60,6 +60,7 @@ def main(argv):
             xy, _, polls = tail.partition(":")
             x, _, y = xy.partition(",")
             k.controller_set("", int(x), int(y or 0), int(polls or 6))
+            wait_fields(int(polls or 6) + 2)  # como los botones: no pisar la palanca con el paso siguiente
         else:
             k.controller_set(head, 0, 0, int(tail or 6))
             wait_fields(int(tail or 6) + 2)   # dejar que el juego vea el flanco de suelta
