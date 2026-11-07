@@ -1282,7 +1282,8 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
     for(size_t i = 0; i < timeBuf.size(); i++) timeBuf[i] = c.profBuckets[i] + c.profStall[i];
     src = &timeBuf; mtotal = c.profTotal + c.profStallTotal;
   }
-  else if(metric != "exec" && metric != "stall")  { data.set("warn", std::string("metric desconocida, uso exec")); }
+  else if(metric != "exec" && metric != "stall" && metric != "dmiss" && metric != "imiss" && metric != "dline" && metric != "time")
+    data.set("warn", std::string("metric desconocida, uso exec"));
   // El interprete muestrea en CPU::step(); el JIT, por bloque en su driver (jit_run.cpp).
   if(envFlag("KESTREL_JIT", true))
     data.set("warn", std::string(metric == "exec"
