@@ -19,7 +19,10 @@ Pasos:
   wait:<n>              espera n fotogramas de juego contando campos VI de emu.status.
   shot:<ruta>           captura el framebuffer del VI a PNG.
   status                imprime fps/ocupacion.
+  state:save:<n> / state:load:<n>  savestate en la ranura n.
   peek:<addr>[:n]       imprime n bytes (16) de RDRAM fisica en hex, coherente con D-cache.
+  prof:start / prof:rsp:<json>  perfil RSP por ranura IMEM; el JSON se lee con
+                        kestrel64-sdk/tools/prof_rsp.py --load <json> <listado>.
 """
 import os, sys, time
 
@@ -68,6 +71,24 @@ def main(argv):
             print(k.capture_framebuffer(tail or "kestrel_fb.png"))
         elif head == "status":
             print(k.emu_status())
+        elif head == "rdpstats":   # rdpstats:reset = abre ventana; rdpstats = imprime perFlip
+            r = k.rdp_stats("reset" if tail == "reset" else "read")
+            if tail != "reset":
+                print("rdpstats", r.get("perFlip", r))
+        elif head == "state":   # state:save:N / state:load:N = ranura N (<rom>.stN junto a la ROM)
+            op, _, slot = tail.partition(":")
+            print("state", op, k.query("state." + op, slot=int(slot or 0)))
+        elif head == "prof":   # prof:start = abre ventana; prof:rsp:<json> = guarda perfil RSP
+            op, _, path = tail.partition(":")
+            if op == "start":
+                k.query("prof.start")
+            else:   # formato de prof_rsp.py --save (metrica ciclos si KESTREL_RSP_TIMING=1)
+                import json
+                d = k.profile_rsp(top=4096, metric="cycles" if os.environ.get("KESTREL_RSP_TIMING") else "count")
+                if os.environ.get("KESTREL_RSP_TIMING"):
+                    d["timing"] = 1
+                json.dump(d, open(path, "w"))
+                print("prof rsp ->", path)
         elif head == "peek":   # peek:<dir fisica hex>[:bytes] = vuelca RDRAM via D-cache
             a, _, n = tail.partition(":")
             print("peek", a, k.read_memory("rdram", a, int(n or 16), coherent=True)["hex"])
