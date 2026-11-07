@@ -416,6 +416,7 @@ auto CPU::icFetch(u32 phys) -> u32 {
   if(__builtin_expect(cacheStat, 0)) icAccess++;
   u32 idx  = (phys >> 5) & 0x1ff;
   u32 base = phys & ~0x1fu;
+  if(__builtin_expect(itraceOn, 0) && (phys >> 5) != itraceLast) itraceRec(phys >> 5);
   ICacheLine& l = icache[idx];
   if(!l.valid || l.ptag != base) icFill(idx, base);
   u32 off = phys & 0x1c;
@@ -886,6 +887,21 @@ auto CPU::profEnable(bool on) -> void {
     profStall.assign(kProfBuckets, 0);
   }
   if(on) profClear();
+  if(const char* tp = std::getenv("KESTREL_ITRACE")) {     // traza de lineas de I$
+    if(on) {
+      const char* mx = std::getenv("KESTREL_ITRACE_MAX");
+      itrace.clear(); itrace.reserve(mx ? std::strtoull(mx, nullptr, 0) : (64u << 20));
+      itraceLast = ~0u; itraceOn = true;
+    } else if(itraceOn) {
+      itraceOn = false;
+      if(FILE* f = std::fopen(tp, "wb")) {
+        std::fwrite(itrace.data(), 4, itrace.size(), f);
+        std::fclose(f);
+      }
+      std::fprintf(stderr, "[itrace] %zu lineas -> %s\n", itrace.size(), tp);
+      itrace = {};
+    }
+  }
   profOn = on;
   refreshDebugArmed();   // el muestreador cuelga de la guarda unica del prologo
 }

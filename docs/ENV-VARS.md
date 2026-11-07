@@ -346,6 +346,7 @@ Convencion: salvo que se diga otra cosa, una variable "de presencia" se activa c
 ### Coste y reloj guest
 
 - `KESTREL_DCACHECOST=<n|on|off>` / `KESTREL_ICACHECOST=<n|on|off>` — coste de fallo por cache; `0`/`off` = 0, `1`/`on` = 60 ciclos, otro numero hasta 1024. Si faltan, valen `KESTREL_CACHECOST`.
+- `KESTREL_ITRACE=<fichero>` — traza de lineas de la I-cache entre `prof.start` y `prof.stop` (interprete, `KESTREL_JIT=0`): cada vez que el fetch pasa a otra linea de 32 bytes apunta `phys >> 5` (u32 LE); al `prof.stop` escribe el fichero. `KESTREL_ITRACE_MAX=<n>` tope de entradas (64 M por defecto). Sirve para simular la I-cache con otra colocacion del codigo sin volver a correr la ROM.
 - `KESTREL_UNCACHEDCOST=<n|on|off>` — ciclos por lectura no cacheada (KSEG1); mismos valores (1 = 60, max 1024). Default 0.
 - `KESTREL_FPUCOST` / `KESTREL_INTERLOCK` / `KESTREL_MULDIVCOST` — coste de FPU / interlocks / mul-div: `stat` cuenta sin cobrar, `0`/`off` apaga, otro valor cobra (FPUCOST admite ademas `block`). Default 0.
 - `KESTREL_STALLCLOCK=0|off|vi|cart` — si las esperas cuentan como tiempo guest: `0`/`off` ninguna, `vi` solo VI, `cart` solo plazos PI/SI. Default ambas.

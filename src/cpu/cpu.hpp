@@ -657,6 +657,17 @@ struct CPU {
   std::vector<u32> profStall;
   u64   profStallTotal = 0, profStallLast = 0;
   u32   profCurPhys = 0;
+  // Traza de lineas de I$ (KESTREL_ITRACE=<fichero>): cada vez que el fetch cambia de linea de
+  // 32 B se apunta la linea (fisica >> 5), entre prof.start y prof.stop, y al parar se escribe
+  // como u32 LE. Con ella un simulador fuera de linea evalua cualquier colocacion del codigo
+  // del invitado en la I$ directa de 16 KB (tools/icsim.py del SDK). Solo interprete.
+  bool  itraceOn = false;
+  u32   itraceLast = ~0u;
+  std::vector<u32> itrace;
+  auto  itraceRec(u32 line) -> void {
+    itraceLast = line;
+    if(itrace.size() < itrace.capacity()) itrace.push_back(line);
+  }
   auto  profEnable(bool on) -> void;                            // alloc + clear when enabling
   auto  profClear() -> void;
 
