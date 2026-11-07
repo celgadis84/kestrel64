@@ -18,6 +18,7 @@ Pasos:
                         con botones, pulsados a la vez (stick:60,0:30:z).
   wait:<n>              espera n fotogramas de juego contando campos VI de emu.status.
   shot:<ruta>           captura el framebuffer del VI a PNG.
+  shot480:<ruta>        igual, 480 filas.
   status                imprime fps/ocupacion.
   state:save:<n> / state:load:<n>  savestate en la ranura n.
   peek:<addr>[:n]       imprime n bytes (16) de RDRAM fisica en hex, coherente con D-cache.
@@ -69,6 +70,8 @@ def main(argv):
             wait_fields(int(tail))
         elif head == "shot":
             print(k.capture_framebuffer(tail or "kestrel_fb.png"))
+        elif head == "shot480":   # framebuffer de 480 filas (UI 640x480)
+            print(k.capture_framebuffer(tail or "kestrel_fb.png", height=480))
         elif head == "status":
             print(k.emu_status())
         elif head == "rdpstats":   # rdpstats:reset = abre ventana; rdpstats = imprime perFlip
