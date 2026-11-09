@@ -468,6 +468,11 @@ struct LinkSite {
   // los sitios POR PHYS, sin volver a mirar el TLB, asi que tras un remapeo hay que
   // re-sondear la VA una vez y marcar los que ya no casan; si el mapeo vuelve, vuelven.
   bool tlbOk = true;
+  // Generacion del mapeo (CodeCache::tlbGen) en la que se calculo tlbOk. El re-sondeo es
+  // perezoso: se hace al ir a ARMAR el sitio, no para todos los sitios en cada remapeo (con
+  // codigo paginado por TLB hay miles de remapeos por segundo y decenas de miles de sitios).
+  u64  tlbOkGen = 0;
+  bool armed = false;       // esta en CodeCache::armed (evita duplicados)
 };
 // VA con la que la guarda de enlace nace DESACTIVADA, y etiqueta de una entrada vacia de la
 // ITC. Es impar a proposito: una PC alineada nunca casa. OJO, no es una VA "imposible" --
@@ -555,6 +560,16 @@ struct CodeCache {
   // decenas de miles de bloques el emulador se para en seco. Tras el primer desenlace no
   // queda nada que desenlazar hasta que alguien vuelva a armar un sitio.
   bool anyLinked = false;
+  // Indices de los sitios armados desde el ultimo desenlace global: unlinkAll() recorre solo
+  // estos. Un barrido de I-cache son cientos de CACHE seguidos y entre uno y otro el driver
+  // vuelve a armar un punado de sitios (el bloque siguiente del propio bucle de barrido): con
+  // la bandera sola cada CACHE volvia a recorrer TODOS los sitios y bloques -- medido con
+  // codigo paginado (un barrido por fallo de pagina): 8.600 millones de desarmes en 140 s.
+  std::vector<u32> armed;
+  // Re-sondeo TLB de un sitio (ver LinkSite::tlbOkGen): lo instala el driver de la CPU.
+  bool (*tlbProbe)(void* ctx, u64 va, u32 phys) = nullptr;
+  void* tlbProbeCtx = nullptr;
+  auto arm(u32 idx, u8* entry) -> void;
 
   // --- cache de destinos INDIRECTOS (JR/JALR) ---
   // El enlace estatico se indexa por el destino de COMPILACION, y un JR no tiene: `jr $ra` va

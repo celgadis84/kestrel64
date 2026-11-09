@@ -1276,13 +1276,15 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   else if(metric == "imiss") { src = &c.profIMiss; mtotal = c.profIMissTotal; }
   else if(metric == "dline") { src = &c.profDLine; mtotal = c.profDMissTotal; dline = true; }
   else if(metric == "stall") { src = &c.profStall; mtotal = c.profStallTotal; }
+  bool vexec = false;
+  if(metric == "vexec") { src = &c.profVirt; mtotal = c.profVirtTotal; vexec = true; }
   std::vector<u32> timeBuf;   // "time": ciclos = instrucciones + paradas, por cubo
   if(metric == "time" && !c.profStall.empty()) {
     timeBuf.resize(c.profBuckets.size());
     for(size_t i = 0; i < timeBuf.size(); i++) timeBuf[i] = c.profBuckets[i] + c.profStall[i];
     src = &timeBuf; mtotal = c.profTotal + c.profStallTotal;
   }
-  else if(metric != "exec" && metric != "stall" && metric != "dmiss" && metric != "imiss" && metric != "dline" && metric != "time")
+  else if(metric != "exec" && metric != "stall" && metric != "dmiss" && metric != "imiss" && metric != "dline" && metric != "time" && metric != "vexec")
     data.set("warn", std::string("metric desconocida, uso exec"));
   // El interprete muestrea en CPU::step(); el JIT, por bloque en su driver (jit_run.cpp).
   if(envFlag("KESTREL_JIT", true))
@@ -1303,6 +1305,13 @@ auto Server::cmdProfCpu(const json::Value& args, json::Value& data) -> void {
   u64 total = mtotal ? mtotal : 1;
   for(u32 k = 0; k < hot.size() && k < topN; k++) {
     u32 phys = hot[k].second << CPU::kProfShift;
+    if(vexec) {   // PC virtual de kseg2 (codigo paginado): sin desensamblado (el marco cambia)
+      json::Value e = json::Value::object();
+      e.set("va", (u64)(CPU::kProfVBase + (hot[k].second << CPU::kProfShift)));
+      e.set("count", (u64)hot[k].first);
+      list.push(e);
+      continue;
+    }
     if(dline) {   // linea de DATOS: sin desensamblado; simbolo mas cercano si hay mapa
       json::Value e = json::Value::object();
       e.set("phys", (u64)phys);

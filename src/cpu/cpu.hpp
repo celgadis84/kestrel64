@@ -656,6 +656,12 @@ struct CPU {
   // de cache, MUL/DIV, FPU, acceso sin cache, interbloqueo). Solo con KESTREL_JIT=0.
   std::vector<u32> profStall;
   u64   profStallTotal = 0, profStallLast = 0;
+  // PC VIRTUAL del codigo mapeado por TLB en kseg2 (metric "vexec"): codigo paginado bajo
+  // demanda (k64/vm.h) cambia de marco fisico a cada fallo, asi que el cubo fisico no dice
+  // que funcion corrio; este si (orden de enlace guiado por perfil). Solo el interprete.
+  static constexpr u32 kProfVBase = 0xC000'0000u, kProfVSize = 32u << 20;
+  std::vector<u32> profVirt;
+  u64   profVirtTotal = 0;
   u32   profCurPhys = 0;
   // Traza de lineas de I$ (KESTREL_ITRACE=<fichero>): cada vez que el fetch cambia de linea de
   // 32 B se apunta la linea (fisica >> 5), entre prof.start y prof.stop, y al parar se escribe

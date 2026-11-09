@@ -173,7 +173,10 @@ conectar. El servidor acepta varios clientes a la vez (MCP + `scripts/pad.py`).
   bloque entero cae en su PC de ENTRADA y una cadena enlazada en su bloque de cabeza (el
   `warn` lo recuerda). `KESTREL_JIT_NOLINK=1` da reparto por bloque (top-10 de regiones de
   1 KB igual que el interprete); `KESTREL_JIT=0` da reparto por instruccion y es el unico
-  con `metric=dmiss|imiss|dline`.
+  con `metric=dmiss|imiss|dline`. `metric=vexec` (solo interprete) cuenta por PC VIRTUAL
+  del codigo mapeado por TLB en 0xC0000000..+32 MB (codigo paginado bajo demanda, `k64/vm.h`
+  del SDK): el marco fisico cambia a cada fallo de pagina, asi que el cubo fisico no dice
+  que funcion corrio; las entradas traen `va` en vez de `pc` y sin desensamblado.
 - `profile_rsp`: ranura de IMEM del microcodigo; el propio perfilado pasa el RSP al
   interprete, asi que sale fiel. Sirve para ver donde gasta el ucode grafico/audio. `word`
   = la palabra que hay AHORA en el hueco (la del ultimo microcodigo cargado).

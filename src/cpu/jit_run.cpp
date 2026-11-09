@@ -700,6 +700,14 @@ auto CPU::jitTryBlock() -> u32 {
   if(!jitCache) {
     auto* cc = new jit::CodeCache();
     if(!cc->init()) { delete cc; return 0; }
+    cc->tlbProbeCtx = this;
+    cc->tlbProbe = [](void* ctx, u64 va, u32 phys) -> bool {
+      auto* c = static_cast<CPU*>(ctx);
+      bool sc = c->xlatCacheable; c->xlatCacheable = false;
+      u64 tp = c->tlbProbePhys(va);
+      bool ca = c->xlatCacheable; c->xlatCacheable = sc;
+      return (tp != ~0ull) && ca && ((u32)tp == phys);
+    };
     jitCache = cc;
   }
   jit::CodeCache* cc = jitCache;
@@ -718,13 +726,8 @@ auto CPU::jitTryBlock() -> u32 {
     // -- medido en Perfect Dark, que acababa ejecutando datos en 0x70003a94. Se re-sondea la
     // VA de cada sitio TLB una vez por cambio de mapeo; el que sigue casando vuelve a ser
     // elegible y el que no se queda fuera hasta que el mapeo vuelva.
-    for(jit::LinkSite& L : cc->links) {
-      if(!L.tlbTarget) continue;
-      bool sc = xlatCacheable; xlatCacheable = false;
-      u64 tp = tlbProbePhys(L.targetVA);
-      bool ca = xlatCacheable; xlatCacheable = sc;
-      L.tlbOk = (tp != ~0ull) && ca && ((u32)tp == L.targetPhys);
-    }
+    // Perezoso (LinkSite::tlbOkGen): linkTo() re-sondea cada sitio TLB la primera vez que
+    // intenta armarlo bajo esta generacion; aqui solo se cambia la generacion.
   }
 
   // Cache negativa: este PC ya falló al compilar y su op líder no ha cambiado → intérprete

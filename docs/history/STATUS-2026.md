@@ -10656,3 +10656,13 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - Arreglo: `VkPipelineCache` propio en `%LOCALAPPDATA%\kestrel64\gpurdp-pipelines.bin`
   (`KESTREL_GPURDP_PIPECACHE`), y la ventana espera mientras GPU-RDP siga arrancando (aviso
   cada 5 s, tope 5 min). Con caché: pipelines 6 ms. SM64 en ventana con GPU-RDP correcto.
+
+## 2026-11-09 — JIT con código paginado por TLB: `unlinkAll` O(armados), sondeo TLB perezoso
+
+- Código paginado bajo demanda (SDK `k64/vm.h`, port NFS III): cada CACHE de un barrido de
+  I$ volvía a recorrer todos los sitios y bloques (8,6 G desarmes en 140 s) y cada remapeo
+  re-sondeaba todos los sitios TLB. Lista `CodeCache::armed` + `LinkSite::tlbOkGen`.
+  Primer cuadro de la carrera 244 s -> 77 s. Detalle: `docs/PERF-CPU.md` §22.
+- `prof.cpu metric=vexec`: perfil por PC virtual de kseg2 (código paginado), solo intérprete.
+- systemtest jit / threaded-jit ALL OK, sm64 jit OK (exe de build-gpu; build-gpu-static
+  bloqueado por otra sesión, `release.sh` pendiente).

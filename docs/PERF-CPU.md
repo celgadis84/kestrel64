@@ -1261,3 +1261,30 @@ aunque ese gpr no se toque en el bloque.
 
 Preguntado al propio compilador con `-march=native` en este anfitrion (i7-870, Nehalem, 2009):
 solo `__SSE4_2__` y `__POPCNT__`, **ningun `__AVX__`**. `_mm256_madd_epi16` no existe aqui.
+
+## 22. Codigo paginado por TLB: `unlinkAll` O(armados) y re-sondeo TLB perezoso (2026-11-09)
+
+Caso: el port de NFS III del SDK pagina su codigo (18,8 MB en `.ktext`, kseg2 0xC0000000)
+sobre un pool de 64 marcos de 8 KB (`k64/vm.h`). Cada fallo de pagina hacia un barrido de
+I-cache (512 CACHE seguidos) y un remapeo TLB. Con el JIT el juego iba 3-4x MAS LENTO que el
+interprete (primer cuadro 244-265 s contra ~70 s).
+
+Causa: el bug 1 de arriba otra vez, por otro lado. La bandera `anyLinked` solo cortocircuita
+si nada esta armado; entre CACHE y CACHE el propio bucle de barrido re-arma un punado de
+sitios, asi que cada CACHE volvia a recorrer TODOS los sitios (~30 k) y bloques (~45 k):
+`KESTREL_JIT_STATS` midio **8.600 millones de desarmes en 140 s**. Ademas cada cambio de
+`tlbGen` re-sondeaba el TLB para todos los sitios con destino TLB.
+
+Arreglo (`jit.hpp/jit.cpp/jit_run.cpp`):
+- `CodeCache::armed`: lista de indices de sitios armados desde el ultimo desenlace global
+  (`LinkSite::armed` evita duplicados). `arm()` es el unico sitio que arma. `unlinkAll()`
+  recorre solo esa lista; el bucle por bloque (`linkedEpoch = ~0`) sobraba: las epocas solo
+  crecen, ningun bloque tiene ya la nueva.
+- `LinkSite::tlbOkGen`: el sondeo TLB de un sitio se hace al ir a armarlo (`linkTo`) si la
+  generacion cambio, con `CodeCache::tlbProbe` (lo instala el driver de la CPU). El remapeo
+  ya no recorre los sitios.
+
+Medida (NFS3 race ROM, JIT): desarmes 8,6 G -> **10 M**; primer cuadro 244 s -> **77 s**
+(junto con el mantenimiento de cache por marco del SDK). Lo que queda en el JIT con codigo
+paginado es recompilar: un marco reciclado mata sus bloques (clave fisica). Validacion:
+systemtest jit y threaded-jit ALL OK, sm64 jit OK.

@@ -885,6 +885,7 @@ auto CPU::profEnable(bool on) -> void {
     profIMiss.assign(kProfBuckets, 0);
     profDLine.assign(kProfBuckets, 0);
     profStall.assign(kProfBuckets, 0);
+    profVirt.assign(kProfVSize >> kProfShift, 0);
   }
   if(on) profClear();
   if(const char* tp = std::getenv("KESTREL_ITRACE")) {     // traza de lineas de I$
@@ -907,9 +908,9 @@ auto CPU::profEnable(bool on) -> void {
 }
 
 auto CPU::profClear() -> void {
-  for(auto* v : {&profBuckets, &profDMiss, &profIMiss, &profDLine, &profStall})
+  for(auto* v : {&profBuckets, &profDMiss, &profIMiss, &profDLine, &profStall, &profVirt})
     if(!v->empty()) std::fill(v->begin(), v->end(), 0u);
-  profTotal = profDMissTotal = profIMissTotal = profStallTotal = 0;
+  profTotal = profDMissTotal = profIMissTotal = profStallTotal = profVirtTotal = 0;
   profStallLast = stallTotal;
 }
 
@@ -971,6 +972,7 @@ auto CPU::step() -> void {
       if(!profStall.empty()) { profStall[profCurPhys >> kProfShift] += (u32)d; profStallTotal += d; }
     }
     if(pp < (8u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; profCurPhys = pp; }
+    if((u32)pc - kProfVBase < kProfVSize) { profVirt[((u32)pc - kProfVBase) >> kProfShift]++; profVirtTotal++; }
   }
   // pc/nextPc branch-delay model: fetch pc, advance, then default nextPc = pc+4.
   // While execute() runs, `pc` is the delay-slot address, so relative branches

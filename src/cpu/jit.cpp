@@ -222,6 +222,8 @@ auto CodeCache::clear() -> void {
   // Todo el código emitido (y con él las guardas/ranuras de enlace) deja de existir: los
   // punteros de `links` apuntarían a bytes reciclados por el bump-allocator.
   links.clear();
+  armed.clear();
+  anyLinked = false;
   byTarget.clear();
   itcClear();     // sus puntos de entrada son bytes reciclados igual que los de `links`
 }
@@ -233,6 +235,8 @@ auto CodeCache::clear() -> void {
 auto CodeCache::addLink(const LinkSite& s) -> void {
   u32 idx = (u32)links.size();
   links.push_back(s);
+  links.back().tlbOkGen = tlbGen;   // compilado bajo el mapeo actual: tlbOk vale ahora
+  links.back().armed = false;
   *s.vaImm = kNoLink;          // nace desenlazado
   *s.slot  = 0;
   byTarget[s.targetPhys].push_back(idx);
@@ -243,13 +247,17 @@ auto CodeCache::addLink(const LinkSite& s) -> void {
   // I-cache, remapeo) un bloque vivo puede estar cubriendo bytes que el guest ya reescribio
   // (DMA a un marco reutilizado) y solo el driver, al revalidarlo, puede volver a publicarlo.
   if(bi >= 0 && !blocks[bi].dead && blocks[bi].linkEntry && blocks[bi].linkedEpoch == linkEpoch
-     && !(s.tlbTarget && (blocks[bi].crossPage || !s.tlbOk))) {
-    LinkSite& L = links[idx];
-    *L.slot = (u64)(std::uintptr_t)blocks[bi].linkEntry;
-    *L.vaImm = L.targetVA;
-    nLinked++;
-    anyLinked = true;
-  }
+     && !(s.tlbTarget && (blocks[bi].crossPage || !s.tlbOk)))
+    arm(idx, blocks[bi].linkEntry);
+}
+
+auto CodeCache::arm(u32 idx, u8* entry) -> void {
+  LinkSite& L = links[idx];
+  *L.slot = (u64)(std::uintptr_t)entry;
+  *L.vaImm = L.targetVA;
+  nLinked++;
+  anyLinked = true;
+  if(!L.armed) { L.armed = true; armed.push_back(idx); }
 }
 
 auto CodeCache::linkTo(u32 phys, u8* entry, bool xpage) -> void {
@@ -258,11 +266,15 @@ auto CodeCache::linkTo(u32 phys, u8* entry, bool xpage) -> void {
   for(u32 i : it->second) {
     LinkSite& L = links[i];
     // Destino TLB: ni a un bloque crossPage (ver addLink) ni con la traduccion caducada.
-    if(L.tlbTarget && (xpage || !L.tlbOk)) continue;
-    *L.slot = (u64)(std::uintptr_t)entry;
-    *L.vaImm = L.targetVA;
-    nLinked++;
-    anyLinked = true;
+    if(L.tlbTarget) {
+      if(xpage) continue;
+      if(L.tlbOkGen != tlbGen) {   // mapeo cambiado desde el ultimo sondeo de este sitio
+        L.tlbOk = tlbProbe && tlbProbe(tlbProbeCtx, L.targetVA, L.targetPhys);
+        L.tlbOkGen = tlbGen;
+      }
+      if(!L.tlbOk) continue;
+    }
+    arm(i, entry);
   }
 }
 
@@ -274,6 +286,7 @@ auto CodeCache::unlinkTo(u32 phys) -> void {
   itcClear();
   auto it = byTarget.find(phys);
   if(it == byTarget.end()) return;
+  // Siguen en `armed` (desarmados): unlinkAll() los volvera a poner a kNoLink, inocuo.
   for(u32 i : it->second) { *links[i].vaImm = kNoLink; nUnlinked++; }
 }
 
@@ -287,10 +300,12 @@ auto CodeCache::unlinkAll() -> void {
   if(!anyLinked) return;      // ya está todo desenlazado: nada que recorrer (ver jit.hpp)
   nInvalAllEff++;
   anyLinked = false;
-  for(LinkSite& L : links) *L.vaImm = kNoLink;
-  nUnlinked += links.size();
+  for(u32 i : armed) { *links[i].vaImm = kNoLink; links[i].armed = false; }
+  nUnlinked += armed.size();
+  armed.clear();
+  // Las epocas solo crecen: ningun bloque publicado antes tiene linkedEpoch == la nueva, asi
+  // que todos se re-enlazan al revalidarse sin tener que recorrerlos aqui.
   linkEpoch++;
-  for(Block& b : blocks) b.linkedEpoch = ~0ull;   // fuerza re-enlace tras revalidar
 }
 
 }  // namespace kestrel::jit
