@@ -356,8 +356,12 @@ auto CPU::hostPoke(u32 phys, const u8* src, u32 n, bool code) -> u32 {
     // caigan en la linea residente; una linea que no esta no hace falta tocarla.
     DCacheLine& d = dcache[(a >> 4) & 0x1ff];
     if(d.tagv == ((a & ~0xfu) | 1u)) d.data[a & 0xf] = mem->rdram[a];
-    ICacheLine& ic = icache[(a >> 5) & 0x1ff];
-    if(ic.valid && ic.ptag == (a & ~0x1fu)) ic.data[a & 0x1f] = mem->rdram[a];
+    // I$ VIPT: la linea de `a` puede estar en cualquiera de los 4 indices que dan los bits
+    // 13:12 de una VA (ver CPU::icIdx); el tag fisico dice cual es.
+    for(u32 k = 0; k < 4; k++) {
+      ICacheLine& ic = icache[(((a >> 5) & 0x7f) | (k << 7))];
+      if(ic.valid && ic.ptag == (a & ~0x1fu)) ic.data[a & 0x1f] = mem->rdram[a];
+    }
     a++;
   }
   if(code) {
@@ -414,7 +418,7 @@ auto CPU::icFill(u32 idx, u32 base) -> void {
 
 auto CPU::icFetch(u32 phys) -> u32 {
   if(__builtin_expect(cacheStat, 0)) icAccess++;
-  u32 idx  = (phys >> 5) & 0x1ff;
+  u32 idx  = icIdx(phys);
   u32 base = phys & ~0x1fu;
   if(__builtin_expect(itraceOn, 0) && (phys >> 5) != itraceLast) itraceRec(phys >> 5);
   ICacheLine& l = icache[idx];
@@ -977,6 +981,7 @@ auto CPU::step() -> void {
   // pc/nextPc branch-delay model: fetch pc, advance, then default nextPc = pc+4.
   // While execute() runs, `pc` is the delay-slot address, so relative branches
   // use `pc + (simm<<2)` as their target base; branch()/jumps override nextPc.
+  icVaDelta = (u32)pc - fpe;
   u32 op = !mem ? 0 : (fcacheable && fpe < mem->rdram.size()) ? icFetch(fpe) : mem->read32(fpe);
   pc = nextPc;
   nextPc = pc + 4;

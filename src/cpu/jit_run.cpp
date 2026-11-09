@@ -274,7 +274,7 @@ u64 g_trampWhy[5] = {0};   // 0=permiso agotado 1=MI 2=latch timer 3=rsp corrien
 // salidas que no resuelven destino (ni enlace estatico ni acierto en la ITC).
 u64 g_trampBail = 0;
 auto CPU::jitPeekWord(u32 phys) -> u32 {
-  const ICacheLine& l = icache[(phys >> 5) & 0x1ff];
+  const ICacheLine& l = icache[icIdx(phys)];
   if(!l.valid || l.ptag != (phys & ~0x1fu)) {
     if((usize)phys + 4 > mem->rdram.size()) return 0;
     mem->dmaSettle(phys, (u64)phys + 4);   // el compilador mira RDRAM: ver Memory::dmaSettle
@@ -284,8 +284,7 @@ auto CPU::jitPeekWord(u32 phys) -> u32 {
   u32 w; std::memcpy(&w, &l.data[phys & 0x1c], 4);
   return __builtin_bswap32(w);
 }
-auto CPU::jitIcRefill(u32 entry, u32 base) -> u8 {
-  u32 idx = (base >> 5) & 0x1ff;
+auto CPU::jitIcRefill(u32 entry, u32 base, u32 idx) -> u8 {   // idx: horneado al compilar
   icFill(idx, base);
   if(!jitCache) return 0;
   s32 bi = jitCache->find(entry);
@@ -304,8 +303,8 @@ auto CPU::jitIcRefill(u32 entry, u32 base) -> u8 {
   if(li < sizeof(b.lineSeq) / sizeof(b.lineSeq[0])) b.lineSeq[li] = l.seq;
   return 1;
 }
-extern "C" KJIT_ABI u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base) {
-  return reinterpret_cast<CPU*>(cpu)->jitIcRefill(entry, base);
+extern "C" KJIT_ABI u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base, u32 idx) {
+  return reinterpret_cast<CPU*>(cpu)->jitIcRefill(entry, base, idx);
 }
 
 extern "C" KJIT_ABI u32 kestrel_jitProceedTramp(void* cpu, u32 K) {
@@ -369,7 +368,7 @@ auto CPU::jitIdleSkip(u32 phys) -> u32 {
   // I-cache exacta: el salto no pasa por el fetch, asi que solo vale con las dos lineas ya
   // cargadas (todas las vueltas aciertan); si no, la primera vuelta la da el camino normal.
   if(jitIcExact()) {
-    for(u32 pa : {phys, phys + 4}) { const ICacheLine& l = icache[(pa >> 5) & 0x1ff];
+    for(u32 pa : {phys, phys + 4}) { const ICacheLine& l = icache[icIdx(pa)];
       if(!l.valid || l.ptag != (pa & ~0x1fu)) { jit::g_idleWhy[1]++; return 0; } }
   }
   u32 w0 = jitFetchWord(phys), op = w0 >> 26;
@@ -692,6 +691,7 @@ auto CPU::jitTryBlock() -> u32 {
     }
   }
   if((usize)phys + 4 > mem->rdram.size()) { JDECL(DR_MISC); return 0; }
+  icVaDelta = (u32)pc - phys;   // I$ VIPT (CPU::icIdx): validar/compilar con el indice de ESTA VA
   if(g_gpcProf.top) g_gpcProf.note(pc, phys, mem->rdram.data(), mem->rdram.size());
 
   // Hilo ocioso del invitado: se cobra entero sin emitir ni ejecutar nada. Ver jitIdleSkip.
@@ -839,7 +839,7 @@ auto CPU::jitTryBlock() -> u32 {
   const bool icExact = jitIcExact();
   if(!noSmc)
   for(u32 base = phys & ~0x1fu, li = 0; base < endPa; base += 32, li++) {
-    u32 idx = (base >> 5) & 0x1ff;
+    u32 idx = icIdx(base);
     ICacheLine& l = icache[idx];
     if(!l.valid || l.ptag != base) { if(icExact) continue; icFill(idx, base); }   // exacta: la rellena el bloque
     if(l.seq == blk.lineSeq[li]) continue;                 // linea intacta desde la ultima mirada

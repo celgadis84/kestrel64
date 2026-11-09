@@ -1002,10 +1002,16 @@ public:
   // Mientras tanto el compilador lee las palabras sin rellenar (jitPeekWord): un relleno en
   // tiempo de compilacion cobraria lineas que la ejecucion quiza no alcance.
   auto jitIcExact() const -> bool { return icMissCycles != 0; }
+  // La I-cache del VR4300 es VIPT: indice = bits 13:5 de la VA, tag = PA. Con paginas de 4 KB
+  // los bits 13:12 de VA y PA pueden diferir (codigo mapeado por TLB), y el software invalida
+  // por indice de VA (CACHE Index_* via kseg0). `icVaDelta` = VA - PA del fetch en curso: lo
+  // fija el fetch del interprete y el driver del JIT antes de validar/compilar un bloque.
+  u32  icVaDelta = 0;
+  auto icIdx(u32 phys) const -> u32 { return ((phys + icVaDelta) >> 5) & 0x1ff; }
   auto jitPeekWord(u32 phys) -> u32;
   // Rellena la linea `base` (cobra el fallo) y comprueba que las palabras del bloque que entra
   // en `entry` siguen siendo las compiladas. 0 = cambiaron: bloque muerto, bail.
-  auto jitIcRefill(u32 entry, u32 base) -> u8;
+  auto jitIcRefill(u32 entry, u32 base, u32 idx) -> u8;
   // Ejecuta un load/store simple-alineado (Etapa 2b) espejando EXACTO el intérprete.
   // Devuelve 1 = hecho limpio; 0 = faultaría (misalign/TLB/ADE) → el bloque hace bail y
   // el intérprete re-ejecuta la op para vectorizar la excepción. Nunca vectoriza aquí.

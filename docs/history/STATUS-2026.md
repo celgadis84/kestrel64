@@ -10666,3 +10666,22 @@ CombinerOverflow 45.54 -> 45.41, SetPrimColor32BPP 0.79 -> 0.78. Baseline
 - `prof.cpu metric=vexec`: perfil por PC virtual de kseg2 (código paginado), solo intérprete.
 - systemtest jit / threaded-jit ALL OK, sm64 jit OK (exe de build-gpu; build-gpu-static
   bloqueado por otra sesión, `release.sh` pendiente).
+
+## 2026-11-09 (b) — I-cache VIPT: índice por VA, tag por PA
+
+- La I$ se indexaba con la dirección FÍSICA. El VR4300 la indexa con la VIRTUAL (bits 13:5;
+  manual NEC: "direct-mapped, virtually-indexed, and physically-tagged"). Con código mapeado
+  por TLB en páginas de 4 KB los bits 13:12 de VA y PA difieren, y el software invalida por
+  índice de VA (CACHE Index_Invalidate vía kseg0).
+- Síntoma: el SDK pagina código y, al reciclar un marco, invalida solo los 256 índices de la
+  VA de la unidad saliente (correcto en HW). Aquí esas líneas vivían en el índice de la PA:
+  seguían válidas con el tag del marco, el driver del JIT las daba por buenas (`lineSeq`
+  intacto) y ejecutaba el bloque de la unidad anterior -> "TLB miss" en `c0175000`, que en
+  el ELF es un `and`. Sin enlaces (`KESTREL_JIT_NOLINK`/`NOTLBLINK`) fallaba igual.
+- Arreglo: `CPU::icVaDelta` (VA - PA del fetch en curso, lo fijan el fetch del intérprete y
+  el driver del JIT) + `CPU::icIdx(phys)`; icFetch, jitPeekWord, validación del driver,
+  jitIdleSkip y la I$ exacta horneada (el índice viaja a `jitIcRefill` en R9). La escritura
+  del anfitrión en RDRAM mira los 4 índices posibles de la línea. Las ops Index ya usaban
+  los bits de la VA. D$ sigue por PA (anotado en GAPS).
+- systemtest interp / jit / threaded-jit / phys / phys-threaded ALL OK; sm64 interp / jit /
+  phys OK (kseg0: VA y PA comparten los bits del índice, nada cambia para juegos sin TLB).

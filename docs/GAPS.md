@@ -769,6 +769,10 @@ decomp, o sea del emulador.
        is 16 KB." y "Data Cache is a direct-mapped, virtually-indexed and physically-tagged
        writeback cache. The capacity is 8 KB." (tabla de resumen: lineas de 32 / 16 bytes, "Direct
        map, virtual index"). El modelo de aqui ya es de mapeo directo: coincide con el HW.
+       **Indice virtual:** I$ con indice de VA desde 2026-11-09 (`CPU::icIdx`, ver
+       `docs/history/STATUS-2026.md`). Pendiente: la **D$ sigue indexada por PA** (con paginas
+       de 4 KB el bit 12 de VA y PA puede diferir) y las ops CACHE **Hit_*** sobre una VA mapeada
+       por TLB usan `vaddr & 0x1FFFFFFF` como tag en vez de traducirla (con kseg0 da igual).
     3b. **Muestra de PD en nivel -- HECHA 2026-09-17.** Defeccion (warp por trucos): D$ 2,29 %,
        I$ 0,38 %, CPI 2,73 con base 1,0. El hueco era la muestra de titulo. Detalle y por que el
        defecto no se mueve sin captura de HW: `docs/history/STATUS-2026.md`, seccion del 2026-09-17.

@@ -1619,7 +1619,7 @@ static const int g_jitDiffAny = (std::getenv("KESTREL_JIT_DIFF") || std::getenv(
 // timer — más viajes al driver, más código emitido, peor I-cache del host.
 static const int g_jitTrace = (std::getenv("KESTREL_JIT_TRACE") && !g_jitDiffAny) ? 1 : 0;
 extern "C" KJIT_ABI u32 kestrel_jitProceedTramp(void* cpu, u32 K);
-extern "C" KJIT_ABI u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base);
+extern "C" KJIT_ABI u8 kestrel_jitIcRefill(void* cpu, u32 entry, u32 base, u32 idx);
 
 extern const char* g_jitDump;   // KESTREL_JIT_DUMP (definido mas abajo)
 auto compileBlock(CPU& c, u32 phys) -> Block {
@@ -1818,7 +1818,7 @@ auto compileBlock(CPU& c, u32 phys) -> Block {
   // cualquier otro; el relleno no se deshace, y el interprete que re-ejecuta la op acierta.
   const bool icExact = c.jitIcExact();
   auto fetchW = [&](u32 a) -> u32 { return icExact ? c.jitPeekWord(a) : c.jitFetchWord(a); };
-  struct IcChk { usize at, j1, j2, cont; u32 base; u32 idx; RcSnap snap; IlkUndo undo; };
+  struct IcChk { usize at, j1, j2, cont; u32 base; u32 idx; u32 icIdx; RcSnap snap; IlkUndo undo; };
   std::vector<ColdCall> coldCalls;
   g_cold = &coldCalls;
   std::vector<ColdMem> coldMems;
@@ -1828,8 +1828,11 @@ auto compileBlock(CPU& c, u32 phys) -> Block {
   auto icChk = [&](u32 a, u32 idx) {
     if(!icExact || (a != phys && (a & 0x1f))) return;
     u32 base = a & ~0x1fu;
-    const s32 lo = (s32)(offsetof(CPU, icache) + ((base >> 5) & 0x1ff) * sizeof(CPU::ICacheLine));
-    IcChk k; k.at = c.jitCache->buf.used; k.base = base; k.idx = idx;
+    // Indice VIPT con la VA de este despacho (CPU::icIdx); el bloque va por clave fisica, y
+    // otra VA con distintos bits 13:12 tendria otro indice: solo afecta a la I$ exacta.
+    const u32 ici = c.icIdx(base);
+    const s32 lo = (s32)(offsetof(CPU, icache) + ici * sizeof(CPU::ICacheLine));
+    IcChk k; k.at = c.jitCache->buf.used; k.base = base; k.idx = idx; k.icIdx = ici;
     e.mov_r32_m(RAX, RBX, lo + (s32)offsetof(CPU::ICacheLine, ptag));
     e.alu32_imm(7, RAX, base);                     // cmp eax, base
     k.j1 = e.jne_rel32_placeholder();
@@ -2540,6 +2543,7 @@ auto compileBlock(CPU& c, u32 phys) -> Block {
     e.mov_r_r(RCX, RBX);
     e.mov_r_imm32(RDX, phys);
     e.mov_r_imm32(R8, k.base);
+    e.mov_r_imm32(R9, k.icIdx);
     e.mov_r_imm64(RAX, (u64)&kestrel_jitIcRefill);
     e.call_reg(RAX);
     e.test_al_al();
