@@ -1319,6 +1319,26 @@ grupo, `ctx.saveData.autoAdvanceTest = 0` lo aparca en un test, y `ctx.diffMode`
   el tiempo de RSP del audio mezclado dentro del microcodigo grafico propio del SDK frente al
   microcodigo de audio estandar (aspMain) en tareas separadas. Prueba minima: una ROM con ambas
   clases de tarea, suma de cubos == ciclos totales del RSP.
+- **Perfilador de línea de tiempo con flame chart y fallos de caché (anotado 2026-11-13,
+  petición del usuario; referencia: el perfilador de ares upstream, sept 2026).**
+  ares muestra en una ventana, por cuadro: (1) flame chart de la CPU con la pila de llamadas
+  simbolizada en el tiempo (main -> bucle -> render -> ... con memcpy/memset visibles); (2) una
+  pista "Cache" encima con marcas de fallo I$/D$ en el instante en que pasan, así se ve qué
+  llamada falla siempre en I$; (3) pistas RSP (tareas/ucode, DMA) y RDP (busy) en el mismo eje;
+  (4) cabecera con cpu/rsp/rdp/halt en ciclos y % del cuadro; (5) panel RDP Commands con
+  métricas (overdraw, píxeles, triángulos, rects, TexLoads) y TMEM. Lo nuestro hoy: `dbg.timeline`
+  (CPU/RSP/RDP/VI/AI en el tiempo, sin pila de llamadas), `prof_cpu.py` (muestreo plano por
+  función), `profile_cpu` con métricas de caché (solo `KESTREL_JIT=0`, agregado, sin tiempo),
+  `KESTREL_ITRACE` + `icsim.py` (offline), `rdpframe.py` (comandos/coste del cuadro). Falta:
+  - pila de llamadas por muestra (jal/jalr/jr ra en el intérprete; en el JIT, sondas en
+    entrada/salida de bloque o desenrollado por $sp/$ra con el mapa de símbolos) -> flame chart;
+  - eventos de fallo I$/D$ con marca de tiempo y PC (anillo, solo con el modelo de caché activo,
+    hoy JIT=0) superpuestos al flame chart, y agregados por función (fallos I$, D$, writeback);
+  - pistas RSP/RDP alineadas en el mismo eje (ya están en `dbg.timeline`: unirlas en la vista);
+  - panel en la ventana ImGui del depurador + volcado JSON por MCP (`dbg.flame`) para scripts.
+  Uso: fase final de caché de los ports (regla: solo cuando el usuario la abra) y SDK.
+  Nota: `ares-64/` es nuestro fork CONGELADO; esta función está en ares upstream. Para
+  consultarla, clonar upstream aparte (solo lectura, reimplementar, no copiar).
 
 ---
 
