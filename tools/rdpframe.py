@@ -19,6 +19,10 @@ ap.add_argument('--poke', nargs=3, metavar=('MAP', 'SYMBOL', 'VALUE'))
 ap.add_argument('--dump')
 ap.add_argument('--port', default='9474')
 ap.add_argument('--top', type=int, default=15)
+ap.add_argument('--rec', type=int, default=8, help='VI fields to record (slow games need more than one frame time)')
+ap.add_argument('--stall', type=float, default=60, help='host seconds without SYMBOL moving = hang/crash: abort')
+ap.add_argument('--pad', nargs=2, metavar=('BUTTONS', 'AT'), help='hold BUTTONS + stick up once SYMBOL >= AT (games that need input)')
+ap.add_argument('--log', help='emulator stdout (default: next to --dump, or the temp dir)')
 ap.add_argument('--exe', default=os.environ.get('KESTREL_EXE', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'build-static', 'kestrel64.exe')))
 a_ = ap.parse_args()
 port, top = a_.port, a_.top
@@ -36,9 +40,26 @@ gf = int(a_.sym[2], 0) if a_.sym else 0
 ea = sym_addr(a_.poke[0], a_.poke[1]) if a_.poke else None
 os.environ['KESTREL_TELEMETRY_PORT'] = port
 import kestrel_mcp as k
-env = dict(os.environ, KESTREL_CACHECOST='1', KESTREL_HUD_OFF='1', KESTREL_AUDIO='0')
-proc = subprocess.Popen([a_.exe, a_.rom, '--port', port], env=env,
-                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+env = dict({'KESTREL_CACHECOST': '1'}, **dict(os.environ, KESTREL_HUD_OFF='1', KESTREL_AUDIO='0'))   # caller's KESTREL_CACHECOST wins
+import tempfile
+logpath = a_.log or ((a_.dump + '.log') if a_.dump else os.path.join(tempfile.gettempdir(), 'rdpframe_%s.log' % port))
+logf = open(logpath, 'wb')
+# cwd = the ROM's folder: ports read their SD / fs data relative to it
+proc = subprocess.Popen([a_.exe, os.path.abspath(a_.rom), '--port', port], env=env, cwd=os.path.dirname(os.path.abspath(a_.rom)),
+                        stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT)
+
+
+def crashed():
+    """The guest's crash / panic banner in the emulator log, or the emulator gone."""
+    if proc.poll() is not None: return 'emulator exited rc=%s' % proc.returncode
+    try:
+        t = open(logpath, 'rb').read().decode('latin-1')
+    except OSError:
+        return None
+    for key in ('*** CRASH', 'PANIC', 'panic'):
+        i = t.find(key)
+        if i >= 0: return t[i:i + 300].strip()
+    return None
 
 
 SW, SH = 320, 240                      # screen (scissor) the area is clipped to
@@ -79,13 +100,27 @@ try:
         except Exception: time.sleep(0.25)
     if addr is None:
         k.frame_advance(a_.frames, timeout_ms=600000)
-    while addr is not None and int(k.read_memory('rdram', addr, 4, coherent=True)['hex'], 16) < gf:
+    # RAM garbage before .bss is cleared can read >= VALUE: only accept VALUE..VALUE+0xFFFF
+    last, moved, padded = None, time.time(), False
+    while addr is not None:
+        v = int(k.read_memory('rdram', addr, 4, coherent=True)['hex'], 16)
+        if gf <= v < gf + 0x10000: break
+        if v != last: last, moved = v, time.time()
+        why = crashed() or (time.time() - moved > a_.stall and '%s stuck at %d for %.0f s' % (a_.sym[1], v, a_.stall))
+        if why:
+            shot = (a_.dump or os.path.join(tempfile.gettempdir(), 'rdpframe')) + '.hang.png'
+            try: k.capture_framebuffer(shot)
+            except Exception: pass
+            sys.exit('ABORT: %s\n  log %s\n  screen %s' % (why, logpath, shot))
+        if a_.pad and not padded and v >= int(a_.pad[1], 0) and v < gf + 0x10000:
+            k.controller_set(buttons=a_.pad[0], stick_y=80, polls=-1)
+            padded = True
         k.frame_advance(10, timeout_ms=600000)
         if ea is not None: k.write_memory('rdram', ea, '%02x' % (int(a_.poke[2], 0) & 0xFF))
     k.dbg_enable(True)
     k.frame_advance(4, timeout_ms=600000)
     s0, k0 = k.dbg_status(), k.query('rdp.stats.reset')
-    k.frame_advance(8, timeout_ms=600000)
+    k.frame_advance(a_.rec, timeout_ms=600000)
     s1, st = k.dbg_status(), k.query('rdp.stats')[0]
     print('dbg frames', s0.get('frames'), '->', s1.get('frames'), ' flips', st['flips'], ' ops', dict(sorted(st['ops'].items(), key=lambda x: -x[1])[:4]))
     k.dbg_freeze(True)
