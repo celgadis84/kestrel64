@@ -7,6 +7,8 @@
 #include "../video/vifilter.hpp"
 #include "../video/capture.hpp"
 #include <algorithm>
+#include <unordered_map>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1118,6 +1120,25 @@ auto CPU::takeException(u32 excCode, bool tlbRefill, bool xtlb) -> void {
     u64 n = v ? std::strtoull(v, nullptr, 0) : 0;
     return n > 1 ? n : 80ull;
   }();
+  // KESTREL_TLBHIST=<n>: histograma de fallos TLB (code 1/2/3) por unidad de 8 KiB de BadVAddr;
+  // cada <n> fallos vuelca a stderr las 24 unidades mas frecuentes y reinicia.
+  static const u64 kTlbHist = []{
+    const char* v = std::getenv("KESTREL_TLBHIST");
+    return v ? std::strtoull(v, nullptr, 0) : 0ull;
+  }();
+  if(kTlbHist && excCode >= 1 && excCode <= 3) {
+    static std::unordered_map<u32, u32> hist;
+    static u64 seen;
+    hist[(u32)cop0[C0_BadVAddr] >> 13]++;
+    if(++seen >= kTlbHist) {
+      std::vector<std::pair<u32, u32>> v(hist.begin(), hist.end());
+      std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+      std::fprintf(stderr, "[tlbhist] %llu faults, %zu units:", (unsigned long long)seen, v.size());
+      for(size_t i = 0; i < v.size() && i < 24; i++) std::fprintf(stderr, " %08x:%u", v[i].first << 13, v[i].second);
+      std::fprintf(stderr, "\n");
+      hist.clear(); seen = 0;
+    }
+  }
   if(excTrace && exceptions < kExcTraceMax) {
     std::fprintf(stderr, "[exc] #%llu code=%u epc=0x%016llx badv=0x%016llx status=0x%08x cause=0x%08x mi_intr=0x%02x mi_mask=0x%02x retired=%llu\n",
                  (unsigned long long)exceptions, excCode, (unsigned long long)epc, (unsigned long long)cop0[C0_BadVAddr], status, (u32)cop0[C0_Cause],

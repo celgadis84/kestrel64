@@ -316,6 +316,7 @@ Convencion: salvo que se diga otra cosa, una variable "de presencia" se activa c
 - `KESTREL_PCRING` — anillo de los ultimos 4096 (pc, op) ejecutados, volcado al salir.
 - `KESTREL_EXCTAIL` — anillo de las ultimas 40 excepciones, volcado al salir.
 - `KESTREL_EXCTRACE=<n>` — sube el tope de la traza de excepciones (default 80).
+- `KESTREL_TLBHIST=<n>` — histograma de fallos TLB (refill/invalid/Mod, codigos 1-3) por unidad de 8 KiB de BadVAddr: cada `<n>` fallos vuelca a stderr `[tlbhist] <n> faults, <k> units:` + las 24 unidades mas frecuentes (`va:cuenta`) y reinicia. Para ver si un programa paginado sufre por alcance de la TLB (muchas unidades repartidas) o por pocas paginas calientes.
 - `KESTREL_FAULTTRACE` — traza las primeras 24 excepciones que no son Int/Sys, con banco de registros.
 - `KESTREL_TRAPRI` — traza excepciones con excCode 10/2/3/11 (RI, TLBL, TLBS, CpU).
 - `KESTREL_TRAPWILD` — trampa: salto o fetch a MMIO del RCP (`0xA4000000..0xA4900000`), puntero corrupto; vuelca el rastro de saltos y para.
