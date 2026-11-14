@@ -123,6 +123,8 @@ try:
     k.frame_advance(a_.rec, timeout_ms=600000)
     s1, st = k.dbg_status(), k.query('rdp.stats')[0]
     print('dbg frames', s0.get('frames'), '->', s1.get('frames'), ' flips', st['flips'], ' ops', dict(sorted(st['ops'].items(), key=lambda x: -x[1])[:4]))
+    pf = st.get('perFlip', {})
+    print('per flip: gclk %.0f  tmem gclk %.0f  loads %.1f' % (pf.get('gclk', 0), pf.get('gclkTmem', 0), pf.get('loads', 0)))
     k.dbg_freeze(True)
     cmds, start = [], 0
     while True:
