@@ -1039,7 +1039,7 @@ auto CPU::jitTryBlock() -> u32 {
   if(jit::g_jitDump) { blk.runs++; jit::g_dumpCache = cc; }
   // prof.* dmiss/imiss bajo JIT: los fallos del bloque van a su PC fisica de entrada (sin
   // esto caian en la ultima op interpretada, a veces muy lejos)
-  if(__builtin_expect(profOn, 0) && phys < (8u << 20)) profCurPhys = phys;
+  if(__builtin_expect(profOn, 0) && phys < (16u << 20)) profCurPhys = phys;
   u32 Rraw = blk.fn(gpr, this);
   if(g_jitStats) {
     if(Rraw & 0x80000000u)        jit::g_retBranch++;   // salio por un terminador de salto
@@ -1103,7 +1103,7 @@ auto CPU::jitTryBlock() -> u32 {
   retired += R;
   // prof.* bajo JIT: el bloque entero va al cubo de su PC fisica de entrada (las cadenas
   // enlazadas, al bloque cabeza: KESTREL_JIT_NOLINK=1 para el reparto exacto por bloque)
-  if(__builtin_expect(profOn, 0) && phys < (8u << 20)) {
+  if(__builtin_expect(profOn, 0) && phys < (16u << 20)) {
     u32 nR = R + jitPending; profBuckets[phys >> kProfShift] += nR; profTotal += nR;
   }
   // La guarda de arriba garantiza que no se cruza Compare aqui, pero el latch se hace igual:

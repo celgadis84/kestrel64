@@ -319,7 +319,7 @@ auto CPU::dcMiss(u32 idx, u32 base) -> void {
   dcMisses++;
   if(__builtin_expect(profOn, 0) && !profDMiss.empty()) {   // P8: fallos de D$ por PC
     profDMiss[profCurPhys >> kProfShift]++;
-    if(base < (8u << 20)) profDLine[base >> 4]++;
+    if(base < (16u << 20)) profDLine[base >> 4]++;
     profDMissTotal++;
   }
   chargeDcMiss();   // el relleno de linea paga la latencia de RDRAM (ver countTicks)
@@ -977,7 +977,7 @@ auto CPU::step() -> void {
       profStallLast = stallTotal;
       if(!profStall.empty()) { profStall[profCurPhys >> kProfShift] += (u32)d; profStallTotal += d; }
     }
-    if(pp < (8u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; profCurPhys = pp; }
+    if(pp < (16u << 20)) { profBuckets[pp >> kProfShift]++; profTotal++; profCurPhys = pp; }
     if((u32)pc - kProfVBase < kProfVSize) { profVirt[((u32)pc - kProfVBase) >> kProfShift]++; profVirtTotal++; }
   }
   // pc/nextPc branch-delay model: fetch pc, advance, then default nextPc = pc+4.

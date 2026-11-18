@@ -121,8 +121,9 @@ auto Memory::sampleWorkerCpu() -> void {
   cpuCpuNs.store(threadCpuNs(cpuThreadH), std::memory_order_relaxed);
 }
 
-auto Memory::reset(bool expansionPak) -> void {
-  rdram.assign(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000, 0);
+auto Memory::reset(bool expansionPak) -> void { resetSized(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000); }
+auto Memory::resetSized(u32 bytes) -> void {
+  rdram.assign(bytes, 0);
   rdramHidden.assign(rdram.size() >> 1, 0);
   // KESTREL_RDRAM_FILL=<semilla>: RDRAM de encendido con basura pseudoaleatoria, como la consola
   // real (que no la borra). Destapa programas que leen memoria sin inicializar y que con ceros

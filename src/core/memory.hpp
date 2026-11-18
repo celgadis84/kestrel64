@@ -207,6 +207,7 @@ struct StateVisitor;
 struct Memory {
   friend struct StateVisitor;   // savestate: punteros de reanudacion del FIFO del RDP
   static constexpr u32 RDRAM_SIZE_EXPANDED = 0x0080'0000;  // 8 MB (Expansion Pak)
+  static constexpr u32 RDRAM_SIZE_MAX = 0x0100'0000;       // 16 MB: devkit mode (KESTREL_RDRAM=12/16/devkit)
   static constexpr u32 DMEM_SIZE = 0x1000;                 // 4 KB
   static constexpr u32 IMEM_SIZE = 0x1000;                 // 4 KB
   static constexpr u32 PIFRAM_SIZE = 0x40;                 // 64 B
@@ -657,7 +658,7 @@ struct Memory {
   // que ajusta jitPending con las ops de su bloque antes de entrar), y el interprete lleva el
   // reloj al dia por instruccion. Asi la CPU ve los bytes del DMA exactamente igual que en
   // Lockstep: antes de su instante los viejos, despues los nuevos.
-  static constexpr u32 kDmaPgShift = 12, kDmaPgN = (8u << 20) >> kDmaPgShift;
+  static constexpr u32 kDmaPgShift = 12, kDmaPgN = (16u << 20) >> kDmaPgShift;
   std::atomic<u32> dmaPgPend{0};           // entradas de DMA sin aplicar (0 = nada que mirar)
   std::atomic<u16> dmaPg[kDmaPgN]{};       // ... y cuantas tocan cada pagina
   std::atomic<u64> dmaSettles{0}, dmaSettleHits{0};
@@ -1571,6 +1572,7 @@ public:
   auto saveWrite(u32 phys, u64 value, u32 nbytes) -> void;  // CPU write to save space
 
   auto reset(bool expansionPak = true) -> void;
+  auto resetSized(u32 bytes) -> void;          // any size up to RDRAM_SIZE_MAX (devkit: 12/16 MB)
   auto initMap() -> void;                       // (re)builds the regions table
   auto loadRom(std::vector<u8> image) -> void;  // takes a normalized big-endian ROM
 

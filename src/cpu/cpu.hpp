@@ -640,7 +640,7 @@ struct CPU {
   // VA 0x70xxxxxx) fall in the same bucket — a virtual-PC sampler would miss it.
   // Backing is allocated on first enable; the hot loop pays a single bool test when off.
   static constexpr u32 kProfShift   = 4;                        // 16-byte (4-instr) resolution
-  static constexpr u32 kProfBuckets = (8u << 20) >> kProfShift; // 8 MB RDRAM / 16 = 512 K
+  static constexpr u32 kProfBuckets = (16u << 20) >> kProfShift; // 8 MB RDRAM / 16 = 512 K
   bool  profOn = false;
   std::vector<u32> profBuckets;                                 // sized kProfBuckets on enable
   u64   profTotal = 0;

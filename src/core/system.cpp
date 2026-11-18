@@ -42,17 +42,22 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
   // tamano no se puede cambiar en caliente (la RDRAM se dimensiona una vez y los estados
   // guardados llevan el suyo dentro), asi que se decide aqui y se queda.
   bool expansionPak = true;
+  u32 rdramBytes = Memory::RDRAM_SIZE_EXPANDED;
   if(const char* e = std::getenv("KESTREL_RDRAM")) {
     std::string v(e);
     for(auto& c : v) c = (char)std::tolower((unsigned char)c);
-    if(v == "4" || v == "4mb" || v == "0") expansionPak = false;
+    if(v == "4" || v == "4mb" || v == "0") { expansionPak = false; rdramBytes = 0x0040'0000; }
+    // Modo devkit: mas RDRAM que la consola (como las placas de desarrollo), para trabajar
+    // sin pelear por espacio y encajar en los 8 MB reales al final. 12, 16 o "devkit" (= 12).
+    else if(v == "12" || v == "12mb" || v == "devkit") rdramBytes = 12u << 20;
+    else if(v == "16" || v == "16mb") rdramBytes = Memory::RDRAM_SIZE_MAX;
   }
-  memory.reset(expansionPak);
+  memory.resetSized(rdramBytes);
   // El tamano no se anuncia solo: el invitado lo lee en RDRAM 0x318 (osMemSize) y 0x3F0,
   // que el arranque rapido rellena desde rdram.size(), y el camino rapido del dynarec lo
   // acota con jitRdramSz, que sale del mismo sitio al compilar cada bloque.
   std::printf("[system] RDRAM %u MB%s\n", (unsigned)(memory.rdram.size() >> 20),
-              expansionPak ? " (Expansion Pak)" : " (consola de serie)");
+              rdramBytes > Memory::RDRAM_SIZE_EXPANDED ? " (devkit)" : expansionPak ? " (Expansion Pak)" : " (consola de serie)");
   if(!rom.loadFile(romPath, error)) return false;
   memory.loadRom(rom.data);  // exposes CART_ROM region for telemetry
   memory.attachSaveFile(romPath);  // load existing .eep/.sra/.fla, if any, next to the ROM
