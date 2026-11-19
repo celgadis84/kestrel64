@@ -94,12 +94,17 @@ auto Memory::rdpCostOn() -> bool {
 
 static const bool g_dpSubProf = std::getenv("KESTREL_DPSUBPROF") != nullptr;
 
+// Copia de DMEM del trabajo xbus que pinta ESTE hilo (worker del RDP); nulo = DMEM viva
+// (lockstep, inline, y el paseo de coste que hace el productor al lanzar el tramo).
+static thread_local const u8* tlJobDmem = nullptr;
+
 auto Memory::rdpCostPass(u32 current, u32 stop, bool xbus, const u8* cmdSrc) -> bool {
   if(!rdpCostOn() || stop == current) return false;
   softCost.costOnly = true;
   softCost.charge   = true;
   softCost.curOut   = nullptr;   // DPC_CURRENT lo publica quien pinta, no este paseo
   softCost.cmdSrc   = cmdSrc;
+  softCost.dmemSrc  = tlJobDmem;
   const auto tC = g_dpSubProf ? std::chrono::steady_clock::now()
                               : std::chrono::steady_clock::time_point{};
   const u32 nc = softCost.run(*this, current, stop, xbus);
@@ -146,7 +151,8 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
   // Depurador (docs/DEBUGGER.md): graba los comandos del tramo, ya con la reanudacion
   // aplicada, desde la MISMA fuente que va a leer el rasterizador. Vale para los tres backends.
   struct DbgJobEnd { Memory* m; ~DbgJobEnd() { dbg::g.rdpJobEnd(m->cartNow()); } } dbgEnd{this};
-  dbg::g.rdpJob(cmdSrc ? cmdSrc : rdram.data(), (u32)rdram.size(), dmem.data(), current, end, xbus,
+  dbg::g.rdpJob(cmdSrc ? cmdSrc : rdram.data(), (u32)rdram.size(),
+                tlJobDmem ? tlJobDmem : dmem.data(), current, end, xbus,
                 cartNow());
   rcp.dpc_current.store(current, std::memory_order_release);   // el consumidor abre el span
   wrtag::setWin(0, current & 0x00ff'ffffu, end & 0x00ff'ffffu);
@@ -170,6 +176,7 @@ auto Memory::rdpRunJob(u32 current, u32 end, bool xbus, const u8* cmdSrc, bool p
   softRdp.costOnly = false;      // este camino SI pinta
   softRdp.curOut = &rcp.dpc_current;
   softRdp.cmdSrc = cmdSrc;
+  softRdp.dmemSrc = tlJobDmem;
   u32 nc = softRdp.run(*this, current, end, xbus);
   // stopAt vive en el espacio de direcciones que usa SoftRdp::run (enmascarado igual que
   // alli), asi que la comparacion se hace contra el mismo `end` enmascarado.
@@ -291,8 +298,10 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
           std::chrono::steady_clock::now() - tLk).count(), std::memory_order_relaxed);
     ev("dp.sub", current, end);
     // La copia se toma con el mutex cogido y ANTES de publicar el trabajo: el worker no
-    // puede ver el tramo hasta que sus bytes estan a salvo. Solo el camino RDRAM; en xbus
-    // los comandos viven en DMEM, que el RSP no reescribe mientras su tarea corre.
+    // puede ver el tramo hasta que sus bytes estan a salvo. En RDRAM, la sombra por
+    // generacion; en xbus, una copia de la DMEM que viaja con el trabajo (abajo): un
+    // microcodigo con anillo en DMEM reescribe un trozo en cuanto DPC_CURRENT/STATUS (horario
+    // de invitado) dicen que el RDP lo leyo, y el worker puede ir por detras.
     {
       const auto tSn = g_dpSubProf ? std::chrono::steady_clock::now()
                                    : std::chrono::steady_clock::time_point{};
@@ -326,11 +335,17 @@ auto Memory::rdpSubmit(u32 current, u32 end, bool xbus) -> void {
     if(!rdpQueue.empty() && rdpQueue.back().end == current && rdpQueue.back().xbus == xbus
        && rdpQueue.back().gen == rdpGen) {
       rdpQueue.back().end = end;
+      // xbus: la copia del trabajo trae los bytes viejos; se le anaden los del tramo nuevo
+      // (los de antes pueden estar ya reescritos en la DMEM viva).
+      if(xbus && !rdpQueue.back().dmem.empty())
+        for(u32 a = current & 0xfffu, n = (end - current) & 0xfffu; n; n--, a = (a + 1) & 0xfffu)
+          rdpQueue.back().dmem[a] = dmem[a];
       if(g_dpSubProf) rdpCoal.fetch_add(1, std::memory_order_relaxed);
     }
     else {
       rdpQueue.push_back({current, end, xbus, rdpGen,
                           tlDpLogApply ? tlDpLogAt : tlIsRspThread ? rspGuestNow() : cartNow()});
+      if(xbus) rdpQueue.back().dmem.assign(dmem.begin(), dmem.begin() + DMEM_SIZE);
       // Un lector vivo mas para esta generacion de la sombra: no se puede reutilizar hasta
       // que el worker termine de LEER sus comandos. El tramo unido (rama de arriba) no
       // cuenta: alarga un trabajo ya contado.
@@ -459,14 +474,16 @@ auto Memory::rdpWorkerLoop() -> void {
       if(rdpStop && rdpQueue.empty()) return;
       // El horario de este tramo ya esta hecho desde que se lanzo (dpScheduleSpan): el worker
       // no toca ni una fecha, solo pinta.
-      job = rdpQueue.front(); rdpQueue.pop_front();
+      job = std::move(rdpQueue.front()); rdpQueue.pop_front();
     }
     auto t0 = std::chrono::steady_clock::now();
-    // Los comandos salen de la copia de SU generacion; en xbus no hay copia (DMEM).
+    // Los comandos salen de la copia de SU generacion; en xbus, de la copia de DMEM del trabajo.
     const u8* src = (!job.xbus && !rdpShadow[job.gen].empty()) ? rdpShadow[job.gen].data()
                                                               : rdram.data();
     dpJobOps = job.ops;   // instante de invitado del lanzamiento, para el plazo de fin
+    tlJobDmem = (job.xbus && !job.dmem.empty()) ? job.dmem.data() : nullptr;
     rdpRunJob(job.current, job.end, job.xbus, src, rdpCostOn());
+    tlJobDmem = nullptr;
     rdpBusyNs.fetch_add((u64)std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now() - t0).count(), std::memory_order_relaxed);
     rdpJobsRun.fetch_add(1, std::memory_order_relaxed);

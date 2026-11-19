@@ -360,7 +360,10 @@ struct Memory {
 
   // `gen` = generacion del buffer de comandos (ver rdpShadow). Cambia cuando el juego
   // instala un START fresco, o sea otro FIFO.
-  struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; };
+  // `dmem` = copia de la DMEM (4 KiB) tomada al lanzar un tramo xbus: el RSP reescribe su
+  // anillo de comandos en cuanto DPC_CURRENT/STATUS (horario de invitado) le dicen que el RDP
+  // ya lo leyo, y el worker puede ir por detras. Vacia en RDRAM (eso lo cubre rdpShadow).
+  struct RdpJob { u32 current, end; bool xbus; u8 gen; u64 ops; std::vector<u8> dmem; };
   // Trabajos vivos (encolados + el que se esta pintando) que leen de CADA generacion de la
   // sombra. Con el solo se puede contestar la pregunta que importa: al instalar un START
   // fresco, la generacion que se va a REUTILIZAR, esta libre? Si no lo esta, la copia nueva

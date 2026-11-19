@@ -109,6 +109,9 @@ struct SoftRdp {
   // RDRAM viva). Normalmente es la instantanea que el productor dejo al encolar el tramo:
   // ver Memory::rdpSnapshot. Nulo = leer la RDRAM directamente (lockstep, pruebas).
   const u8* cmdSrc = nullptr;
+  // Lo mismo en modo xbus: copia de 4 KiB de la DMEM tomada al lanzar el tramo (nulo = la
+  // DMEM viva: lockstep, el paseo de coste del productor, pruebas).
+  const u8* dmemSrc = nullptr;
   // Modo SOLO-COSTE: decodifica el FIFO y cobra los contadores del RDP (DPC_CLOCK y el
   // reloj de coste que frena a la CPU) SIN escribir un solo pixel. Existe porque con
   // GPU-RDP quien rasteriza es la GPU, y la GPU no puede decirle al invitado lo que

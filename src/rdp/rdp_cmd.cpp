@@ -243,8 +243,9 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   // mode. Big-endian 64-bit word either way. Pixel writes still target RDRAM.
   auto fetch = [&](u32 a) -> u64 {
     if(!xbus) return cmdSrc ? rd64p(cmdSrc, a, (u32)m.size()) : rd64(m, a);
+    const u8* d = dmemSrc ? dmemSrc : dm.data();
     u64 v = 0;
-    for(int i = 0; i < 8; i++) v = (v << 8) | dm[(a + i) & 0xfff];
+    for(int i = 0; i < 8; i++) v = (v << 8) | d[(a + i) & 0xfff];
     return v;
   };
   u32 cur, end2;
