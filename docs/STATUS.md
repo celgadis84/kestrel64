@@ -43,6 +43,24 @@ su sección aquí y el detalle va al documento de profundidad correspondiente.
   el README no da cifras de ares. Pendiente de baja prioridad: enlace y EPC con direcciones
   virtuales de 64 bits (GAPS, Fidelidad).
 
+### Brecha emu/HW abierta: TK3 port PSX (2026-11-22, sin resolver)
+
+- En HW: bis16/fixA/HEAD se cuelgan al empezar la pelea (bis15/fixB no), texturas corruptas
+  (fondo de menú, suelo) y parpadeo con VI scan stride 1024. kestrel64 no reproduce nada.
+- Revisado: la hipótesis "cachés coherentes" NO vale. Ya hay D$ 8 KB write-back e I$ 16 KB
+  funcionales siempre activos (`dcache[512]`/`icache[512]`, instrucción CACHE, el JIT valida
+  cada bloque contra la línea de I$, no contra RDRAM; DMA/RDP/VI leen solo RDRAM).
+  `KESTREL_WRTAG=1` ya avisa de SP-DMA sobre línea sucia: bis16 100 s (1696 campos PSX, aún
+  en menú/attract) sin avisos.
+- Pendiente (siguientes pistas, por orden): (1) detector de fetch de I$ sobre línea SUCIA en
+  D$ (código nx no volcado) y de lecturas RSP-DMA/RDP/VI sobre líneas sucias, ampliando
+  `wrtag::dirtyProbe` a todos los lectores; (2) interrupciones a mitad de bloque JIT (en HW
+  caen en cualquier instrucción; si el JIT solo las entrega en bordes, una ventana del stub nx
+  con registros "muertos" por la liveness de aae738c4 no se ve aquí); (3) hazard MFHI/MFLO→
+  MULT/DIV y MULT con operandos no extendidos en signo; (4) VI_CTRL/serrate/Y-scale con stride
+  1024 para el parpadeo. Llegar a la pelea desde arranque necesita pad (patrón
+  `tk_run.py`, ~7 min): falta savestate en pelea de las ROM HW para cumplir ≤2 min.
+
 ## RSP
 
 - **LLE puro**: intérprete con unidad vectorial en SSE4.1 (`src/rsp/rsp.cpp`) y **RSP JIT**
