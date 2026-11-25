@@ -2384,12 +2384,27 @@ auto Rsp::step(u64 maxInsns) -> void {
       u32 op = bswap32(w);
       curpc = pc;
       exactLeft = c;   // copia del saldo: `c` sigue viviendo en un registro
-      if(prof) { profPc[(pc >> 2) & 1023]++; profTotal++; }   // hotpath sampler (MCP prof.*)
+      u64* profCyc = nullptr; u64 profC0 = 0;
+      if(prof) {   // hotpath sampler (MCP prof.*)
+        const u32 sl = (pc >> 2) & 1023;
+        profPc[sl]++; profTotal++;
+        // Tabla etiquetada (ranura, palabra): 4 vias por ranura, para overlays que comparten IMEM.
+        ProfTag* pt = profT.get();
+        if(pt) {
+          u32* tg = pt->tag[sl]; u32 wy = 0;
+          while(wy < 4 && pt->cnt[sl][wy] && tg[wy] != op) wy++;
+          if(wy < 4) {
+            tg[wy] = op; pt->cnt[sl][wy]++;
+            if(tim) { profCyc = &pt->cyc[sl][wy]; profC0 = tim->cycle; }
+          } else pt->over++;
+        }
+      }
       u32 nextpc = (pc + 4) & 0xfff;
       branch = false;
       if(tim) tim->feed(op, pc, r[(op >> 16) & 31]);
       exec(op);
       if(tim) tim->post(branch);
+      if(profCyc) *profCyc += tim->cycle - profC0;
       // El `r[0] = 0` que habia aqui era una tienda por instruccion sin efecto: setR() es el
       // unico camino que escribe en r[] y ya ignora el registro 0, que es cableado a cero.
       if(inDelay)      { pc = pendingTarget; inDelay = false; }

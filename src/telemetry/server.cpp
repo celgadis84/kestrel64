@@ -1388,6 +1388,19 @@ auto Server::cmdProfRsp(const json::Value& args, json::Value& data) -> void {
       e.set("word", (u64)((u32)im[o] << 24 | (u32)im[o + 1] << 16 | (u32)im[o + 2] << 8 | im[o + 3]));
     list.push(e);
   }
+  json::Value tagged = json::Value::array();
+  const Rsp::ProfTag* pt = s.profT.get();
+  for(u32 sl = 0; pt && sl < 1024; sl++) for(u32 w = 0; w < 4; w++) {
+    if(!pt->cnt[sl][w]) continue;
+    json::Value e = json::Value::object();
+    e.set("imem", (u64)(sl << 2));
+    e.set("word", (u64)pt->tag[sl][w]);
+    e.set("count", (u64)pt->cnt[sl][w]);
+    e.set("cycles", (u64)pt->cyc[sl][w]);
+    tagged.push(e);
+  }
+  data.set("tagged", tagged);
+  data.set("taggedOverflow", (u64)(pt ? pt->over : 0));
   data.set("total", (u64)s.profTotal);
   data.set("enabled", s.profOn);
   data.set("hot", list);

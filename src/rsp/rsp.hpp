@@ -19,6 +19,8 @@
 // jitImemSyncReq, idle* counters. Everything else (registers, vpr, JIT table) is confined to
 // the thread that runs step(); rspThread records which one.
 #include <atomic>
+#include <cstring>
+#include <memory>
 #include <emmintrin.h>   // __m128i: el camino rapido de COP2 lo lleva en la firma
 // kestrel64 — Reality Signal Processor, low-level interpreter (M3.3).
 //
@@ -491,6 +493,10 @@ public:
   // un contador u32 por ranura de 4 bytes, lo que senala la rutina de microcodigo exacta.
   u32  profPc[1024] = {};
   u64  profTotal = 0;
+  // Tabla etiquetada por (ranura IMEM, palabra de instruccion): 4 vias por ranura. En heap
+  // (56 KB): el Rsp vive en una pila/struct grande y estas tablas lo desbordaban.
+  struct ProfTag { u32 tag[1024][4]; u32 cnt[1024][4]; u64 cyc[1024][4]; u64 over; };
+  std::unique_ptr<ProfTag> profT;
   // Reparto por OSTask.type (DMEM 0xFC0): tareas acabadas en BREAK y sus ciclos ENTEROS
   // (desde el arranque o desde taskClear, lo que sea mas tarde). rsp.tasks por MCP,
   // KESTREL_RSPTASKS al salir. taskFrom = cyclesRun en el ultimo taskClear.
@@ -499,7 +505,9 @@ public:
   auto taskClear() -> void { for(u32 i = 0; i < 8; i++) taskN[i] = taskCyc[i] = 0; taskFrom = exactCycles(); }
   auto taskDump() -> void;
   auto profDump() -> void;
-  auto profClear() -> void { for(auto& c : profPc) c = 0; profTotal = 0; }
+  auto profClear() -> void { for(auto& c : profPc) c = 0; profTotal = 0;
+                          auto t = std::make_unique<ProfTag>(); std::memset(t.get(), 0, sizeof(ProfTag));
+                          profT = std::move(t); }
 };
 
 }  // namespace kestrel
