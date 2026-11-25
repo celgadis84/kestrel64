@@ -31,7 +31,7 @@ auto Memory::piDma(bool toCart) -> void {
   // donde se cuela un adelanto no acotado.
   if(!toCart && wrBarrierOn() && dmaBarrierOn()) cpuRamWrBarrier(cartNow());
   {
-    const u32 d = rcp.pi_dram_addr & 0xff'ffff;
+    const u32 d = rcp.pi_dram_addr & rcp.dramMask;
     const u32 n = (rcp.pi_wr_len > rcp.pi_rd_len ? rcp.pi_wr_len : rcp.pi_rd_len) + 1;
     dmaSettle(d, (u64)d + n);
   }
@@ -47,7 +47,7 @@ auto Memory::piDma(bool toCart) -> void {
     if(saveType != SaveType::None && isSaveDomain(cartPhys)) {
       u32 rawLen = toCart ? rcp.pi_rd_len : rcp.pi_wr_len;
       u32 len = (rawLen & 0x00ff'ffff) + 1;
-      u32 dram = rcp.pi_dram_addr & 0x00ff'ffff;
+      u32 dram = rcp.pi_dram_addr & rcp.dramMask;
       u32 cart = cartPhys;
       // FlashRAM en modo Read: solo la direccion de ARRANQUE pasa por el cableado del chip
       // (ver flashArrayOff); la rafaga sigue lineal con el contador interno del chip.
@@ -119,7 +119,7 @@ auto Memory::piDma(bool toCart) -> void {
   s32 maxBlock = 128;
   bool firstBlock = true;
   u32 cart = rcp.pi_cart_addr & 0x1fff'fffe;
-  u32 dram = rcp.pi_dram_addr & 0x00ff'ffff;
+  u32 dram = rcp.pi_dram_addr & rcp.dramMask;
   if(dram < 0x400u && dmaVectorWarn())
     std::fprintf(stderr, "[dma!] PI->RDRAM sobre vectores: dram=0x%06x len=%d\n", dram, (int)length);
   while(length > 0) {
@@ -205,7 +205,7 @@ auto Memory::spDma(bool toRam) -> void {
   bool imem    = (memAddr & 0x1000) != 0;
   u32 memOff   = memAddr & 0xff8;
   const u32 memOff0 = memOff;   // el bucle de abajo lo avanza; el dynarec necesita el inicial
-  u32 dramAddr = rcp.sp_dram_addr & 0xfffff8;
+  u32 dramAddr = rcp.sp_dram_addr & (rcp.dramMask & ~7u);
   if(rcpMode == RcpMode::Threaded)                     // solo hace algo en el hilo del RSP
     rspDmaRdpWait(dramAddr, dramAddr + (length + skip) * count);
   if(toRam && dramAddr < 0x400u && dmaVectorWarn())
@@ -300,7 +300,7 @@ auto Memory::spDma(bool toRam) -> void {
   // caza la huella que Rsp::start comprueba al arrancar cada tarea.
   if(imem && !toRam) rsp.jitInvalidate(memOff0, count * length, sp.data());
   rcp.sp_mem_addr  = (imem ? 0x1000 : 0) | memOff;
-  rcp.sp_dram_addr = dramAddr & 0xffffff;
+  rcp.sp_dram_addr = dramAddr & rcp.dramMask;
   // After any SP DMA completes the length register counts down to a fixed 0xFF8
   // readback (LENGTH=0xFF8, COUNT/SKIP drained). Both RD_LEN and WR_LEN share it.
   rcp.sp_rd_len = rcp.sp_wr_len = 0xff8;
@@ -322,7 +322,7 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   const u32 memAddr = rcp.sp_mem_addr & 0x1fff;
   const bool imem   = (memAddr & 0x1000) != 0;
   u32 memOff        = memAddr & 0xff8;
-  const u32 dram    = rcp.sp_dram_addr & 0xfffff8;
+  const u32 dram    = rcp.sp_dram_addr & (rcp.dramMask & ~7u);
   if(rcpPend.load(std::memory_order_acquire) & 4u) {
     // Mismo criterio de solape que rspDmaRdpWait, pero sin esperar: si pisa una imagen del RDP
     // en vuelo, camino de siempre.
@@ -368,7 +368,7 @@ auto Memory::spDmaLogPush(u64 at, u32 len) -> bool {
   dmaPayTail = w;
   // Los registros cambian en el instante del RSP, igual que cualquier otra escritura suya al SP.
   rcp.sp_mem_addr  = (imem ? 0x1000 : 0) | memOff;
-  rcp.sp_dram_addr = (dram + (length + skip) * count) & 0xffffff;
+  rcp.sp_dram_addr = (dram + (length + skip) * count) & rcp.dramMask;
   rcp.sp_rd_len = rcp.sp_wr_len = 0xff8;
   const u32 t = dpLogTail.load(std::memory_order_relaxed);
   dpLogDma[t & kDpLogM] = {dram, length, count, skip, pay};
@@ -463,7 +463,7 @@ auto Memory::siDma(bool toPif) -> void {
   // interrupcion antes de tocar el SI otra vez), pero si ocurre se cierra el anterior en
   // vez de perderlo: dejar un plazo huerfano seria un despertar que nunca llega.
   if(siBusy) siFinish();
-  u32 dram = rcp.si_dram_addr & 0xffffff;
+  u32 dram = rcp.si_dram_addr & rcp.dramMask;
   siDram = dram;
   u64 us = kSiXferUs;   // el traslado de los 64 B entre RDRAM y PIF RAM
   ramBytesSi.fetch_add(64, std::memory_order_relaxed);

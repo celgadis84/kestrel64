@@ -225,7 +225,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     if(a >= BASE_SP_PC) { if((off & 0xff) == 0) rcp.sp_pc = v & 0xffc; return; }
     switch(off & 0xff) {
     case 0x00: rcp.sp_mem_addr = v & 0x1fff; break;
-    case 0x04: rcp.sp_dram_addr = v & 0xffffff; break;
+    case 0x04: rcp.sp_dram_addr = v & rcp.dramMask; break;
     case 0x08: rcp.sp_rd_len = v; spDma(/*toRam=*/false); break;   // RDRAM -> SP mem
     case 0x0c: rcp.sp_wr_len = v; spDma(/*toRam=*/true);  break;   // SP mem -> RDRAM
     case 0x10: {  // SP_STATUS write: paired clear/set control bits.
@@ -377,10 +377,10 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     switch(off & 0xff) {
     case 0x00:  // DPC_START write: latch start, arm START_VALID. Ignored while START_VALID
       // already set (a pending start hasn't been consumed by an END write yet).
-      if(!(rcp.dpc_status & 0x400u)) { rcp.dpc_start = v & 0xfffff8; rcp.dpc_status |= 0x400u; }
+      if(!(rcp.dpc_status & 0x400u)) { rcp.dpc_start = v & (rcp.dramMask & ~7u); rcp.dpc_status |= 0x400u; }
       break;
     case 0x04:  // DPC_END write: kick the RDP. Rasterize the FIFO, then signal DP.
-      rcp.dpc_end = v & 0xfffff8;
+      rcp.dpc_end = v & (rcp.dramMask & ~7u);
       // CURRENT reloads from START only when a fresh START is pending (START_VALID).
       // Otherwise the RDP continues from where CURRENT sits — the streaming case,
       // where many END bumps follow a single START.
@@ -526,7 +526,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     // ensenar el buffer VIEJO, que un juego de doble buffer esta reescribiendo ya — en
     // threaded eso depende del reloj de pared y los cinco modos dejaron de coincidir en
     // SM64. El punto de captura tiene que ser el buffer recien publicado, que nadie toca.
-    case 0x04: { u32 nv = v & 0xffffff;
+    case 0x04: { u32 nv = v & rcp.dramMask;
                  if(rcp.vi_origin && nv != rcp.vi_origin) {
                    rcp.viFlips++;
                    dbg::g.flip(rcp.viFlips, cartNow());   // depurador: cierra el cuadro
@@ -568,7 +568,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     return;
   case BASE_AI & 0x1ff0'0000:
     switch(off & 0xff) {
-    case 0x00: rcp.ai_dram = v & 0xffffff; break;
+    case 0x00: rcp.ai_dram = v & rcp.dramMask; break;
     case 0x04: {  // AI_LEN write: enqueue a DMA buffer (the "go" for the audio FIFO)
       // El DAC se pone al dia ANTES de tocar la cola. aiAcc y aiLastRetired son un credito
       // fechado: armar el plazo del nuevo bufer sobre un aiLastRetired viejo lo adelantaba
@@ -614,7 +614,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     return;
   case BASE_PI & 0x1ff0'0000:
     switch(off & 0xff) {
-    case 0x00: rcp.pi_dram_addr = v & 0x00ff'fffe; break;   // PI masks bit0 and the top byte
+    case 0x00: rcp.pi_dram_addr = v & (rcp.dramMask & ~1u); break;   // PI masks bit0 and the top byte
     case 0x04: rcp.pi_cart_addr = v & 0xffff'fffe; break;   // PI masks bit0
     case 0x08: rcp.pi_rd_len = v & 0xffffff; piDma(/*toCart=*/true);  break;  // RDRAM -> cart
     case 0x0c: rcp.pi_wr_len = v & 0xffffff; piDma(/*toCart=*/false); break;  // cart -> RDRAM
@@ -639,7 +639,7 @@ auto Memory::mmioWrite32(u32 a, u32 v) -> void {
     return;
   case BASE_SI & 0x1ff0'0000:
     switch(off & 0xff) {
-    case 0x00: rcp.si_dram_addr = v & 0xffffff; break;
+    case 0x00: rcp.si_dram_addr = v & rcp.dramMask; break;
     case 0x04: siDma(/*toPif=*/false); break;   // PIF RAM -> RDRAM (read 64B)
     case 0x10: siDma(/*toPif=*/true);  break;   // RDRAM -> PIF RAM (write 64B)
     // Escribir SI_STATUS solo BORRA LA INTERRUPCION: el bit de ocupado lo lleva el
@@ -676,7 +676,7 @@ auto Memory::viTick(u64 retiredNow) -> bool {
   if(intrFire) raiseIntr(MI_VI);
   if(fieldClose) {
     rcp.viFields++;
-    rcp.viFieldOrigin[(retiredNow / field - 1) & 1] = rcp.vi_origin & 0x00ffffff;
+    rcp.viFieldOrigin[(retiredNow / field - 1) & 1] = rcp.vi_origin & rcp.dramMask;
     // Plazo del PIF para el 0x08 (fin del arranque), contado desde el encendido (instante 0
     // del reloj de invitado) y mirado por campo: la congelacion llega como mucho un campo
     // tarde, que para un plazo de 5 s da igual. KESTREL_PIFBOOTWAIT=0 lo quita (solo para

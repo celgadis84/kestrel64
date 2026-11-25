@@ -153,10 +153,13 @@ struct Rcp {
   // VI_ORIGIN que se barrio en el ultimo campo de cada paridad (lo apunta viTick al cerrar
   // campo). Solo para volcar/capturar el cuadro entrelazado entero; no es estado del invitado.
   u32 viFieldOrigin[2] = {};
+  // Mascara de direccion de RDRAM de los registros DMA/VI/DPC: 24 bits como el hardware; solo
+  // con RDRAM de devkit > 16 MB se ensancha (Memory::resetSized), que a 24 bits no se alcanza.
+  u32 dramMask = 0x00ffffff;
   // Origen del CUADRO entrelazado: con SERRATE y los dos campos apuntando a lineas contiguas
   // del mismo framebuffer (el de arriba = filas pares), el menor de los dos; si no, VI_ORIGIN.
   auto viFrameOrigin() const -> u32 {
-    const u32 o = vi_origin & 0x00ffffff, a = viFieldOrigin[0], b = viFieldOrigin[1];
+    const u32 o = vi_origin & dramMask, a = viFieldOrigin[0], b = viFieldOrigin[1];
     if(!(vi_ctrl & 0x40) || !a || !b) return o;
     const u32 lo = a < b ? a : b, d = (a < b ? b : a) - lo;
     const u32 line = (vi_width & 0xfff) * ((vi_ctrl & 3) == 3 ? 4u : 2u);
@@ -207,7 +210,7 @@ struct StateVisitor;
 struct Memory {
   friend struct StateVisitor;   // savestate: punteros de reanudacion del FIFO del RDP
   static constexpr u32 RDRAM_SIZE_EXPANDED = 0x0080'0000;  // 8 MB (Expansion Pak)
-  static constexpr u32 RDRAM_SIZE_MAX = 0x0100'0000;       // 16 MB: devkit mode (KESTREL_RDRAM=12/16/devkit)
+  static constexpr u32 RDRAM_SIZE_MAX = 0x0200'0000;       // 32 MB: devkit mode (KESTREL_RDRAM=12/16/32/devkit)
   static constexpr u32 DMEM_SIZE = 0x1000;                 // 4 KB
   static constexpr u32 IMEM_SIZE = 0x1000;                 // 4 KB
   static constexpr u32 PIFRAM_SIZE = 0x40;                 // 64 B
@@ -1575,7 +1578,7 @@ public:
   auto saveWrite(u32 phys, u64 value, u32 nbytes) -> void;  // CPU write to save space
 
   auto reset(bool expansionPak = true) -> void;
-  auto resetSized(u32 bytes) -> void;          // any size up to RDRAM_SIZE_MAX (devkit: 12/16 MB)
+  auto resetSized(u32 bytes) -> void;          // any size up to RDRAM_SIZE_MAX (devkit: 12/16/32 MB)
   auto initMap() -> void;                       // (re)builds the regions table
   auto loadRom(std::vector<u8> image) -> void;  // takes a normalized big-endian ROM
 

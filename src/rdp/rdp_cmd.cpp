@@ -250,7 +250,7 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
   };
   u32 cur, end2;
   if(xbus) { cur = start & 0xfff'ffff; end2 = end & 0xfff'ffff; }  // DMEM offsets: keep the
-  else     { cur = start & 0x00ff'ffff; end2 = end & 0x00ff'ffff; }  // overflow range unmasked
+  else     { cur = start & mem.rcp.dramMask; end2 = end & mem.rcp.dramMask; }  // overflow range unmasked
   end = end2;
   u32 executed = 0;
   // Reparto CPU/GPU por tramo (KESTREL_GPURDP_MINPX, pixeles; 0 = todo a la GPU). Cada vaciado
@@ -578,13 +578,13 @@ auto SoftRdp::run(Memory& mem, u32 start, u32 end, bool xbus) -> u32 {
     }
     case 0x3d:                                          // SET_TEXTURE_IMAGE
       ti_fmt = (cmd >> 53) & 7; ti_size = (cmd >> 51) & 3;
-      ti_width = ((cmd >> 32) & 0x3ff) + 1; ti_addr = (u32)cmd & 0x00ff'ffff;
+      ti_width = ((cmd >> 32) & 0x3ff) + 1; ti_addr = (u32)cmd & mem.rcp.dramMask;
       break;
-    case 0x3e: zi_addr = (u32)cmd & 0x00ff'ffff; break; // SET_Z_IMAGE
+    case 0x3e: zi_addr = (u32)cmd & mem.rcp.dramMask; break; // SET_Z_IMAGE
     case 0x3f:                                          // SET_COLOR_IMAGE
       ci_size = (cmd >> 51) & 3;
       ci_width = ((cmd >> 32) & 0x3ff) + 1;
-      ci_addr = (u32)cmd & 0x00ff'ffff;
+      ci_addr = (u32)cmd & mem.rcp.dramMask;
       // Diagnostico: ningun juego pone su framebuffer encima de los vectores de
       // excepcion de libultra (0x0-0x400) ni del area del OS. Si aparece aqui es que
       // el FIFO se ha desincronizado o el puntero llego corrupto: avisar con el

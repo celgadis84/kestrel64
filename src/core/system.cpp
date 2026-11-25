@@ -48,9 +48,10 @@ auto System::init(const std::string& romPath, std::string& error) -> bool {
     for(auto& c : v) c = (char)std::tolower((unsigned char)c);
     if(v == "4" || v == "4mb" || v == "0") { expansionPak = false; rdramBytes = 0x0040'0000; }
     // Modo devkit: mas RDRAM que la consola (como las placas de desarrollo), para trabajar
-    // sin pelear por espacio y encajar en los 8 MB reales al final. 12, 16 o "devkit" (= 12).
+    // sin pelear por espacio y encajar en los 8 MB reales al final. 12, 16, 32 o "devkit" (= 12).
     else if(v == "12" || v == "12mb" || v == "devkit") rdramBytes = 12u << 20;
-    else if(v == "16" || v == "16mb") rdramBytes = Memory::RDRAM_SIZE_MAX;
+    else if(v == "16" || v == "16mb") rdramBytes = 16u << 20;
+    else if(v == "32" || v == "32mb") rdramBytes = Memory::RDRAM_SIZE_MAX;
   }
   memory.resetSized(rdramBytes);
   // El tamano no se anuncia solo: el invitado lo lee en RDRAM 0x318 (osMemSize) y 0x3F0,
@@ -541,7 +542,7 @@ auto System::runLoop() -> void {
 // stride, bpp from VI_CTRL). Region size only — the point is "did the picture move",
 // not what it looks like, so a cheap FNV-1a over the bytes is enough.
 static auto framebufferHash(Memory& mem) -> u64 {
-  u32 origin = mem.rcp.vi_origin & 0x00ff'ffff;
+  u32 origin = mem.rcp.vi_origin & mem.rcp.dramMask;
   u32 type   = mem.rcp.vi_ctrl & 3;                        // 2=16bpp, 3=32bpp
   if(type != 2 && type != 3) return 0;
   u32 w = mem.rcp.vi_width ? mem.rcp.vi_width : 320;

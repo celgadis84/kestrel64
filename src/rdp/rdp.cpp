@@ -265,7 +265,7 @@ auto SoftRdp::acctSnap(Memory& mem, u64 npx) -> AcctSnap {
   a.ci = ci_addr; a.zi = zi_addr; a.ciW = ci_width; a.ciSize = ci_size;
   a.sx1 = sx1; a.sy1 = sy1; a.olo = other_lo; a.cyc = cycleType();
   a.viOn = (mem.rcp.vi_ctrl & 3) != 0 && mem.rcp.vi_origin != 0;
-  a.fbviSame = a.viOn && (ci_addr >> 20) == ((mem.rcp.vi_origin & 0x00ff'ffff) >> 20);
+  a.fbviSame = a.viOn && (ci_addr >> 20) == ((mem.rcp.vi_origin & mem.rcp.dramMask) >> 20);
   a.charge = charge;
   return a;
 }

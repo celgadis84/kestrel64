@@ -813,7 +813,7 @@ auto Rsp::mtc0(int rd, u32 v) -> void {
   // antes de que la CPU aplicase la entrada: dato viejo, intermitente segun lo adelantada
   // que fuera la CPU (kestrel64-sdk 11_audio, estado ADPCM releido por el record siguiente).
   if(((rd & 7) == 2 || (rd & 7) == 3) && mem->rcpMode == Memory::RcpMode::Threaded) {
-    const u32 lo = mem->rcp.sp_dram_addr & 0xfffff8;
+    const u32 lo = mem->rcp.sp_dram_addr & (mem->rcp.dramMask & ~7u);
     const u64 span = (u64)((((v & 0xfff) + 8) & ~7u) + ((v >> 20) & 0xff8)) * (((v >> 12) & 0xff) + 1);
     if(mem->dmaPgAny(lo, (u64)lo + span)) { publishExact(); mem->dpLogWait(0, false); }
   }

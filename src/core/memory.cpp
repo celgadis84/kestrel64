@@ -1,3 +1,4 @@
+#include <bit>
 #include "hbmeta.hpp"
 #include "wrtag.hpp"
 #include "memory.hpp"
@@ -124,6 +125,7 @@ auto Memory::sampleWorkerCpu() -> void {
 auto Memory::reset(bool expansionPak) -> void { resetSized(expansionPak ? RDRAM_SIZE_EXPANDED : 0x0040'0000); }
 auto Memory::resetSized(u32 bytes) -> void {
   rdram.assign(bytes, 0);
+  rcp.dramMask = bytes > 0x0100'0000 ? 0x03ff'ffffu & (u32)(std::bit_ceil(bytes) - 1) : 0x00ff'ffffu;   // 24 bits salvo devkit > 16 MB
   rdramHidden.assign(rdram.size() >> 1, 0);
   // KESTREL_RDRAM_FILL=<semilla>: RDRAM de encendido con basura pseudoaleatoria, como la consola
   // real (que no la borra). Destapa programas que leen memoria sin inicializar y que con ceros
